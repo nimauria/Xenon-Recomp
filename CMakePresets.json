@@ -1,0 +1,60 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "XENON_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-x64-debug",
+      "inherits": "base",
+      "displayName": "Linux x64 Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "XENON_ENABLE_MEMORY": "ON",
+        "XENON_ENABLE_GRAPHICS": "ON"
+      }
+    },
+    {
+      "name": "linux-x64-release",
+      "inherits": "base",
+      "displayName": "Linux x64 Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "XENON_ENABLE_MEMORY": "ON",
+        "XENON_ENABLE_GRAPHICS": "ON"
+      }
+    },
+    {
+      "name": "windows-x64-debug",
+      "inherits": "base",
+      "displayName": "Windows x64 CPU-only Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "XENON_ENABLE_MEMORY": "OFF",
+        "XENON_ENABLE_GRAPHICS": "OFF"
+      }
+    },
+    {
+      "name": "windows-x64-release",
+      "inherits": "base",
+      "displayName": "Windows x64 CPU-only Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "XENON_ENABLE_MEMORY": "OFF",
+        "XENON_ENABLE_GRAPHICS": "OFF"
+      }
+    }
+  ]
+}
