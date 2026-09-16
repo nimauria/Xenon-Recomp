@@ -1,0 +1,8 @@
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _xenon_arch)
+if(_xenon_arch MATCHES "^(x86_64|amd64)$")
+  set(XENON_HOST_ARCH "x86_64")
+elseif(_xenon_arch MATCHES "^(aarch64|arm64)$")
+  set(XENON_HOST_ARCH "arm64")
+else()
+  set(XENON_HOST_ARCH "${_xenon_arch}")
+endif()
