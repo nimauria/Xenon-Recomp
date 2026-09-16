@@ -6,11 +6,7 @@ The goal of the project is to provide reusable infrastructure that can be shared
 
 ## Current Status
 
-Xenon Recomp is currently in the architecture and early-development stage.
-
-The project is not currently a complete Xbox 360 runtime and should not be considered an emulator replacement.
-
-Initial development is focused on defining modular interfaces and building the minimum runtime functionality required by supported recompilation projects.
+Current development focus: The Xenos GPU frontend foundation is complete, and development has moved to the Vulkan host GPU backend. Rendering support is actively in progress and is not yet complete.
 
 ## Goals
 
