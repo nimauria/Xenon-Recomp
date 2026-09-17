@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -121,6 +122,38 @@ void store_le32(std::byte* p, std::uint32_t value) noexcept {
   }
 }
 
+// Xenos context registers written implicitly by DRAW_INDX packet fields.
+// Keeping these writes in the frontend means every host backend observes the
+// same register stream without needing to know the PM4 packet layout.
+constexpr std::uint32_t kVgtDmaBase = 0x21FAu;
+constexpr std::uint32_t kVgtDmaSize = 0x21FBu;
+constexpr std::uint32_t kVgtDrawInitiator = 0x21FCu;
+
+struct DrawInitiatorFields {
+  PrimitiveType primitive{PrimitiveType::None};
+  DrawSource source{DrawSource::Reserved};
+  MajorMode major_mode{MajorMode::Implicit};
+  IndexFormat index_format{IndexFormat::UInt16};
+  bool not_eop{};
+  std::uint32_t index_count{};
+};
+
+[[nodiscard]] DrawInitiatorFields decode_draw_initiator(
+    std::uint32_t value) noexcept {
+  DrawInitiatorFields fields{};
+  fields.primitive = static_cast<PrimitiveType>(value & 0x3Fu);
+  fields.source = static_cast<DrawSource>((value >> 6) & 0x3u);
+  fields.major_mode = static_cast<MajorMode>((value >> 8) & 0x3u);
+  fields.index_format = static_cast<IndexFormat>((value >> 11) & 0x1u);
+  fields.not_eop = ((value >> 12) & 0x1u) != 0;
+  fields.index_count = value >> 16;
+  return fields;
+}
+
+[[nodiscard]] std::uint32_t index_size_bytes(IndexFormat format) noexcept {
+  return format == IndexFormat::UInt32 ? 4u : 2u;
+}
+
 }  // namespace
 
 class CommandProcessor::Reader {
@@ -170,6 +203,11 @@ void CommandProcessor::reset() {
   registers_.reset();
   stream_.clear();
   stats_ = {};
+  active_vertex_shader_ = {};
+  active_pixel_shader_ = {};
+  bin_base_offset_ = 0;
+  bin_mask_ = 0;
+  bin_select_ = 0;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
 }
@@ -295,6 +333,124 @@ void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload)
   }
 }
 
+void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
+                                    std::vector<std::uint32_t> payload) {
+  const bool has_viz_token =
+      opcode == Type3Opcode::DrawIndx || opcode == Type3Opcode::DrawIndxBin;
+  const bool binned =
+      opcode == Type3Opcode::DrawIndxBin || opcode == Type3Opcode::DrawIndx2Bin;
+
+  const std::size_t initiator_index = has_viz_token ? 1u : 0u;
+  if (payload.size() <= initiator_index) {
+    throw std::runtime_error("Xenos draw packet missing VGT_DRAW_INITIATOR");
+  }
+
+  const std::uint32_t initiator_value = payload[initiator_index];
+  const auto initiator = decode_draw_initiator(initiator_value);
+
+  // DRAW packets program these registers as part of packet execution. Emit the
+  // implicit register write so backend shadow state remains hardware-faithful.
+  emit_register_write(kVgtDrawInitiator, initiator_value);
+
+  ir::DrawPacket draw{};
+  draw.opcode = opcode;
+  draw.predicate = predicate;
+  draw.primitive_type = initiator.primitive;
+  draw.source = initiator.source;
+  draw.major_mode = initiator.major_mode;
+  draw.explicit_major_mode =
+      is_explicit_major_mode(initiator.major_mode, initiator.primitive);
+  draw.index_format = initiator.index_format;
+  draw.not_eop = initiator.not_eop;
+  draw.binned = binned;
+  draw.index_count = initiator.index_count;
+  draw.viz_query_condition = has_viz_token ? payload[0] : 0u;
+  draw.vertex_shader = active_vertex_shader_;
+  draw.pixel_shader = active_pixel_shader_;
+
+  std::size_t tail_index = initiator_index + 1u;
+
+  // The binned variants insert BIN_BASE and BIN_SIZE immediately after the
+  // draw initiator, before the ordinary source-specific index data. This is
+  // the same packet layout documented by the AMD/Yamato A2xx command stream,
+  // whose PM4 packet family shares these Xenos-era opcodes. The original GPU
+  // uses the data for visibility/bin predication; a native full-target renderer
+  // executes the normalized draw once and does not replay that tiling pass.
+  if (binned) {
+    if (payload.size() < tail_index + 2u) {
+      throw std::runtime_error(
+          "Xenos binned draw missing BIN_BASE/BIN_SIZE");
+    }
+    draw.binning.valid = true;
+    draw.binning.base = payload[tail_index++];
+    draw.binning.size = payload[tail_index++];
+    draw.binning.base_offset = bin_base_offset_;
+    draw.binning.effective_base =
+        draw.binning.base + draw.binning.base_offset;
+    draw.binning.mask = bin_mask_;
+    draw.binning.select = bin_select_;
+  }
+
+  switch (initiator.source) {
+    case DrawSource::Dma: {
+      if (payload.size() < tail_index + 2u) {
+        throw std::runtime_error(
+            "Xenos DMA draw missing VGT_DMA_BASE/VGT_DMA_SIZE");
+      }
+      const std::uint32_t raw_base = payload[tail_index++];
+      const std::uint32_t dma_size = payload[tail_index++];
+      emit_register_write(kVgtDmaBase, raw_base);
+      emit_register_write(kVgtDmaSize, dma_size);
+
+      const std::uint32_t element_bytes = index_size_bytes(initiator.index_format);
+      const std::uint32_t address =
+          cpu_to_gpu_address(raw_base) & ~(element_bytes - 1u);
+      const std::uint32_t num_words = dma_size & 0x00FFFFFFu;
+      const std::uint64_t length64 =
+          std::uint64_t(num_words) * std::uint64_t(element_bytes);
+      if (length64 > UINT32_MAX) {
+        throw std::out_of_range("Xenos index buffer length overflow");
+      }
+      const auto length = static_cast<std::uint32_t>(length64);
+      if (std::uint64_t(address) + length > memory::kPhysicalMemorySize) {
+        throw std::out_of_range("Xenos index buffer outside physical RAM");
+      }
+
+      draw.index_buffer.valid = true;
+      draw.index_buffer.physical_address = address;
+      draw.index_buffer.length_bytes = length;
+      draw.index_buffer.index_count = initiator.index_count;
+      draw.index_buffer.format = initiator.index_format;
+      draw.index_buffer.endian =
+          static_cast<Endian>((dma_size >> 30) & 0x3u);
+      break;
+    }
+
+    case DrawSource::Immediate: {
+      // Preserve immediate indices in their packet packing. The future
+      // primitive conversion stage will unpack/convert them once, before any
+      // Vulkan/D3D12 backend sees the draw. For binned packets, BIN_BASE and
+      // BIN_SIZE have already been consumed above, so the remainder is the same
+      // source-specific immediate payload as the non-binned form.
+      if (tail_index < payload.size()) {
+        draw.immediate_index_dwords.assign(
+            payload.begin() + static_cast<std::ptrdiff_t>(tail_index),
+            payload.end());
+      }
+      break;
+    }
+
+    case DrawSource::AutoIndex:
+    case DrawSource::Reserved:
+      break;
+  }
+
+  draw.register_generation = registers_.generation();
+  draw.raw_payload = std::move(payload);
+  stream_.emit(std::move(draw));
+  ++stats_.draws;
+}
+
 void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
                                      std::uint32_t depth) {
   auto payload = read_payload(reader, header.count);
@@ -369,8 +525,16 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     for (std::uint32_t i = 0; i < size; ++i) {
       microcode.push_back(load_be32(memory_.physical_data(address + i * 4u)));
     }
+    ShaderProgram program(stage, microcode, start);
+    const ir::ShaderReference reference{true, program.hash(), start};
+    if (stage == ShaderStage::Vertex) {
+      active_vertex_shader_ = reference;
+    } else {
+      active_pixel_shader_ = reference;
+    }
+    auto decoded = ShaderDecoder::decode(program);
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
-                                ShaderProgram(stage, microcode, start), payload});
+                                std::move(program), std::move(decoded), payload});
     return;
   }
 
@@ -387,8 +551,16 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::runtime_error("truncated PM4_IM_LOAD_IMMEDIATE microcode");
     }
     const std::span<const std::uint32_t> microcode(payload.data() + 2, size);
+    ShaderProgram program(stage, microcode, start);
+    const ir::ShaderReference reference{true, program.hash(), start};
+    if (stage == ShaderStage::Vertex) {
+      active_vertex_shader_ = reference;
+    } else {
+      active_pixel_shader_ = reference;
+    }
+    auto decoded = ShaderDecoder::decode(program);
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
-                                ShaderProgram(stage, microcode, start), payload});
+                                std::move(program), std::move(decoded), payload});
     return;
   }
 
@@ -410,10 +582,63 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     return;
   }
 
+  if (header.opcode == Type3Opcode::SetBinBaseOffset) {
+    if (payload.empty()) {
+      throw std::runtime_error("PM4_SET_BIN_BASE_OFFSET missing value");
+    }
+    bin_base_offset_ = payload[0];
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::SetBinMask ||
+      header.opcode == Type3Opcode::SetBinSelect) {
+    if (payload.empty()) {
+      throw std::runtime_error("64-bit Xenos bin state packet missing value");
+    }
+    std::uint64_t value = payload[0];
+    if (payload.size() > 1u) value |= std::uint64_t(payload[1]) << 32u;
+    if (header.opcode == Type3Opcode::SetBinMask) {
+      bin_mask_ = value;
+    } else {
+      bin_select_ = value;
+    }
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::SetBinMaskLow ||
+      header.opcode == Type3Opcode::SetBinMaskHigh ||
+      header.opcode == Type3Opcode::SetBinSelectLow ||
+      header.opcode == Type3Opcode::SetBinSelectHigh) {
+    if (payload.empty()) {
+      throw std::runtime_error("Xenos bin state half-write missing value");
+    }
+    const std::uint64_t low_mask = UINT64_C(0x00000000FFFFFFFF);
+    const std::uint64_t high_mask = UINT64_C(0xFFFFFFFF00000000);
+    switch (header.opcode) {
+      case Type3Opcode::SetBinMaskLow:
+        bin_mask_ = (bin_mask_ & high_mask) | payload[0];
+        break;
+      case Type3Opcode::SetBinMaskHigh:
+        bin_mask_ = (bin_mask_ & low_mask) | (std::uint64_t(payload[0]) << 32u);
+        break;
+      case Type3Opcode::SetBinSelectLow:
+        bin_select_ = (bin_select_ & high_mask) | payload[0];
+        break;
+      case Type3Opcode::SetBinSelectHigh:
+        bin_select_ = (bin_select_ & low_mask) |
+                      (std::uint64_t(payload[0]) << 32u);
+        break;
+      default:
+        break;
+    }
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
   if (is_draw_opcode(header.opcode)) {
-    ++stats_.draws;
-    stream_.emit(ir::DrawPacket{header.opcode, header.predicate,
-                                registers_.generation(), std::move(payload)});
+    execute_draw(header.opcode, header.predicate, std::move(payload));
     return;
   }
 
