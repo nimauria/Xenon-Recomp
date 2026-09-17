@@ -5,11 +5,16 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <stdexcept>
 #include <utility>
 
 #if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
 #include <sys/mman.h>
+#elif defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #endif
 
 namespace xenon::memory {
@@ -47,10 +52,31 @@ constexpr bool overlaps(std::uint32_t a_base, std::uint32_t a_size,
 template <typename T>
 constexpr T byteswap_if(T value, bool do_swap) {
   if (!do_swap) return value;
-  if constexpr (sizeof(T) == 2) return static_cast<T>(__builtin_bswap16(static_cast<std::uint16_t>(value)));
-  if constexpr (sizeof(T) == 4) return static_cast<T>(__builtin_bswap32(static_cast<std::uint32_t>(value)));
-  if constexpr (sizeof(T) == 8) return static_cast<T>(__builtin_bswap64(static_cast<std::uint64_t>(value)));
-  return value;
+  if constexpr (sizeof(T) == 2) {
+    const auto v = static_cast<std::uint16_t>(value);
+    return static_cast<T>((v << 8) | (v >> 8));
+  }
+  else if constexpr (sizeof(T) == 4) {
+    const auto v = static_cast<std::uint32_t>(value);
+    return static_cast<T>(((v & 0x000000FFu) << 24) |
+                          ((v & 0x0000FF00u) << 8) |
+                          ((v & 0x00FF0000u) >> 8) |
+                          ((v & 0xFF000000u) >> 24));
+  }
+  else if constexpr (sizeof(T) == 8) {
+    const auto v = static_cast<std::uint64_t>(value);
+    return static_cast<T>(((v & 0x00000000000000FFull) << 56) |
+                          ((v & 0x000000000000FF00ull) << 40) |
+                          ((v & 0x0000000000FF0000ull) << 24) |
+                          ((v & 0x00000000FF000000ull) << 8) |
+                          ((v & 0x000000FF00000000ull) >> 8) |
+                          ((v & 0x0000FF0000000000ull) >> 24) |
+                          ((v & 0x00FF000000000000ull) >> 40) |
+                          ((v & 0xFF00000000000000ull) >> 56));
+  }
+  else {
+    return value;
+  }
 }
 
 }  // namespace
@@ -71,6 +97,16 @@ class AddressSpace::PhysicalBacking {
     if (p == MAP_FAILED) return false;
     data_ = static_cast<std::byte*>(p);
     mapped_ = true;
+#elif defined(_WIN32)
+    void* p = VirtualAlloc(nullptr, kPhysicalMemorySize,
+                           MEM_RESERVE, PAGE_READWRITE);
+    if (!p) return false;
+    if (!VirtualAlloc(p, kPhysicalMemorySize, MEM_COMMIT, PAGE_READWRITE)) {
+      VirtualFree(p, 0, MEM_RELEASE);
+      return false;
+    }
+    data_ = static_cast<std::byte*>(p);
+    mapped_ = true;
 #else
     fallback_ = std::make_unique<std::byte[]>(kPhysicalMemorySize);
     if (!fallback_) return false;
@@ -84,6 +120,8 @@ class AddressSpace::PhysicalBacking {
     if (!data_) return;
 #if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
     if (mapped_) munmap(data_, kPhysicalMemorySize);
+#elif defined(_WIN32)
+    if (mapped_) VirtualFree(data_, 0, MEM_RELEASE);
 #endif
     fallback_.reset();
     data_ = nullptr;
@@ -99,6 +137,22 @@ class AddressSpace::PhysicalBacking {
       return;
     }
 #endif
+#elif defined(_WIN32)
+    if (mapped_) {
+      if (VirtualFree(data_, kPhysicalMemorySize, MEM_DECOMMIT)) {
+        if (VirtualAlloc(data_, kPhysicalMemorySize, MEM_COMMIT,
+                         PAGE_READWRITE)) {
+          return;
+        }
+        // The range is still reserved but no longer accessible. Continuing
+        // into memset would access decommitted pages and hide the real host
+        // allocation failure behind an access violation.
+        throw std::bad_alloc{};
+      }
+      // Retain a valid backing even if a host refuses whole-region decommit.
+      std::memset(data_, 0, kPhysicalMemorySize);
+      return;
+    }
 #endif
     std::memset(data_, 0, kPhysicalMemorySize);
   }
@@ -154,6 +208,17 @@ void AddressSpace::reset() {
     page.allocation_protect = Protect::None;
     page.current_protect = Protect::None;
     page.kind = RegionKind::Virtual;
+  }
+  // A reset zeroes all physical RAM. Existing GPU/APU mirrors must invalidate
+  // their complete copies even though there were no individual CPU writes.
+  std::vector<PhysicalWriteCallback> callbacks;
+  callbacks.reserve(physical_write_callbacks_.size());
+  for (const auto& [id, callback] : physical_write_callbacks_) {
+    (void)id;
+    callbacks.push_back(callback);
+  }
+  for (auto& callback : callbacks) {
+    if (callback) callback(0, kPhysicalMemorySize);
   }
 }
 
@@ -478,6 +543,7 @@ void AddressSpace::free_physical_page(std::uint32_t page) {
 #else
   std::memset(physical_->data() + std::size_t(page) * kBasePageSize, 0, kBasePageSize);
 #endif
+  note_physical_write(page * kBasePageSize, kBasePageSize);
 }
 
 bool AddressSpace::reserve_physical_run(std::uint32_t count, std::uint32_t alignment_pages,
@@ -522,6 +588,7 @@ bool AddressSpace::allocate_physical(std::uint32_t size, std::uint32_t alignment
   if (!reserve_physical_run(count, alignment_pages, top_down, first)) return false;
   out_physical_address = first * kBasePageSize;
   std::memset(physical_->data() + out_physical_address, 0, std::size_t(count) * kBasePageSize);
+  note_physical_write(out_physical_address, count * kBasePageSize);
   return true;
 }
 
@@ -556,6 +623,7 @@ bool AddressSpace::free_physical(std::uint32_t physical_base, std::uint32_t size
                 kBasePageSize);
 #endif
   }
+  note_physical_write(physical_base, count * kBasePageSize);
   return true;
 }
 
@@ -630,6 +698,18 @@ std::byte* AddressSpace::physical_data(std::uint32_t physical_address) {
 const std::byte* AddressSpace::physical_data(std::uint32_t physical_address) const {
   if (!initialized_ || physical_address >= kPhysicalMemorySize) return nullptr;
   return physical_->data() + physical_address;
+}
+
+bool AddressSpace::copy_physical_range(
+    std::uint32_t physical_address, std::span<std::byte> destination) const {
+  std::lock_guard lock(mutex_);
+  if (!initialized_ || std::uint64_t(physical_address) + destination.size() >
+                           kPhysicalMemorySize) {
+    return false;
+  }
+  std::memcpy(destination.data(), physical_->data() + physical_address,
+              destination.size());
+  return true;
 }
 
 AddressSpace::ResolvedByte AddressSpace::resolve_byte(GuestAddress address, AccessKind access) {
@@ -806,7 +886,7 @@ void AddressSpace::write_integer(GuestAddress address, T value, bool little_endi
     *resolved.ptr = static_cast<std::byte>((value >> shift) & 0xFFu);
     physical_addresses[i] = resolved.physical_address;
   }
-  note_physical_write(physical_addresses.front(), sizeof(T));
+  note_physical_write_addresses(physical_addresses);
 }
 
 std::uint8_t AddressSpace::read8(GuestAddress address) {
@@ -846,13 +926,13 @@ void AddressSpace::write128(GuestAddress address, const xenon::cpu::Vector128& v
     note_physical_write(contiguous->physical_address, static_cast<std::uint32_t>(value.bytes.size()));
     return;
   }
-  std::uint32_t first_physical = 0xFFFFFFFFu;
+  std::array<std::uint32_t, 16> physical_addresses{};
   for (std::size_t i = 0; i < value.bytes.size(); ++i) {
     auto r = resolve_byte(address + static_cast<GuestAddress>(i), AccessKind::Write);
     *r.ptr = static_cast<std::byte>(value.bytes[i]);
-    if (i == 0) first_physical = r.physical_address;
+    physical_addresses[i] = r.physical_address;
   }
-  note_physical_write(first_physical, 16);
+  note_physical_write_addresses(physical_addresses);
 }
 
 std::uint16_t AddressSpace::read16_le(GuestAddress a) { return read_integer<std::uint16_t>(a, true); }
@@ -877,9 +957,29 @@ void AddressSpace::note_physical_write(std::uint32_t physical_address, std::uint
   }
   // These observers are intended for lightweight cache-dirty notifications in
   // GPU/APU subsystems. They run synchronously so visibility follows the write.
+  std::vector<PhysicalWriteCallback> callbacks;
+  callbacks.reserve(physical_write_callbacks_.size());
   for (const auto& [id, callback] : physical_write_callbacks_) {
     (void)id;
+    callbacks.push_back(callback);
+  }
+  for (auto& callback : callbacks)
     if (callback) callback(physical_address, width);
+}
+
+void AddressSpace::note_physical_write_addresses(
+    std::span<const std::uint32_t> physical_addresses) {
+  if (physical_addresses.empty()) return;
+  std::size_t first = 0;
+  for (std::size_t i = 1; i <= physical_addresses.size(); ++i) {
+    if (i != physical_addresses.size() &&
+        physical_addresses[i] == physical_addresses[i - 1u] + 1u) {
+      continue;
+    }
+    note_physical_write(
+        physical_addresses[first],
+        static_cast<std::uint32_t>(i - first));
+    first = i;
   }
 }
 

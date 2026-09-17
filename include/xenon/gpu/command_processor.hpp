@@ -66,6 +66,8 @@ class CommandProcessor {
       Reader& reader, std::uint32_t count);
   void emit_register_write(std::uint32_t index, std::uint32_t value);
   void execute_mem_write(std::span<const std::uint32_t> payload);
+  void execute_draw(Type3Opcode opcode, bool predicate,
+                    std::vector<std::uint32_t> payload);
   void write_physical_dword(std::uint32_t address_with_endian,
                             std::uint32_t logical_value);
 
@@ -73,6 +75,11 @@ class CommandProcessor {
   RegisterFile& registers_;
   ir::Stream& stream_;
   Statistics stats_{};
+  ir::ShaderReference active_vertex_shader_{};
+  ir::ShaderReference active_pixel_shader_{};
+  std::uint32_t bin_base_offset_{};
+  std::uint64_t bin_mask_{};
+  std::uint64_t bin_select_{};
   std::uint64_t submission_dwords_{};
   std::uint32_t max_indirect_depth_{};
 };
