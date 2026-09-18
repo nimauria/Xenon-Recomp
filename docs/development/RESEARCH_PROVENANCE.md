@@ -123,3 +123,25 @@ rules follow the Khronos Vulkan 1.3 API; D3D12 upload footprints and SRV rules
 follow Microsoft documentation. Xenon's layout objects, detiler, cache and
 backend image ownership are independent implementations and contain no game-
 specific format or binding assumptions.
+
+## Third GPU correctness audit — 2026-09-18
+
+Current Xenia packet execution, EDRAM transfer/sample ordering and texture-fetch
+definitions were consulted read-only for Type-3 predication, standard host MSAA
+sample mapping and fetch result exponent adjustment. FH1 recomp findings were
+used as real-title evidence for predicated tiled passes, empty resolves and
+exponent-adjusted lighting. The resulting behavior lives in Xenon's common
+command, EDRAM and shader-resource layers rather than in either native backend;
+no emulator command processor or title-specific binding was imported.
+
+## GPU completion audit — native fixed function and resolves
+
+The current Xenia `registers.h`, `draw_util.h/.cc`, DXBC output-merger lowering
+and Vulkan/D3D12 pipeline code were used read-only to verify polygon-offset
+units, alpha-to-mask thresholds and quadrant ordering, target-zero alpha-test
+behavior, independent stencil state, copy-mode register fields, sample
+selection sanitization and resolve-rectangle raster rules. UnleashedRecomp's
+native renderer was cross-checked for frame-context/upload allocation,
+descriptor, barrier and alpha-test practices. Xenon retains independent common
+IR, shader generation, resource planning and native backends; no command-
+processor emulation or title-specific bindings were imported.

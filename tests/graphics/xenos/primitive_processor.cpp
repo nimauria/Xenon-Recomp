@@ -40,8 +40,34 @@ int main() {
   assert(batch.valid && batch.indexed);
   assert((batch.indices == std::vector<std::uint32_t>{0, 1, 1, 2, 2, 0}));
 
+  draw = {};
+  draw.source = DrawSource::Immediate;
+  draw.primitive_type = PrimitiveType::TriangleStrip;
+  draw.index_format = IndexFormat::UInt16;
+  draw.index_count = 7;
+  draw.immediate_index_dwords = {
+      0u | (1u << 16u), 2u | (0xFFFFu << 16u),
+      4u | (5u << 16u), 6u | (0x7777u << 16u)};
+  batch = process_primitives(draw, memory, {true, 0xFFFFu});
+  assert(batch.valid && batch.indexed);
+  // Restart begins a fresh strip, including a fresh winding-parity sequence.
+  assert((batch.indices == std::vector<std::uint32_t>{0, 1, 2, 4, 5, 6}));
+
+  // Primitive reset is ignored for list topologies even if the register enable
+  // is set, matching Xenos/Vulkan-safe semantics.
+  draw.primitive_type = PrimitiveType::LineList;
+  batch = process_primitives(draw, memory, {true, 0xFFFFu});
+  assert(batch.valid);
+  assert((batch.indices ==
+          std::vector<std::uint32_t>{0, 1, 2, 0xFFFFu, 4, 5}));
+
+  draw = {};
+  draw.source = DrawSource::AutoIndex;
   draw.primitive_type = PrimitiveType::RectangleList;
+  draw.index_count = 3;
   batch = process_primitives(draw, memory);
-  assert(!batch.valid && !batch.error.empty());
+  assert(batch.valid && !batch.indexed && batch.requires_rectangle_expansion);
+  assert(batch.topology == HostPrimitiveTopology::TriangleList);
+  assert((batch.indices == std::vector<std::uint32_t>{0, 1, 2}));
   std::cout << "xenon_primitive_processor_tests: ok\n";
 }

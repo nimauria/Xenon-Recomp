@@ -18,6 +18,12 @@ The tracker also materializes the shader constant buffer used by GPU 07:
 - eight packed boolean words
 - 32 loop constants
 - the base word of all 32 vertex fetch constants
+- the signed texture result exponent adjustment for all 32 fetch constants
+
+The exponent adjustment comes from fetch-constant word 3 and is distinct from
+the LOD bias. Generated shaders apply it to the sampled result after the
+texture operation, while the descriptor hash keeps it part of resource
+identity.
 
 The remaining fetch descriptor words stay in `DrawResourceState`; later native
 vertex realization must use that decoded structure rather than extending the

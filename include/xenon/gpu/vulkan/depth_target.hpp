@@ -33,6 +33,9 @@ class DepthTargetImage {
   [[nodiscard]] VkFormat format() const noexcept { return format_; }
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+  [[nodiscard]] const EdramSurfaceLayout& surface() const noexcept {
+    return surface_;
+  }
   [[nodiscard]] bool requires_float24_conversion() const noexcept {
     return float24_;
   }
@@ -47,6 +50,7 @@ class DepthTargetImage {
   VkImageLayout layout_{VK_IMAGE_LAYOUT_UNDEFINED};
   std::uint32_t width_{};
   std::uint32_t height_{};
+  EdramSurfaceLayout surface_{};
   bool float24_{};
   std::string error_{};
 };

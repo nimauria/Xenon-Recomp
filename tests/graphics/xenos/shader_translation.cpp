@@ -96,7 +96,19 @@ void test_pixel_target_and_incomplete_rejection() {
   const auto pixel = HlslShaderLowerer::lower(pixel_shader);
   assert(pixel.complete && pixel.profile == "ps_6_0");
   assert(pixel.hlsl.find("& 255) + 256]") != std::string::npos);
+  assert(pixel.hlsl.find("uint coverage : SV_Coverage") != std::string::npos);
+  assert(pixel.hlsl.find("xenon_compare(e[0].w") != std::string::npos);
+  assert(pixel.hlsl.find("xenon_alpha_to_mask(e[0].w") != std::string::npos);
+  assert(pixel.hlsl.find("0.75 - o / 16.0") != std::string::npos);
   assert(compiler.compile(pixel, {}).succeeded);
+
+  pixel_shader.reflection.exports.clear();
+  const auto no_color_zero = HlslShaderLowerer::lower(pixel_shader);
+  assert(no_color_zero.complete);
+  assert(no_color_zero.hlsl.find("xenon_compare(e[0].w") == std::string::npos);
+  assert(no_color_zero.hlsl.find("output.coverage = 0xFFFFFFFFu") !=
+         std::string::npos);
+  assert(compiler.compile(no_color_zero, {}).succeeded);
 
   DecodedShader incomplete{};
   incomplete.diagnostics.emplace_back("fixture failure");
@@ -167,11 +179,49 @@ void test_texture_lod_and_gradient_lowering() {
   assert(lowered.complete);
   assert(lowered.hlsl.find("SampleGrad") != std::string::npos);
   assert(lowered.hlsl.find("true, grad_h, grad_v, true") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_apply_texture_exp_adjust(3, fetched)") !=
+         std::string::npos);
+  assert(lowered.hlsl.find(
+             "XenonVertexFetchConstants[fetch_constant & 31].y") !=
+         std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
   ShaderCompileOptions spirv{};
   spirv.format = ShaderBinaryFormat::Spirv;
   assert(compiler.compile(lowered, spirv).succeeded);
+}
+
+void test_rectangle_list_geometry_shader() {
+  using namespace xenon::gpu;
+  const auto lowered = make_rectangle_list_geometry_shader();
+  assert(lowered.complete && lowered.stage == ShaderStage::Geometry);
+  assert(lowered.profile == "gs_6_0");
+  assert(lowered.hlsl.find("d01 >= d12") != std::string::npos);
+  assert(lowered.hlsl.find("maxvertexcount(4)") != std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+}
+
+void test_sample_transfer_shaders() {
+  using namespace xenon::gpu;
+  DxcShaderCompiler compiler;
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  for (const auto& shader : {make_transfer_fullscreen_vertex_shader(),
+                             make_color_sample_read_shader(MsaaSamples::X2),
+                             make_color_sample_read_shader(MsaaSamples::X4),
+                             make_color_sample_write_shader()}) {
+    assert(shader.complete);
+    assert(compiler.compile(shader, {}).succeeded);
+    assert(compiler.compile(shader, spirv).succeeded);
+  }
+  assert(make_color_sample_read_shader(MsaaSamples::X2).hlsl.find(
+             "Texture2DMS<float4,2>") != std::string::npos);
+  assert(make_color_sample_write_shader().hlsl.find("SV_SampleIndex") !=
+         std::string::npos);
 }
 
 }  // namespace
@@ -182,5 +232,7 @@ int main() {
   test_pixel_target_and_incomplete_rejection();
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
+  test_rectangle_list_geometry_shader();
+  test_sample_transfer_shaders();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

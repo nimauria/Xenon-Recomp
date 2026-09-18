@@ -1,6 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <span>
 #include <string>
+#include <vector>
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -20,12 +24,26 @@ class RenderTargetImage {
                                 ColorRenderTargetFormat format);
   [[nodiscard]] bool clear(CommandQueue& queue,
                            const float value[4]);
+  [[nodiscard]] bool upload(CommandQueue& queue,
+                            std::span<const std::byte> source,
+                            std::uint32_t row_pitch);
+  [[nodiscard]] bool readback(CommandQueue& queue, std::uint32_t left,
+                              std::uint32_t top, std::uint32_t right,
+                              std::uint32_t bottom,
+                              std::vector<std::byte>& destination,
+                              std::uint32_t& row_pitch);
   void reset() noexcept;
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE rtv() const noexcept { return rtv_; }
   [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
+  [[nodiscard]] ColorRenderTargetFormat guest_format() const noexcept {
+    return guest_format_;
+  }
   [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
   [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+  [[nodiscard]] const EdramSurfaceLayout& surface() const noexcept {
+    return surface_;
+  }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -33,8 +51,11 @@ class RenderTargetImage {
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtv_heap_{};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_{};
   DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
+  ColorRenderTargetFormat guest_format_{ColorRenderTargetFormat::R8G8B8A8};
   std::uint32_t width_{};
   std::uint32_t height_{};
+  std::uint32_t bytes_per_pixel_{};
+  EdramSurfaceLayout surface_{};
   std::string error_{};
 };
 

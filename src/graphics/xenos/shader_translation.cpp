@@ -63,9 +63,15 @@ void write_masked(std::ostringstream& out, std::string_view destination,
 }
 
 std::string destination(const AluInstruction& alu, bool scalar) {
-  const auto index = scalar ? alu.scalar_destination : alu.vector_destination;
-  const bool relative = scalar ? alu.scalar_destination_relative
-                               : alu.vector_destination_relative;
+  // Xenos exports both the vector and scalar ALU results to vector_dest. The
+  // scalar destination field only selects a temporary register when EXPORT_DATA
+  // is clear.
+  const auto index = alu.export_data
+                         ? alu.vector_destination
+                         : (scalar ? alu.scalar_destination : alu.vector_destination);
+  const bool relative = !alu.export_data &&
+                        (scalar ? alu.scalar_destination_relative
+                                : alu.vector_destination_relative);
   std::ostringstream out;
   if (alu.export_data) {
     out << "e[" << unsigned(index) << "]";
@@ -134,6 +140,8 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
         << (float(fetch.offsets_half_texels[0]) / 2.0f) << ","
         << (float(fetch.offsets_half_texels[1]) / 2.0f) << ","
         << (float(fetch.offsets_half_texels[2]) / 2.0f) << "));\n"
+        << "          fetched = xenon_apply_texture_exp_adjust("
+        << unsigned(fetch.fetch_constant) << ", fetched);\n"
         << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
     if (fetch.destination_relative) out << " + ar";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
@@ -150,6 +158,7 @@ cbuffer XenonShaderConstants : register(b0) {
   uint4 XenonBoolConstants[8];
   uint4 XenonLoopConstants[32];
   uint4 XenonVertexFetchConstants[32];
+  uint4 XenonDrawState[8];
 };
 ByteAddressBuffer XenonGuestMemory : register(t0);
 Texture1D<float4> XenonTextures1D[32] : register(t1);
@@ -161,6 +170,79 @@ SamplerState XenonSamplers[32] : register(s0);
 bool xenon_bool(uint index) {
   uint word = XenonBoolConstants[(index >> 7) & 7][(index >> 5) & 3];
   return ((word >> (index & 31)) & 1) != 0;
+}
+
+bool xenon_compare(float value, float reference, uint function) {
+  switch (function & 7u) {
+    case 0u: return false;
+    case 1u: return value < reference;
+    case 2u: return value == reference;
+    case 3u: return value <= reference;
+    case 4u: return value > reference;
+    case 5u: return value != reference;
+    case 6u: return value >= reference;
+    default: return true;
+  }
+}
+
+uint xenon_alpha_to_mask(float alpha, float2 position) {
+  uint sample_count = clamp(XenonDrawState[0].z, 1u, 4u);
+  // Xenos offset index: Y is the low bit, X is the high bit.
+  uint quadrant = (uint(floor(position.y)) & 1u) |
+                  ((uint(floor(position.x)) & 1u) << 1u);
+  uint offset = (XenonDrawState[0].w >> (quadrant * 2u)) & 3u;
+  float a = saturate(alpha);
+  float o = float(offset);
+  if (sample_count >= 4u) {
+    uint coverage = 0u;
+    if (a >= 0.75 - o / 16.0) coverage |= 1u;
+    if (a >= 0.25 - o / 16.0) coverage |= 2u;
+    if (a >= 0.50 - o / 16.0) coverage |= 4u;
+    if (a >= 1.00 - o / 16.0) coverage |= 8u;
+    return coverage;
+  }
+  if (sample_count >= 2u) {
+    // Native host 2x sample order is the reverse of Xenos vertical order.
+    uint coverage = 0u;
+    if (a >= 0.50 - o / 8.0) coverage |= 2u;
+    if (a >= 1.00 - o / 8.0) coverage |= 1u;
+    return coverage;
+  }
+  return a >= 1.00 - o / 4.0 ? 1u : 0u;
+}
+
+// Xbox 360 D24FS8 stores positive depth on a 20-bit mantissa / 4-bit exponent
+// lattice. These are bit-for-bit counterparts of the host-side conversion.
+uint xenon_float32_to_20e4(float value, bool round_nearest_even) {
+  if (!(value > 0.0)) return 0u;
+  uint bits = asuint(value);
+  if (bits >= 0x3FFFFFF8u) return 0x00FFFFFFu;
+  if (bits < 0x38800000u) {
+    uint shift = min(113u - (bits >> 23u), 24u);
+    bits = (0x00800000u | (bits & 0x007FFFFFu)) >> shift;
+  } else {
+    bits += 0xC8000000u;
+  }
+  if (round_nearest_even) bits += 3u + ((bits >> 3u) & 1u);
+  return (bits >> 3u) & 0x00FFFFFFu;
+}
+float xenon_float20e4_to_float32(uint value) {
+  value &= 0x00FFFFFFu;
+  if (value == 0u) return 0.0;
+  uint mantissa = value & 0x000FFFFFu;
+  int exponent = int(value >> 20u);
+  if (exponent == 0) {
+    int highest = firstbithigh(mantissa);
+    uint shift = 20u - uint(highest);
+    exponent = 1 - int(shift);
+    mantissa = (mantissa << shift) & 0x000FFFFFu;
+  }
+  uint ieee = (uint(exponent + 112) << 23u) | (mantissa << 3u);
+  return asfloat(ieee);
+}
+float xenon_quantize_float20e4(float value, bool round_nearest_even) {
+  return xenon_float20e4_to_float32(
+      xenon_float32_to_20e4(value, round_nearest_even));
 }
 
 float xenon_legacy_mul(float a, float b) {
@@ -302,6 +384,10 @@ float4 xenon_texture_fetch(uint fetch_constant, uint opcode, uint dimension,
   if (register_lod || !computed_lod) return XenonTexturesCube[slot].SampleLevel(XenonSamplers[slot],cube_coord,coord.w+lod_bias);
   return XenonTexturesCube[slot].SampleBias(XenonSamplers[slot],cube_coord,lod_bias);
 }
+float4 xenon_apply_texture_exp_adjust(uint fetch_constant, float4 value) {
+  int adjustment=asint(XenonVertexFetchConstants[fetch_constant & 31].y);
+  return ldexp(value, int4(adjustment,adjustment,adjustment,adjustment));
+}
 void xenon_write_fetch(inout float4 dest, float4 value, uint swizzle) {
   [unroll] for (uint i=0;i<4;++i) {
     uint s=(swizzle>>(i*3))&7;
@@ -377,6 +463,15 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     instructions.emplace(address, &instruction);
   }
 
+  const bool emits_pixel_depth =
+      shader.stage == ShaderStage::Pixel &&
+      (shader.reflection.writes_depth ||
+       options.pixel_depth_output != PixelDepthOutputMode::Native);
+  const bool writes_color_target_zero =
+      shader.stage == ShaderStage::Pixel &&
+      std::find(shader.reflection.exports.begin(), shader.reflection.exports.end(),
+                std::uint8_t{0}) != shader.reflection.exports.end();
+
   std::ostringstream out;
   out << "// Project Xenon generated HLSL; source hash 0x" << std::hex
       << shader.source_hash << std::dec << "\n";
@@ -388,8 +483,12 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   } else {
     out << "struct XenonInput { float4 position : SV_Position;";
     for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    if (options.force_sample_frequency)
+      out << " uint sample_index : SV_SampleIndex;";
     out << " };\nstruct XenonOutput {";
     for (unsigned i=0;i<4;++i) out << " float4 c" << i << " : SV_Target" << i << ";";
+    if (emits_pixel_depth) out << " float depth : SV_Depth;";
+    out << " uint coverage : SV_Coverage;";
     out << " };\nXenonOutput " << options.entry_point << "(XenonInput input) {\n";
   }
   out << "  float4 r[64]; float4 e[64];\n"
@@ -502,11 +601,164 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     for (unsigned i=0;i<16;++i) out << "  output.i" << i << "=e[" << i << "];\n";
   } else {
     for (unsigned i=0;i<4;++i) out << "  output.c" << i << "=e[" << i << "];\n";
+    if (writes_color_target_zero) {
+      out << "  if ((XenonDrawState[0].x & 1u) != 0u && "
+             "!xenon_compare(e[0].w, asfloat(XenonDrawState[1].x), "
+             "XenonDrawState[0].y)) discard;\n"
+          << "  output.coverage = (XenonDrawState[0].x & 2u) != 0u ? "
+             "xenon_alpha_to_mask(e[0].w, input.position.xy) : 0xFFFFFFFFu;\n";
+    } else {
+      out << "  output.coverage = 0xFFFFFFFFu;\n";
+    }
+    if (emits_pixel_depth) {
+      out << "  float xenon_depth = "
+          << (shader.reflection.writes_depth ? "e[61].x" : "input.position.z")
+          << ";\n";
+      if (options.force_sample_frequency) {
+        // A static SV_SampleIndex use makes MSAA depth conversion run at sample
+        // frequency on D3D12 and Vulkan. The branch is unreachable for a valid
+        // sample index, but intentionally prevents the input from being DCE'd.
+        out << "  if (input.sample_index == 0xFFFFFFFFu) xenon_depth = 0.0;\n";
+      }
+      if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4NearestEven) {
+        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, true);\n";
+      } else if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4Truncate) {
+        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, false);\n";
+      }
+      out << "  output.depth=xenon_depth;\n";
+    }
   }
   out << "  return output;\n}\n";
   result.hlsl = out.str();
   result.translation_hash = hash_text(result.hlsl);
   result.complete = result.diagnostics.empty();
+  return result;
+}
+
+LoweredShader make_rectangle_list_geometry_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Geometry;
+  result.entry_point = "main";
+  result.profile = "gs_6_0";
+  result.hlsl = R"hlsl(
+// Project Xenon native RectangleList expansion.
+struct XenonVertex {
+  float4 position : SV_Position;
+  float4 i0 : TEXCOORD0; float4 i1 : TEXCOORD1;
+  float4 i2 : TEXCOORD2; float4 i3 : TEXCOORD3;
+  float4 i4 : TEXCOORD4; float4 i5 : TEXCOORD5;
+  float4 i6 : TEXCOORD6; float4 i7 : TEXCOORD7;
+  float4 i8 : TEXCOORD8; float4 i9 : TEXCOORD9;
+  float4 i10 : TEXCOORD10; float4 i11 : TEXCOORD11;
+  float4 i12 : TEXCOORD12; float4 i13 : TEXCOORD13;
+  float4 i14 : TEXCOORD14; float4 i15 : TEXCOORD15;
+};
+
+XenonVertex xenon_rectangle_corner(XenonVertex a, XenonVertex b,
+                                    XenonVertex c) {
+  XenonVertex d;
+  // The Xenos rectangle rule is applied after perspective division. Keep C's
+  // W and rebuild clip-space XY so the generated corner lands at A+B-C in
+  // screen space. Z and interpolants use the matching affine relationship.
+  float2 ndc = a.position.xy / a.position.w +
+               b.position.xy / b.position.w - c.position.xy / c.position.w;
+  d.position = float4(ndc * c.position.w,
+                      (a.position.z / a.position.w +
+                       b.position.z / b.position.w -
+                       c.position.z / c.position.w) * c.position.w,
+                      c.position.w);
+  d.i0=a.i0+b.i0-c.i0; d.i1=a.i1+b.i1-c.i1;
+  d.i2=a.i2+b.i2-c.i2; d.i3=a.i3+b.i3-c.i3;
+  d.i4=a.i4+b.i4-c.i4; d.i5=a.i5+b.i5-c.i5;
+  d.i6=a.i6+b.i6-c.i6; d.i7=a.i7+b.i7-c.i7;
+  d.i8=a.i8+b.i8-c.i8; d.i9=a.i9+b.i9-c.i9;
+  d.i10=a.i10+b.i10-c.i10; d.i11=a.i11+b.i11-c.i11;
+  d.i12=a.i12+b.i12-c.i12; d.i13=a.i13+b.i13-c.i13;
+  d.i14=a.i14+b.i14-c.i14; d.i15=a.i15+b.i15-c.i15;
+  return d;
+}
+
+[maxvertexcount(4)]
+void main(triangle XenonVertex input[3],
+          inout TriangleStream<XenonVertex> stream) {
+  float2 p0=input[0].position.xy/input[0].position.w;
+  float2 p1=input[1].position.xy/input[1].position.w;
+  float2 p2=input[2].position.xy/input[2].position.w;
+  float d01=dot(p0-p1,p0-p1);
+  float d12=dot(p1-p2,p1-p2);
+  float d20=dot(p2-p0,p2-p0);
+  XenonVertex a, b, c;
+  if (d01 >= d12 && d01 >= d20) { a=input[0]; b=input[1]; c=input[2]; }
+  else if (d12 >= d20) { a=input[1]; b=input[2]; c=input[0]; }
+  else { a=input[2]; b=input[0]; c=input[1]; }
+  stream.Append(a);
+  stream.Append(c);
+  stream.Append(b);
+  stream.Append(xenon_rectangle_corner(a,b,c));
+  stream.RestartStrip();
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.rectangle-list.geometry.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_transfer_fullscreen_vertex_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Vertex;
+  result.entry_point = "main";
+  result.profile = "vs_6_0";
+  result.hlsl = R"hlsl(
+struct Output { float4 position : SV_Position; };
+Output main(uint id : SV_VertexID) {
+  Output o;
+  o.position=float4(float2((id << 1) & 2, id & 2) * float2(2,-2) + float2(-1,1),0,1);
+  return o;
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.transfer.fullscreen.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_color_sample_read_shader(MsaaSamples samples) {
+  const auto count = 1u << static_cast<unsigned>(samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "Texture2DMS<float4," << count << "> Source : register(t0);\n"
+      << "cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };\n"
+      << "float4 main(float4 position : SV_Position) : SV_Target0 {\n"
+      << "  return Source.Load(int2(position.xy) + int2(origin), sample);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.sample.read.v1") ^ count;
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported transfer sample count");
+  return result;
+}
+
+LoweredShader make_color_sample_write_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  result.hlsl = R"hlsl(
+Texture2D<float4> Source : register(t0);
+cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };
+float4 main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) : SV_Target0 {
+  if (host_sample != sample) discard;
+  return Source.Load(int3(int2(position.xy) + int2(origin), 0));
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.transfer.sample.write.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
   return result;
 }
 

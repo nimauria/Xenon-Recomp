@@ -66,7 +66,17 @@ xenon::gpu::LoweredShader test_pixel_shader() {
   shader.translation_hash = 0x2002;
   shader.entry_point = "main";
   shader.profile = "ps_6_0";
-  shader.hlsl = "float4 main() : SV_Target0 { return float4(0.0, 1.0, 0.0, 1.0); }";
+  shader.hlsl = R"(
+struct Output {
+  float4 c0 : SV_Target0;
+  float4 c1 : SV_Target1;
+};
+Output main() {
+  Output result;
+  result.c0 = float4(0.0, 1.0, 0.0, 1.0);
+  result.c1 = float4(0.0, 0.0, 1.0, 1.0);
+  return result;
+})";
   shader.complete = true;
   return shader;
 }
@@ -141,10 +151,31 @@ int main() {
                                   vulkan_context.device(), vulkan_queue,
                                   vulkan_surface,
                                   xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+  std::vector<std::byte> vulkan_ownership_upload(64u * 64u * 4u);
+  for (std::size_t i = 0; i < vulkan_ownership_upload.size(); ++i)
+    vulkan_ownership_upload[i] = std::byte(i & 0xFFu);
+  assert(vulkan_target.upload(vulkan_queue, vulkan_ownership_upload, 64u * 4u));
+  std::vector<std::byte> vulkan_ownership_readback;
+  std::uint32_t vulkan_ownership_pitch{};
+  assert(vulkan_target.readback(vulkan_queue, 0, 0, 2, 2,
+                                vulkan_ownership_readback,
+                                vulkan_ownership_pitch));
+  assert(vulkan_ownership_pitch == 8u);
+  assert(std::memcmp(vulkan_ownership_readback.data(),
+                     vulkan_ownership_upload.data(), 8u) == 0);
+  assert(std::memcmp(vulkan_ownership_readback.data() + 8u,
+                     vulkan_ownership_upload.data() + 64u * 4u, 8u) == 0);
   VkClearColorValue vulkan_clear{};
   vulkan_clear.float32[0] = 0.25f;
   vulkan_clear.float32[3] = 1.0f;
   assert(vulkan_target.clear(vulkan_queue, vulkan_clear));
+  xenon::gpu::EdramSurfaceLayout vulkan_surface_1{
+      16, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
+  xenon::gpu::vulkan::RenderTargetImage vulkan_target_1;
+  assert(vulkan_target_1.initialize(
+      vulkan_context.physical_device(), vulkan_context.device(), vulkan_queue,
+      vulkan_surface_1, xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+  assert(vulkan_target_1.clear(vulkan_queue, vulkan_clear));
   xenon::gpu::EdramSurfaceLayout vulkan_depth_surface{
       64, 64, 64, xenon::gpu::MsaaSamples::X1, false, true};
   xenon::gpu::vulkan::DepthTargetImage vulkan_depth;
@@ -153,6 +184,30 @@ int main() {
                                   xenon::gpu::DepthRenderTargetFormat::D24S8));
   assert(vulkan_depth.clear(vulkan_queue, 1.0f, 0));
 #if defined(XENON_TEST_DXC)
+  xenon::gpu::EdramSurfaceLayout vulkan_msaa_surface{
+      96, 8, 8, xenon::gpu::MsaaSamples::X4, false, false};
+  xenon::gpu::vulkan::RenderTargetImage vulkan_msaa_target;
+  assert(vulkan_msaa_target.initialize(
+      vulkan_context.physical_device(), vulkan_context.device(), vulkan_queue,
+      vulkan_msaa_surface, xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+  VkClearColorValue vulkan_msaa_clear{};
+  vulkan_msaa_clear.float32[0] = 0.25f;
+  vulkan_msaa_clear.float32[1] = 0.5f;
+  vulkan_msaa_clear.float32[2] = 0.75f;
+  vulkan_msaa_clear.float32[3] = 1.0f;
+  assert(vulkan_msaa_target.clear(vulkan_queue, vulkan_msaa_clear));
+  std::vector<std::byte> first_sample;
+  std::uint32_t first_sample_pitch{};
+  assert(vulkan_msaa_target.readback_sample(
+      vulkan_queue, 0, 0, 0, 8, 8, first_sample, first_sample_pitch));
+  assert(first_sample_pitch == 32u && first_sample.size() == 256u);
+  for (std::uint32_t guest_sample = 1; guest_sample < 4; ++guest_sample) {
+    std::vector<std::byte> selected;
+    std::uint32_t selected_pitch{};
+    assert(vulkan_msaa_target.readback_sample(
+        vulkan_queue, guest_sample, 0, 0, 8, 8, selected, selected_pitch));
+    assert(selected_pitch == first_sample_pitch && selected == first_sample);
+  }
   xenon::gpu::DxcShaderCompiler vulkan_compiler;
   assert(vulkan_compiler.available());
   xenon::gpu::ShaderCompileOptions vulkan_compile_options{};
@@ -164,33 +219,40 @@ int main() {
   assert(vulkan_vs.succeeded && vulkan_ps.succeeded);
   xenon::gpu::RasterState vulkan_raster{};
   xenon::gpu::vulkan::GraphicsPipeline vulkan_pipeline;
-  const std::array vulkan_formats{vulkan_target.format()};
-  const std::array<std::uint8_t, 1> vulkan_write_masks{0xFu};
-  const std::array<xenon::gpu::BlendState, 1> vulkan_blend_states{};
+  const std::array vulkan_formats{vulkan_target.format(),
+                                  vulkan_target_1.format()};
+  const std::array<std::uint8_t, 2> vulkan_write_masks{0xFu, 0xFu};
+  const std::array<xenon::gpu::BlendState, 2> vulkan_blend_states{};
   xenon::gpu::DepthTargetDescriptor vulkan_depth_state{};
   vulkan_depth_state.test_enabled = true;
   vulkan_depth_state.write_enabled = true;
   vulkan_depth_state.function = xenon::gpu::CompareFunction::Less;
   assert(vulkan_pipeline.initialize(
       vulkan_context.device(), vulkan_resources.pipeline_layout(), vulkan_vs,
-      vulkan_ps, vulkan_formats, xenon::gpu::MsaaSamples::X1,
+      vulkan_ps, nullptr, vulkan_formats, xenon::gpu::MsaaSamples::X1,
       xenon::gpu::HostPrimitiveTopology::TriangleList, vulkan_raster,
-      vulkan_write_masks, vulkan_blend_states, {}, vulkan_depth.format(),
+      vulkan_write_masks, vulkan_blend_states, vulkan_depth.format(),
       &vulkan_depth_state));
   assert(vulkan_queue.execute([&](VkCommandBuffer command) {
     vulkan_target.transition_to_color_attachment(command);
+    vulkan_target_1.transition_to_color_attachment(command);
     vulkan_depth.transition_to_depth_attachment(command);
-    VkRenderingAttachmentInfo attachment{
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    attachment.imageView = vulkan_target.view();
-    attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    std::array<VkRenderingAttachmentInfo, 2> attachments{};
+    attachments[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachments[0].imageView = vulkan_target.view();
+    attachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    attachments[1].imageView = vulkan_target_1.view();
+    attachments[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo rendering{VK_STRUCTURE_TYPE_RENDERING_INFO};
     rendering.renderArea.extent = {vulkan_target.width(), vulkan_target.height()};
     rendering.layerCount = 1;
-    rendering.colorAttachmentCount = 1;
-    rendering.pColorAttachments = &attachment;
+    rendering.colorAttachmentCount = 2;
+    rendering.pColorAttachments = attachments.data();
     VkRenderingAttachmentInfo depth_attachment{
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     depth_attachment.imageView = vulkan_depth.view();
@@ -210,25 +272,40 @@ int main() {
     vkCmdDraw(command, 3, 1, 0, 0);
     vkCmdEndRendering(command);
   }));
+  std::vector<std::byte> vulkan_region;
+  std::uint32_t vulkan_region_pitch{};
+  assert(vulkan_target.readback(vulkan_queue, 31, 31, 33, 33,
+                                vulkan_region, vulkan_region_pitch));
+  assert(vulkan_region_pitch == 8 && vulkan_region.size() == 16);
+  assert(std::to_integer<unsigned>(vulkan_region[5]) > 200u);
   xenon::gpu::vulkan::Buffer vulkan_draw_readback;
+  xenon::gpu::vulkan::Buffer vulkan_draw_readback_1;
   constexpr VkDeviceSize kVulkanDrawBytes = 64u * 64u * 4u;
   assert(vulkan_draw_readback.initialize(
       vulkan_context.physical_device(), vulkan_context.device(),
       kVulkanDrawBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+  assert(vulkan_draw_readback_1.initialize(
+      vulkan_context.physical_device(), vulkan_context.device(),
+      kVulkanDrawBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
   assert(vulkan_queue.execute([&](VkCommandBuffer command) {
-    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.image = vulkan_target.image();
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    std::array<VkImageMemoryBarrier2, 2> barriers{};
+    for (auto& barrier : barriers) {
+      barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+      barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+      barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+      barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+      barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+      barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    }
+    barriers[0].image = vulkan_target.image();
+    barriers[1].image = vulkan_target_1.image();
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dependency.imageMemoryBarrierCount = 1;
-    dependency.pImageMemoryBarriers = &barrier;
+    dependency.imageMemoryBarrierCount = 2;
+    dependency.pImageMemoryBarriers = barriers.data();
     vkCmdPipelineBarrier2(command, &dependency);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -236,25 +313,35 @@ int main() {
     vkCmdCopyImageToBuffer(command, vulkan_target.image(),
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            vulkan_draw_readback.buffer(), 1, &copy);
-    VkBufferMemoryBarrier2 readback_barrier{
-        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-    readback_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-    readback_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    readback_barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
-    readback_barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
-    readback_barrier.buffer = vulkan_draw_readback.buffer();
-    readback_barrier.size = kVulkanDrawBytes;
+    vkCmdCopyImageToBuffer(command, vulkan_target_1.image(),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           vulkan_draw_readback_1.buffer(), 1, &copy);
+    std::array<VkBufferMemoryBarrier2, 2> readback_barriers{};
+    for (auto& barrier : readback_barriers) {
+      barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+      barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+      barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+      barrier.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+      barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+      barrier.size = kVulkanDrawBytes;
+    }
+    readback_barriers[0].buffer = vulkan_draw_readback.buffer();
+    readback_barriers[1].buffer = vulkan_draw_readback_1.buffer();
     dependency.imageMemoryBarrierCount = 0;
     dependency.pImageMemoryBarriers = nullptr;
-    dependency.bufferMemoryBarrierCount = 1;
-    dependency.pBufferMemoryBarriers = &readback_barrier;
+    dependency.bufferMemoryBarrierCount = 2;
+    dependency.pBufferMemoryBarriers = readback_barriers.data();
     vkCmdPipelineBarrier2(command, &dependency);
   }));
   std::span<std::byte> vulkan_draw_pixels;
+  std::span<std::byte> vulkan_draw_pixels_1;
   assert(vulkan_draw_readback.map(vulkan_draw_pixels));
+  assert(vulkan_draw_readback_1.map(vulkan_draw_pixels_1));
   const auto vulkan_center = (32u * 64u + 32u) * 4u;
   assert(std::to_integer<unsigned>(vulkan_draw_pixels[vulkan_center + 1u]) > 200u);
+  assert(std::to_integer<unsigned>(vulkan_draw_pixels_1[vulkan_center + 2u]) > 200u);
   vulkan_draw_readback.unmap();
+  vulkan_draw_readback_1.unmap();
 #endif
   constexpr std::uint32_t kVulkanProbeAddress = 0x4321;
   vulkan_guest_memory.physical_data()[kVulkanProbeAddress] = std::byte{0x6B};
@@ -344,8 +431,29 @@ int main() {
     xenon::gpu::d3d12::RenderTargetImage d3d_target;
     assert(d3d_target.initialize(context.device(), d3d_surface,
                                  xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+    std::vector<std::byte> d3d_ownership_upload(64u * 64u * 4u);
+    for (std::size_t i = 0; i < d3d_ownership_upload.size(); ++i)
+      d3d_ownership_upload[i] = std::byte(i & 0xFFu);
+    assert(d3d_target.upload(queue, d3d_ownership_upload, 64u * 4u));
+    std::vector<std::byte> d3d_ownership_readback;
+    std::uint32_t d3d_ownership_pitch{};
+    assert(d3d_target.readback(queue, 0, 0, 2, 2,
+                               d3d_ownership_readback,
+                               d3d_ownership_pitch));
+    assert(d3d_ownership_pitch == 8u);
+    assert(std::memcmp(d3d_ownership_readback.data(),
+                       d3d_ownership_upload.data(), 8u) == 0);
+    assert(std::memcmp(d3d_ownership_readback.data() + 8u,
+                       d3d_ownership_upload.data() + 64u * 4u, 8u) == 0);
     const float d3d_clear[4]{0.25f, 0.0f, 0.0f, 1.0f};
     assert(d3d_target.clear(queue, d3d_clear));
+    xenon::gpu::EdramSurfaceLayout d3d_surface_1{
+        16, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
+    xenon::gpu::d3d12::RenderTargetImage d3d_target_1;
+    assert(d3d_target_1.initialize(
+        context.device(), d3d_surface_1,
+        xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+    assert(d3d_target_1.clear(queue, d3d_clear));
     xenon::gpu::EdramSurfaceLayout d3d_depth_surface{
         64, 64, 64, xenon::gpu::MsaaSamples::X1, false, true};
     xenon::gpu::d3d12::DepthTargetImage d3d_depth;
@@ -360,16 +468,16 @@ int main() {
     assert(d3d_vs.succeeded && d3d_ps.succeeded);
     xenon::gpu::RasterState d3d_raster{};
     xenon::gpu::d3d12::GraphicsPipeline d3d_pipeline;
-    const std::array d3d_formats{d3d_target.format()};
-    const std::array<std::uint8_t, 1> d3d_write_masks{0xFu};
-    const std::array<xenon::gpu::BlendState, 1> d3d_blend_states{};
+    const std::array d3d_formats{d3d_target.format(), d3d_target_1.format()};
+    const std::array<std::uint8_t, 2> d3d_write_masks{0xFu, 0xFu};
+    const std::array<xenon::gpu::BlendState, 2> d3d_blend_states{};
     xenon::gpu::DepthTargetDescriptor d3d_depth_state{};
     d3d_depth_state.test_enabled = true;
     d3d_depth_state.write_enabled = true;
     d3d_depth_state.function = xenon::gpu::CompareFunction::Less;
     assert(d3d_pipeline.initialize(
         context.device(), resources.root_signature(), d3d_vs, d3d_ps,
-        d3d_formats, xenon::gpu::MsaaSamples::X1,
+        nullptr, d3d_formats, xenon::gpu::MsaaSamples::X1,
         xenon::gpu::HostPrimitiveTopology::TriangleList, d3d_raster,
         d3d_write_masks, d3d_blend_states, d3d_depth.format(),
         &d3d_depth_state));
@@ -391,12 +499,19 @@ int main() {
                                static_cast<LONG>(d3d_target.height())};
       list->RSSetViewports(1, &viewport);
       list->RSSetScissorRects(1, &scissor);
-      const auto rtv = d3d_target.rtv();
+      const std::array rtvs{d3d_target.rtv(), d3d_target_1.rtv()};
       const auto dsv = d3d_depth.dsv();
-      list->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+      list->OMSetRenderTargets(static_cast<UINT>(rtvs.size()), rtvs.data(),
+                               FALSE, &dsv);
       list->IASetPrimitiveTopology(d3d_pipeline.native_topology());
       list->DrawInstanced(3, 1, 0, 0);
     }));
+    std::vector<std::byte> d3d_region;
+    std::uint32_t d3d_region_pitch{};
+    assert(d3d_target.readback(queue, 31, 31, 33, 33, d3d_region,
+                               d3d_region_pitch));
+    assert(d3d_region_pitch == 8 && d3d_region.size() == 16);
+    assert(std::to_integer<unsigned>(d3d_region[5]) > 200u);
     const auto draw_desc = d3d_target.resource()->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT draw_footprint{};
     UINT draw_rows{};
@@ -406,30 +521,53 @@ int main() {
                                              &draw_footprint, &draw_rows,
                                              &draw_row_bytes, &draw_total_bytes);
     xenon::gpu::d3d12::Buffer d3d_draw_readback;
+    xenon::gpu::d3d12::Buffer d3d_draw_readback_1;
     assert(d3d_draw_readback.initialize(context.device(), draw_total_bytes,
                                          D3D12_HEAP_TYPE_READBACK,
                                          D3D12_RESOURCE_STATE_COPY_DEST));
+    assert(d3d_draw_readback_1.initialize(context.device(), draw_total_bytes,
+                                           D3D12_HEAP_TYPE_READBACK,
+                                           D3D12_RESOURCE_STATE_COPY_DEST));
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
-      const D3D12_RESOURCE_BARRIER barrier{
-          D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
-          D3D12_RESOURCE_BARRIER_FLAG_NONE,
-          {.Transition = {d3d_target.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                          D3D12_RESOURCE_STATE_RENDER_TARGET,
-                          D3D12_RESOURCE_STATE_COPY_SOURCE}}};
-      list->ResourceBarrier(1, &barrier);
+      std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+      const std::array<ID3D12Resource*, 2> draw_targets{
+          d3d_target.resource(), d3d_target_1.resource()};
+      for (std::size_t i = 0; i < barriers.size(); ++i) {
+        auto& barrier = barriers[i];
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.Transition.pResource = draw_targets[i];
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+      }
+      list->ResourceBarrier(static_cast<UINT>(barriers.size()),
+                            barriers.data());
       const D3D12_TEXTURE_COPY_LOCATION source{
           d3d_target.resource(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+          {.SubresourceIndex = 0}};
+      const D3D12_TEXTURE_COPY_LOCATION source_1{
+          d3d_target_1.resource(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
           {.SubresourceIndex = 0}};
       const D3D12_TEXTURE_COPY_LOCATION destination{
           d3d_draw_readback.resource(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
           {.PlacedFootprint = draw_footprint}};
+      const D3D12_TEXTURE_COPY_LOCATION destination_1{
+          d3d_draw_readback_1.resource(),
+          D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+          {.PlacedFootprint = draw_footprint}};
       list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+      list->CopyTextureRegion(&destination_1, 0, 0, 0, &source_1, nullptr);
     }));
     std::span<std::byte> d3d_draw_pixels;
+    std::span<std::byte> d3d_draw_pixels_1;
     assert(d3d_draw_readback.map(d3d_draw_pixels));
+    assert(d3d_draw_readback_1.map(d3d_draw_pixels_1));
     const auto d3d_center = std::size_t(draw_footprint.Footprint.RowPitch) * 32u + 32u * 4u;
     assert(std::to_integer<unsigned>(d3d_draw_pixels[d3d_center + 1u]) > 200u);
+    assert(std::to_integer<unsigned>(d3d_draw_pixels_1[d3d_center + 2u]) > 200u);
     d3d_draw_readback.unmap();
+    d3d_draw_readback_1.unmap();
 #endif
     constexpr std::uint32_t kProbeAddress = 0x1234;
     guest_memory.physical_data()[kProbeAddress] = std::byte{0xA5};

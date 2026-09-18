@@ -21,6 +21,7 @@ class CommandProcessor {
     std::uint64_t indirect_buffers{};
     std::uint64_t draws{};
     std::uint64_t physical_writes{};
+    std::uint64_t predicated_packets_skipped{};
   };
 
   CommandProcessor(memory::AddressSpace& memory, RegisterFile& registers,
@@ -70,6 +71,7 @@ class CommandProcessor {
                     std::vector<std::uint32_t> payload);
   void write_physical_dword(std::uint32_t address_with_endian,
                             std::uint32_t logical_value);
+  [[nodiscard]] bool predicate_passes() const noexcept;
 
   memory::AddressSpace& memory_;
   RegisterFile& registers_;

@@ -21,6 +21,7 @@ class GraphicsPipeline {
                                 ID3D12RootSignature* root_signature,
                                 const CompiledShader& vertex_shader,
                                 const CompiledShader& pixel_shader,
+                                const CompiledShader* geometry_shader,
                                 std::span<const DXGI_FORMAT> color_formats,
                                 MsaaSamples samples,
                                 HostPrimitiveTopology topology,

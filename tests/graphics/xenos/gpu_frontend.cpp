@@ -128,6 +128,45 @@ void test_constants(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x4900) == 0x01020304);
 }
 
+void test_type3_predication(AddressSpace& memory, CommandProcessor& cp,
+                            RegisterFile& regs,
+                            xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t failed = 0x01001400;
+  constexpr std::uint32_t passed = 0x01001500;
+  constexpr std::uint32_t test_register = 0x2F00;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+
+  write_words(memory, failed,
+              {make_packet_type3(Type3Opcode::SetBinMask, 2), 1u, 0u,
+               make_packet_type3(Type3Opcode::SetBinSelect, 2), 0u, 0u,
+               make_packet_type3(Type3Opcode::SetConstant2, 2, true),
+               test_register, 0xDEADBEEFu,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1, true), initiator});
+  const auto skipped_before = cp.statistics().predicated_packets_skipped;
+  const auto draws_before = cp.statistics().draws;
+  const auto stream_before = stream.size();
+  cp.execute_buffer(failed, 11);
+  assert(regs.read(test_register) == 0);
+  assert(cp.statistics().draws == draws_before);
+  assert(cp.statistics().predicated_packets_skipped == skipped_before + 2);
+  // Only the two unpredicated bin-state packets are observable in IR.
+  assert(stream.size() == stream_before + 2);
+
+  write_words(memory, passed,
+              {make_packet_type3(Type3Opcode::SetBinSelect, 2), 1u, 0u,
+               make_packet_type3(Type3Opcode::SetConstant2, 2, true),
+               test_register, 0xCAFEBABEu,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1, true), initiator});
+  cp.execute_buffer(passed, 8);
+  assert(regs.read(test_register) == 0xCAFEBABEu);
+  assert(cp.statistics().draws == draws_before + 1);
+  assert(cp.statistics().predicated_packets_skipped == skipped_before + 2);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(draw.predicate);
+}
+
 void test_load_constant_context(AddressSpace& memory, CommandProcessor& cp,
                                 RegisterFile& regs) {
   constexpr std::uint32_t constants = 0x01100000;
@@ -505,6 +544,7 @@ int main() {
 
   test_register_packets(memory, cp, regs);
   test_constants(memory, cp, regs);
+  test_type3_predication(memory, cp, regs, stream);
   test_load_constant_context(memory, cp, regs);
   test_mem_write(memory, cp);
   test_indirect_buffer(memory, cp, regs);

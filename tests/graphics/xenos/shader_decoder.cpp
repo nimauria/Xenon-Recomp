@@ -59,6 +59,27 @@ void test_texture_predicate_and_loop() {
   assert(decoded.instructions[0].texture_fetch.offsets_half_texels[0] == -1);
 }
 
+
+void test_pixel_depth_export_reflection() {
+  using namespace xenon::gpu;
+  const auto cf = pack_cf(1u | (1u << 12),
+      std::uint16_t(std::uint16_t(ControlFlowOpcode::ExecEnd) << 12));
+  // PS export e61. Scalar destination deliberately differs: scalar export also
+  // targets vector_destination on Xenos.
+  const std::uint32_t alu0 = 61u | (7u << 8) | (1u << 15) |
+                             (1u << 16) | (2u << 20);
+  const std::uint32_t alu2 = 0u;
+  const std::vector<std::uint32_t> words = {
+      cf[0], cf[1], cf[2], alu0, 0u, alu2};
+  const auto decoded = ShaderDecoder::decode(
+      ShaderProgram(ShaderStage::Pixel, words));
+  assert(decoded.complete);
+  assert(decoded.reflection.writes_depth);
+  assert(decoded.reflection.exports == std::vector<std::uint8_t>{61});
+  assert(decoded.reflection.color_exports == 0);
+  assert(decoded.reflection.memory_exports == 0);
+}
+
 void test_malformed_stream_is_diagnostic() {
   using namespace xenon::gpu;
   const std::uint32_t words[] = {1, 2};
@@ -70,6 +91,7 @@ void test_malformed_stream_is_diagnostic() {
 int main() {
   test_mixed_exec_and_reflection();
   test_texture_predicate_and_loop();
+  test_pixel_depth_export_reflection();
   test_malformed_stream_is_diagnostic();
   std::cout << "xenon_shader_decoder_tests: ok\n";
 }

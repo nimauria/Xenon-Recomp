@@ -5,9 +5,11 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/edram_surface.hpp"
+#include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/register_file.hpp"
 
 namespace xenon::gpu {
@@ -77,6 +79,7 @@ struct TextureDescriptor {
   std::uint8_t aniso_filter{};
   std::uint8_t border_color{};
   std::int16_t lod_bias{};
+  std::int8_t exp_adjust{};
   bool stacked{};
   bool tiled{};
   bool packed_mips{};
@@ -120,6 +123,70 @@ struct ViewportState {
   float z_offset{};
 };
 
+struct PixelControlState {
+  CompareFunction alpha_function{CompareFunction::Always};
+  float alpha_reference{};
+  std::array<std::uint8_t, 4> alpha_to_mask_offsets{};
+  bool alpha_test_enabled{};
+  bool alpha_to_mask_enabled{};
+};
+
+enum class CopyCommand : std::uint8_t {
+  Raw = 0,
+  Convert = 1,
+  ConstantOne = 2,
+  Null = 3,
+};
+
+enum class CopySampleSelect : std::uint8_t {
+  Sample0 = 0,
+  Sample1 = 1,
+  Sample2 = 2,
+  Sample3 = 3,
+  Samples01 = 4,
+  Samples23 = 5,
+  Samples0123 = 6,
+};
+
+struct CopyResolveState {
+  std::uint32_t destination_base{};
+  std::uint16_t destination_pitch{};
+  std::uint16_t destination_height{};
+  std::uint8_t source_select{};
+  CopySampleSelect sample_select{CopySampleSelect::Sample0};
+  CopyCommand command{CopyCommand::Raw};
+  Endian128 destination_endian{Endian128::None};
+  std::uint8_t destination_slice{};
+  std::uint8_t destination_format{};
+  std::uint8_t destination_number_format{};
+  std::int8_t destination_exponent_bias{};
+  bool destination_array{};
+  bool destination_red_blue_swap{};
+  bool color_clear_enabled{};
+  bool depth_clear_enabled{};
+  std::array<std::uint32_t, 2> color_clear{};
+  std::uint32_t depth_clear{};
+
+  [[nodiscard]] bool copies_depth() const noexcept { return source_select >= 4; }
+};
+
+struct PolygonOffsetState {
+  float scale{};
+  float offset{};
+  bool enabled{};
+};
+
+enum class HostPolygonMode : std::uint8_t {
+  Fill,
+  Line,
+  Point,
+};
+
+struct PrimitiveAssemblyState {
+  bool reset_enabled{};
+  std::uint32_t reset_index{};
+};
+
 struct RasterState {
   std::uint16_t surface_pitch{};
   std::uint8_t msaa_samples_log2{};
@@ -131,24 +198,139 @@ struct RasterState {
   bool cull_back{};
   bool front_face_clockwise{};
   bool multisample_enabled{};
+  bool vertex_window_offset_enabled{};
+  bool d3d_pixel_center{true};
+  std::int32_t window_offset_x{};
+  std::int32_t window_offset_y{};
+  bool polygon_offset_front_enabled{};
+  bool polygon_offset_back_enabled{};
+  bool polygon_offset_parallel_enabled{};
   std::uint8_t polygon_mode{};
   std::uint8_t front_polygon_type{};
   std::uint8_t back_polygon_type{};
+  float polygon_offset_front_scale{};
+  float polygon_offset_front_offset{};
+  float polygon_offset_back_scale{};
+  float polygon_offset_back_offset{};
   ViewportState viewport{};
+};
+
+struct NativePipelineKey {
+  std::uint64_t value{};
+  friend bool operator==(const NativePipelineKey&, const NativePipelineKey&) = default;
 };
 
 struct DrawResourceState {
   EdramMode edram_mode{EdramMode::NoOperation};
   std::array<RenderTargetDescriptor, 4> color_targets{};
   std::array<float, 4> blend_constant{};
+  PixelControlState pixel_control{};
+  CopyResolveState copy{};
   DepthTargetDescriptor depth_target{};
+  PrimitiveAssemblyState primitive_assembly{};
   RasterState raster{};
   std::array<std::optional<TextureDescriptor>, 32> textures{};
   std::array<std::array<std::optional<VertexBufferDescriptor>, 3>, 32>
       vertex_buffers{};
   std::uint64_t generation{};
-  [[nodiscard]] std::uint64_t pipeline_hash(const ir::DrawPacket& draw) const noexcept;
+  [[nodiscard]] NativePipelineKey native_pipeline_key(
+      const ir::DrawPacket& draw) const noexcept;
+  [[nodiscard]] std::uint64_t pipeline_hash(
+      const ir::DrawPacket& draw) const noexcept {
+    return native_pipeline_key(draw).value;
+  }
 };
+
+struct ResolveRectangle {
+  std::int32_t left{};
+  std::int32_t top{};
+  std::int32_t right{};
+  std::int32_t bottom{};
+  bool valid{};
+
+  [[nodiscard]] bool empty() const noexcept {
+    return valid && (left >= right || top >= bottom);
+  }
+};
+
+// Fully decoded, backend-neutral resolve policy. Native backends consume this
+// instead of reinterpreting Xenos sample-selection and copy-control fields.
+struct ResolvePlan {
+  CopyResolveState copy{};
+  ResolveRectangle rectangle{};
+  MsaaSamples samples{MsaaSamples::X1};
+  std::array<std::uint8_t, 4> host_sample_for_guest{0xFF, 0xFF, 0xFF, 0xFF};
+  std::uint8_t guest_sample_mask{};
+  std::uint8_t selected_sample_count{};
+  std::uint8_t source_color_slot{};
+  bool depth{};
+  bool native_color_average{};
+  bool valid{};
+  std::string error{};
+};
+
+// Host-backend-neutral description of which Xenos color export locations are
+// active for a draw. attachment_count deliberately preserves the highest
+// enabled Xenos MRT slot + 1 rather than compacting the array: pixel shader
+// export eN / SV_TargetN must remain attached to native color slot N.
+struct ColorTargetPlan {
+  std::array<bool, 4> enabled{};
+  std::uint8_t enabled_mask{};
+  std::uint8_t attachment_count{};
+  bool contiguous{true};
+
+  [[nodiscard]] bool any() const noexcept { return enabled_mask != 0; }
+};
+
+[[nodiscard]] ColorTargetPlan plan_color_targets(
+    const DrawResourceState& state) noexcept;
+
+// Xenos dual polygon mode can request a different representation for front and
+// back faces. Modern pipelines expose one fill mode, so choose the most
+// conservative visible representation (point < line < fill), matching the
+// generic strategy used by native Xenos renderers. Non-dual/reserved modes are
+// filled triangles.
+[[nodiscard]] HostPolygonMode host_polygon_mode(
+    const RasterState& raster) noexcept;
+
+[[nodiscard]] PolygonOffsetState preferred_polygon_offset(
+    const RasterState& raster, HostPrimitiveTopology topology) noexcept;
+
+// Converts the Xenos absolute polygon offset to the units expected by modern
+// floating-point host APIs. D24FS8 has three fewer mantissa bits than float32,
+// while D24S8 uses the full unsigned 24-bit depth range.
+[[nodiscard]] float scaled_polygon_offset_constant(
+    float offset, DepthRenderTargetFormat format) noexcept;
+
+// Converts the Xenos absolute polygon offset to the integer ULP count used by
+// D3D12 rasterizer state. Float24 offsets are kept in multiples of eight so
+// shader-side float24 quantization cannot erase the separation.
+[[nodiscard]] std::int32_t integer_polygon_offset(
+    float offset, DepthRenderTargetFormat format) noexcept;
+
+[[nodiscard]] CopySampleSelect sanitize_copy_sample_select(
+    CopySampleSelect selection, MsaaSamples samples, bool depth) noexcept;
+
+// Native image resolve operations average every color sample. This identifies
+// the Xenos selections that are bit-for-bit representable by that operation.
+[[nodiscard]] bool is_full_color_resolve(CopySampleSelect selection,
+                                         MsaaSamples samples) noexcept;
+
+// D3D rasterization converts window coordinates to signed 16.8 fixed point
+// with round-to-nearest-even, NaN-to-zero and saturation. Keeping this helper
+// host-independent prevents one-pixel resolve/scissor differences.
+[[nodiscard]] std::int32_t float_to_d3d_fixed_16_8(float value) noexcept;
+
+// Extracts the covered copy-mode rectangle from the conventional three-float2
+// Xenos resolve vertex stream, applies pixel-center/window/scissor state, and
+// expands it to the hardware's 8x8 resolve granularity.
+[[nodiscard]] ResolveRectangle decode_resolve_rectangle(
+    const DrawResourceState& state,
+    std::span<const std::byte> physical_memory) noexcept;
+
+[[nodiscard]] ResolvePlan plan_resolve(
+    const DrawResourceState& state,
+    std::span<const std::byte> physical_memory);
 
 class ResourceStateTracker {
  public:

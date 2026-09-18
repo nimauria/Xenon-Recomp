@@ -18,6 +18,7 @@ include(Warnings)
 include(Dependencies)
 
 option(XENON_BUILD_TESTS "Build Xenon Recomp tests" ON)
+option(XENON_BUILD_LAUNCHER "Build the Xenon launcher UI when Qt 6 is available" ON)
 option(XENON_ENABLE_MEMORY "Build the production Xenon memory subsystem" ON)
 option(XENON_ENABLE_GRAPHICS "Build the Xenos graphics frontend" ON)
 option(XENON_ENABLE_VULKAN "Build the Vulkan backend when the SDK is available" ON)
@@ -89,10 +90,13 @@ if(XENON_ENABLE_GRAPHICS)
     src/graphics/xenos/shader.cpp
     src/graphics/xenos/shader_decoder.cpp
     src/graphics/xenos/shader_translation.cpp
+    src/graphics/xenos/depth_format.cpp
     src/graphics/xenos/resource_ir.cpp
+    src/graphics/xenos/resource_barrier.cpp
     src/graphics/xenos/texture.cpp
     src/graphics/xenos/edram.cpp
     src/graphics/xenos/edram_surface.cpp
+    src/graphics/xenos/edram_ownership.cpp
     src/graphics/xenos/primitive_processor.cpp
     src/graphics/xenos/command_processor.cpp
     src/graphics/xenos/graphics_system.cpp
@@ -113,12 +117,19 @@ if(XENON_ENABLE_GRAPHICS)
   add_library(xenon_gpu ALIAS xenon_graphics)
 
   if(WIN32 AND XENON_ENABLE_DXC)
-    find_path(XENON_DXC_INCLUDE_DIR dxc/dxcapi.h
-      HINTS "$ENV{VULKAN_SDK}/Include")
-    find_library(XENON_DXC_LIBRARY NAMES dxcompiler
-      HINTS "$ENV{VULKAN_SDK}/Lib")
-    find_file(XENON_DXC_RUNTIME NAMES dxcompiler.dll
-      HINTS "$ENV{VULKAN_SDK}/Bin")
+    # The Windows SDK DXC can emit DXIL only. Prefer the Vulkan SDK's matched
+    # headers/import library/runtime because that build includes SPIR-V codegen.
+    if(DEFINED ENV{VULKAN_SDK})
+      find_path(XENON_DXC_INCLUDE_DIR dxc/dxcapi.h
+        PATHS "$ENV{VULKAN_SDK}/Include" NO_DEFAULT_PATH)
+      find_library(XENON_DXC_LIBRARY NAMES dxcompiler
+        PATHS "$ENV{VULKAN_SDK}/Lib" NO_DEFAULT_PATH)
+      find_file(XENON_DXC_RUNTIME NAMES dxcompiler.dll
+        PATHS "$ENV{VULKAN_SDK}/Bin" NO_DEFAULT_PATH)
+    endif()
+    find_path(XENON_DXC_INCLUDE_DIR dxc/dxcapi.h)
+    find_library(XENON_DXC_LIBRARY NAMES dxcompiler)
+    find_file(XENON_DXC_RUNTIME NAMES dxcompiler.dll)
     if(XENON_DXC_INCLUDE_DIR AND XENON_DXC_LIBRARY)
       add_library(xenon_graphics_dxc STATIC
         src/graphics/dxc/shader_compiler.cpp)
@@ -315,10 +326,27 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_shader_decoder_tests)
     add_test(NAME xenon_shader_decoder_tests COMMAND xenon_shader_decoder_tests)
 
+    add_executable(xenon_depth_format_tests tests/graphics/xenos/depth_format.cpp)
+    target_link_libraries(xenon_depth_format_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_depth_format_tests)
+    add_test(NAME xenon_depth_format_tests COMMAND xenon_depth_format_tests)
+
+    add_executable(xenon_shader_lowering_tests
+      tests/graphics/xenos/shader_lowering.cpp)
+    target_link_libraries(xenon_shader_lowering_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_shader_lowering_tests)
+    add_test(NAME xenon_shader_lowering_tests COMMAND xenon_shader_lowering_tests)
+
     add_executable(xenon_resource_ir_tests tests/graphics/xenos/resource_ir.cpp)
     target_link_libraries(xenon_resource_ir_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_resource_ir_tests)
     add_test(NAME xenon_resource_ir_tests COMMAND xenon_resource_ir_tests)
+
+    add_executable(xenon_resource_barrier_tests
+      tests/graphics/xenos/resource_barrier.cpp)
+    target_link_libraries(xenon_resource_barrier_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_resource_barrier_tests)
+    add_test(NAME xenon_resource_barrier_tests COMMAND xenon_resource_barrier_tests)
 
     add_executable(xenon_texture_tests tests/graphics/xenos/texture.cpp)
     target_link_libraries(xenon_texture_tests PRIVATE xenon_graphics)
@@ -330,6 +358,12 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_edram_surface_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_edram_surface_tests)
     add_test(NAME xenon_edram_surface_tests COMMAND xenon_edram_surface_tests)
+
+    add_executable(xenon_edram_ownership_tests
+      tests/graphics/xenos/edram_ownership.cpp)
+    target_link_libraries(xenon_edram_ownership_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_edram_ownership_tests)
+    add_test(NAME xenon_edram_ownership_tests COMMAND xenon_edram_ownership_tests)
 
     add_executable(xenon_primitive_processor_tests
       tests/graphics/xenos/primitive_processor.cpp)
@@ -359,4 +393,10 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_gpu_frontend_tests)
     add_test(NAME xenon_gpu_frontend_tests COMMAND xenon_gpu_frontend_tests)
   endif()
+endif()
+# -----------------------------------------------------------------------------
+# Launcher UI. Kept isolated from the runtime so Qt does not leak into Xenon
+# core, CPU, memory, graphics, or game-module interfaces.
+if(XENON_BUILD_LAUNCHER)
+  add_subdirectory(launcher)
 endif()
