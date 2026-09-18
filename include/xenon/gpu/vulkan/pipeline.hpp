@@ -24,13 +24,13 @@ class GraphicsPipeline {
   [[nodiscard]] bool initialize(VkDevice device, VkPipelineLayout layout,
                                 const CompiledShader& vertex_shader,
                                 const CompiledShader& pixel_shader,
+                                const CompiledShader* geometry_shader,
                                 std::span<const VkFormat> color_formats,
                                 MsaaSamples samples,
                                 HostPrimitiveTopology topology,
                                 const RasterState& raster,
                                 std::span<const std::uint8_t> color_write_masks,
                                 std::span<const BlendState> blend_states,
-                                const std::array<float, 4>& blend_constant,
                                 VkFormat depth_format = VK_FORMAT_UNDEFINED,
                                 const DepthTargetDescriptor* depth_state = nullptr);
   void reset() noexcept;

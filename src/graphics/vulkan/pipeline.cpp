@@ -44,6 +44,16 @@ VkBlendFactor native_blend_factor(BlendFactor factor) {
   return VK_BLEND_FACTOR_ONE;
 }
 
+VkBlendFactor native_alpha_blend_factor(BlendFactor factor) {
+  switch (factor) {
+    case BlendFactor::SrcColor: return VK_BLEND_FACTOR_SRC_ALPHA;
+    case BlendFactor::InvSrcColor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    case BlendFactor::DestColor: return VK_BLEND_FACTOR_DST_ALPHA;
+    case BlendFactor::InvDestColor: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+    default: return native_blend_factor(factor);
+  }
+}
+
 VkBlendOp native_blend_operation(BlendOperation operation) {
   switch (operation) {
     case BlendOperation::Add: return VK_BLEND_OP_ADD;
@@ -87,31 +97,39 @@ GraphicsPipeline::~GraphicsPipeline() { reset(); }
 bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
                                   const CompiledShader& vertex_shader,
                                   const CompiledShader& pixel_shader,
+                                  const CompiledShader* geometry_shader,
                                   std::span<const VkFormat> color_formats,
                                   MsaaSamples samples,
                                   HostPrimitiveTopology topology,
                                   const RasterState& raster,
                                   std::span<const std::uint8_t> color_write_masks,
                                   std::span<const BlendState> blend_states,
-                                  const std::array<float, 4>& blend_constant,
                                   VkFormat depth_format,
                                   const DepthTargetDescriptor* depth_state) {
   reset();
   error_.clear();
-  if (!device || !layout || color_formats.empty() || color_formats.size() > 4 ||
+  if (!device || !layout || color_formats.size() > 4 ||
+      (color_formats.empty() && depth_format == VK_FORMAT_UNDEFINED) ||
       color_write_masks.size() != color_formats.size() ||
       blend_states.size() != color_formats.size() ||
       !vertex_shader.succeeded || !pixel_shader.succeeded ||
       vertex_shader.format != ShaderBinaryFormat::Spirv ||
       pixel_shader.format != ShaderBinaryFormat::Spirv ||
       vertex_shader.binary.empty() || pixel_shader.binary.empty() ||
-      (vertex_shader.binary.size() & 3u) || (pixel_shader.binary.size() & 3u)) {
+      (vertex_shader.binary.size() & 3u) || (pixel_shader.binary.size() & 3u) ||
+      (geometry_shader &&
+       (!geometry_shader->succeeded ||
+        geometry_shader->format != ShaderBinaryFormat::Spirv ||
+        geometry_shader->binary.empty() ||
+        (geometry_shader->binary.size() & 3u)))) {
     error_ = "Vulkan graphics pipeline requires valid SPIR-V shaders and render state";
     return false;
   }
-  for (const auto format : color_formats) {
-    if (format == VK_FORMAT_UNDEFINED) {
-      error_ = "Vulkan graphics pipeline received an unsupported color format";
+  for (std::size_t i = 0; i < color_formats.size(); ++i) {
+    if (color_formats[i] == VK_FORMAT_UNDEFINED &&
+        (color_write_masks[i] != 0 || blend_states[i].enabled)) {
+      error_ =
+          "Vulkan unused MRT slots must have writes and blending disabled";
       return false;
     }
   }
@@ -119,6 +137,7 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
   VkShaderModule vertex_module = VK_NULL_HANDLE;
   VkShaderModule pixel_module = VK_NULL_HANDLE;
+  VkShaderModule geometry_module = VK_NULL_HANDLE;
   module_info.codeSize = vertex_shader.binary.size();
   module_info.pCode = reinterpret_cast<const std::uint32_t*>(vertex_shader.binary.data());
   if (vkCreateShaderModule(device_, &module_info, nullptr, &vertex_module) != VK_SUCCESS) {
@@ -134,14 +153,34 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
     reset();
     return false;
   }
+  if (geometry_shader) {
+    module_info.codeSize = geometry_shader->binary.size();
+    module_info.pCode = reinterpret_cast<const std::uint32_t*>(
+        geometry_shader->binary.data());
+    if (vkCreateShaderModule(device_, &module_info, nullptr,
+                             &geometry_module) != VK_SUCCESS) {
+      vkDestroyShaderModule(device_, pixel_module, nullptr);
+      vkDestroyShaderModule(device_, vertex_module, nullptr);
+      error_ = "vkCreateShaderModule failed for RectangleList expansion";
+      reset();
+      return false;
+    }
+  }
 
-  const std::array stages{
+  std::array<VkPipelineShaderStageCreateInfo, 3> stages{
       VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                       nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT,
                                       vertex_module, vertex_shader.entry_point.c_str(), nullptr},
       VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                      nullptr, 0, VK_SHADER_STAGE_GEOMETRY_BIT,
+                                      geometry_module,
+                                      geometry_shader ? geometry_shader->entry_point.c_str()
+                                                      : nullptr,
+                                      nullptr},
+      VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                       nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT,
                                       pixel_module, pixel_shader.entry_point.c_str(), nullptr}};
+  if (!geometry_shader) stages[1] = stages[2];
   VkPipelineVertexInputStateCreateInfo vertex_input{
       VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   VkPipelineInputAssemblyStateCreateInfo assembly{
@@ -153,7 +192,17 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   viewport.scissorCount = 1;
   VkPipelineRasterizationStateCreateInfo rasterization{
       VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-  rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+  switch (host_polygon_mode(raster)) {
+    case HostPolygonMode::Point:
+      rasterization.polygonMode = VK_POLYGON_MODE_POINT;
+      break;
+    case HostPolygonMode::Line:
+      rasterization.polygonMode = VK_POLYGON_MODE_LINE;
+      break;
+    case HostPolygonMode::Fill:
+      rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+      break;
+  }
   rasterization.cullMode = raster.cull_front && raster.cull_back
                                ? VK_CULL_MODE_FRONT_AND_BACK
                                : raster.cull_front ? VK_CULL_MODE_FRONT_BIT
@@ -163,6 +212,15 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
                                 ? VK_FRONT_FACE_CLOCKWISE
                                 : VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
+  const auto polygon_offset = preferred_polygon_offset(raster, topology);
+  rasterization.depthBiasEnable = polygon_offset.enabled;
+  rasterization.depthBiasConstantFactor = scaled_polygon_offset_constant(
+      polygon_offset.offset,
+      depth_state && depth_state->format ==
+                         static_cast<std::uint8_t>(DepthRenderTargetFormat::D24FS8)
+          ? DepthRenderTargetFormat::D24FS8
+          : DepthRenderTargetFormat::D24S8);
+  rasterization.depthBiasSlopeFactor = polygon_offset.scale / 16.0f;
   VkPipelineMultisampleStateCreateInfo multisample{
       VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
   multisample.rasterizationSamples = native_samples(samples);
@@ -189,8 +247,8 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
     attachments[i].srcColorBlendFactor = native_blend_factor(blend_states[i].color_source);
     attachments[i].dstColorBlendFactor = native_blend_factor(blend_states[i].color_destination);
     attachments[i].colorBlendOp = native_blend_operation(blend_states[i].color_operation);
-    attachments[i].srcAlphaBlendFactor = native_blend_factor(blend_states[i].alpha_source);
-    attachments[i].dstAlphaBlendFactor = native_blend_factor(blend_states[i].alpha_destination);
+    attachments[i].srcAlphaBlendFactor = native_alpha_blend_factor(blend_states[i].alpha_source);
+    attachments[i].dstAlphaBlendFactor = native_alpha_blend_factor(blend_states[i].alpha_destination);
     attachments[i].alphaBlendOp = native_blend_operation(blend_states[i].alpha_operation);
     attachments[i].colorWriteMask =
         static_cast<VkColorComponentFlags>(color_write_masks[i] & 0xFu);
@@ -198,10 +256,11 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   VkPipelineColorBlendStateCreateInfo blend{
       VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
   blend.attachmentCount = static_cast<std::uint32_t>(color_formats.size());
-  blend.pAttachments = attachments.data();
-  for (std::size_t i = 0; i < blend_constant.size(); ++i)
-    blend.blendConstants[i] = blend_constant[i];
-  const std::array dynamic_states{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+  blend.pAttachments = color_formats.empty() ? nullptr : attachments.data();
+  const std::array dynamic_states{
+      VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+      VK_DYNAMIC_STATE_BLEND_CONSTANTS, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+      VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE};
   VkPipelineDynamicStateCreateInfo dynamic{
       VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
   dynamic.dynamicStateCount = static_cast<std::uint32_t>(dynamic_states.size());
@@ -213,7 +272,7 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   rendering.stencilAttachmentFormat = depth_format;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
   info.pNext = &rendering;
-  info.stageCount = static_cast<std::uint32_t>(stages.size());
+  info.stageCount = geometry_shader ? 3u : 2u;
   info.pStages = stages.data();
   info.pVertexInputState = &vertex_input;
   info.pInputAssemblyState = &assembly;
@@ -226,6 +285,7 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   info.layout = layout;
   const auto result = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info,
                                                 nullptr, &pipeline_);
+  if (geometry_module) vkDestroyShaderModule(device_, geometry_module, nullptr);
   vkDestroyShaderModule(device_, pixel_module, nullptr);
   vkDestroyShaderModule(device_, vertex_module, nullptr);
   if (result != VK_SUCCESS) {

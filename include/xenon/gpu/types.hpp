@@ -16,6 +16,7 @@ enum class PacketType : std::uint8_t {
 enum class ShaderStage : std::uint8_t {
   Vertex,
   Pixel,
+  Geometry,
 };
 
 enum class PrimitiveType : std::uint8_t {
@@ -71,6 +72,15 @@ enum class Endian : std::uint8_t {
   Swap8In16 = 1,
   Swap8In32 = 2,
   Swap16In32 = 3,
+};
+
+enum class Endian128 : std::uint8_t {
+  None = 0,
+  Swap8In16 = 1,
+  Swap8In32 = 2,
+  Swap16In32 = 3,
+  Swap8In64 = 4,
+  Swap8In128 = 5,
 };
 
 // Xenos type-3 PM4 opcodes. These are command-processor operations, not host

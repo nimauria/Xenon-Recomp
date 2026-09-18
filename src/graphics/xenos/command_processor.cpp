@@ -455,6 +455,14 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
                                      std::uint32_t depth) {
   auto payload = read_payload(reader, header.count);
 
+  // Type-3 predication is command-processor state, not draw/backend state.
+  // A failed predicate suppresses the complete packet after its payload has
+  // been consumed from the ring, before it can mutate state or emit IR.
+  if (header.predicate && !predicate_passes()) {
+    ++stats_.predicated_packets_skipped;
+    return;
+  }
+
   if (header.opcode == Type3Opcode::Nop) {
     // NOP payloads often carry debug strings/markers. Preserve them in the IR
     // rather than treating the bytes as semantic state.
@@ -663,6 +671,10 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
   // runtime emulation fallback: it is lossless frontend IR so a later analysis
   // or backend can diagnose/implement the command without corrupting the stream.
   stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
+}
+
+bool CommandProcessor::predicate_passes() const noexcept {
+  return (bin_select_ & bin_mask_) != 0;
 }
 
 }  // namespace xenon::gpu

@@ -5,6 +5,8 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <cmath>
 
 namespace xenon::gpu {
 namespace {
@@ -158,6 +160,24 @@ void packed_origin(const TextureDescriptor& descriptor, const TextureFormatInfo&
 
 const TextureFormatInfo& texture_format_info(std::uint8_t format) noexcept {
   return kFormats[format & 63u];
+}
+
+std::optional<std::uint8_t> raw_resolve_texture_format(
+    ColorRenderTargetFormat format) noexcept {
+  switch (storage_color_format(format)) {
+    case ColorRenderTargetFormat::R8G8B8A8: return std::uint8_t{6};
+    case ColorRenderTargetFormat::R8G8B8A8Gamma: return std::uint8_t{62};
+    case ColorRenderTargetFormat::R10G10B10A2: return std::uint8_t{7};
+    case ColorRenderTargetFormat::R10G10B10A2Float: return std::uint8_t{63};
+    case ColorRenderTargetFormat::R16G16Fixed: return std::uint8_t{13};
+    case ColorRenderTargetFormat::R16G16B16A16Fixed: return std::uint8_t{21};
+    case ColorRenderTargetFormat::R16G16Float: return std::uint8_t{31};
+    case ColorRenderTargetFormat::R16G16B16A16Float:
+      return std::uint8_t{32};
+    case ColorRenderTargetFormat::R32Float: return std::uint8_t{36};
+    case ColorRenderTargetFormat::R32G32Float: return std::uint8_t{37};
+    default: return std::nullopt;
+  }
 }
 
 std::uint64_t tiled_offset_2d(std::uint32_t x, std::uint32_t y,
@@ -325,6 +345,330 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
   }
   result.valid = true;
   return result;
+}
+
+bool encode_texture(const TextureDescriptor& descriptor,
+                    std::span<const std::byte> linear_data,
+                    std::span<std::byte> physical_memory,
+                    std::string* error) {
+  const auto fail = [&](std::string message) {
+    if (error) *error = std::move(message);
+    return false;
+  };
+  const auto layout = build_texture_layout(descriptor);
+  if (!layout.valid) return fail(layout.error);
+  if (!layout.format.host_supported())
+    return fail("Xenos texture format has no lossless native mapping");
+  if (linear_data.size() < layout.linear_size_bytes)
+    return fail("linear texture source is smaller than the declared layout");
+
+  const auto bpb = layout.format.bytes_per_block();
+  for (const auto& sub : layout.subresources) {
+    for (std::uint32_t z = 0; z < sub.depth_texels; ++z) {
+      for (std::uint32_t y = 0; y < sub.height_blocks; ++y) {
+        for (std::uint32_t x = 0; x < sub.width_blocks; ++x) {
+          const auto dx = x + sub.packed_x_blocks;
+          const auto dy = y + sub.packed_y_blocks;
+          const auto dz = z + sub.packed_z;
+          std::uint64_t destination_offset{};
+          if (descriptor.tiled) {
+            destination_offset = descriptor.dimension == TextureDimension::ThreeD
+                ? tiled_offset_3d(dx, dy, dz, sub.storage_pitch_blocks,
+                                  sub.storage_height_blocks, bpb)
+                : tiled_offset_2d(dx, dy, sub.storage_pitch_blocks, bpb);
+          } else {
+            destination_offset =
+                std::uint64_t(dz) * sub.storage_height_blocks *
+                    sub.storage_pitch_blocks * bpb +
+                std::uint64_t(dy) * sub.storage_pitch_blocks * bpb +
+                std::uint64_t(dx) * bpb;
+          }
+          const auto destination =
+              std::uint64_t(sub.guest_address) + destination_offset;
+          const auto source = sub.linear_offset_bytes +
+              (std::uint64_t(z) * sub.height_blocks + y) *
+                  sub.linear_row_pitch_bytes +
+              std::uint64_t(x) * bpb;
+          if (destination + bpb > physical_memory.size() ||
+              source + bpb > linear_data.size()) {
+            return fail("Xenos texture write references memory outside its bounds");
+          }
+          endian_copy(physical_memory.data() + destination,
+                      linear_data.data() + source, bpb, descriptor.endian);
+        }
+      }
+    }
+  }
+  if (error) error->clear();
+  return true;
+}
+
+void apply_endian128(std::span<std::byte> data, Endian128 endian) noexcept {
+  const auto reverse_groups = [](std::span<std::byte, 16> block,
+                                 std::size_t group) {
+    for (std::size_t base = 0; base < block.size(); base += group)
+      std::reverse(block.begin() + static_cast<std::ptrdiff_t>(base),
+                   block.begin() + static_cast<std::ptrdiff_t>(base + group));
+  };
+  for (std::size_t offset = 0; offset + 16 <= data.size(); offset += 16) {
+    std::span<std::byte, 16> block(data.data() + offset, 16);
+    switch (endian) {
+      case Endian128::None:
+        break;
+      case Endian128::Swap8In16:
+        reverse_groups(block, 2);
+        break;
+      case Endian128::Swap8In32:
+        reverse_groups(block, 4);
+        break;
+      case Endian128::Swap16In32:
+        for (std::size_t base = 0; base < block.size(); base += 4) {
+          std::swap(block[base], block[base + 2]);
+          std::swap(block[base + 1], block[base + 3]);
+        }
+        break;
+      case Endian128::Swap8In64:
+        reverse_groups(block, 8);
+        break;
+      case Endian128::Swap8In128:
+        std::reverse(block.begin(), block.end());
+        break;
+    }
+  }
+}
+
+ResolveWriteResult write_raw_resolve(
+    const CopyResolveState& copy, const ResolveRectangle& rectangle,
+    std::span<const std::byte> source, std::uint32_t source_row_pitch,
+    std::span<std::byte> physical_memory) {
+  ResolveWriteResult result{};
+  if (copy.command != CopyCommand::Raw) {
+    result.error = "converted Xenos resolve requires format conversion";
+    return result;
+  }
+  if (!rectangle.valid || rectangle.left < 0 || rectangle.top < 0) {
+    result.error = "invalid Xenos resolve rectangle";
+    return result;
+  }
+  if (rectangle.empty()) {
+    result.valid = true;
+    return result;
+  }
+  if (!copy.destination_pitch ||
+      (copy.destination_array && !copy.destination_height)) {
+    result.error = "raw resolve destination storage dimensions are invalid";
+    return result;
+  }
+  if (copy.destination_red_blue_swap || copy.destination_exponent_bias) {
+    result.error = "raw resolve cannot apply component swap or exponent bias";
+    return result;
+  }
+  const auto& format = texture_format_info(copy.destination_format);
+  if (format.storage != TextureStorage::Uncompressed ||
+      format.block_width != 1 || format.block_height != 1) {
+    result.error = "raw resolve destination format is not losslessly writable";
+    return result;
+  }
+  const auto bytes_per_pixel = format.bytes_per_block();
+  const auto width = static_cast<std::uint32_t>(rectangle.right - rectangle.left);
+  const auto height = static_cast<std::uint32_t>(rectangle.bottom - rectangle.top);
+  if (source_row_pitch < width * bytes_per_pixel ||
+      std::uint64_t(source_row_pitch) * height > source.size()) {
+    result.error = "native resolve readback is smaller than its rectangle";
+    return result;
+  }
+  const auto pitch_aligned =
+      (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
+  const auto height_aligned =
+      (std::uint32_t(copy.destination_height) + 31u) & ~31u;
+  std::map<std::uint32_t, std::array<std::byte, 16>> blocks;
+  for (std::uint32_t y = 0; y < height; ++y) {
+    for (std::uint32_t x = 0; x < width; ++x) {
+      const auto destination_x =
+          static_cast<std::uint32_t>(rectangle.left) + x;
+      const auto destination_y =
+          static_cast<std::uint32_t>(rectangle.top) + y;
+      // Pitch and height describe tiled storage, not clipping dimensions.
+      // In array mode the base is already adjusted to its Z/8 group and the
+      // three-bit destination slice selects the layer within that group.
+      const auto tiled = copy.destination_array
+          ? tiled_offset_3d(destination_x, destination_y,
+                            copy.destination_slice, pitch_aligned,
+                            height_aligned, bytes_per_pixel)
+          : tiled_offset_2d(destination_x, destination_y, pitch_aligned,
+                            bytes_per_pixel);
+      const auto destination = std::uint64_t(copy.destination_base) + tiled;
+      if (destination + bytes_per_pixel > physical_memory.size()) {
+        result.error = "raw resolve destination is outside physical memory";
+        return result;
+      }
+      const auto block_address = static_cast<std::uint32_t>(destination & ~15ull);
+      auto [block_it, inserted] = blocks.try_emplace(block_address);
+      if (inserted) {
+        if (std::uint64_t(block_address) + 16u > physical_memory.size()) {
+          result.error = "raw resolve endian block is outside physical memory";
+          return result;
+        }
+        std::memcpy(block_it->second.data(),
+                    physical_memory.data() + block_address, 16);
+        apply_endian128(block_it->second, copy.destination_endian);
+      }
+      const auto block_offset = static_cast<std::size_t>(destination & 15ull);
+      if (block_offset + bytes_per_pixel > 16u) {
+        result.error = "raw resolve pixel crosses a 128-bit endian block";
+        return result;
+      }
+      std::memcpy(block_it->second.data() + block_offset,
+                  source.data() + std::size_t(y) * source_row_pitch +
+                      std::size_t(x) * bytes_per_pixel,
+                  bytes_per_pixel);
+    }
+  }
+  if (blocks.empty()) {
+    result.error = "raw resolve produced no destination blocks";
+    return result;
+  }
+  for (auto& [address, block] : blocks) {
+    apply_endian128(block, copy.destination_endian);
+    std::memcpy(physical_memory.data() + address, block.data(), block.size());
+  }
+  const auto first = blocks.begin()->first;
+  const auto last = blocks.rbegin()->first + 16u;
+  result.modified_address = first;
+  result.modified_size = last - first;
+  result.valid = true;
+  return result;
+}
+
+ResolveWriteResult write_converted_resolve(
+    const CopyResolveState& copy, ColorRenderTargetFormat source_format,
+    const ResolveRectangle& rectangle, std::span<const std::byte> source,
+    std::uint32_t source_row_pitch, std::span<std::byte> physical_memory) {
+  ResolveWriteResult result{};
+  if (copy.command != CopyCommand::Convert && copy.command != CopyCommand::Raw) {
+    result.error = "Xenos resolve command cannot use color conversion";
+    return result;
+  }
+  if (!rectangle.valid || rectangle.left < 0 || rectangle.top < 0) {
+    result.error = "invalid converted Xenos resolve rectangle";
+    return result;
+  }
+  if (rectangle.empty()) { result.valid = true; return result; }
+  const auto& destination_format = texture_format_info(copy.destination_format);
+  if (destination_format.storage != TextureStorage::Uncompressed ||
+      destination_format.block_width != 1 ||
+      destination_format.block_height != 1 ||
+      !destination_format.bits_per_pixel ||
+      (destination_format.bits_per_pixel & 7u)) {
+    result.error = "converted resolve destination format is unsupported";
+    return result;
+  }
+  const auto source_bytes = color_host_bytes_per_pixel(source_format);
+  const auto destination_bytes = destination_format.bytes_per_block();
+  const auto width = std::uint32_t(rectangle.right - rectangle.left);
+  const auto height = std::uint32_t(rectangle.bottom - rectangle.top);
+  if (!source_bytes || source_row_pitch < width * source_bytes ||
+      std::uint64_t(source_row_pitch) * height > source.size()) {
+    result.error = "converted resolve source is smaller than its rectangle";
+    return result;
+  }
+  std::vector<std::byte> converted(
+      std::size_t(width) * height * destination_bytes);
+  const auto unorm = [](float value, std::uint32_t maximum) {
+    return std::uint32_t(std::nearbyint(
+        std::clamp(value, 0.0f, 1.0f) * float(maximum)));
+  };
+  for (std::uint32_t y = 0; y < height; ++y) {
+    for (std::uint32_t x = 0; x < width; ++x) {
+      ColorSample sample{};
+      if (!decode_host_color_sample(
+              source_format,
+              source.subspan(std::uint64_t(y) * source_row_pitch +
+                                  std::uint64_t(x) * source_bytes,
+                              source_bytes), sample)) {
+        result.error = "converted resolve could not decode native source";
+        return result;
+      }
+      auto& c = sample.components;
+      for (auto& component : c)
+        component = std::ldexp(component, copy.destination_exponent_bias);
+      if (copy.destination_red_blue_swap) std::swap(c[0], c[2]);
+      auto destination = std::span(converted).subspan(
+          (std::size_t(y) * width + x) * destination_bytes,
+          destination_bytes);
+      std::array<std::uint32_t, 4> words{};
+      switch (copy.destination_format) {
+        case 2: words[0] = unorm(c[0], 255u); break;
+        case 6: case 14: case 50:
+          for (unsigned i = 0; i < 4; ++i)
+            words[0] |= unorm(c[i], 255u) << (i * 8u);
+          break;
+        case 62:
+          words = {pack_color_sample(
+              ColorRenderTargetFormat::R8G8B8A8Gamma, sample)[0], 0, 0, 0};
+          break;
+        case 7: case 54:
+          words[0] = unorm(c[0], 1023u) | (unorm(c[1], 1023u) << 10u) |
+                     (unorm(c[2], 1023u) << 20u) |
+                     (unorm(c[3], 3u) << 30u);
+          break;
+        case 63:
+          words = {pack_color_sample(
+              ColorRenderTargetFormat::R10G10B10A2Float, sample)[0], 0, 0, 0};
+          break;
+        case 10:
+          words[0] = unorm(c[0], 255u) | (unorm(c[1], 255u) << 8u);
+          break;
+        case 13: {
+          const auto packed = pack_color_sample(
+              ColorRenderTargetFormat::R16G16Fixed, sample);
+          words[0] = packed[0];
+          break;
+        }
+        case 21: {
+          const auto packed = pack_color_sample(
+              ColorRenderTargetFormat::R16G16B16A16Fixed, sample);
+          words[0] = packed[0]; words[1] = packed[1];
+          break;
+        }
+        case 25:
+          words[0] = unorm(c[0], 65535u) | (unorm(c[1], 65535u) << 16u);
+          break;
+        case 26:
+          words[0] = unorm(c[0], 65535u) | (unorm(c[1], 65535u) << 16u);
+          words[1] = unorm(c[2], 65535u) | (unorm(c[3], 65535u) << 16u);
+          break;
+        case 30: case 31: case 32: {
+          const auto packed = pack_color_sample(
+              copy.destination_format == 32
+                  ? ColorRenderTargetFormat::R16G16B16A16Float
+                  : ColorRenderTargetFormat::R16G16Float,
+              sample);
+          words[0] = packed[0]; words[1] = packed[1];
+          break;
+        }
+        case 36:
+          words[0] = std::bit_cast<std::uint32_t>(c[0]); break;
+        case 37:
+          words[0] = std::bit_cast<std::uint32_t>(c[0]);
+          words[1] = std::bit_cast<std::uint32_t>(c[1]); break;
+        case 38:
+          for (unsigned i = 0; i < 4; ++i)
+            words[i] = std::bit_cast<std::uint32_t>(c[i]);
+          break;
+        default:
+          result.error = "converted resolve destination codec is unsupported";
+          return result;
+      }
+      std::memcpy(destination.data(), words.data(), destination_bytes);
+    }
+  }
+  auto raw_copy = copy;
+  raw_copy.command = CopyCommand::Raw;
+  raw_copy.destination_exponent_bias = 0;
+  raw_copy.destination_red_blue_swap = false;
+  return write_raw_resolve(raw_copy, rectangle, converted,
+                           width * destination_bytes, physical_memory);
 }
 
 void TextureDirtyTracker::track(std::uint64_t key, const TextureLayout& layout) {

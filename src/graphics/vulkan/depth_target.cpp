@@ -48,6 +48,7 @@ bool DepthTargetImage::initialize(VkPhysicalDevice physical_device,
   format_ = depth_render_target_format(depth_format);
   width_ = surface.pitch_pixels;
   height_ = surface.height_pixels;
+  surface_ = surface;
   float24_ = depth_format == DepthRenderTargetFormat::D24FS8;
   VkFormatProperties properties{};
   vkGetPhysicalDeviceFormatProperties(physical_device, format_, &properties);
@@ -188,6 +189,7 @@ void DepthTargetImage::reset() noexcept {
   layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
   float24_ = false;
   width_ = height_ = 0;
+  surface_ = {};
 }
 
 }  // namespace xenon::gpu::vulkan

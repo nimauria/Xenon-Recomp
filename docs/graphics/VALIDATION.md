@@ -160,3 +160,101 @@ shaders/pipelines and submit normalized indexed or non-indexed draws with the
 native resource ABI, viewport, scissor, culling, MSAA, color masks, independent
 blend controls and blend constants. Visual C++ 19.51 Debug and Release pass
 20/20 CTest targets.
+
+## GPU 10A.1 core MRT submission — 2026-09-17
+
+The portable common suite passes 21/21 tests in GCC 14 Debug and 21/21 in
+Clang 17 Release with Vulkan and D3D12 disabled in this build environment.
+Additional common coverage validates native attachment planning for no color,
+contiguous four-target and sparse MRT layouts while preserving Xenos color
+export slot numbers.
+
+The production Vulkan and D3D12 draw paths now consume up to four simultaneous
+color targets. Vulkan keeps sparse slots as undefined/null dynamic-rendering
+attachments; D3D12 uses zero-write dummy RTVs so `SV_TargetN` remains mapped to
+slot N. Required native texture, constant, depth and active color-resource
+failures abort the draw with an actionable backend error rather than silently
+submitting degraded state.
+
+The Windows hardware fixture has been extended to compile a pixel shader that
+writes distinct values to `SV_Target0` and `SV_Target1`, bind two native color
+targets, submit one depth-tested triangle, read both targets back and verify
+both outputs independently. This environment does not contain the Windows SDK,
+DXC or Vulkan development headers, so the new native-backend code and the
+expanded hardware fixture are implemented but pending the next Windows/Work
+hardware validation pass.
+
+## GPU 10A.2 primitive/raster parity — 2026-09-17
+
+The portable suite remains 21/21 in GCC 14 Debug and 21/21 in Clang 17
+Release. `PA_SU_SC_MODE_CNTL.multi_prim_ib_ena` and
+`VGT_MULTI_PRIM_IB_RESET_INDX` are now reflected into common primitive-assembly
+state. Strip/fan/loop-style explicit index streams are split at reset markers
+before topology conversion, so reset restarts winding and fan anchors without
+relying on backend-specific restart support. List topologies and auto-index
+draws intentionally ignore the reset marker.
+
+Dual polygon mode is normalized from the visible front/back Xenos polygon
+types. Non-dual and reserved polygon-mode values remain filled triangles.
+Vulkan enables `fillModeNonSolid` when the device exposes it and can use native
+point/line/fill polygon modes; D3D12 uses wireframe for Xenos point/line polygon
+requests because D3D12 has no point polygon fill mode. Front+back culling is
+filtered before native triangle submission so D3D12 no longer turns the Xenos
+"cull both" case into `CULL_NONE` output.
+
+The backend source changes still require the next Windows Vulkan/D3D12 hardware
+build before this checkpoint is marked native-hardware validated.
+
+## GPU completion audit and resolve foundations — 2026-09-17
+
+The Windows Visual C++ Debug hardware suite passes after the second Xenia and
+UnleashedRecomp audit, including real Vulkan/D3D12 initialization and generated
+DXIL/SPIR-V. Focused fixtures cover format-correct polygon-offset conversion,
+dithered alpha-to-mask generation, target-zero alpha-test suppression,
+dynamic-state-safe PSO keys and independent stencil state.
+
+New portable fixtures validate transition coalescing, subresource transitions,
+aliasing and memory dependencies in the shared resource-barrier planner. Copy
+mode tests validate every decoded `RB_COPY` field, 1x/2x/4x sample-selection
+sanitization, half-pixel/window/scissor-aware resolve rectangles and lossless
+linear-to-tiled-to-linear texture round trips with endian conversion.
+
+## Resolve addressing and EDRAM ownership — 2026-09-18
+
+Portable coverage now includes offset raw resolves whose coordinates exceed
+the destination pitch/height, array-slice resolves through 3D tiling, every
+Endian128 mode, exact D3D signed 16.8 tie/saturation/NaN behavior, EDRAM
+raw-store round trips, circular tile ownership, 64bpp/MSAA coverage and stale
+ownership-plan rejection. The resolve-coordinate fixture also verifies that a
+NaN is converted to fixed-point zero rather than rejecting the rectangle, and
+surface identity tests prove scissor-derived height is excluded while base and
+the other identity fields remain significant.
+
+The Windows hardware fixture verifies native full-surface ownership uploads and
+rectangular readback on both Vulkan and D3D12 before running the existing MRT,
+depth and shader draw checks. The focused native/backend, frontend, texture,
+resource-state, EDRAM surface and ownership tests all pass in Debug. Both raw
+resolve implementations now reacquire their selected native source through the
+ownership tracker before readback, closing the stale-alias source path.
+Visual C++ Debug and Release both pass all 24 tests on Windows, including the
+hardware-backed Vulkan and D3D12 capability/rendering fixture.
+
+## Third reference-audit corrections — 2026-09-18
+
+The common frontend fixture now proves that a failed Type-3 predicate suppresses
+both a register packet and a draw, increments a dedicated skipped-packet
+counter, and resumes normal execution when `BIN_SELECT & BIN_MASK` becomes
+nonzero. Resolve fixtures distinguish malformed input from a valid clipped-away
+rectangle and verify the latter performs no guest-memory write.
+
+EDRAM fixtures cover every guest sample independently: 1x identity, native 2x
+index reversal, the 2x-on-4x samples 0/3 fallback, and 4x identity. Depth and
+color resource identity tests use height-independent keys; depth growth remains
+an explicit error until reversible depth/stencil ownership is implemented.
+
+Texture/resource tests decode signed fetch-constant word-3 exponent adjustment,
+place it in the stable constant ABI and descriptor hash, and verify generated
+HLSL applies `ldexp` after texture sampling. The DXC-enabled Visual C++ Release
+tree compiles both DXIL and SPIR-V variants. The complete Release suite passes
+24/24; the Debug tree passes its 23 configured tests (DXC discovery was not
+enabled in that existing build tree).

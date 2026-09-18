@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -66,6 +67,12 @@ struct TextureFormatInfo {
 [[nodiscard]] const TextureFormatInfo& texture_format_info(
     std::uint8_t format) noexcept;
 
+// Returns the texture-format encoding whose in-memory bits exactly match a
+// native color-target readback. Formats requiring numeric conversion are not
+// raw-compatible and return no value.
+[[nodiscard]] std::optional<std::uint8_t> raw_resolve_texture_format(
+    ColorRenderTargetFormat format) noexcept;
+
 struct TextureSubresourceLayout {
   std::uint32_t mip_level{};
   std::uint32_t array_layer{};
@@ -119,6 +126,41 @@ struct DecodedTexture {
 [[nodiscard]] DecodedTexture decode_texture(
     const TextureDescriptor& descriptor,
     std::span<const std::byte> physical_memory);
+
+// Inverse of decode_texture, used by EDRAM resolves and CPU-visible readbacks.
+// The source is tightly packed in the same subresource order as
+// TextureLayout::subresources; the destination receives Xenos tiling and
+// endian conversion.
+[[nodiscard]] bool encode_texture(
+    const TextureDescriptor& descriptor, std::span<const std::byte> linear_data,
+    std::span<std::byte> physical_memory, std::string* error = nullptr);
+
+// Applies the RB copy/memexport 128-bit endian mode independently to every
+// complete 16-byte group. All defined Xenos modes are involutions.
+void apply_endian128(std::span<std::byte> data, Endian128 endian) noexcept;
+
+struct ResolveWriteResult {
+  std::uint32_t modified_address{};
+  std::uint32_t modified_size{};
+  std::string error{};
+  bool valid{};
+};
+
+// Writes an already format-compatible native readback rectangle to the Xenos
+// tiled copy destination. Conversion, red/blue swap and exponent bias are
+// intentionally rejected here and belong to the converted-resolve path.
+[[nodiscard]] ResolveWriteResult write_raw_resolve(
+    const CopyResolveState& copy, const ResolveRectangle& rectangle,
+    std::span<const std::byte> source, std::uint32_t source_row_pitch,
+    std::span<std::byte> physical_memory);
+
+// Converts linear native render-target pixels through the common Xenos color
+// model, then writes the guest tiled destination with copy endian semantics.
+[[nodiscard]] ResolveWriteResult write_converted_resolve(
+    const CopyResolveState& copy, ColorRenderTargetFormat source_format,
+    const ResolveRectangle& rectangle, std::span<const std::byte> source,
+    std::uint32_t source_row_pitch,
+    std::span<std::byte> physical_memory);
 
 class TextureDirtyTracker {
  public:

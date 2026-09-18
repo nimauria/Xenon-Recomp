@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace xenon::gpu {
 namespace {
@@ -56,63 +58,63 @@ std::uint64_t TextureDescriptor::hash() const noexcept {
   hash = hash_value(hash, aniso_filter);
   hash = hash_value(hash, border_color);
   hash = hash_value(hash, static_cast<std::uint16_t>(lod_bias));
+  hash = hash_value(hash, static_cast<std::uint8_t>(exp_adjust));
   hash = hash_value(hash, stacked);
   hash = hash_value(hash, tiled);
   hash = hash_value(hash, packed_mips);
   return hash_value(hash, valid);
 }
 
-std::uint64_t DrawResourceState::pipeline_hash(
+NativePipelineKey DrawResourceState::native_pipeline_key(
     const ir::DrawPacket& draw) const noexcept {
   std::uint64_t hash = 14695981039346656037ull;
-  hash = hash_value(hash, static_cast<std::uint64_t>(edram_mode));
   hash = hash_value(hash, draw.vertex_shader.hash);
   hash = hash_value(hash, draw.pixel_shader.hash);
-  hash = hash_value(hash, static_cast<std::uint64_t>(draw.primitive_type));
-  hash = hash_value(hash, static_cast<std::uint64_t>(draw.index_format));
   for (const auto& target : color_targets) {
-    hash = hash_value(hash, target.base_tile);
-    hash = hash_value(hash, target.format);
-    hash = hash_value(hash, static_cast<std::uint8_t>(target.exponent_bias));
-    hash = hash_value(hash, target.write_mask);
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_source));
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_destination));
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_operation));
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_source));
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_destination));
-    hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_operation));
-    hash = hash_value(hash, target.blend.enabled);
     hash = hash_value(hash, target.enabled);
+    if (!target.enabled) continue;
+    hash = hash_value(hash, target.format);
+    hash = hash_value(hash, target.write_mask);
+    hash = hash_value(hash, target.blend.enabled);
+    if (target.blend.enabled) {
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_source));
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_destination));
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.color_operation));
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_source));
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_destination));
+      hash = hash_value(hash, static_cast<std::uint64_t>(target.blend.alpha_operation));
+    }
   }
-  for (const auto value : blend_constant)
-    hash = hash_value(hash, std::bit_cast<std::uint32_t>(value));
-  hash = hash_value(hash, depth_target.base_tile);
-  hash = hash_value(hash, depth_target.format);
+  const bool depth_active = depth_target.test_enabled ||
+                            depth_target.write_enabled ||
+                            depth_target.stencil_enabled;
+  hash = hash_value(hash, depth_active);
+  if (depth_active) hash = hash_value(hash, depth_target.format);
   hash = hash_value(hash, depth_target.test_enabled);
   hash = hash_value(hash, depth_target.write_enabled);
-  hash = hash_value(hash, static_cast<std::uint64_t>(depth_target.function));
+  if (depth_target.test_enabled)
+    hash = hash_value(hash, static_cast<std::uint64_t>(depth_target.function));
   hash = hash_value(hash, depth_target.stencil_enabled);
-  hash = hash_value(hash, depth_target.backface_stencil_enabled);
-  hash = hash_value(hash, depth_target.stencil_reference);
-  hash = hash_value(hash, depth_target.stencil_read_mask);
-  hash = hash_value(hash, depth_target.stencil_write_mask);
-  hash = hash_value(hash, depth_target.stencil_back_reference);
-  hash = hash_value(hash, depth_target.stencil_back_read_mask);
-  hash = hash_value(hash, depth_target.stencil_back_write_mask);
   const auto hash_stencil = [&](const StencilFaceState& stencil) {
     hash = hash_value(hash, static_cast<std::uint64_t>(stencil.function));
     hash = hash_value(hash, static_cast<std::uint64_t>(stencil.fail));
     hash = hash_value(hash, static_cast<std::uint64_t>(stencil.depth_pass));
     hash = hash_value(hash, static_cast<std::uint64_t>(stencil.depth_fail));
   };
-  hash_stencil(depth_target.stencil_front);
-  hash_stencil(depth_target.stencil_back);
-  hash = hash_value(hash, raster.surface_pitch);
+  if (depth_target.stencil_enabled) {
+    hash = hash_value(hash, depth_target.backface_stencil_enabled);
+    // D3D12 stencil masks are PSO state. References are dynamic on both native
+    // APIs and deliberately excluded.
+    hash = hash_value(hash, depth_target.stencil_read_mask);
+    hash = hash_value(hash, depth_target.stencil_write_mask);
+    hash_stencil(depth_target.stencil_front);
+    if (depth_target.backface_stencil_enabled) {
+      hash = hash_value(hash, depth_target.stencil_back_read_mask);
+      hash = hash_value(hash, depth_target.stencil_back_write_mask);
+      hash_stencil(depth_target.stencil_back);
+    }
+  }
   hash = hash_value(hash, raster.msaa_samples_log2);
-  hash = hash_value(hash, static_cast<std::uint32_t>(raster.scissor_left));
-  hash = hash_value(hash, static_cast<std::uint32_t>(raster.scissor_top));
-  hash = hash_value(hash, static_cast<std::uint32_t>(raster.scissor_right));
-  hash = hash_value(hash, static_cast<std::uint32_t>(raster.scissor_bottom));
   hash = hash_value(hash, raster.cull_front);
   hash = hash_value(hash, raster.cull_back);
   hash = hash_value(hash, raster.front_face_clockwise);
@@ -120,13 +122,294 @@ std::uint64_t DrawResourceState::pipeline_hash(
   hash = hash_value(hash, raster.polygon_mode);
   hash = hash_value(hash, raster.front_polygon_type);
   hash = hash_value(hash, raster.back_polygon_type);
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.x_scale));
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.x_offset));
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.y_scale));
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.y_offset));
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.z_scale));
-  hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.viewport.z_offset));
-  return hash;
+  hash = hash_value(hash, raster.polygon_offset_front_enabled);
+  hash = hash_value(hash, raster.polygon_offset_back_enabled);
+  hash = hash_value(hash, raster.polygon_offset_parallel_enabled);
+  if (raster.polygon_offset_front_enabled ||
+      raster.polygon_offset_parallel_enabled) {
+    hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.polygon_offset_front_scale));
+    hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.polygon_offset_front_offset));
+  }
+  if (raster.polygon_offset_back_enabled) {
+    hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.polygon_offset_back_scale));
+    hash = hash_value(hash, std::bit_cast<std::uint32_t>(raster.polygon_offset_back_offset));
+  }
+  return {hash};
+}
+
+ColorTargetPlan plan_color_targets(const DrawResourceState& state) noexcept {
+  ColorTargetPlan plan{};
+  if (state.edram_mode != EdramMode::ColorDepth) return plan;
+
+  int highest_enabled = -1;
+  for (std::size_t i = 0; i < state.color_targets.size(); ++i) {
+    const bool enabled = state.color_targets[i].enabled;
+    plan.enabled[i] = enabled;
+    if (enabled) {
+      plan.enabled_mask |= static_cast<std::uint8_t>(1u << i);
+      highest_enabled = static_cast<int>(i);
+    }
+  }
+  if (highest_enabled < 0) return plan;
+
+  plan.attachment_count = static_cast<std::uint8_t>(highest_enabled + 1);
+  for (std::uint8_t i = 0; i < plan.attachment_count; ++i) {
+    if (!plan.enabled[i]) {
+      plan.contiguous = false;
+      break;
+    }
+  }
+  return plan;
+}
+
+HostPolygonMode host_polygon_mode(const RasterState& raster) noexcept {
+  // Xenos polygon mode 1 is the actual dual-mode enable. Values 0, 2 and 3
+  // render normal filled triangles; at least one retail title is known to use
+  // the otherwise-reserved value 2 with triangle polygon types.
+  if (raster.polygon_mode != 1u) return HostPolygonMode::Fill;
+
+  // PolygonType encoding: points=0, lines=1, triangles=2. Host APIs expose a
+  // single polygon mode, so among visible faces choose the least filled mode.
+  std::uint8_t polygon_type = 2u;
+  if (!raster.cull_front)
+    polygon_type = std::min<std::uint8_t>(polygon_type,
+                                          raster.front_polygon_type);
+  if (!raster.cull_back)
+    polygon_type = std::min<std::uint8_t>(polygon_type,
+                                          raster.back_polygon_type);
+  switch (polygon_type) {
+    case 0: return HostPolygonMode::Point;
+    case 1: return HostPolygonMode::Line;
+    default: return HostPolygonMode::Fill;
+  }
+}
+
+PolygonOffsetState preferred_polygon_offset(
+    const RasterState& raster, HostPrimitiveTopology topology) noexcept {
+  if (topology != HostPrimitiveTopology::TriangleList) {
+    return {raster.polygon_offset_front_scale,
+            raster.polygon_offset_front_offset,
+            raster.polygon_offset_parallel_enabled};
+  }
+  if (raster.polygon_offset_front_enabled && !raster.cull_front) {
+    return {raster.polygon_offset_front_scale,
+            raster.polygon_offset_front_offset, true};
+  }
+  if (raster.polygon_offset_back_enabled && !raster.cull_back) {
+    return {raster.polygon_offset_back_scale,
+            raster.polygon_offset_back_offset, true};
+  }
+  return {};
+}
+
+float scaled_polygon_offset_constant(
+    float offset, DepthRenderTargetFormat format) noexcept {
+  constexpr float kUnorm24Factor = 16777215.0f;
+  constexpr float kFloat24Factor = 16777216.0f;
+  return offset * (format == DepthRenderTargetFormat::D24FS8
+                       ? kFloat24Factor
+                       : kUnorm24Factor);
+}
+
+std::int32_t integer_polygon_offset(
+    float offset, DepthRenderTargetFormat format) noexcept {
+  if (!std::isfinite(offset) || offset == 0.0f) return 0;
+  const bool float24 = format == DepthRenderTargetFormat::D24FS8;
+  const float magnitude = std::ceil(
+      std::abs(offset) * (float24 ? 2097152.0f : 16777215.0f));
+  double integer_magnitude = float24 ? static_cast<double>(magnitude) * 8.0
+                                     : static_cast<double>(magnitude);
+  integer_magnitude = std::min(
+      integer_magnitude,
+      static_cast<double>(std::numeric_limits<std::int32_t>::max()));
+  const auto result = static_cast<std::int32_t>(integer_magnitude);
+  return offset < 0.0f ? -result : result;
+}
+
+CopySampleSelect sanitize_copy_sample_select(
+    CopySampleSelect selection, MsaaSamples samples, bool depth) noexcept {
+  auto value = static_cast<std::uint8_t>(selection);
+  if (samples == MsaaSamples::X4) {
+    value = std::min<std::uint8_t>(
+        value, static_cast<std::uint8_t>(CopySampleSelect::Samples0123));
+    if (depth) {
+      if (value == static_cast<std::uint8_t>(CopySampleSelect::Samples01) ||
+          value == static_cast<std::uint8_t>(CopySampleSelect::Samples0123)) {
+        value = static_cast<std::uint8_t>(CopySampleSelect::Sample0);
+      } else if (value ==
+                 static_cast<std::uint8_t>(CopySampleSelect::Samples23)) {
+        value = static_cast<std::uint8_t>(CopySampleSelect::Sample2);
+      }
+    }
+  } else if (samples == MsaaSamples::X2) {
+    if (value == static_cast<std::uint8_t>(CopySampleSelect::Sample2))
+      value = static_cast<std::uint8_t>(CopySampleSelect::Sample0);
+    else if (value == static_cast<std::uint8_t>(CopySampleSelect::Sample3))
+      value = static_cast<std::uint8_t>(CopySampleSelect::Sample1);
+    else if (value > static_cast<std::uint8_t>(CopySampleSelect::Samples01))
+      value = static_cast<std::uint8_t>(CopySampleSelect::Samples01);
+    if (depth && value ==
+                     static_cast<std::uint8_t>(CopySampleSelect::Samples01)) {
+      value = static_cast<std::uint8_t>(CopySampleSelect::Sample0);
+    }
+  } else {
+    value = static_cast<std::uint8_t>(CopySampleSelect::Sample0);
+  }
+  return static_cast<CopySampleSelect>(value);
+}
+
+bool is_full_color_resolve(CopySampleSelect selection,
+                           MsaaSamples samples) noexcept {
+  selection = sanitize_copy_sample_select(selection, samples, false);
+  switch (samples) {
+    case MsaaSamples::X1:
+      return selection == CopySampleSelect::Sample0;
+    case MsaaSamples::X2:
+      return selection == CopySampleSelect::Samples01;
+    case MsaaSamples::X4:
+      return selection == CopySampleSelect::Samples0123;
+  }
+  return false;
+}
+
+ResolvePlan plan_resolve(const DrawResourceState& state,
+                         std::span<const std::byte> physical_memory) {
+  ResolvePlan result{};
+  result.copy = state.copy;
+  result.depth = state.copy.copies_depth();
+  result.source_color_slot = result.depth ? 0 : state.copy.source_select;
+  const auto sample_log2 = state.raster.msaa_samples_log2;
+  if (sample_log2 > static_cast<std::uint8_t>(MsaaSamples::X4)) {
+    result.error = "invalid Xenos resolve MSAA mode";
+    return result;
+  }
+  result.samples = static_cast<MsaaSamples>(sample_log2);
+  if (!result.depth && result.source_color_slot >= 4) {
+    result.error = "invalid Xenos resolve color source";
+    return result;
+  }
+  result.rectangle = decode_resolve_rectangle(state, physical_memory);
+  if (!result.rectangle.valid) {
+    result.error = "invalid Xenos resolve rectangle";
+    return result;
+  }
+  const auto selection = sanitize_copy_sample_select(
+      state.copy.sample_select, result.samples, result.depth);
+  result.copy.sample_select = selection;
+  switch (selection) {
+    case CopySampleSelect::Sample0: result.guest_sample_mask = 0x1; break;
+    case CopySampleSelect::Sample1: result.guest_sample_mask = 0x2; break;
+    case CopySampleSelect::Sample2: result.guest_sample_mask = 0x4; break;
+    case CopySampleSelect::Sample3: result.guest_sample_mask = 0x8; break;
+    case CopySampleSelect::Samples01: result.guest_sample_mask = 0x3; break;
+    case CopySampleSelect::Samples23: result.guest_sample_mask = 0xC; break;
+    case CopySampleSelect::Samples0123: result.guest_sample_mask = 0xF; break;
+  }
+  const auto physical_count = 1u << sample_log2;
+  result.guest_sample_mask &= static_cast<std::uint8_t>((1u << physical_count) - 1u);
+  for (std::uint8_t guest = 0; guest < physical_count; ++guest) {
+    if (!(result.guest_sample_mask & (1u << guest))) continue;
+    const auto mapped = map_guest_sample_to_host(result.samples, guest);
+    if (!mapped) {
+      result.error = "Xenos resolve sample has no native mapping";
+      return result;
+    }
+    result.host_sample_for_guest[guest] =
+        static_cast<std::uint8_t>(mapped->sample);
+    ++result.selected_sample_count;
+  }
+  result.native_color_average = !result.depth &&
+      is_full_color_resolve(selection, result.samples);
+  result.valid = result.selected_sample_count != 0;
+  if (!result.valid) result.error = "Xenos resolve selected no samples";
+  return result;
+}
+
+std::int32_t float_to_d3d_fixed_16_8(float value) noexcept {
+  if (std::isnan(value)) return 0;
+  constexpr std::int32_t kMinimum = -(1 << 23);
+  constexpr std::int32_t kMaximum = (1 << 23) - 1;
+  if (value <= -32768.0f) return kMinimum;
+  if (value >= 32768.0f) return kMaximum;
+
+  // Multiplication by a power of two is exact for finite binary32 values in
+  // this range. Resolve halfway cases explicitly so behavior is independent
+  // of the host floating-point environment's current rounding mode.
+  const double scaled = static_cast<double>(value) * 256.0;
+  const double lower = std::floor(scaled);
+  const double fraction = scaled - lower;
+  double rounded = lower;
+  if (fraction > 0.5 ||
+      (fraction == 0.5 &&
+       (static_cast<std::int64_t>(lower) & std::int64_t{1}))) {
+    rounded = lower + 1.0;
+  }
+  return static_cast<std::int32_t>(std::clamp(
+      rounded, static_cast<double>(kMinimum), static_cast<double>(kMaximum)));
+}
+
+ResolveRectangle decode_resolve_rectangle(
+    const DrawResourceState& state,
+    std::span<const std::byte> physical_memory) noexcept {
+  ResolveRectangle result{};
+  if (state.edram_mode != EdramMode::Copy ||
+      (state.copy.command != CopyCommand::Raw &&
+       state.copy.command != CopyCommand::Convert)) {
+    return result;
+  }
+  const auto& fetch = state.vertex_buffers[0][0];
+  if (!fetch || !fetch->valid || fetch->size_dwords != 6 ||
+      std::uint64_t(fetch->physical_address) + 6u * sizeof(std::uint32_t) >
+          physical_memory.size()) {
+    return result;
+  }
+
+  std::array<std::int32_t, 6> vertices{};
+  for (std::size_t i = 0; i < vertices.size(); ++i) {
+    std::uint32_t word{};
+    std::memcpy(&word, physical_memory.data() + fetch->physical_address +
+                           i * sizeof(word), sizeof(word));
+    const float value = std::bit_cast<float>(gpu_swap(word, fetch->endian)) +
+                        (state.raster.d3d_pixel_center ? 0.5f : 0.0f);
+    vertices[i] = float_to_d3d_fixed_16_8(value);
+  }
+  const auto to_pixel = [](std::int32_t fixed) {
+    return static_cast<std::int32_t>(
+        std::floor(static_cast<double>(fixed + 127) / 256.0));
+  };
+  auto x0 = to_pixel(std::min({vertices[0], vertices[2], vertices[4]}));
+  auto y0 = to_pixel(std::min({vertices[1], vertices[3], vertices[5]}));
+  auto x1 = to_pixel(std::max({vertices[0], vertices[2], vertices[4]}));
+  auto y1 = to_pixel(std::max({vertices[1], vertices[3], vertices[5]}));
+  if (state.raster.vertex_window_offset_enabled) {
+    x0 += state.raster.window_offset_x;
+    x1 += state.raster.window_offset_x;
+    y0 += state.raster.window_offset_y;
+    y1 += state.raster.window_offset_y;
+  }
+
+  const auto scissor_left = std::max(0, state.raster.scissor_left);
+  const auto scissor_top = std::max(0, state.raster.scissor_top);
+  const auto scissor_right = std::max(scissor_left, state.raster.scissor_right);
+  const auto scissor_bottom = std::max(scissor_top, state.raster.scissor_bottom);
+  x0 = std::clamp(x0, scissor_left, scissor_right);
+  y0 = std::clamp(y0, scissor_top, scissor_bottom);
+  x1 = std::clamp(x1, scissor_left, scissor_right);
+  y1 = std::clamp(y1, scissor_top, scissor_bottom);
+
+  constexpr std::int32_t kAlignment = 8;
+  constexpr std::int32_t kMaximumExtent = (1 << 14) - kAlignment;
+  x0 &= ~(kAlignment - 1);
+  y0 &= ~(kAlignment - 1);
+  x1 = (x1 + kAlignment - 1) & ~(kAlignment - 1);
+  y1 = (y1 + kAlignment - 1) & ~(kAlignment - 1);
+  const auto pitch = std::int32_t(state.raster.surface_pitch) &
+                     ~(kAlignment - 1);
+  x0 = std::min(x0, pitch);
+  x1 = std::min(x1, pitch);
+  if (y1 - y0 > kMaximumExtent) y1 = y0 + kMaximumExtent;
+  result = {x0, y0, x1, y1, true};
+  return result;
 }
 
 void ResourceStateTracker::reset() noexcept {
@@ -203,6 +486,7 @@ std::optional<TextureDescriptor> ResourceStateTracker::texture(
   result.min_filter = static_cast<std::uint8_t>(bits(w3, 21, 2));
   result.mip_filter = static_cast<std::uint8_t>(bits(w3, 23, 2));
   result.aniso_filter = static_cast<std::uint8_t>(bits(w3, 25, 3));
+  result.exp_adjust = static_cast<std::int8_t>(signed_bits(w3, 13, 6));
   result.mip_min_level = static_cast<std::uint8_t>(bits(w4, 2, 4));
   result.mip_max_level = static_cast<std::uint8_t>(
       std::max(bits(w4, 2, 4), bits(w4, 6, 4)));
@@ -231,16 +515,76 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.raster.cull_front = bits(mode, 0, 2) == 1 || bits(mode, 0, 2) == 3;
   result.raster.cull_back = bits(mode, 0, 2) == 2 || bits(mode, 0, 2) == 3;
   result.raster.front_face_clockwise = bits(mode, 2, 1) != 0;
+  result.raster.polygon_offset_front_enabled = bits(mode, 11, 1) != 0;
+  result.raster.polygon_offset_back_enabled = bits(mode, 12, 1) != 0;
+  result.raster.polygon_offset_parallel_enabled = bits(mode, 13, 1) != 0;
+  result.primitive_assembly.reset_enabled = bits(mode, 21, 1) != 0;
+  result.primitive_assembly.reset_index = registers_[0x2103] & 0x00FFFFFFu;
   result.raster.polygon_mode = static_cast<std::uint8_t>(bits(mode, 3, 2));
   result.raster.front_polygon_type = static_cast<std::uint8_t>(bits(mode, 5, 3));
   result.raster.back_polygon_type = static_cast<std::uint8_t>(bits(mode, 8, 3));
   result.raster.multisample_enabled = bits(mode, 15, 1) != 0;
+  result.raster.vertex_window_offset_enabled = bits(mode, 16, 1) != 0;
+  const auto window_offset = registers_[0x2080];
+  result.raster.window_offset_x = signed_bits(window_offset, 0, 15);
+  result.raster.window_offset_y = signed_bits(window_offset, 16, 15);
+  result.raster.d3d_pixel_center = bits(registers_[0x2302], 0, 1) == 0;
   result.raster.viewport.x_scale = std::bit_cast<float>(registers_[0x210F]);
   result.raster.viewport.x_offset = std::bit_cast<float>(registers_[0x2110]);
   result.raster.viewport.y_scale = std::bit_cast<float>(registers_[0x2111]);
   result.raster.viewport.y_offset = std::bit_cast<float>(registers_[0x2112]);
   result.raster.viewport.z_scale = std::bit_cast<float>(registers_[0x2113]);
   result.raster.viewport.z_offset = std::bit_cast<float>(registers_[0x2114]);
+  result.raster.polygon_offset_front_scale =
+      std::bit_cast<float>(registers_[0x2380]);
+  result.raster.polygon_offset_front_offset =
+      std::bit_cast<float>(registers_[0x2381]);
+  result.raster.polygon_offset_back_scale =
+      std::bit_cast<float>(registers_[0x2382]);
+  result.raster.polygon_offset_back_offset =
+      std::bit_cast<float>(registers_[0x2383]);
+
+  const auto color_control = registers_[0x2202];
+  result.pixel_control.alpha_function =
+      static_cast<CompareFunction>(bits(color_control, 0, 3));
+  result.pixel_control.alpha_test_enabled = bits(color_control, 3, 1) != 0;
+  result.pixel_control.alpha_to_mask_enabled = bits(color_control, 4, 1) != 0;
+  result.pixel_control.alpha_reference =
+      std::bit_cast<float>(registers_[0x210E]);
+  for (unsigned i = 0; i < 4; ++i) {
+    result.pixel_control.alpha_to_mask_offsets[i] =
+        static_cast<std::uint8_t>(bits(color_control, 24 + i * 2, 2));
+  }
+
+  const auto copy_control = registers_[0x2318];
+  const auto copy_pitch = registers_[0x231A];
+  const auto copy_info = registers_[0x231B];
+  result.copy.source_select =
+      static_cast<std::uint8_t>(bits(copy_control, 0, 3));
+  result.copy.sample_select = static_cast<CopySampleSelect>(
+      bits(copy_control, 4, 3));
+  result.copy.color_clear_enabled = bits(copy_control, 8, 1) != 0;
+  result.copy.depth_clear_enabled = bits(copy_control, 9, 1) != 0;
+  result.copy.depth_clear = registers_[0x231D];
+  result.copy.color_clear = {registers_[0x231E], registers_[0x231F]};
+  result.copy.command = static_cast<CopyCommand>(bits(copy_control, 20, 2));
+  result.copy.destination_base = registers_[0x2319];
+  result.copy.destination_pitch =
+      static_cast<std::uint16_t>(bits(copy_pitch, 0, 14));
+  result.copy.destination_height =
+      static_cast<std::uint16_t>(bits(copy_pitch, 16, 14));
+  result.copy.destination_endian =
+      static_cast<Endian128>(bits(copy_info, 0, 3));
+  result.copy.destination_array = bits(copy_info, 3, 1) != 0;
+  result.copy.destination_slice =
+      static_cast<std::uint8_t>(bits(copy_info, 4, 3));
+  result.copy.destination_format =
+      static_cast<std::uint8_t>(bits(copy_info, 7, 6));
+  result.copy.destination_number_format =
+      static_cast<std::uint8_t>(bits(copy_info, 13, 3));
+  result.copy.destination_exponent_bias =
+      static_cast<std::int8_t>(signed_bits(copy_info, 16, 6));
+  result.copy.destination_red_blue_swap = bits(copy_info, 24, 1) != 0;
 
   const auto color_mask = registers_[0x2104];
   for (unsigned i = 0; i < result.blend_constant.size(); ++i)
@@ -328,13 +672,33 @@ bool ResourceStateTracker::write_constant_buffer(
     std::memcpy(destination.data() + 8320 + i * 16,
                 registers_.data() + 0x4908 + i, sizeof(std::uint32_t));
   }
-  // GPU 07 currently consumes the base dword of each six-dword vertex fetch
-  // descriptor. The full descriptors remain available via DrawResourceState.
+  // The base dword is used by vertex fetches. Texture fetches dynamically use
+  // the signed result exponent adjustment from word 3 bits 13:18; it is kept
+  // separate from the unrelated LOD bias in word 4.
   for (std::size_t i = 0; i < 32; ++i) {
     std::memcpy(destination.data() + 8832 + i * 16,
                 registers_.data() + kFetchConstantBase + i * 6,
                 sizeof(std::uint32_t));
+    const auto exp_adjust = static_cast<std::int32_t>(signed_bits(
+        registers_[kFetchConstantBase + i * 6 + 3], 13, 6));
+    std::memcpy(destination.data() + 8832 + i * 16 + 4,
+                &exp_adjust, sizeof(exp_adjust));
   }
+  // The final 128 bytes of the stable constant ABI are per-draw native
+  // translation state. Keep this generic rather than specializing shaders for
+  // alpha reference or alpha-to-mask offsets.
+  std::array<std::uint32_t, 8> draw_state{};
+  const auto color_control = registers_[0x2202];
+  draw_state[0] = (bits(color_control, 3, 1) ? 1u : 0u) |
+                  (bits(color_control, 4, 1) ? 2u : 0u);
+  draw_state[1] = bits(color_control, 0, 3);
+  draw_state[2] = 1u << std::min(2u, bits(registers_[0x2000], 16, 2));
+  for (unsigned i = 0; i < 4; ++i) {
+    draw_state[3] |= bits(color_control, 24 + i * 2u, 2) << (i * 2u);
+  }
+  draw_state[4] = registers_[0x210E];
+  std::memcpy(destination.data() + 9344, draw_state.data(),
+              draw_state.size() * sizeof(std::uint32_t));
   return true;
 }
 

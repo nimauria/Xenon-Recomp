@@ -99,6 +99,10 @@ bool Context::initialize(const ContextConfig& config) {
   features13.dynamicRendering = VK_TRUE;
   VkPhysicalDeviceFeatures enabled_features{};
   enabled_features.samplerAnisotropy = features.features.samplerAnisotropy;
+  // Needed for Xenos dual polygon point/line modes. If unsupported, ordinary
+  // filled rendering remains available and non-solid pipeline creation will
+  // fail explicitly rather than being silently rendered as fill.
+  enabled_features.fillModeNonSolid = features.features.fillModeNonSolid;
   const float priority = 1.0f;
   VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   queue_info.queueFamilyIndex = graphics_queue_family_;

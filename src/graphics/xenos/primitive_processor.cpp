@@ -51,6 +51,11 @@ bool convert_topology(PrimitiveType type, std::span<const std::uint32_t> input,
       result.topology = HostPrimitiveTopology::TriangleList;
       output.assign(input.begin(), input.begin() + input.size() / 3u * 3u);
       return true;
+    case PrimitiveType::RectangleList:
+      result.topology = HostPrimitiveTopology::TriangleList;
+      result.requires_rectangle_expansion = true;
+      output.assign(input.begin(), input.begin() + input.size() / 3u * 3u);
+      return true;
     case PrimitiveType::TriangleStrip:
     case PrimitiveType::TwoDTriStrip:
       result.topology = HostPrimitiveTopology::TriangleList;
@@ -85,10 +90,48 @@ bool convert_topology(PrimitiveType type, std::span<const std::uint32_t> input,
   }
 }
 
+bool supports_primitive_reset(PrimitiveType type) noexcept {
+  switch (type) {
+    case PrimitiveType::LineStrip:
+    case PrimitiveType::TriangleFan:
+    case PrimitiveType::TriangleStrip:
+    case PrimitiveType::LineLoop:
+    case PrimitiveType::QuadStrip:
+    case PrimitiveType::Polygon:
+    case PrimitiveType::TwoDLineStrip:
+    case PrimitiveType::TwoDTriStrip:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool convert_with_primitive_reset(
+    PrimitiveType type, std::span<const std::uint32_t> input,
+    std::uint32_t reset_index, ProcessedPrimitiveBatch& result) {
+  std::size_t begin = 0;
+  bool emitted_range = false;
+  for (std::size_t i = 0; i <= input.size(); ++i) {
+    if (i != input.size() && input[i] != reset_index) continue;
+    if (i > begin) {
+      if (!convert_topology(type, input.subspan(begin, i - begin), result))
+        return false;
+      emitted_range = true;
+    }
+    begin = i + 1;
+  }
+  // Preserve the output topology even when the guest index buffer contains
+  // only restart markers (or is otherwise empty).
+  if (!emitted_range)
+    return convert_topology(type, std::span<const std::uint32_t>{}, result);
+  return true;
+}
+
 }  // namespace
 
 ProcessedPrimitiveBatch process_primitives(
-    const ir::DrawPacket& draw, std::span<const std::byte> physical_memory) {
+    const ir::DrawPacket& draw, std::span<const std::byte> physical_memory,
+    const PrimitiveProcessingOptions& options) {
   ProcessedPrimitiveBatch result{};
   std::vector<std::uint32_t> source;
   source.reserve(draw.index_count);
@@ -129,7 +172,22 @@ ProcessedPrimitiveBatch process_primitives(
     result.error = "reserved Xenos draw source";
     return result;
   }
-  if (!convert_topology(draw.primitive_type, source, result)) return result;
+  bool reset_enabled = options.reset_enabled &&
+                       draw.source != DrawSource::AutoIndex &&
+                       supports_primitive_reset(draw.primitive_type);
+  std::uint32_t reset_index = options.reset_index & 0x00FFFFFFu;
+  if (reset_enabled && draw.index_format == IndexFormat::UInt16) {
+    // Xenos doesn't truncate a >16-bit reset value for a 16-bit index buffer;
+    // such a value simply cannot match and primitive reset is effectively off.
+    if (reset_index > 0xFFFFu) reset_enabled = false;
+  }
+  if (reset_enabled) {
+    if (!convert_with_primitive_reset(draw.primitive_type, source, reset_index,
+                                      result))
+      return result;
+  } else if (!convert_topology(draw.primitive_type, source, result)) {
+    return result;
+  }
   result.vertex_count = static_cast<std::uint32_t>(result.indices.size());
   result.indexed = draw.source != DrawSource::AutoIndex ||
                    result.indices.size() != draw.index_count;

@@ -132,6 +132,7 @@ struct ShaderReflection {
   bool uses_loops{};
   bool uses_dynamic_addressing{};
   bool kills_pixels{};
+  bool writes_depth{};
 };
 
 struct DecodedShader {

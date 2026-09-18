@@ -91,7 +91,8 @@ DecodedControlFlow decode_cf(const ControlFlowInstruction48& raw,
 }
 
 AluInstruction decode_alu(const ShaderInstruction96& raw, std::uint32_t address,
-                          Usage& usage, ShaderReflection& reflection) {
+                          ShaderStage stage, Usage& usage,
+                          ShaderReflection& reflection) {
   const auto w0 = raw.words[0], w1 = raw.words[1], w2 = raw.words[2];
   AluInstruction out{};
   out.address = address;
@@ -130,16 +131,17 @@ AluInstruction decode_alu(const ShaderInstruction96& raw, std::uint32_t address,
     reflection.uses_dynamic_addressing |= source.relative;
   }
   reflection.uses_predication |= out.predicate.enabled;
-  reflection.temporary_register_count = std::max(
-      reflection.temporary_register_count,
-      std::uint32_t(std::max(out.vector_destination, out.scalar_destination)) + 1u);
   if (out.export_data) {
+    // Xenos scalar and vector ALU results share vector_dest when exporting.
+    // Export register numbers are stage-specific (for example PS e61 is depth).
     usage.exports.insert(out.vector_destination);
-    if (out.vector_destination >= 32 && out.vector_destination <= 37) {
-      ++reflection.memory_exports;
-    } else if (out.vector_destination == 62) {
-      ++reflection.position_exports;
+    if (stage == ShaderStage::Pixel && out.vector_destination == 61u) {
+      reflection.writes_depth = true;
     }
+  } else {
+    reflection.temporary_register_count = std::max(
+        reflection.temporary_register_count,
+        std::uint32_t(std::max(out.vector_destination, out.scalar_destination)) + 1u);
   }
   reflection.kills_pixels |= out.vector_opcode >= 24 && out.vector_opcode <= 27;
   return out;
@@ -248,7 +250,7 @@ DecodedShader ShaderDecoder::decode(const ShaderProgram& program) {
             instruction.kind = ShaderInstructionKind::Alu;
             instruction.serialize = serialize;
             instruction.alu = decode_alu(program.instruction(address), address,
-                                         usage, result.reflection);
+                                         program.stage(), usage, result.reflection);
             result.instructions.push_back(instruction);
           }
         }
@@ -267,12 +269,16 @@ DecodedShader ShaderDecoder::decode(const ShaderProgram& program) {
   assign_sorted(usage.textures, result.reflection.texture_fetch_constants);
   assign_sorted(usage.exports, result.reflection.exports);
   for (auto export_index : result.reflection.exports) {
-    if (export_index <= 15) {
-      if (program.stage() == ShaderStage::Vertex) {
-        ++result.reflection.interpolator_exports;
-      } else if (export_index <= 3) {
-        ++result.reflection.color_exports;
-      }
+    // eA is 32 and eM0..eM4 are 33..37 for both stages.
+    if (export_index >= 33u && export_index <= 37u) {
+      ++result.reflection.memory_exports;
+    }
+    if (program.stage() == ShaderStage::Vertex) {
+      if (export_index <= 15u) ++result.reflection.interpolator_exports;
+      if (export_index == 62u) ++result.reflection.position_exports;
+    } else {
+      if (export_index <= 3u) ++result.reflection.color_exports;
+      if (export_index == 61u) result.reflection.writes_depth = true;
     }
   }
   result.complete = ended && result.diagnostics.empty();

@@ -20,6 +20,7 @@ bool DepthTargetImage::initialize(ID3D12Device* device,
   format_ = depth_render_target_format(depth_format);
   width_ = surface.pitch_pixels;
   height_ = surface.height_pixels;
+  surface_ = surface;
   float24_ = depth_format == DepthRenderTargetFormat::D24FS8;
   D3D12_RESOURCE_DESC desc{};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -80,6 +81,7 @@ void DepthTargetImage::reset() noexcept {
   format_ = DXGI_FORMAT_UNKNOWN;
   float24_ = false;
   width_ = height_ = 0;
+  surface_ = {};
 }
 
 }  // namespace xenon::gpu::d3d12
