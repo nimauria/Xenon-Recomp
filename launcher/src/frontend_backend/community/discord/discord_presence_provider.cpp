@@ -2,6 +2,10 @@
 
 #include <utility>
 
+#ifndef XENON_LAUNCHER_DISCORD_RICH_PRESENCE_ENABLED
+#define XENON_LAUNCHER_DISCORD_RICH_PRESENCE_ENABLED 0
+#endif
+
 #ifndef XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK
 #define XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK 0
 #endif
@@ -17,10 +21,14 @@ UnavailableDiscordPresenceProvider::UnavailableDiscordPresenceProvider(QString a
     : application_id_(std::move(application_id)) {}
 
 QString UnavailableDiscordPresenceProvider::status() const {
+#if !XENON_LAUNCHER_DISCORD_RICH_PRESENCE_ENABLED
+  return QStringLiteral("Rich Presence is planned but disabled in this build. Discord community links remain available.");
+#else
   if (application_id_.trimmed().isEmpty()) {
     return QStringLiteral("Discord application ID is not configured for this build.");
   }
-  return QStringLiteral("Discord application is configured, but the Discord Social SDK is not linked in this build.");
+  return QStringLiteral("Rich Presence was enabled for this build, but the Discord Social SDK is not linked.");
+#endif
 }
 
 ServiceResult UnavailableDiscordPresenceProvider::publish(const QVariantMap&) {

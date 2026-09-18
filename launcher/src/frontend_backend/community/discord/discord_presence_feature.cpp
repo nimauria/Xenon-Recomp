@@ -21,6 +21,14 @@ DiscordPresenceFeature::DiscordPresenceFeature(SettingsFeature& settings, Sessio
       session_(session),
       provider_(createDiscordPresenceProvider(application_id)),
       application_id_(std::move(application_id)) {
+  // A dormant/unavailable provider must never leave behind a latent opt-in.
+  // This keeps future SDK-enabled builds privacy-safe: Rich Presence still
+  // requires an explicit user opt-in after the provider actually exists.
+  if (!provider_->available() &&
+      settings_.boolValue(QStringLiteral("community/discordRichPresence"), false)) {
+    settings_.setValue(QStringLiteral("community/discordRichPresence"), false);
+  }
+
   connect(&session_, &SessionController::changed, this, [this]() { rebuild(); });
   connect(&settings_, &SettingsFeature::changed, this,
           [this](const QString& key, const QVariant&) {
@@ -40,7 +48,7 @@ DiscordPresenceFeature::DiscordPresenceFeature(SettingsFeature& settings, Sessio
       emit changed();
     }
   });
-  callback_timer_.start();
+  if (provider_->available()) callback_timer_.start();
   rebuild();
 }
 
@@ -50,8 +58,12 @@ DiscordPresenceFeature::~DiscordPresenceFeature() {
   provider_->pump();
 }
 
-bool DiscordPresenceFeature::enabled() const {
+bool DiscordPresenceFeature::requestedEnabled() const {
   return settings_.boolValue(QStringLiteral("community/discordRichPresence"), false);
+}
+
+bool DiscordPresenceFeature::enabled() const {
+  return provider_->available() && requestedEnabled();
 }
 
 bool DiscordPresenceFeature::showGameTitle() const {
@@ -67,6 +79,7 @@ void DiscordPresenceFeature::setPage(const QString& page_name) {
 
 QVariantMap DiscordPresenceFeature::state() const {
   return {{QStringLiteral("enabled"), enabled()},
+          {QStringLiteral("requestedEnabled"), requestedEnabled()},
           {QStringLiteral("providerId"), provider_->id()},
           {QStringLiteral("providerAvailable"), provider_->available()},
           {QStringLiteral("providerStatus"), provider_->status()},
@@ -89,9 +102,9 @@ ServiceResult DiscordPresenceFeature::refresh() {
     return ServiceResult::success(QStringLiteral("Discord Rich Presence disabled"));
   }
   if (!provider_->available()) {
-    last_publish_error_ = provider_->status();
+    last_publish_error_.clear();
     emit changed();
-    return ServiceResult::failure(QStringLiteral("Discord Rich Presence unavailable"), last_publish_error_);
+    return ServiceResult::success(QStringLiteral("Discord Rich Presence unavailable"), provider_->status());
   }
   const auto result = provider_->publish(desired_activity_);
   last_publish_error_ = result.ok ? QString{} : result.message;
@@ -125,7 +138,7 @@ void DiscordPresenceFeature::rebuild() {
     return;
   }
   if (!provider_->available()) {
-    last_publish_error_ = provider_->status();
+    last_publish_error_.clear();
     emit changed();
     return;
   }

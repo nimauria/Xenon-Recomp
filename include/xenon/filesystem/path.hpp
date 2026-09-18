@@ -18,6 +18,8 @@ namespace xenon::filesystem {
 [[nodiscard]] bool guest_path_has_prefix(std::string_view path,
                                          std::string_view prefix) noexcept;
 [[nodiscard]] bool guest_path_is_absolute(std::string_view path) noexcept;
+[[nodiscard]] bool guest_wildcard_match(std::string_view pattern,
+                                        std::string_view value) noexcept;
 [[nodiscard]] std::string guest_path_key(std::string_view path);
 
 }  // namespace xenon::filesystem

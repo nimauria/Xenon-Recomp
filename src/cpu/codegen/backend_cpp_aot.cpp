@@ -184,7 +184,20 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     }
     case Op::StringLoad:o<<"  aot::string_load(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
     case Op::StringStore:o<<"  aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
-    case Op::Barrier:{const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";o<<"  memory.barrier(BarrierKind::"<<k<<");\n";break;}
+    case Op::Barrier:{
+      const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";
+      o<<"  memory.barrier(BarrierKind::"<<k<<");\n";
+      if(i.imm0==4){
+        // isync discards already-fetched guest instructions. Recompiled guest
+        // code therefore leaves the current native translation after the host
+        // instruction barrier so the dispatcher/code cache can validate the
+        // next guest instruction against executable-page generations.
+        const auto next=static_cast<GuestAddress>(i.guest_address+4u);
+        o<<"  state.nia="<<next<<"u;\n";
+        o<<"  return {FlowReason::Branch,state.nia,0};\n";
+      }
+      break;
+    }
     case Op::CacheZero:o<<"  memory_access.zero_cache_block(static_cast<GuestAddress>("<<arg(i,0)<<"),"<<i.imm0<<");\n";break;
     case Op::ICacheInvalidate:o<<"  memory.instruction_cache_invalidate(static_cast<GuestAddress>("<<arg(i,0)<<"));\n";break;
     case Op::CacheHint:o<<"  (void)"<<arg(i,0)<<";\n";break;

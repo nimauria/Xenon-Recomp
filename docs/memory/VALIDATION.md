@@ -314,3 +314,80 @@ Validation for the completed Phase 4 slice:
 - Clang Release memory + generated CPU→memory integration: **2/2 passed**;
 - GCC TSan `xenon_memory_tests`: **passed with no reported data race**, including the
   new CPU + DMA + mapping-churn stress.
+
+### Host VM completion + direct guest aperture
+
+The newer Memory V2 baseline closes brief phases 5 and 6 rather than leaving the
+host-VM layer and direct-aperture work as research-only scaffolding.
+
+Phase 5 validation now covers:
+
+- native Linux reserve/commit/protect/decommit/recommit/discard/release lifecycle;
+- opaque move-only shared-memory objects;
+- two writable host views of the same shared bytes;
+- shared-view unmap/remap behavior;
+- capability-tested fixed shared mappings used only by the optional guest aperture;
+- platform separation between POSIX, Windows and fallback host-VM implementations.
+
+Phase 6 validation now covers:
+
+- explicit `Compact`, `DirectAperture` and `Auto` translation strategies;
+- fixed 0x7F/A/C/E architectural aliases using the same physical backing;
+- dynamic virtual commit/decommit/remap through the aperture;
+- paired XEX 0x8/0x9 aliases;
+- withdrawal of the direct hot-entry bit plus read-side quiescence before a fixed
+  host view is replaced, preventing stale host-pointer reuse;
+- transparent fallback to compact translation when fixed shared mappings are not
+  supported or cannot be transitioned safely;
+- dedicated compact-vs-direct Release benchmark reporting.
+
+Current Linux x86-64 paired measurements do not justify making the 4 GiB aperture the
+qualified default, so `Auto` remains compact unless explicitly enabled at build time.
+This is a performance selection only; both strategies retain the same Xbox-visible
+mapping semantics.
+
+### PPC/Xenon memory-ordering completion
+
+The earlier Phase 10 foundation is now closed against the full brief requirements.
+In addition to the existing canonical `sync`/`lwsync`/`eieio`/`isync` matrix and
+x86-64/ARM64 host mappings, the production memory system now exposes its actual ordering
+domain from mapping state:
+
+- normal cached RAM;
+- write-combined RAM;
+- cache-inhibited / `NoCache` RAM;
+- MMIO/device pages.
+
+`MemoryAccessContext` reads those classifications directly from compact hot metadata
+where possible and delegates only slow/MMIO pages to the cold `AddressSpace` query.
+`eieio` remains architecturally ineffective for ordinary cached RAM while ordering the
+three device-like domains.
+
+Generated `isync` is now a native translation boundary rather than only a host/compiler
+fence. AOT code performs the instruction barrier and returns to the dispatcher at the
+next guest PC, allowing executable-page generation validation to take effect before
+execution continues.
+
+Additional completion coverage includes:
+
+- real mapping-domain tests for Normal/WC/CI/MMIO;
+- a dedicated lightweight-sync message-passing litmus;
+- a heavyweight-sync Store-Buffering litmus, where both threads reading zero is
+  forbidden by Store->Load ordering;
+- generated AOT verification that `isync` returns `FlowReason::Branch` to the exact
+  next guest instruction;
+- a dedicated `xenon_memory_ordering_tests` target suitable for sanitizer/TSan runs;
+- Clang AArch64 assembly acceptance of `dsb ish`, `dmb ishst`, `dmb ishld`, `dmb osh`
+  and `isb`.
+
+Validation on this completion checkpoint:
+
+- GCC Linux x86-64 Release full matrix: **28/28 passed**;
+- targeted Debug ASan+UBSan memory/ordering/CPU->memory/host-VM/texture/GPU-front-end
+  coverage: all selected tests pass;
+- Clang Release memory, ordering, host-VM and CPU->memory targets pass;
+- GCC TSan dedicated `xenon_memory_ordering_tests`: **passed with no reported race**.
+
+The larger all-in-one `xenon_memory_tests` TSan executable remains slow enough to exceed
+this environment's command execution window; that timeout produced no TSan race report
+and is not substituted for the dedicated ordering TSan result.

@@ -8,6 +8,8 @@
 
 namespace xenon::filesystem {
 
+struct HostOpenRegistry;
+
 struct HostPathDeviceOptions {
   bool read_only{true};
   bool create_root{false};
@@ -27,7 +29,8 @@ class HostPathDevice final : public Device {
                              FileInfo& out_info) const override;
   [[nodiscard]] FsError open(std::string_view relative_path,
                              const OpenOptions& options,
-                             std::unique_ptr<FileHandle>& out_file) override;
+                             std::unique_ptr<FileHandle>& out_file,
+                             OpenAction* out_action = nullptr) override;
   [[nodiscard]] FsError list(
       std::string_view relative_path,
       std::vector<DirectoryEntry>& out_entries) const override;
@@ -55,6 +58,7 @@ class HostPathDevice final : public Device {
   std::filesystem::path configured_root_{};
   std::filesystem::path root_{};
   HostPathDeviceOptions options_{};
+  std::shared_ptr<HostOpenRegistry> open_registry_{};
   bool initialized_{};
 };
 

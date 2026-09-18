@@ -19,21 +19,46 @@ struct GpuCoherencyRange {
   }
 };
 
+// Describes how the host GPU reaches Xbox physical memory. Current desktop
+// Vulkan/D3D12 backends use a device-local mirror. A future UMA/mobile backend
+// may map Xenon's shared physical backing directly and execute visibility/cache
+// operations without redundant CPU<->GPU copies.
+enum class GpuMemoryTopology : std::uint8_t {
+  DiscreteMirror,
+  SharedHostVisible,
+};
+
+enum class GpuSynchronizationAction : std::uint8_t {
+  Copy,
+  VisibilityOnly,
+};
+
 struct GpuUploadPlan {
   std::uint64_t through_epoch{};
   bool exact_history{};
+  GpuSynchronizationAction action{GpuSynchronizationAction::Copy};
   std::vector<GpuCoherencyRange> ranges{};
 };
 
-// Backend-neutral ownership and synchronization planning for a device-side
-// Xbox physical-memory mirror. Native APIs execute copies and barriers; Xenon
-// Memory owns which bytes are newer and which ranges are device-valid.
+struct GpuReadbackPlan {
+  std::uint64_t gpu_generation{};
+  GpuSynchronizationAction action{GpuSynchronizationAction::Copy};
+  std::vector<GpuCoherencyRange> ranges{};
+};
+
+// Backend-neutral ownership and synchronization planning for Xbox physical
+// memory visible to a GPU. Native APIs execute copies/barriers/cache operations;
+// Xenon Memory owns which bytes are newer, which ranges are device-valid, CPU
+// publication epochs and GPU generations.
 class GuestMemoryGpuCoherency {
  public:
-  void reset(std::uint32_t size, bool cpu_initially_dirty = true) {
+  void reset(std::uint32_t size, bool cpu_initially_dirty = true,
+             GpuMemoryTopology topology = GpuMemoryTopology::DiscreteMirror) {
     std::lock_guard lock(mutex_);
     size_ = size;
+    topology_ = topology;
     synchronized_epoch_ = 0;
+    gpu_generation_ = 0;
     cpu_dirty_.clear();
     gpu_dirty_.clear();
     device_valid_.clear();
@@ -43,7 +68,9 @@ class GuestMemoryGpuCoherency {
   void clear() noexcept {
     std::lock_guard lock(mutex_);
     size_ = 0;
+    topology_ = GpuMemoryTopology::DiscreteMirror;
     synchronized_epoch_ = 0;
+    gpu_generation_ = 0;
     cpu_dirty_.clear();
     gpu_dirty_.clear();
     device_valid_.clear();
@@ -55,19 +82,11 @@ class GuestMemoryGpuCoherency {
       std::uint32_t max_range_bytes = 0) {
     GpuUploadPlan plan{};
     plan.through_epoch = memory.current_epoch();
-    std::vector<DirtyPhysicalRange> writes;
+    plan.action = synchronization_action();
 
     std::lock_guard lock(mutex_);
-    plan.exact_history = memory.collect_exact_dirty_ranges(
-        synchronized_epoch_, plan.through_epoch, writes);
-    if (!plan.exact_history) {
-      memory.collect_dirty_ranges(synchronized_epoch_, plan.through_epoch,
-                                  max_range_bytes, writes);
-    }
-    for (const auto& write : writes)
-      mark_cpu_write_unlocked(write.address, write.size);
-    synchronized_epoch_ = plan.through_epoch;
-
+    plan.exact_history = ingest_cpu_writes_unlocked(
+        memory, plan.through_epoch, 0u, max_range_bytes);
     plan.ranges = intersections(cpu_dirty_, clamp(address, size));
     if (max_range_bytes) split_ranges(plan.ranges, max_range_bytes);
     return plan;
@@ -89,30 +108,69 @@ class GuestMemoryGpuCoherency {
     mark_cpu_write_unlocked(address, size);
   }
 
-  void mark_gpu_write(std::uint32_t address, std::uint32_t size) {
+  // Returns the generation assigned to this GPU-authored ownership change.
+  std::uint64_t mark_gpu_write(std::uint32_t address,
+                               std::uint32_t size) {
     std::lock_guard lock(mutex_);
     const auto range = clamp(address, size);
-    if (!range.size) return;
+    if (!range.size) return gpu_generation_;
+    ++gpu_generation_;
+    if (!gpu_generation_) ++gpu_generation_;
     subtract(cpu_dirty_, range);
     add(gpu_dirty_, range);
     add(device_valid_, range);
+    return gpu_generation_;
   }
 
-  [[nodiscard]] std::vector<GpuCoherencyRange> plan_readback(
+  [[nodiscard]] GpuReadbackPlan plan_readback(
       std::uint32_t address, std::uint32_t size,
       std::uint32_t max_range_bytes = 0) const {
     std::lock_guard lock(mutex_);
-    auto result = intersections(gpu_dirty_, clamp(address, size));
-    if (max_range_bytes) split_ranges(result, max_range_bytes);
-    return result;
+    GpuReadbackPlan plan{};
+    plan.gpu_generation = gpu_generation_;
+    plan.action = synchronization_action_unlocked();
+    plan.ranges = intersections(gpu_dirty_, clamp(address, size));
+    if (max_range_bytes) split_ranges(plan.ranges, max_range_bytes);
+    return plan;
   }
 
-  void commit_gpu_download(std::uint32_t address, std::uint32_t size) {
+  // Completes a GPU->CPU visibility operation. publication_epoch is the exact
+  // GuestMemoryCoherency epoch produced when a discrete mirror copied the
+  // downloaded bytes into Xenon physical RAM. That epoch is source-aware: it
+  // is acknowledged as this consumer's own write while all unrelated CPU/DMA
+  // writes in the same interval are retained as CPU-dirty.
+  //
+  // If exact journal history has wrapped, the function deliberately retains
+  // conservative CPU dirt rather than risking suppression of a real writer.
+  // If another GPU write was published after the plan was made, GPU dirt is
+  // also retained conservatively instead of clearing a newer generation.
+  [[nodiscard]] bool commit_gpu_download(
+      const GuestMemoryCoherency& memory, const GpuReadbackPlan& plan,
+      std::uint32_t address, std::uint32_t size,
+      std::uint64_t publication_epoch = 0) {
     std::lock_guard lock(mutex_);
     const auto range = clamp(address, size);
-    subtract(gpu_dirty_, range);
-    subtract(cpu_dirty_, range);
+    if (!range.size) return true;
+
+    bool exact_acknowledgement = true;
+    if (publication_epoch) {
+      exact_acknowledgement = ingest_cpu_writes_unlocked(
+          memory, publication_epoch, publication_epoch, 0u);
+    }
+
+    const bool generation_stable = gpu_generation_ == plan.gpu_generation;
+    if (generation_stable) subtract(gpu_dirty_, range);
+
+    // The device copy itself is current for this range, but any CPU write we
+    // observed while acknowledging the readback makes the overlapping bytes
+    // device-stale again. On journal overflow we conservatively leave CPU dirt
+    // in place, so this same rule remains safe.
     add(device_valid_, range);
+    for (const auto& cpu_range : intersections(cpu_dirty_, range)) {
+      subtract(device_valid_, cpu_range);
+    }
+
+    return exact_acknowledgement && generation_stable;
   }
 
   [[nodiscard]] bool has_gpu_dirty(std::uint32_t address,
@@ -136,12 +194,28 @@ class GuestMemoryGpuCoherency {
     return synchronized_epoch_;
   }
 
-  // Compatibility API retained while all consumers move to explicit plans.
+  [[nodiscard]] std::uint64_t gpu_generation() const {
+    std::lock_guard lock(mutex_);
+    return gpu_generation_;
+  }
+
+  [[nodiscard]] GpuMemoryTopology topology() const {
+    std::lock_guard lock(mutex_);
+    return topology_;
+  }
+
+  // Compatibility helpers retained for tests/tooling and non-native consumers.
   void mark_cpu_uploaded(std::uint32_t address, std::uint32_t size) {
     commit_cpu_upload(address, size);
   }
   void mark_gpu_downloaded(std::uint32_t address, std::uint32_t size) {
-    commit_gpu_download(address, size);
+    std::lock_guard lock(mutex_);
+    const auto range = clamp(address, size);
+    subtract(gpu_dirty_, range);
+    add(device_valid_, range);
+    for (const auto& cpu_range : intersections(cpu_dirty_, range)) {
+      subtract(device_valid_, cpu_range);
+    }
   }
   [[nodiscard]] std::vector<GpuCoherencyRange> cpu_dirty_ranges(
       std::uint32_t address = 0,
@@ -152,10 +226,52 @@ class GuestMemoryGpuCoherency {
   [[nodiscard]] std::vector<GpuCoherencyRange> gpu_dirty_ranges(
       std::uint32_t address = 0,
       std::uint32_t size = (std::numeric_limits<std::uint32_t>::max)()) const {
-    return plan_readback(address, size);
+    return plan_readback(address, size).ranges;
   }
 
  private:
+  [[nodiscard]] GpuSynchronizationAction synchronization_action() const {
+    std::lock_guard lock(mutex_);
+    return synchronization_action_unlocked();
+  }
+
+  [[nodiscard]] GpuSynchronizationAction synchronization_action_unlocked() const
+      noexcept {
+    return topology_ == GpuMemoryTopology::SharedHostVisible
+               ? GpuSynchronizationAction::VisibilityOnly
+               : GpuSynchronizationAction::Copy;
+  }
+
+  // Pulls CPU/DMA publications from the canonical Xenon journal through a
+  // stable epoch. ignored_epoch is used only for a mirror's own CPU writeback.
+  // Returns false when byte-exact journal history was unavailable and a
+  // conservative page-level fallback had to be used.
+  bool ingest_cpu_writes_unlocked(const GuestMemoryCoherency& memory,
+                                  std::uint64_t through_epoch,
+                                  std::uint64_t ignored_epoch,
+                                  std::uint32_t max_range_bytes) {
+    if (through_epoch <= synchronized_epoch_) return true;
+
+    std::vector<DirtyPhysicalWrite> exact_writes;
+    const bool exact = memory.collect_exact_dirty_writes(
+        synchronized_epoch_, through_epoch, exact_writes);
+    if (exact) {
+      for (const auto& write : exact_writes) {
+        if (ignored_epoch && write.epoch == ignored_epoch) continue;
+        mark_cpu_write_unlocked(write.address, write.size);
+      }
+    } else {
+      std::vector<DirtyPhysicalRange> dirty_pages;
+      memory.collect_dirty_ranges(synchronized_epoch_, through_epoch,
+                                  max_range_bytes, dirty_pages);
+      for (const auto& write : dirty_pages) {
+        mark_cpu_write_unlocked(write.address, write.size);
+      }
+    }
+    synchronized_epoch_ = through_epoch;
+    return exact;
+  }
+
   [[nodiscard]] GpuCoherencyRange clamp(std::uint32_t address,
                                         std::uint32_t size) const noexcept {
     if (!size || address >= size_) return {};
@@ -265,7 +381,9 @@ class GuestMemoryGpuCoherency {
 
   mutable std::mutex mutex_{};
   std::uint32_t size_{};
+  GpuMemoryTopology topology_{GpuMemoryTopology::DiscreteMirror};
   std::uint64_t synchronized_epoch_{};
+  std::uint64_t gpu_generation_{};
   std::vector<GpuCoherencyRange> cpu_dirty_{};
   std::vector<GpuCoherencyRange> gpu_dirty_{};
   std::vector<GpuCoherencyRange> device_valid_{};

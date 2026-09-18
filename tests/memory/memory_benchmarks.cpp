@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "xenon/memory/address_space.hpp"
+#include "xenon/memory/host_vm.hpp"
 
 namespace {
 
@@ -104,6 +105,45 @@ int main() {
     }
     return sum;
   });
+  AddressSpace compact_memory(GuestTranslationMode::Compact);
+  if (!compact_memory.initialize() ||
+      !compact_memory.commit_fixed(base, bytes, kReadWrite)) {
+    std::cerr << "Compact benchmark setup failed\n";
+    return 3;
+  }
+  auto compact = compact_memory.access_context();
+  measure("random_translation_32_compact", iterations, [&] {
+    std::uint32_t random = 0x12345678u;
+    std::uint64_t sum = 0;
+    for (std::uint64_t i = 0; i < iterations; ++i) {
+      random = random * 1664525u + 1013904223u;
+      const auto address = base + ((random & (bytes - 4u)) & ~GuestAddress{3u});
+      compact.write32_be(address, random);
+      sum += compact.read32_be(address);
+    }
+    return sum;
+  });
+  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+    AddressSpace direct_memory(GuestTranslationMode::DirectAperture);
+    if (!direct_memory.initialize() || !direct_memory.direct_aperture_active() ||
+        !direct_memory.commit_fixed(base, bytes, kReadWrite)) {
+      std::cerr << "Direct-aperture benchmark setup failed\n";
+      return 3;
+    }
+    auto direct = direct_memory.access_context();
+    measure("random_translation_32_direct_aperture", iterations, [&] {
+      std::uint32_t random = 0x12345678u;
+      std::uint64_t sum = 0;
+      for (std::uint64_t i = 0; i < iterations; ++i) {
+        random = random * 1664525u + 1013904223u;
+        const auto address =
+            base + ((random & (bytes - 4u)) & ~GuestAddress{3u});
+        direct.write32_be(address, random);
+        sum += direct.read32_be(address);
+      }
+      return sum;
+    });
+  }
   measure("cross_page_64", iterations / 16u, [&] {
     std::uint64_t sum = 0;
     for (std::uint64_t i = 0; i < iterations / 16u; ++i) {

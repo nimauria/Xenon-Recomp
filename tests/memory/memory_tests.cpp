@@ -58,6 +58,16 @@ int main() {
 
   AddressSpace mem;
   assert(mem.initialize());
+  // Auto currently selects the compact table on the qualified Linux x86-64
+  // baseline because the Phase 6 benchmark measured it faster than the direct
+  // aperture. Direct mode remains independently testable and build-selectable.
+#if defined(XENON_MEMORY_DEFAULT_DIRECT_APERTURE) && XENON_MEMORY_DEFAULT_DIRECT_APERTURE
+  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+    assert(mem.direct_aperture_active());
+  }
+#else
+  assert(!mem.direct_aperture_active());
+#endif
 
   auto rs = AddressSpace::regions();
   assert(rs.size() == 9);
@@ -69,6 +79,81 @@ int main() {
 
   // 4 KiB virtual mapping backed by real 512 MiB physical RAM.
   assert(mem.commit_fixed(0x00100000u, 0x2000u, kReadWrite));
+  if (mem.direct_aperture_active()) {
+    assert(mem.direct_aperture_maps(0x00100000u));
+    assert(mem.direct_aperture_maps(0x00101000u));
+  }
+
+  // Phase 6 must remain optional. Force the portable compact-translation mode
+  // and verify that Xbox-visible behavior is identical when no aperture is
+  // requested.
+  {
+    AddressSpace compact_only(GuestTranslationMode::Compact);
+    assert(compact_only.initialize());
+    assert(!compact_only.direct_aperture_active());
+    assert(compact_only.commit_fixed(0x00100000u, 0x1000u, kReadWrite));
+    assert(!compact_only.direct_aperture_maps(0x00100000u));
+    compact_only.write32_be(0x00100000u, 0x13579BDFu);
+    const auto compact_phys = compact_only.get_physical_address(0x00100000u);
+    assert(compact_phys != 0xFFFFFFFFu);
+    assert(compact_only.read32_be(kPhysical64KBase + compact_phys) ==
+           0x13579BDFu);
+  }
+
+  // Dynamic aperture mappings follow commit/decommit/recommit and XEX aliases
+  // while preserving one physical backing object.
+  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+    AddressSpace aperture_mem(GuestTranslationMode::DirectAperture);
+    assert(aperture_mem.initialize());
+    assert(aperture_mem.direct_aperture_active());
+    assert(aperture_mem.direct_aperture_maps(kGpuWritebackBase));
+    assert(aperture_mem.direct_aperture_maps(kPhysical64KBase));
+    assert(aperture_mem.direct_aperture_maps(kPhysical16MBase));
+    assert(aperture_mem.direct_aperture_maps(kPhysical4KBase));
+    constexpr GuestAddress kAperturePage = 0x00200000u;
+    assert(aperture_mem.commit_fixed(kAperturePage, kBasePageSize, kReadWrite));
+    assert(aperture_mem.direct_aperture_maps(kAperturePage));
+    aperture_mem.write32_be(kAperturePage, 0x2468ACE0u);
+    const auto aperture_phys = aperture_mem.get_physical_address(kAperturePage);
+    assert(aperture_mem.read32_be(kPhysical64KBase + aperture_phys) ==
+           0x2468ACE0u);
+    assert(aperture_mem.decommit(kAperturePage, kBasePageSize));
+    assert(!aperture_mem.direct_aperture_maps(kAperturePage));
+    assert(aperture_mem.commit_fixed(kAperturePage, kBasePageSize, kReadWrite));
+    assert(aperture_mem.direct_aperture_maps(kAperturePage));
+
+    constexpr GuestAddress kXexPage = 0x82000000u;
+    constexpr GuestAddress kXexAlias = 0x92000000u;
+    assert(aperture_mem.commit_fixed(kXexPage, kLargePageSize, kReadWrite));
+    assert(aperture_mem.direct_aperture_maps(kXexPage));
+    assert(aperture_mem.direct_aperture_maps(kXexAlias));
+    aperture_mem.write32_be(kXexPage, 0xA5C31F70u);
+    assert(aperture_mem.read32_be(kXexAlias) == 0xA5C31F70u);
+
+    // Direct mappings obey the same read-side lifetime rule as physical-page
+    // reclamation. If a fast context could have observed the old direct entry,
+    // decommit first removes kDirectAperture but leaves the host alias intact
+    // until that context is gone. Recommit can then safely establish the new
+    // mapping.
+    constexpr GuestAddress kQuiescentPage = 0x00300000u;
+    assert(aperture_mem.commit_fixed(kQuiescentPage, kBasePageSize, kReadWrite));
+    aperture_mem.write32_be(kQuiescentPage, 0xDEADBEEFu);
+    {
+      auto held = aperture_mem.access_context();
+      xenon::cpu::MemoryAccessContext::PhysicalResolution resolution{};
+      assert(held.resolve_physical_ram(kQuiescentPage, sizeof(std::uint32_t),
+                                       false, alignof(std::uint32_t),
+                                       resolution));
+      assert(resolution.ptr !=
+             aperture_mem.physical_data(resolution.physical_address));
+      assert(aperture_mem.decommit(kQuiescentPage, kBasePageSize));
+      assert(!aperture_mem.direct_aperture_maps(kQuiescentPage));
+      // The old host alias remains mapped during the read-side grace period.
+      assert(resolution.ptr != nullptr);
+    }
+    assert(aperture_mem.commit_fixed(kQuiescentPage, kBasePageSize, kReadWrite));
+    assert(aperture_mem.direct_aperture_maps(kQuiescentPage));
+  }
 
   // Executable mappings use physical-page generations rather than arbitrary
   // callbacks on every scalar store. CPU writes, controlled external writes
@@ -122,8 +207,64 @@ int main() {
                                            OrderedAccess::Store,
                                            OrderedAccess::Store,
                                            MemoryOrderingDomain::Device));
+  static_assert(xenon::cpu::barrier_orders(BarrierKind::Eieio,
+                                           OrderedAccess::Load,
+                                           OrderedAccess::Store,
+                                           MemoryOrderingDomain::WriteCombined));
+  static_assert(xenon::cpu::barrier_orders(BarrierKind::Eieio,
+                                           OrderedAccess::Store,
+                                           OrderedAccess::Load,
+                                           MemoryOrderingDomain::CacheInhibited));
   static_assert(xenon::cpu::barrier_semantics(BarrierKind::InstructionSync)
                     .instruction_sync);
+
+  // Ordering domains come from production mapping state, not from a parallel
+  // CPU-side guess. The compact hot entry distinguishes normal, WC and CI RAM;
+  // MMIO remains a cold/device classification because it is already slow-path.
+  {
+    AddressSpace ordering_mem;
+    assert(ordering_mem.initialize());
+    constexpr GuestAddress normal_page = 0x00300000u;
+    constexpr GuestAddress ci_page = 0x00301000u;
+    constexpr GuestAddress wc_page = 0x00302000u;
+    constexpr GuestAddress mmio_page = 0xFFD00000u;
+    assert(ordering_mem.commit_fixed(normal_page, kBasePageSize, kReadWrite));
+    assert(ordering_mem.commit_fixed(
+        ci_page, kBasePageSize, kReadWrite | Protect::NoCache));
+    assert(ordering_mem.commit_fixed(
+        wc_page, kBasePageSize, kReadWrite | Protect::WriteCombine));
+    assert(ordering_mem.add_mmio_range(
+        mmio_page, kBasePageSize,
+        [](GuestAddress, std::uint32_t) -> std::uint64_t { return 0u; },
+        [](GuestAddress, std::uint32_t, std::uint64_t) {}, "ordering-mmio"));
+    auto ordering_access = ordering_mem.access_context();
+    assert(ordering_mem.ordering_domain(normal_page) ==
+           MemoryOrderingDomain::Normal);
+    assert(ordering_access.ordering_domain(normal_page) ==
+           MemoryOrderingDomain::Normal);
+    assert(ordering_mem.ordering_domain(ci_page) ==
+           MemoryOrderingDomain::CacheInhibited);
+    assert(ordering_access.ordering_domain(ci_page) ==
+           MemoryOrderingDomain::CacheInhibited);
+    assert(ordering_mem.ordering_domain(wc_page) ==
+           MemoryOrderingDomain::WriteCombined);
+    assert(ordering_access.ordering_domain(wc_page) ==
+           MemoryOrderingDomain::WriteCombined);
+    assert(ordering_mem.ordering_domain(mmio_page) ==
+           MemoryOrderingDomain::Device);
+    assert(ordering_access.ordering_domain(mmio_page) ==
+           MemoryOrderingDomain::Device);
+    // eieio is architecturally meaningful for the latter three domains, but
+    // not ordinary cached RAM. The host fence may conservatively be stronger.
+    assert(!xenon::cpu::barrier_orders(
+        BarrierKind::Eieio, OrderedAccess::Store, OrderedAccess::Load,
+        ordering_access.ordering_domain(normal_page)));
+    for (const auto address : {ci_page, wc_page, mmio_page}) {
+      assert(xenon::cpu::barrier_orders(
+          BarrierKind::Eieio, OrderedAccess::Store, OrderedAccess::Load,
+          ordering_access.ordering_domain(address)));
+    }
+  }
 
   // Message-passing litmus using actual Memory V2 relaxed RAM operations. The
   // producer's Store->Store and consumer's Load->Load ordering are both pairs
@@ -159,6 +300,32 @@ int main() {
   order_producer.join();
   order_consumer.join();
   assert(!ordering_failed.load());
+
+  // Store-buffering litmus for heavyweight sync. PPC sync orders Store->Load,
+  // so both threads observing the pre-store zero value is forbidden.
+  constexpr GuestAddress sync_x = 0x00100620u;
+  constexpr GuestAddress sync_y = 0x00100624u;
+  for (std::uint32_t round = 0; round < 256u; ++round) {
+    mem.write32_be(sync_x, 0u);
+    mem.write32_be(sync_y, 0u);
+    std::uint32_t r0 = 0u;
+    std::uint32_t r1 = 0u;
+    std::thread left([&] {
+      auto access = mem.access_context();
+      access.write32_be(sync_x, 1u);
+      mem.barrier(BarrierKind::Sync);
+      r0 = access.read32_be(sync_y);
+    });
+    std::thread right([&] {
+      auto access = mem.access_context();
+      access.write32_be(sync_y, 1u);
+      mem.barrier(BarrierKind::Sync);
+      r1 = access.read32_be(sync_x);
+    });
+    left.join();
+    right.join();
+    assert(r0 != 0u || r1 != 0u);
+  }
   mem.write32_be(0x00100FFEu, 0x11223344u);  // intentionally crosses a page
   assert(mem.read32_be(0x00100FFEu) == 0x11223344u);
   mem.write32_le(0x00100020u, 0xA1B2C3D4u);
@@ -1075,8 +1242,12 @@ int main() {
   // The hot page marks MMIO as slow, so the concrete context dispatches to the
   // existing device semantics rather than treating the physical alias as RAM.
   auto mmio_access = mem.access_context();
+  assert(mmio_access.ordering_domain(0x7FEA0010u) ==
+         MemoryOrderingDomain::Device);
   assert(mmio_access.read32_be(0x7FEA0010u) == 0x12345678u);
+  mem.barrier(BarrierKind::Eieio);
   mmio_access.write32_be(0x7FEA0010u, 0x89ABCDEFu);
+  mem.barrier(BarrierKind::Eieio);
   assert(mmio_last == 0x89ABCDEFu);
 
   // Range operations retain byte-visible MMIO behavior on the cold path while

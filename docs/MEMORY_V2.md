@@ -37,12 +37,12 @@ partial until its outstanding requirements are closed.
 | 2. Hot/cold architecture | **Complete** | `AddressSpace` owns cold management; generated PPC acquires concrete `MemoryAccessContext` once and ordinary RAM uses non-virtual/no-allocation fast access while exceptional cases fall back to `MemoryPort`. |
 | 3. Compact page translation | **Complete** | Atomic 64-bit hot entries cover all 1,048,576 guest pages with physical-page identity, permissions, slow/MMIO and memory-type flags; large allocation/query metadata remains cold. |
 | 4. Remove global access serialization | **Complete** | Common generated and direct `AddressSpace` RAM scalar/range accesses bypass the global management mutex; hot mappings are atomically published, retired physical pages use read-side quiescence, CPU accesses use atomic host operations, controlled DMA/GPU writes use atomic transfer helpers, and six-thread + mapping-churn + external-writer stress is TSan-clean. |
-| 5. Host VM backend | Partial / strong | Windows, POSIX/Linux and fallback implementations are separated from Xbox policy; Windows reserve/commit/protect/decommit/discard/release lifecycle is now regression-tested from a clean native build. Equivalent current Linux lifecycle validation remains before strict closure. |
-| 6. Direct guest aperture | Not started | Compact translation remains the portable baseline. |
+| 5. Host VM backend | **Complete** | Windows, POSIX/Linux and fallback implementations are separated from Xbox policy and expose reserve/commit/decommit/release/protect plus opaque shared-memory map/unmap primitives. Linux lifecycle/shared-view tests are native; Windows uses the equivalent pagefile-backed mapping implementation behind the same API. |
+| 6. Direct guest aperture | **Complete** | A 4 GiB optional shared guest aperture is implemented with fixed aliases where the host supports them, including fixed physical/XEX views and safe quiescent mapping transitions. Compact translation remains the mandatory fallback and current Auto/default because paired Release measurements do not show a reliable aperture win on the qualified Linux x86-64 host. |
 | 7. Physical allocator | **Complete** | Coalescing free/retired ranges replace page-by-page search; 4 KiB granularity, contiguous aligned runs, top-down/bottom-up placement, deterministic reuse and randomized fragmentation/coalescence tests are implemented. |
 | 8. Physical ownership/aliases | **Complete** | Mapping refcounts are cross-checked against sparse cold reverse mappings; pending-free/retired ownership, overlapping views, fixed/XEX/GPU-visible aliases, release-order/reallocation behavior and randomized alias-model tests are implemented without whole-space free scans. |
 | 9. PPC reservation monitor | **Complete** | Six live reservation slots plus a ~512 KiB sticky granule bitmap replace the 16 MiB generation table; physical identity, 32/64-bit LR/SC, alias conflicts, DMA/external invalidation, neighboring granules, replacement and six-thread contention are covered. |
-| 10. PPC memory ordering | Partial / strong | Canonical `sync`/`lwsync`/`eieio`/`isync` ordering, x86-64/ARM64 lowering and threaded litmus coverage exist. This phase remains open until device/write-combined/cache-inhibited behavior and instruction synchronization are integrated with phases 16/19 rather than merely represented. |
+| 10. PPC memory ordering | **Complete** | Canonical `sync`/`lwsync`/`eieio`/`isync` semantics, x86-64/ARM64 lowering, real Normal/WC/CI/MMIO domain classification, LR/SC separation, message-passing/store-buffering litmus tests and an AOT `isync` redispatch/refetch boundary are implemented. Full memory-type host policy and native code-cache eviction remain phases 16/19, not missing ordering semantics. |
 | 11. Block/range access | **Complete** | `read/write/fill`, zero, copy/move, `dcbz`, PPC string operations, VMX partial transfers and current external/DMA-style physical writers use page/range operations; common linear copies use overlap-safe atomic word bursts, nonlinear non-overlap uses bounded scratch, and only pathological MMIO/alias cases use snapshot slow paths. |
 | 12. Dirty tracking/observers | **Complete** | Xenon-owned page epochs plus a bounded lock-free exact-range journal drive consumers; synchronous physical-write observers have been removed from the scalar path entirely. Journal wrap safely falls back to conservative page ranges. |
 | 13. Safe external writes | **Complete** | Raw physical backing is read-only externally; `write_physical`, `fill_physical` and RAII `PhysicalWriteSpan` automatically publish reservation, coherency and executable-generation changes. Production Xenos/Vulkan/D3D12 writers use these controlled paths. |
@@ -432,14 +432,27 @@ respect to Xenon writers; it is not used as a replacement for PPC ordering.
 
 Validation now includes compile-time checks of the canonical ordering matrix, a
 two-thread message-passing litmus using real Memory V2 relaxed RAM accesses and
-`lwsync`, plus generated AOT execution of `sync`, `lwsync`, `eieio` and `isync`.
+`lwsync`, a Store-Buffering litmus proving heavyweight `sync` closes Store->Load,
+plus generated AOT execution of `sync`, `lwsync`, `eieio` and `isync`.
 
-Two boundaries remain intentionally separate:
+The ordering domain is now derived from the production mapping rather than being a
+documentation-only enum. `MemoryAccessContext::ordering_domain()` classifies normal
+cached RAM, hot-entry `WriteCombine`, hot-entry `NoCache`/cache-inhibited mappings,
+and MMIO/device pages. `eieio` is architecturally meaningful for the latter three
+domains and not for normal cached RAM. The host fence is allowed to be stronger than
+the minimum guest guarantee, but the canonical model does not falsely claim that
+normal cached accesses are ordered by `eieio`.
 
-- phase 16 still needs the hot-page memory type to drive concrete MMIO,
-  cache-inhibited and write-combined access policy rather than only barrier policy;
-- phase 19 will connect `icbi`/`isync` to executable-page generations and dynamic
-  native-code invalidation.
+`isync` is also a real recompilation boundary now. Generated AOT code performs the
+host instruction-synchronization primitive and returns to the dispatcher at the next
+guest PC. This discards the current native translation's already-fetched continuation,
+allowing executable-page generation validation / later code-cache invalidation to take
+effect before the next guest instruction executes. `icbi` continues to advance the
+physical executable generation.
+
+Phase 16 still owns the *broader* memory-type policy (for example host mapping/cache
+policy and GPU visibility), and phase 19 still owns native code-cache ownership and
+eviction. Those later requirements no longer leave a gap in PPC ordering itself.
 
 ## 10. MMIO fast/slow split
 
@@ -506,25 +519,57 @@ The current abstraction exposes:
 - decommit;
 - protect;
 - discard;
-- release.
+- release;
+- opaque move-only shared-memory creation;
+- shared map/unmap;
+- capability-tested fixed shared mapping and restoration of an inaccessible
+  reservation for the optional direct aperture.
 
 Implementations:
 
-- Windows: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`;
-- POSIX/Linux: `mmap`, `mprotect`, `madvise`, `munmap`;
+- Windows: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`, pagefile-backed
+  `CreateFileMapping`/`MapViewOfFile` shared views;
+- POSIX/Linux: `mmap`, `mprotect`, `madvise`, `munmap`, `memfd_create` with an
+  immediately-unlinked `shm_open` fallback;
 - fallback implementation for unsupported hosts.
 
 `AddressSpace` now asks this abstraction for physical backing rather than containing Win32/POSIX calls itself. Android/Linux ARM64 can share the POSIX family while retaining Android-specific policy behind the same boundary if required later.
 
-Host VM protection is not yet used as the authoritative Xbox protection mechanism; Xbox permissions remain explicit Xenon page metadata. This avoids accidentally turning a host OS mechanism into Xbox-visible policy.
+Host VM protection is not the authoritative Xbox protection mechanism; Xbox
+permissions remain explicit Xenon page metadata. This avoids accidentally turning a
+host OS mechanism into Xbox-visible policy. Shared-native handles are opaque to the
+Xbox-facing layer and to game modules.
 
 ## 15. Direct guest aperture
 
-An optional direct guest virtual-address aperture remains research work.
+Phase 6 research resulted in an optional 4 GiB guest virtual-address aperture built on
+the host-VM shared-mapping primitives. It is an acceleration representation only; the
+compact translation table remains authoritative for mapping state, permissions, MMIO,
+physical identity, reservations and coherency.
 
-Memory V2 does **not** depend on it. The compact translation table is the portable baseline and must continue to work on Windows, Linux and future ARM64/Android hosts.
+Two production strategies therefore exist:
 
-If a direct aperture is later proven worthwhile, both modes must expose identical Xbox-visible semantics and the runtime/build should select the appropriate representation without leaking host policy into game modules.
+- `GuestTranslationMode::Compact` — compact hot entry -> shared physical backing;
+- `GuestTranslationMode::DirectAperture` — the same hot entry additionally marks a
+  fixed guest-VA host alias, allowing the host pointer to be `aperture + guest VA`.
+
+`GuestTranslationMode::Auto` currently selects compact translation unless a platform
+is explicitly qualified at build time with `XENON_MEMORY_DEFAULT_DIRECT_APERTURE`.
+Repeated paired Release measurements on the current Linux x86-64 environment found
+the direct path within noise or slower than compact translation, with the cleaner
+three-way runs around 87-93 ns/op for compact random translation versus roughly
+99-102 ns/op for the direct aperture. Spending 4 GiB of host VA is therefore not the
+default merely because the mechanism exists.
+
+The aperture uses the same shared physical backing for aliases, including fixed
+0x7F/A/C/E views and dynamic Virtual/XEX mappings. Mapping transitions first withdraw
+the aperture bit from the published hot entry and wait for old read-side contexts to
+quiesce before replacing/clearing a fixed host view. If a safe transition cannot be
+performed, that page stays on compact translation rather than risking stale host
+pointers. Hosts without reliable fixed shared mappings simply keep the compact path.
+
+This leaves ARM64/Android free to use compact translation indefinitely or qualify a
+direct aperture later without changing Xbox-visible semantics.
 
 ## 16. Executable/self-modifying memory
 
@@ -618,20 +663,25 @@ comparison baseline, not pass/fail thresholds.
 
 ## 21. Remaining dependency order
 
-The project now closes unfinished phases in numerical order before advancing. Phase 4
-is closed in this slice. The next strict completion sequence is:
+The project closes unfinished phases in numerical order before advancing. Brief
+phases **1-13 are now strictly complete**. The remaining sequence is therefore:
 
-1. **Phase 5** — finish host-VM abstraction and platform separation, including the
-   remaining Windows/Linux validation and lifecycle semantics;
-2. **Phase 6** — research and, if valid, implement the optional direct guest aperture
-   while retaining compact translation as the portable fallback;
-3. Phases **7-9** are already complete;
-4. **Phase 10** — close the remaining device/write-combined/cache-inhibited and
-   instruction-synchronization ordering integration;
-5. Phase **11** is already complete;
-6. Phases **12-13** are already complete;
-7. then close **14, 15, 16, 17, 18, 19, 20 and 21** one at a time under the same
-   strict completion rule.
+1. **Phase 14** — finish shared CPU/GPU coherency ownership and backend-neutral
+   synchronization planning, including Linux/discrete and future UMA policy;
+2. **Phase 15** — finish requested-range/device-valid lazy GPU synchronization;
+3. **Phase 16** — finish observable memory-type policy beyond the ordering semantics
+   already completed in phase 10;
+4. **Phase 17** — finish the cold MMIO dispatcher structure/locking;
+5. **Phase 18** — complete structured fault/protection records and exception-ready
+   translation;
+6. **Phase 19** — complete native generated-code ownership/eviction for executable
+   generations and self-modifying code;
+7. **Phase 20** — complete the remaining benchmark categories/platform reporting;
+8. **Phase 21** — close model/fuzz/invariant/sanitizer hardening.
+
+Strict completion is now **13/21 phases**. A later phase may still expose a bug in an
+earlier phase; such a regression reopens the earlier phase until its invariant is
+restored.
 
 A later phase may still supply a dependency required by an earlier one, but the earlier
 phase will not be marked complete until that dependency is implemented and tested.

@@ -6,11 +6,25 @@
 #include <limits>
 #include <mutex>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #include "xenon/filesystem/path.hpp"
 
 namespace xenon::filesystem {
+
+struct HostOpenRegistry {
+  struct Record {
+    std::uint64_t id{};
+    FileAccess access{FileAccess::None};
+    ShareAccess share{ShareAccess::All};
+  };
+
+  std::mutex mutex{};
+  std::unordered_map<std::string, std::vector<Record>> records{};
+  std::uint64_t next_id{1};
+};
+
 namespace {
 
 [[nodiscard]] char ascii_lower(char value) noexcept {
@@ -50,6 +64,71 @@ namespace {
   return FsError::IoError;
 }
 
+[[nodiscard]] std::string open_key(const std::filesystem::path& path) {
+  auto key = path.lexically_normal().generic_string();
+  std::transform(key.begin(), key.end(), key.begin(), ascii_lower);
+  return key;
+}
+
+[[nodiscard]] bool access_is_shared(FileAccess access,
+                                    ShareAccess share) noexcept {
+  if (has_access(access, FileAccess::Read) &&
+      !has_share(share, ShareAccess::Read)) {
+    return false;
+  }
+  if (has_access(access, FileAccess::Write) &&
+      !has_share(share, ShareAccess::Write)) {
+    return false;
+  }
+  if (has_access(access, FileAccess::Delete) &&
+      !has_share(share, ShareAccess::Delete)) {
+    return false;
+  }
+  return true;
+}
+
+[[nodiscard]] FsError reserve_open(
+    const std::shared_ptr<HostOpenRegistry>& registry, std::string_view key,
+    const OpenOptions& options, std::uint64_t& out_id) {
+  std::scoped_lock lock(registry->mutex);
+  auto& records = registry->records[std::string(key)];
+  for (const auto& record : records) {
+    if (!access_is_shared(options.access, record.share) ||
+        !access_is_shared(record.access, options.share)) {
+      return FsError::SharingViolation;
+    }
+  }
+  out_id = registry->next_id++;
+  records.push_back({out_id, options.access, options.share});
+  return FsError::None;
+}
+
+void release_open(const std::shared_ptr<HostOpenRegistry>& registry,
+                  std::string_view key, std::uint64_t id) noexcept {
+  if (!registry || id == 0) return;
+  std::scoped_lock lock(registry->mutex);
+  const auto it = registry->records.find(std::string(key));
+  if (it == registry->records.end()) return;
+  auto& records = it->second;
+  records.erase(std::remove_if(records.begin(), records.end(),
+                               [&](const auto& record) {
+                                 return record.id == id;
+                               }),
+                records.end());
+  if (records.empty()) registry->records.erase(it);
+}
+
+[[nodiscard]] bool delete_is_shared(
+    const std::shared_ptr<HostOpenRegistry>& registry,
+    std::string_view key) noexcept {
+  std::scoped_lock lock(registry->mutex);
+  const auto it = registry->records.find(std::string(key));
+  if (it == registry->records.end()) return true;
+  return std::all_of(it->second.begin(), it->second.end(), [](const auto& record) {
+    return has_share(record.share, ShareAccess::Delete);
+  });
+}
+
 [[nodiscard]] FileInfo make_info(const std::filesystem::path& path,
                                  std::error_code& ec) {
   FileInfo info{};
@@ -58,9 +137,16 @@ namespace {
   info.is_directory = std::filesystem::is_directory(status);
   info.read_only = (status.permissions() & std::filesystem::perms::owner_write) ==
                    std::filesystem::perms::none;
+  if (info.is_directory) {
+    info.attributes |= FileAttributeDirectory;
+  } else {
+    info.attributes |= FileAttributeNormal | FileAttributeArchive;
+  }
+  if (info.read_only) info.attributes |= FileAttributeReadOnly;
   if (!info.is_directory && std::filesystem::is_regular_file(status)) {
     info.size = std::filesystem::file_size(path, ec);
     if (ec) return {};
+    info.allocation_size = info.size;
   }
   info.last_write_time = std::filesystem::last_write_time(path, ec);
   return info;
@@ -69,8 +155,16 @@ namespace {
 class HostFileHandle final : public FileHandle {
  public:
   HostFileHandle(std::filesystem::path path, FileAccess access,
-                 std::fstream stream)
-      : path_(std::move(path)), access_(access), stream_(std::move(stream)) {}
+                 std::fstream stream, std::shared_ptr<HostOpenRegistry> registry,
+                 std::string open_key_value, std::uint64_t open_id)
+      : path_(std::move(path)),
+        access_(access),
+        stream_(std::move(stream)),
+        registry_(std::move(registry)),
+        open_key_(std::move(open_key_value)),
+        open_id_(open_id) {}
+
+  ~HostFileHandle() override { release_open(registry_, open_key_, open_id_); }
 
   [[nodiscard]] FsError read(std::span<std::byte> destination,
                              std::size_t& bytes_read) override {
@@ -211,6 +305,9 @@ class HostFileHandle final : public FileHandle {
   FileAccess access_{};
   mutable std::mutex mutex_{};
   std::fstream stream_{};
+  std::shared_ptr<HostOpenRegistry> registry_{};
+  std::string open_key_{};
+  std::uint64_t open_id_{};
   std::uint64_t position_{};
 };
 
@@ -221,7 +318,8 @@ HostPathDevice::HostPathDevice(std::string mount_point,
                                HostPathDeviceOptions options)
     : Device(std::move(mount_point), options.read_only),
       configured_root_(std::move(host_root)),
-      options_(options) {}
+      options_(options),
+      open_registry_(std::make_shared<HostOpenRegistry>()) {}
 
 HostPathDevice::~HostPathDevice() = default;
 
@@ -361,8 +459,10 @@ FsError HostPathDevice::stat(std::string_view relative_path,
 
 FsError HostPathDevice::open(std::string_view relative_path,
                              const OpenOptions& options,
-                             std::unique_ptr<FileHandle>& out_file) {
+                             std::unique_ptr<FileHandle>& out_file,
+                             OpenAction* out_action) {
   out_file.reset();
+  if (out_action) *out_action = OpenAction::None;
   if (options.access == FileAccess::None) return FsError::InvalidArgument;
   const bool wants_write = has_access(options.access, FileAccess::Write);
   if (read_only_ && wants_write) return FsError::ReadOnly;
@@ -402,6 +502,42 @@ FsError HostPathDevice::open(std::string_view relative_path,
   }
   if (ec) return map_error(ec);
 
+  OpenAction action = OpenAction::None;
+  switch (options.disposition) {
+    case CreateDisposition::Supersede:
+      action = exists ? OpenAction::Superseded : OpenAction::Created;
+      break;
+    case CreateDisposition::Open:
+      action = OpenAction::Opened;
+      break;
+    case CreateDisposition::Create:
+      action = OpenAction::Created;
+      break;
+    case CreateDisposition::OpenIf:
+      action = exists ? OpenAction::Opened : OpenAction::Created;
+      break;
+    case CreateDisposition::Overwrite:
+      action = OpenAction::Overwritten;
+      break;
+    case CreateDisposition::OverwriteIf:
+      action = exists ? OpenAction::Overwritten : OpenAction::Created;
+      break;
+  }
+
+  const auto key = open_key(path);
+  std::uint64_t open_id = 0;
+  const auto share_error = reserve_open(open_registry_, key, options, open_id);
+  if (share_error != FsError::None) return share_error;
+  struct OpenReservationGuard {
+    std::shared_ptr<HostOpenRegistry> registry;
+    std::string key;
+    std::uint64_t id{};
+    bool committed{};
+    ~OpenReservationGuard() {
+      if (!committed) release_open(registry, key, id);
+    }
+  } guard{open_registry_, key, open_id, false};
+
   const bool should_create =
       options.disposition == CreateDisposition::Supersede ||
       options.disposition == CreateDisposition::Create ||
@@ -432,7 +568,10 @@ FsError HostPathDevice::open(std::string_view relative_path,
   }
   std::fstream stream(path, mode);
   if (!stream) return FsError::IoError;
-  out_file = std::make_unique<HostFileHandle>(path, options.access, std::move(stream));
+  out_file = std::make_unique<HostFileHandle>(path, options.access, std::move(stream),
+                                              open_registry_, key, open_id);
+  guard.committed = true;
+  if (out_action) *out_action = action;
   return FsError::None;
 }
 
@@ -515,6 +654,9 @@ FsError HostPathDevice::remove(std::string_view relative_path) {
   std::filesystem::path path;
   const auto error = resolve_existing(relative_path, path);
   if (error != FsError::None) return error;
+  if (!delete_is_shared(open_registry_, open_key(path))) {
+    return FsError::SharingViolation;
+  }
   std::error_code ec;
   if (!std::filesystem::remove(path, ec)) {
     return ec ? map_error(ec) : FsError::NotFound;
@@ -535,6 +677,10 @@ FsError HostPathDevice::rename(std::string_view old_relative_path,
   std::filesystem::path destination;
   error = resolve_for_creation(new_relative_path, destination, replace_existing);
   if (error != FsError::None) return error;
+  if (!delete_is_shared(open_registry_, open_key(source)) ||
+      !delete_is_shared(open_registry_, open_key(destination))) {
+    return FsError::SharingViolation;
+  }
 
   std::error_code ec;
   if (std::filesystem::exists(destination, ec)) {

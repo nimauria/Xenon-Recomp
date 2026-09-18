@@ -51,6 +51,10 @@ class PhysicalWriteSpan {
                            std::span<const std::byte> source) noexcept;
   [[nodiscard]] bool fill(std::uint32_t offset, std::uint32_t size,
                           std::byte value) noexcept;
+  // Explicit completion is optional; destruction still commits automatically.
+  // The returned Xenon coherency epoch lets source-aware consumers acknowledge
+  // their own write without suppressing unrelated CPU/DMA publications.
+  [[nodiscard]] std::uint64_t commit() noexcept;
 
  private:
   friend class AddressSpace;
@@ -61,12 +65,18 @@ class PhysicalWriteSpan {
         physical_address_(physical_address),
         bytes_(bytes),
         reservation_participant_(reservation_participant) {}
-  void complete() noexcept;
+  [[nodiscard]] std::uint64_t complete() noexcept;
 
   AddressSpace* owner_{};
   std::uint32_t physical_address_{};
   std::span<std::byte> bytes_{};
   bool reservation_participant_{};
+};
+
+enum class GuestTranslationMode : std::uint8_t {
+  Auto,
+  Compact,
+  DirectAperture,
 };
 
 class AddressSpace final : public xenon::cpu::MemoryPort {
@@ -84,7 +94,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
     std::string name{};
   };
 
-  AddressSpace();
+  explicit AddressSpace(GuestTranslationMode mode = GuestTranslationMode::Auto);
   ~AddressSpace() override;
   AddressSpace(const AddressSpace&) = delete;
   AddressSpace& operator=(const AddressSpace&) = delete;
@@ -95,6 +105,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] xenon::cpu::MemoryAccessContext access_context() noexcept override;
   [[nodiscard]] GuestMemoryCoherency& coherency() noexcept { return coherency_; }
   [[nodiscard]] const GuestMemoryCoherency& coherency() const noexcept { return coherency_; }
+  [[nodiscard]] bool direct_aperture_active() const noexcept;
+  [[nodiscard]] bool direct_aperture_maps(GuestAddress address) const noexcept;
 
   [[nodiscard]] static std::span<const RegionDescriptor> regions() noexcept;
   [[nodiscard]] static const RegionDescriptor* region_for(GuestAddress address) noexcept;
@@ -136,8 +148,9 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
       std::uint32_t physical_address = 0) const;
   [[nodiscard]] bool copy_physical_range(std::uint32_t physical_address,
                                          std::span<std::byte> destination) const;
-  [[nodiscard]] bool write_physical(std::uint32_t physical_address,
-                                    std::span<const std::byte> source);
+  [[nodiscard]] bool write_physical(
+      std::uint32_t physical_address, std::span<const std::byte> source,
+      std::uint64_t* published_epoch = nullptr);
   [[nodiscard]] bool fill_physical(std::uint32_t physical_address,
                                    std::uint32_t size, std::byte value);
   [[nodiscard]] std::vector<GuestAddress> dynamic_guest_aliases_for_physical(
@@ -200,6 +213,9 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                            std::uint64_t value) override;
   void cancel_reservation(std::uint64_t token) noexcept override;
 
+  [[nodiscard]] xenon::cpu::MemoryOrderingDomain ordering_domain(
+      xenon::cpu::GuestAddress address) const noexcept override;
+
   void barrier(xenon::cpu::BarrierKind kind) override;
   void zero_cache_block(xenon::cpu::GuestAddress address,
                         std::uint32_t bytes) override;
@@ -246,6 +262,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   };
 
   class PhysicalBacking;
+  class GuestAperture;
   class PhysicalRangeAllocator;
   class PhysicalReverseMappings;
 
@@ -297,6 +314,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   friend class PhysicalWriteSpan;
   [[nodiscard]] std::uint64_t make_hot_entry(std::uint32_t page_index) const;
+  void publish_hot_entry(std::uint32_t page_index, std::uint64_t entry);
   void publish_hot_page(std::uint32_t page_index);
   void publish_hot_range(GuestAddress base, std::uint32_t size);
   void rebuild_hot_pages();
@@ -304,9 +322,9 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] xenon::cpu::FastMemoryView make_fast_memory_view() noexcept;
   [[nodiscard]] bool begin_physical_write(std::uint32_t physical_address,
                                           std::uint32_t width) noexcept;
-  void complete_physical_write(std::uint32_t physical_address,
-                               std::uint32_t width,
-                               bool reservation_participant) noexcept;
+  std::uint64_t complete_physical_write(
+      std::uint32_t physical_address, std::uint32_t width,
+      bool reservation_participant) noexcept;
   void begin_reservation_operation() noexcept;
   void end_reservation_operation() noexcept;
   [[nodiscard]] std::uint64_t claim_reservation(
@@ -324,6 +342,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                                  const char* message);
 
   std::unique_ptr<PhysicalBacking> physical_{};
+  std::unique_ptr<GuestAperture> guest_aperture_{};
   std::unique_ptr<PhysicalRangeAllocator> physical_allocator_{};
   std::unique_ptr<PhysicalReverseMappings> physical_reverse_mappings_{};
   std::vector<Page> pages_{};
@@ -351,6 +370,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   std::vector<std::pair<std::uint64_t, InvalidationCallback>>
       invalidation_callbacks_{};
   std::uint64_t next_invalidation_callback_id_{1};
+  bool direct_aperture_requested_{true};
   bool initialized_{};
 };
 

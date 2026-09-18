@@ -23,6 +23,7 @@ class DiscordPresenceFeature final : public QObject {
 
   [[nodiscard]] QVariantMap state() const;
   [[nodiscard]] QVariantMap desiredActivity() const;
+  [[nodiscard]] bool requestedEnabled() const;
   [[nodiscard]] bool enabled() const;
   [[nodiscard]] bool showGameTitle() const;
   void setPage(const QString& page_name);

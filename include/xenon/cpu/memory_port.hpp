@@ -30,6 +30,7 @@ inline constexpr std::uint64_t kExecute = 1ull << 20u;
 inline constexpr std::uint64_t kSlow = 1ull << 21u;
 inline constexpr std::uint64_t kNoCache = 1ull << 22u;
 inline constexpr std::uint64_t kWriteCombine = 1ull << 23u;
+inline constexpr std::uint64_t kDirectAperture = 1ull << 24u;
 
 [[nodiscard]] constexpr std::uint64_t encode_page(
     std::uint32_t physical_page, bool read, bool write, bool execute,
@@ -47,6 +48,7 @@ inline constexpr std::uint64_t kWriteCombine = 1ull << 23u;
 // whose lifetime is owned by the concrete MemoryPort implementation.
 struct FastMemoryView {
   std::byte* physical_base{};
+  std::byte* guest_aperture_base{};
   const std::atomic<std::uint64_t>* page_table{};
   std::uint32_t page_count{};
   std::uint32_t page_shift{12};
@@ -145,6 +147,13 @@ class MemoryAccessContext {
   [[nodiscard]] bool has_fast_path() const noexcept {
     return fast_.physical_base && fast_.page_table && fast_.page_count;
   }
+
+  // Classify the guest mapping for PPC ordering semantics without forcing the
+  // common generated path back through cold allocation/MMIO metadata. Normal
+  // RAM, write-combined and cache-inhibited pages are encoded in the hot page
+  // entry. Slow/MMIO pages delegate to the owning MemoryPort.
+  [[nodiscard]] MemoryOrderingDomain ordering_domain(
+      GuestAddress address) const noexcept;
 
   struct PhysicalResolution {
     std::byte* ptr{};
@@ -268,6 +277,15 @@ class MemoryPort {
   // token, and also when a mismatched conditional store must clear it. Test
   // ports that use generation-only reservations may leave this as a no-op.
   virtual void cancel_reservation(std::uint64_t token) noexcept { (void)token; }
+
+  // Ordering-domain query is intentionally cold: barrier instructions need it
+  // for validation/tooling, while ordinary loads/stores never call it. Test
+  // ports default to normal cached RAM.
+  [[nodiscard]] virtual MemoryOrderingDomain ordering_domain(
+      GuestAddress address) const noexcept {
+    (void)address;
+    return MemoryOrderingDomain::Normal;
+  }
 
   virtual void barrier(BarrierKind kind) = 0;
   virtual void zero_cache_block(GuestAddress address, std::uint32_t bytes) = 0;
@@ -432,13 +450,35 @@ inline bool MemoryAccessContext::resolve_fast(GuestAddress address,
                           (address & (page_size - 1u));
   if (physical64 + width > fast_.physical_size) return false;
   const auto physical = static_cast<std::uint32_t>(physical64);
-  auto* ptr = fast_.physical_base + physical;
+  auto* ptr = (entry & fast_memory::kDirectAperture) &&
+                  fast_.guest_aperture_base
+              ? fast_.guest_aperture_base + address
+              : fast_.physical_base + physical;
   if (alignment > 1u &&
       (reinterpret_cast<std::uintptr_t>(ptr) & (alignment - 1u)) != 0) {
     return false;
   }
   out = {ptr, physical};
   return true;
+}
+
+inline MemoryOrderingDomain MemoryAccessContext::ordering_domain(
+    GuestAddress address) const noexcept {
+  if (!has_fast_path()) return slow_->ordering_domain(address);
+  const auto page = address >> fast_.page_shift;
+  if (page >= fast_.page_count) return slow_->ordering_domain(address);
+  const auto entry = fast_.page_table[page].load(std::memory_order_acquire);
+  if (entry & fast_memory::kSlow) return slow_->ordering_domain(address);
+  if ((entry & fast_memory::kMapped) == 0u) {
+    return slow_->ordering_domain(address);
+  }
+  if (entry & fast_memory::kNoCache) {
+    return MemoryOrderingDomain::CacheInhibited;
+  }
+  if (entry & fast_memory::kWriteCombine) {
+    return MemoryOrderingDomain::WriteCombined;
+  }
+  return MemoryOrderingDomain::Normal;
 }
 
 namespace reservation_monitor_detail {
@@ -583,10 +623,11 @@ inline void invalidate_range(const FastMemoryView& fast,
   return reservation_participant;
 }
 
-inline void finish_write(const FastMemoryView& fast,
-                         std::uint32_t physical_address,
-                         std::uint32_t width,
-                         bool reservation_participant) noexcept {
+inline std::uint64_t finish_write(const FastMemoryView& fast,
+                                  std::uint32_t physical_address,
+                                  std::uint32_t width,
+                                  bool reservation_participant) noexcept {
+  std::uint64_t published_epoch = 0u;
   if (fast.global_write_epoch && fast.physical_page_epochs &&
       fast.physical_page_count) {
     auto epoch = fast.global_write_epoch->fetch_add(
@@ -596,6 +637,7 @@ inline void finish_write(const FastMemoryView& fast,
       fast.global_write_epoch->store(1u, std::memory_order_release);
       epoch = 1u;
     }
+    published_epoch = epoch;
     constexpr std::uint32_t kPhysicalPageShift = 12u;
     const auto first = physical_address >> kPhysicalPageShift;
     const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -638,6 +680,7 @@ inline void finish_write(const FastMemoryView& fast,
   if (fast.active_coherency_writers) {
     fast.active_coherency_writers->fetch_sub(1u, std::memory_order_release);
   }
+  return published_epoch;
 }
 
 }  // namespace reservation_monitor_detail

@@ -113,6 +113,65 @@ void test_guest_memory_coherency_ranges() {
   assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x301u &&
          plan.ranges[0].size == 1u);
   assert(!planned.device_range_valid(0x300u, 4u));
+
+  // GPU->CPU readback publication is source-aware. The mirror's own physical
+  // write must not immediately appear as CPU dirt that needs uploading back to
+  // the same device mirror.
+  GuestMemoryGpuCoherency readback_tracker;
+  readback_tracker.reset(0x10000u, false);
+  readback_tracker.mark_gpu_write(0x500u, 8u);
+  const auto readback_plan = readback_tracker.plan_readback(0x500u, 8u);
+  assert(readback_plan.action ==
+         xenon::memory::GpuSynchronizationAction::Copy);
+  assert(readback_plan.ranges.size() == 1u);
+  const auto self_epoch = memory_writes.mark_write(0x500u, 8u);
+  assert(readback_tracker.commit_gpu_download(
+      memory_writes, readback_plan, 0x500u, 8u, self_epoch));
+  assert(!readback_tracker.has_gpu_dirty(0x500u, 8u));
+  assert(readback_tracker.cpu_dirty_ranges(0x500u, 8u).empty());
+  assert(readback_tracker.device_range_valid(0x500u, 8u));
+  auto echo_plan = readback_tracker.plan_upload(memory_writes, 0x500u, 8u);
+  assert(echo_plan.ranges.empty());
+
+  // An unrelated CPU publication before the mirror's own readback epoch must
+  // survive acknowledgement and remain uploadable byte-precisely.
+  readback_tracker.mark_gpu_write(0x600u, 8u);
+  const auto conflict_plan = readback_tracker.plan_readback(0x600u, 8u);
+  memory_writes.mark_write(0x603u, 1u);
+  const auto conflict_self_epoch = memory_writes.mark_write(0x600u, 8u);
+  assert(readback_tracker.commit_gpu_download(
+      memory_writes, conflict_plan, 0x600u, 8u, conflict_self_epoch));
+  const auto conflict_cpu = readback_tracker.cpu_dirty_ranges(0x600u, 8u);
+  assert(conflict_cpu.size() == 1u);
+  assert(conflict_cpu[0].address == 0x603u && conflict_cpu[0].size == 1u);
+  assert(!readback_tracker.device_range_valid(0x603u, 1u));
+
+  // A GPU generation published after planning prevents an older readback plan
+  // from clearing newer ownership. Conservatively retaining dirt is correct.
+  readback_tracker.mark_gpu_write(0x700u, 4u);
+  const auto stale_plan = readback_tracker.plan_readback(0x700u, 4u);
+  readback_tracker.mark_gpu_write(0x800u, 4u);
+  const auto stale_self_epoch = memory_writes.mark_write(0x700u, 4u);
+  assert(!readback_tracker.commit_gpu_download(
+      memory_writes, stale_plan, 0x700u, 4u, stale_self_epoch));
+  assert(readback_tracker.has_gpu_dirty(0x700u, 4u));
+
+  // UMA/mobile-capable policy is represented without changing Xbox semantics.
+  // A shared-host-visible implementation receives the same requested ranges,
+  // but executes cache/visibility work instead of redundant memory copies.
+  GuestMemoryGpuCoherency uma_tracker;
+  uma_tracker.reset(0x10000u, false,
+                    xenon::memory::GpuMemoryTopology::SharedHostVisible);
+  memory_writes.mark_write(0x900u, 4u);
+  const auto uma_upload = uma_tracker.plan_upload(memory_writes, 0x900u, 4u);
+  assert(uma_upload.action ==
+         xenon::memory::GpuSynchronizationAction::VisibilityOnly);
+  assert(uma_upload.ranges.size() == 1u);
+  uma_tracker.mark_gpu_write(0xA00u, 4u);
+  const auto uma_readback = uma_tracker.plan_readback(0xA00u, 4u);
+  assert(uma_readback.action ==
+         xenon::memory::GpuSynchronizationAction::VisibilityOnly);
+  assert(uma_readback.ranges.size() == 1u);
 }
 
 void test_memexport_stream_planning() {
