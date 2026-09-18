@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "xenon/cpu/memory_port.hpp"
+#include "xenon/memory/coherency.hpp"
 #include "xenon/memory/fault.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -43,6 +44,10 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   [[nodiscard]] bool initialize();
   void reset();
+
+  [[nodiscard]] xenon::cpu::MemoryAccessContext access_context() noexcept override;
+  [[nodiscard]] GuestMemoryCoherency& coherency() noexcept { return coherency_; }
+  [[nodiscard]] const GuestMemoryCoherency& coherency() const noexcept { return coherency_; }
 
   [[nodiscard]] static std::span<const RegionDescriptor> regions() noexcept;
   [[nodiscard]] static const RegionDescriptor* region_for(GuestAddress address) noexcept;
@@ -144,6 +149,11 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   static constexpr std::uint32_t kReservationGranuleCount =
       kPhysicalMemorySize / kReservationGranuleSize;
   static constexpr std::uint32_t kInvalidPhysicalPage = 0xFFFFFFFFu;
+  static constexpr std::uint8_t kPhysicalFree = 0;
+  static constexpr std::uint8_t kPhysicalSystem = 1;
+  static constexpr std::uint8_t kPhysicalAnonymous = 2;
+  static constexpr std::uint8_t kPhysicalExplicit = 3;
+  static constexpr std::uint8_t kPhysicalAnonymousPendingFree = 4;
 
   struct Page {
     std::uint32_t physical_page{kInvalidPhysicalPage};
@@ -184,6 +194,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   [[nodiscard]] std::uint32_t allocate_physical_page(bool top_down);
   void free_physical_page(std::uint32_t page);
+  void add_physical_mapping_ref(std::uint32_t page);
+  void remove_physical_mapping_ref(std::uint32_t page);
   [[nodiscard]] bool reserve_physical_run(std::uint32_t page_count,
                                           std::uint32_t alignment_pages,
                                           bool top_down,
@@ -210,6 +222,15 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void write_integer(GuestAddress address, T value, bool little_endian);
 
   void note_physical_write(std::uint32_t physical_address, std::uint32_t width);
+  void notify_physical_write_observers(std::uint32_t physical_address,
+                                       std::uint32_t width);
+  static void fast_observer_thunk(void* context, std::uint32_t physical_address,
+                                  std::uint32_t width);
+  [[nodiscard]] std::uint64_t make_hot_entry(std::uint32_t page_index) const;
+  void publish_hot_page(std::uint32_t page_index);
+  void publish_hot_range(GuestAddress base, std::uint32_t size);
+  void rebuild_hot_pages();
+  [[nodiscard]] bool page_has_mmio(std::uint32_t page_index) const;
   void note_physical_write_addresses(
       std::span<const std::uint32_t> physical_addresses);
   [[nodiscard]] std::uint64_t reservation_version(
@@ -222,8 +243,14 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   std::unique_ptr<PhysicalBacking> physical_{};
   std::vector<Page> pages_{};
+  std::vector<std::atomic<std::uint64_t>> hot_pages_{};
+  // Cold physical ownership state is independent of virtual mapping lifetime.
+  // A page can have an owner whose original mapping has gone away while other
+  // aliases still hold mapping references.
   std::vector<std::uint8_t> physical_page_used_{};
+  std::vector<std::uint32_t> physical_mapping_refs_{};
   std::vector<std::atomic<std::uint32_t>> reservation_versions_{};
+  GuestMemoryCoherency coherency_{};
 
   mutable std::recursive_mutex mutex_{};
   std::vector<MmioRange> mmio_ranges_{};
@@ -233,6 +260,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   std::vector<std::pair<std::uint64_t, PhysicalWriteCallback>>
       physical_write_callbacks_{};
   std::uint64_t next_physical_write_callback_id_{1};
+  std::atomic<bool> physical_write_observers_active_{false};
   bool initialized_{};
 };
 

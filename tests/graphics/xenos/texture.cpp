@@ -6,6 +6,7 @@
 #include <set>
 #include <vector>
 
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/texture.hpp"
 
 namespace {
@@ -110,6 +111,18 @@ void test_mips_packing_and_dirty_ranges() {
   assert(dirty.consume_dirty(descriptor.hash()));
   dirty.mark_dirty(0x1F000000, 4);
   assert(!dirty.is_dirty(descriptor.hash()));
+
+  // Memory V2 GPU consumers use Xenon-owned page epochs instead of a
+  // synchronous callback on each CPU scalar store.
+  xenon::memory::GuestMemoryCoherency coherency;
+  const auto clean_epoch = coherency.current_epoch();
+  dirty.track_clean(descriptor.hash(), layout, clean_epoch);
+  assert(!dirty.consume_dirty(descriptor.hash(), coherency,
+                              coherency.current_epoch()));
+  coherency.mark_write(descriptor.base_address + 32u, 4u);
+  const auto dirty_epoch = coherency.current_epoch();
+  assert(dirty.consume_dirty(descriptor.hash(), coherency, dirty_epoch));
+  assert(!dirty.consume_dirty(descriptor.hash(), coherency, dirty_epoch));
 }
 
 void test_3d_tiled_addressing() {
@@ -221,6 +234,73 @@ void test_raw_resolve_write() {
   }
 }
 
+void test_depth_resolve_write() {
+  assert(depth_resolve_texture_format(DepthRenderTargetFormat::D24S8) == 22);
+  assert(depth_resolve_texture_format(DepthRenderTargetFormat::D24FS8) == 23);
+
+  CopyResolveState copy{};
+  // D3D9 programs a color-style destination format for depth resolves. The
+  // common writer must ignore that field, conversion controls and component
+  // swap while preserving the exact packed depth/stencil word.
+  copy.command = CopyCommand::Convert;
+  copy.destination_base = 0x10000;
+  copy.destination_pitch = 32;
+  copy.destination_height = 32;
+  copy.destination_format = 6;
+  copy.destination_endian = Endian128::Swap8In128;
+  copy.destination_exponent_bias = 7;
+  copy.destination_red_blue_swap = true;
+  const ResolveRectangle rectangle{8, 8, 16, 16, true};
+
+  std::vector<std::uint32_t> source(8u * 8u);
+  for (std::uint32_t y = 0; y < 8; ++y) {
+    for (std::uint32_t x = 0; x < 8; ++x) {
+      const float depth = float((y * 8u + x) & 63u) / 63.0f;
+      source[y * 8u + x] = pack_depth_stencil(
+          DepthRenderTargetFormat::D24S8, depth,
+          static_cast<std::uint8_t>(0x80u | x));
+    }
+  }
+  std::vector<std::byte> memory(0x20000, std::byte{0xCC});
+  const auto written = write_depth_resolve(
+      copy, DepthRenderTargetFormat::D24S8, rectangle, source, 8u * 4u,
+      memory);
+  assert(written.valid && written.modified_size != 0);
+
+  auto logical = memory;
+  apply_endian128(std::span(logical).subspan(written.modified_address,
+                                             written.modified_size),
+                  copy.destination_endian);
+  for (std::uint32_t y = 0; y < 8; ++y) {
+    for (std::uint32_t x = 0; x < 8; ++x) {
+      const auto offset = copy.destination_base +
+          tiled_offset_2d(8 + x, 8 + y, 32, 4);
+      std::uint32_t packed{};
+      std::memcpy(&packed, logical.data() + offset, sizeof(packed));
+      assert(packed == source[y * 8u + x]);
+    }
+  }
+
+  // D24FS8 has a representable range above 1.0. Verify resolve transport is
+  // bit-exact rather than re-quantizing through normalized host depth.
+  copy.destination_base = 0x30000;
+  copy.destination_endian = Endian128::None;
+  const ResolveRectangle float_rectangle{0, 0, 1, 1, true};
+  const std::array<std::uint32_t, 1> float_source{
+      pack_depth_stencil(DepthRenderTargetFormat::D24FS8, 1.5f, 0xA5)};
+  memory.assign(0x40000, std::byte{});
+  const auto float_written = write_depth_resolve(
+      copy, DepthRenderTargetFormat::D24FS8, float_rectangle, float_source, 4,
+      memory);
+  assert(float_written.valid);
+  std::uint32_t packed_float{};
+  std::memcpy(&packed_float, memory.data() + copy.destination_base,
+              sizeof(packed_float));
+  assert(packed_float == float_source[0]);
+  assert(unpack_depth_stencil(DepthRenderTargetFormat::D24FS8, packed_float)
+             .stencil == 0xA5);
+}
+
 void test_converted_resolve_write() {
   CopyResolveState copy{};
   copy.command = CopyCommand::Convert;
@@ -274,6 +354,7 @@ int main() {
   test_3d_tiled_addressing();
   test_endian128_modes();
   test_raw_resolve_write();
+  test_depth_resolve_write();
   test_converted_resolve_write();
   std::cout << "xenon_texture_tests: ok\n";
 }

@@ -122,6 +122,16 @@ enum class ColorHostStorage : std::uint8_t {
 [[nodiscard]] bool decode_host_color_sample(
     ColorRenderTargetFormat format, std::span<const std::byte> source,
     ColorSample& sample) noexcept;
+// Averages two native host-storage color readbacks in linear component space.
+// Xenos Samples01 / Samples23 resolves average exactly two guest samples; the
+// backends use this after explicitly reading those samples instead of asking a
+// native full-MSAA resolve to average unrelated samples too.
+[[nodiscard]] bool average_host_color_samples(
+    ColorRenderTargetFormat format, std::uint32_t width,
+    std::uint32_t height, std::span<const std::byte> source_a,
+    std::uint32_t source_a_pitch, std::span<const std::byte> source_b,
+    std::uint32_t source_b_pitch, std::vector<std::byte>& destination,
+    std::uint32_t& destination_pitch) noexcept;
 [[nodiscard]] bool edram_color_to_host(
     ColorRenderTargetFormat format, std::uint32_t width,
     std::uint32_t height, std::span<const std::byte> source,

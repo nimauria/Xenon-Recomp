@@ -7,17 +7,20 @@ Rectangle {
     property string label: ""
     property color tone: Theme.textMuted
 
-    implicitHeight: 26
-    implicitWidth: row.implicitWidth + 18
+    implicitHeight: 28
+    implicitWidth: row.implicitWidth + Theme.spaceLg
     radius: implicitHeight / 2
     color: Theme.surfaceAlt
-    border.width: 1
+    border.width: Theme.borderWidth
     border.color: Theme.border
+
+    Accessible.role: Accessible.StaticText
+    Accessible.name: root.label
 
     RowLayout {
         id: row
         anchors.centerIn: parent
-        spacing: 7
+        spacing: Theme.spaceSm
 
         Rectangle {
             width: 8
@@ -29,7 +32,7 @@ Rectangle {
         Text {
             text: root.label
             color: root.tone
-            font.pixelSize: 11
+            font.pixelSize: Theme.typeCaption
             font.weight: Font.Medium
         }
     }

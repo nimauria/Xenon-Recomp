@@ -72,8 +72,16 @@ add_library(Xenon::CPU ALIAS xenon_cpu)
 # -----------------------------------------------------------------------------
 # Production guest memory. FlatMemory above remains a CPU test fixture only.
 if(XENON_ENABLE_MEMORY)
+  if(WIN32)
+    set(XENON_HOST_VM_SOURCE src/memory/mapping/host_vm_windows.cpp)
+  elseif(UNIX)
+    set(XENON_HOST_VM_SOURCE src/memory/mapping/host_vm_posix.cpp)
+  else()
+    set(XENON_HOST_VM_SOURCE src/memory/mapping/host_vm_fallback.cpp)
+  endif()
   add_library(xenon_memory STATIC
     src/memory/guest/address_space.cpp
+    ${XENON_HOST_VM_SOURCE}
   )
   target_link_libraries(xenon_memory PUBLIC xenon_cpu)
   target_include_directories(xenon_memory PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -318,6 +326,29 @@ if(XENON_BUILD_TESTS)
     endif()
     xenon_enable_test_asserts(xenon_backend_capability_tests)
     add_test(NAME xenon_backend_capability_tests COMMAND xenon_backend_capability_tests)
+
+    # Production-backend EDRAM ownership regression. This target is always
+    # present so the common fixture is syntax-checked even when no native SDK
+    # is installed; available renderer targets opt in below.
+    add_executable(xenon_backend_ownership_integration_tests
+      tests/graphics/backends/backend_ownership_integration.cpp)
+    target_link_libraries(xenon_backend_ownership_integration_tests
+      PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_backend_ownership_integration_tests
+        PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_backend_ownership_integration_tests
+        PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_backend_ownership_integration_tests
+        PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_backend_ownership_integration_tests
+        PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
+    add_test(NAME xenon_backend_ownership_integration_tests
+      COMMAND xenon_backend_ownership_integration_tests)
 
     add_executable(xenon_shader_decoder_tests tests/graphics/xenos/shader_decoder.cpp)
     set_target_properties(xenon_shader_decoder_tests PROPERTIES

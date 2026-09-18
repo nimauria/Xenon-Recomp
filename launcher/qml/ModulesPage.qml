@@ -8,26 +8,20 @@ Item {
 
     property string searchText: ""
     property int selectedModuleIndex: -1
+    property string fixtureMode: launcherBridge.stringSetting(
+        "developer/fixtureMode", launcherBridge.testMode ? "generic" : "none")
 
-    readonly property bool hasModules: modulesModel.count > 0
     readonly property bool testMode: launcherBridge.testMode
+    readonly property bool hasModules: modulesModel.count > 0
 
     ListModel { id: modulesModel }
 
     function emptyModule() {
         return {
-            moduleName: "",
-            description: "",
-            typeName: "",
-            version: "",
-            active: false,
-            status: "",
-            regions: "",
-            updated: "",
-            moduleId: "",
-            gameIds: "",
-            dependency: "",
-            renderer: ""
+            moduleName: "", moduleType: "", version: "", status: "",
+            active: false, updateAvailable: false, description: "", moduleId: "",
+            regions: "", gameIds: "", runtimeDependency: "", renderer: "",
+            artwork: "", capabilities: "", linkedGame: ""
         }
     }
 
@@ -37,268 +31,328 @@ Item {
         return modulesModel.get(selectedModuleIndex)
     }
 
-    function matchesSearch(name, typeName) {
+    function matchesSearch(name, type, id) {
         var needle = searchText.trim().toLowerCase()
         if (needle.length === 0)
             return true
-        return name.toLowerCase().indexOf(needle) !== -1
-            || typeName.toLowerCase().indexOf(needle) !== -1
+        return String(name).toLowerCase().indexOf(needle) !== -1
+            || String(type).toLowerCase().indexOf(needle) !== -1
+            || String(id).toLowerCase().indexOf(needle) !== -1
     }
 
-    function populateTestData() {
+    function selectFirstMatchingModule() {
+        if (!hasModules) {
+            selectedModuleIndex = -1
+            return
+        }
+        for (var i = 0; i < modulesModel.count; ++i) {
+            var module = modulesModel.get(i)
+            if (matchesSearch(module.moduleName, module.moduleType, module.moduleId)) {
+                selectedModuleIndex = i
+                return
+            }
+        }
+        selectedModuleIndex = -1
+    }
+
+    onSearchTextChanged: selectFirstMatchingModule()
+
+    function genericSettings() {
+        return [
+            { id: "renderer", label: "Renderer override", description: "Use the launcher default or select a module-supported renderer.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
+            { id: "offline", label: "Offline mode", description: "Force offline-compatible services for this module.", type: "bool", defaultValue: true },
+            { id: "debugOverlay", label: "Debug overlay", description: "Show module diagnostics while launching test content.", type: "bool", defaultValue: false }
+        ]
+    }
+
+    function gracemeriaSettings() {
+        return [
+            { id: "region", label: "Game region", description: "Choose which supported executable/content region the module should prefer.", type: "choice", defaultValue: "Automatic", options: ["Automatic", "NTSC-U", "PAL"] },
+            { id: "renderer", label: "Renderer override", description: "Override the launcher renderer for this module.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
+            { id: "offline", label: "Offline mode", description: "Use local service fallbacks while online services are unavailable.", type: "bool", defaultValue: true },
+            { id: "skipIntro", label: "Skip intro videos", description: "Example module-defined preference used only by the UI preview.", type: "bool", defaultValue: false },
+            { id: "cache", label: "Shader cache profile", description: "Example scalable manifest choice.", type: "choice", defaultValue: "Automatic", options: ["Automatic", "Conservative", "Aggressive"] }
+        ]
+    }
+
+    // Settings remain outside ListModel delegates. Real modules will expose the
+    // same schema through the module manifest/service API, and this resolver
+    // can be replaced without changing ModuleSettingsDialog.
+    function settingsForModule(moduleId) {
+        if (moduleId === "org.nimauria.project-gracemeria")
+            return gracemeriaSettings()
+        if (String(moduleId).indexOf("xenon.test.") === 0)
+            return genericSettings()
+        return []
+    }
+
+    function populateFixtures() {
         modulesModel.clear()
-        modulesModel.append({
-            moduleName: "Test Flight Module",
-            description: "Fictional game module used exclusively to exercise the Xenon module manager UI.",
-            typeName: "Game Module",
-            version: "0.1-test",
-            active: true,
-            status: "Active",
-            regions: "Test Region A / B",
-            updated: "Test fixture",
-            moduleId: "xenon.test.flight",
-            gameIds: "TEST0001",
-            dependency: "Xenon Recomp",
-            renderer: "Vulkan"
-        })
-        modulesModel.append({
-            moduleName: "Test Runtime Component",
-            description: "Fictional shared component used to preview runtime-component rows and actions.",
-            typeName: "Runtime Component",
-            version: "0.4-test",
-            active: true,
-            status: "Installed",
-            regions: "Global",
-            updated: "Test fixture",
-            moduleId: "xenon.test.runtime",
-            gameIds: "Shared",
-            dependency: "Core",
-            renderer: "Backend Defined"
-        })
-        modulesModel.append({
-            moduleName: "Disabled Test Module",
-            description: "Fictional disabled entry used to test module state switching.",
-            typeName: "Game Module",
-            version: "0.0-test",
-            active: false,
-            status: "Disabled",
-            regions: "Module Defined",
-            updated: "Test fixture",
-            moduleId: "xenon.test.disabled",
-            gameIds: "TEST0002",
-            dependency: "Xenon Recomp",
-            renderer: "Automatic"
-        })
-        selectedModuleIndex = 0
+        selectedModuleIndex = -1
+        if (!testMode || fixtureMode === "none")
+            return
+
+        if (fixtureMode === "gracemeria") {
+            modulesModel.append({
+                moduleName: "Project Gracemeria",
+                moduleType: "Game Module",
+                version: "preview",
+                status: "Active",
+                active: true,
+                updateAvailable: false,
+                description: "Project Gracemeria launcher preview. No commercial game content is bundled; users provide their own local files.",
+                moduleId: "org.nimauria.project-gracemeria",
+                regions: "NTSC-U / PAL",
+                gameIds: "Module declared",
+                runtimeDependency: "Xenon Recomp",
+                renderer: "Vulkan / Direct3D 12",
+                artwork: "",
+                capabilities: "Game identification • DLC catalogue • Saves • Offline services • Module settings",
+                linkedGame: "Ace Combat 6: Fires of Liberation"
+            })
+        } else {
+            modulesModel.append({
+                moduleName: "Test Flight Module", moduleType: "Game Module", version: "0.1-test",
+                status: "Active", active: true, updateAvailable: false,
+                description: "Fictional game module used to exercise discovery, compatibility, update and module settings UI.",
+                moduleId: "xenon.test.flight", regions: "Test Region A / B", gameIds: "TEST0001",
+                runtimeDependency: "Xenon Recomp", renderer: "Vulkan", artwork: "",
+                capabilities: "Game identification • DLC catalogue • Save data • Offline launch",
+                linkedGame: "Xenon Test Flight"
+            })
+            modulesModel.append({
+                moduleName: "Test Arena Module", moduleType: "Game Module", version: "0.2-test",
+                status: "Disabled", active: false, updateAvailable: true,
+                description: "Second fictional module used to verify disabled states and update indicators.",
+                moduleId: "xenon.test.arena", regions: "Module-defined", gameIds: "TEST0002",
+                runtimeDependency: "Xenon Recomp", renderer: "Automatic", artwork: "",
+                capabilities: "Game identification • Local content validation",
+                linkedGame: ""
+            })
+            modulesModel.append({
+                moduleName: "Test Compatibility Pack", moduleType: "Support Package", version: "0.1-test",
+                status: "Installed", active: true, updateAvailable: false,
+                description: "Fictional shared support package used to exercise non-game module presentation.",
+                moduleId: "xenon.test.compat", regions: "Global", gameIds: "Multiple",
+                runtimeDependency: "Xenon Recomp", renderer: "N/A", artwork: "",
+                capabilities: "Compatibility metadata • Validation definitions",
+                linkedGame: ""
+            })
+        }
+        if (modulesModel.count > 0)
+            selectedModuleIndex = 0
     }
 
-    Component.onCompleted: {
-        if (testMode)
-            populateTestData()
+    Component.onCompleted: populateFixtures()
+
+    Connections {
+        target: launcherBridge
+        function onSettingChanged(key, value) {
+            if (key === "developer/fixtureMode") {
+                root.fixtureMode = String(value)
+                root.populateFixtures()
+            }
+        }
     }
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 12
+        spacing: Theme.spaceMd
+
+        XSectionHeader {
+            title: "Modules"
+            description: "Modules add game-specific behaviour without coupling individual games to the Xenon runtime."
+        }
 
         RowLayout {
             Layout.fillWidth: true
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 2
-
-                RowLayout {
-                    spacing: 8
-                    Text {
-                        text: "Modules"
-                        color: Theme.text
-                        font.pixelSize: 30
-                        font.weight: Font.DemiBold
-                    }
-                    StatusPill {
-                        visible: root.testMode
-                        label: "TEST MODE"
-                        tone: Theme.warning
-                    }
-                }
-
-                Text {
-                    text: "Manage game modules, runtime components, and support packages discovered by Xenon."
-                    color: Theme.textMuted
-                    font.pixelSize: 13
-                }
-            }
-
-            XButton {
-                text: "+  Import Module"
-                onClicked: importModuleDialog.open()
-            }
-        }
-
-        StackLayout {
-            Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.hasModules ? 1 : 0
+            spacing: Theme.spaceMd
 
             XPanel {
-                EmptyState {
-                    anchors.fill: parent
-                    glyph: "◇"
-                    title: root.testMode ? "No test modules loaded" : "No modules installed"
-                    description: root.testMode
-                        ? "Reload the fictional module fixtures to exercise the module manager."
-                        : "Xenon only shows modules that have actually been imported or discovered. Import a compatible local module package to begin."
-                    primaryText: root.testMode ? "Reload Test Modules" : "Import Module"
-                    secondaryText: root.testMode ? "Import Module" : ""
-                    onPrimaryClicked: {
-                        if (root.testMode)
-                            root.populateTestData()
-                        else
-                            importModuleDialog.open()
-                    }
-                    onSecondaryClicked: importModuleDialog.open()
-                }
-            }
+                Layout.preferredWidth: Math.max(310, Math.min(380, parent.width * 0.29))
+                Layout.minimumWidth: 280
+                Layout.fillHeight: true
 
-            Item {
                 ColumnLayout {
                     anchors.fill: parent
-                    spacing: 12
+                    anchors.margins: Theme.spaceMd
+                    spacing: Theme.spaceSm
 
-                    XPanel {
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { Layout.fillWidth: true; text: "Installed modules"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                        StatusPill { visible: root.testMode && root.fixtureMode !== "none"; label: root.fixtureMode === "gracemeria" ? "GRACEMERIA PREVIEW" : "TEST"; tone: Theme.warning }
+                        Text { text: modulesModel.count.toString(); color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                    }
+
+                    StackLayout {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        currentIndex: root.hasModules ? 1 : 0
 
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 12
-                            spacing: 8
+                        EmptyState {
+                            glyph: "◇"
+                            title: "No modules installed"
+                            description: "Import a local Xenon module package or browse the public module catalog. Modules never contain commercial game data."
+                            primaryText: "Browse Modules"
+                            secondaryText: "Import Local Module"
+                            onPrimaryClicked: catalogDialog.open()
+                            onSecondaryClicked: moduleDialog.open()
+                        }
 
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 12
+                        ListView {
+                            reuseItems: true
+                            id: moduleList
+                            clip: true
+                            spacing: Theme.spaceSm
+                            model: modulesModel
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                                Text { Layout.preferredWidth: 300; text: "Module"; color: Theme.textMuted; font.pixelSize: 10; font.weight: Font.DemiBold }
-                                Text { Layout.preferredWidth: 150; text: "Type"; color: Theme.textMuted; font.pixelSize: 10; font.weight: Font.DemiBold }
-                                Text { Layout.preferredWidth: 110; text: "Version"; color: Theme.textMuted; font.pixelSize: 10; font.weight: Font.DemiBold }
-                                Text { Layout.preferredWidth: 130; text: "Status"; color: Theme.textMuted; font.pixelSize: 10; font.weight: Font.DemiBold }
-                                Text { Layout.fillWidth: true; text: "Supported Regions"; color: Theme.textMuted; font.pixelSize: 10; font.weight: Font.DemiBold }
-                            }
+                            delegate: Rectangle {
+                                required property int index
+                                required property string moduleName
+                                required property string moduleType
+                                required property string version
+                                required property string status
+                                required property bool active
+                                required property bool updateAvailable
+                                required property string moduleId
 
-                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                readonly property bool matches: root.matchesSearch(moduleName, moduleType, moduleId)
+                                width: moduleList.width - (moduleList.ScrollBar.vertical.visible ? 8 : 0)
+                                height: matches ? Math.round(94 + Math.max(0, Theme.textScale - 1.0) * 36) : 0
+                                visible: matches
+                                radius: Theme.controlRadius
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: moduleName + ", " + (updateAvailable ? "update available" : status)
+                                color: root.selectedModuleIndex === index ? Theme.accentSoft
+                                     : moduleMouse.containsMouse ? Theme.surfaceHover : Theme.surface
+                                border.width: activeFocus ? Theme.focusWidth : Theme.borderWidth
+                                border.color: activeFocus ? Theme.focusRing
+                                             : root.selectedModuleIndex === index ? Theme.accent : Theme.border
+                                Keys.onReturnPressed: root.selectedModuleIndex = index
+                                Keys.onEnterPressed: root.selectedModuleIndex = index
+                                Accessible.onPressAction: root.selectedModuleIndex = index
 
-                            ListView {
-                                id: modulesList
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                clip: true
-                                spacing: 4
-                                model: modulesModel
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spaceMd
+                                    spacing: Theme.spaceSm
 
-                                delegate: Rectangle {
-                                    required property int index
-                                    required property string moduleName
-                                    required property string description
-                                    required property string typeName
-                                    required property string version
-                                    required property bool active
-                                    required property string status
-                                    required property string regions
-
-                                    width: modulesList.width
-                                    height: visible ? 60 : 0
-                                    visible: root.matchesSearch(moduleName, typeName)
-                                    radius: 8
-                                    color: root.selectedModuleIndex === index ? Theme.accentSoft
-                                         : rowMouse.containsMouse ? Theme.surfaceHover
-                                         : "transparent"
-                                    border.width: root.selectedModuleIndex === index ? 1 : 0
-                                    border.color: Theme.accent
-
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-                                        spacing: 12
-
-                                        ColumnLayout {
-                                            Layout.preferredWidth: 290
-                                            spacing: 1
-                                            Text { Layout.fillWidth: true; text: moduleName; color: Theme.text; font.pixelSize: 12; font.weight: Font.DemiBold; elide: Text.ElideRight }
-                                            Text { Layout.fillWidth: true; text: description; color: Theme.textMuted; font.pixelSize: 9; elide: Text.ElideRight }
+                                    Rectangle {
+                                        width: 48; height: 48; radius: Theme.controlRadius
+                                        color: Theme.surfaceAlt
+                                        border.width: Theme.borderWidth
+                                        border.color: active ? Theme.success : Theme.border
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: moduleType === "Game Module" ? "G" : "S"
+                                            color: active ? Theme.success : Theme.accent
+                                            font.pixelSize: Theme.typeBodyLarge
+                                            font.weight: Font.DemiBold
                                         }
-
-                                        Text { Layout.preferredWidth: 150; text: typeName; color: Theme.textMuted; font.pixelSize: 11 }
-                                        Text { Layout.preferredWidth: 110; text: version; color: Theme.text; font.pixelSize: 11 }
-
-                                        RowLayout {
-                                            Layout.preferredWidth: 130
-                                            spacing: 6
-                                            Rectangle { width: 9; height: 9; radius: 5; color: active ? Theme.success : Theme.textMuted }
-                                            Text { text: status; color: active ? Theme.success : Theme.textMuted; font.pixelSize: 11 }
-                                        }
-
-                                        Text { Layout.fillWidth: true; text: regions; color: Theme.textMuted; font.pixelSize: 11 }
                                     }
 
-                                    MouseArea {
-                                        id: rowMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: root.selectedModuleIndex = index
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Text { Layout.fillWidth: true; text: moduleName; color: Theme.text; elide: Text.ElideRight; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+                                            Rectangle { visible: updateAvailable; width: 8; height: 8; radius: 4; color: Theme.warning }
+                                        }
+                                        Text { text: moduleType + " • " + version; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                        Text { text: updateAvailable ? "Update available" : status; color: updateAvailable ? Theme.warning : active ? Theme.success : Theme.textMuted; font.pixelSize: Theme.typeCaption }
                                     }
                                 }
+
+                                MouseArea { id: moduleMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selectedModuleIndex = index }
                             }
                         }
                     }
 
-                    RowLayout {
+                    XButton {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 250
-                        spacing: 12
+                        text: "+  Import Module"
+                        variant: "primary"
+                        onClicked: moduleDialog.open()
+                    }
+                    XButton {
+                        visible: launcherBridge.featureEnabled("modules.catalog")
+                        Layout.fillWidth: true
+                        text: "Browse Module Catalog"
+                        onClicked: catalogDialog.open()
+                    }
+                }
+            }
 
-                        XPanel {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
+            XPanel {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
 
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.margins: 14
-                                spacing: 16
+                StackLayout {
+                    anchors.fill: parent
+                    anchors.margins: Theme.spaceLg
+                    currentIndex: root.hasModules && root.selectedModuleIndex >= 0 ? 1 : 0
 
-                                ArtworkFrame {
-                                    Layout.preferredWidth: 300
-                                    Layout.fillHeight: true
-                                    fallbackTitle: root.selectedModule().moduleName.toUpperCase()
-                                    hero: true
-                                }
+                    EmptyState {
+                        glyph: "◇"
+                        title: "Select a module"
+                        description: "Select an installed module to inspect metadata, capabilities and module-defined settings."
+                        primaryText: ""
+                        secondaryText: ""
+                    }
+
+                    ScrollView {
+                        id: moduleDetailScroll
+                        clip: true
+                        contentWidth: availableWidth
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                        ColumnLayout {
+                            width: moduleDetailScroll.availableWidth
+                            spacing: Theme.spaceMd
+
+                            XPanel {
+                                Layout.fillWidth: true
+                                implicitHeight: moduleHeaderColumn.implicitHeight + Theme.spaceXl * 2
+                                color: Theme.surfaceAlt
 
                                 ColumnLayout {
-                                    Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                    spacing: 5
+                                    id: moduleHeaderColumn
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: Theme.spaceXl
+                                    spacing: Theme.spaceSm
 
                                     RowLayout {
                                         Layout.fillWidth: true
+                                        spacing: Theme.spaceMd
                                         Text {
                                             Layout.fillWidth: true
                                             text: root.selectedModule().moduleName
                                             color: Theme.text
-                                            font.pixelSize: 23
+                                            font.pixelSize: Theme.typeTitle
                                             font.weight: Font.DemiBold
+                                            wrapMode: Text.WordWrap
                                         }
                                         StatusPill {
-                                            visible: root.testMode
-                                            label: "TEST DATA"
-                                            tone: Theme.warning
+                                            label: root.selectedModule().active ? "Active" : root.selectedModule().status
+                                            tone: root.selectedModule().active ? Theme.success : Theme.textMuted
                                         }
                                     }
 
-                                    StatusPill {
-                                        label: root.selectedModule().active ? "Active" : "Disabled"
-                                        tone: root.selectedModule().active ? Theme.success : Theme.textMuted
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.selectedModule().moduleType + " • Version " + root.selectedModule().version
+                                        color: Theme.textMuted
+                                        font.pixelSize: Theme.typeCaption
+                                        wrapMode: Text.WordWrap
                                     }
 
                                     Text {
@@ -306,78 +360,127 @@ Item {
                                         text: root.selectedModule().description
                                         color: Theme.textMuted
                                         wrapMode: Text.WordWrap
-                                        font.pixelSize: 11
+                                        font.pixelSize: Theme.typeBody
+                                        lineHeight: 1.25
                                     }
 
-                                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        Layout.topMargin: Theme.spaceXs
+                                        spacing: Theme.spaceSm
+                                        XButton {
+                                            text: root.selectedModule().active ? "Disable" : "Enable"
+                                            variant: root.selectedModule().active ? "default" : "primary"
+                                            onClicked: {
+                                                var nowActive = !root.selectedModule().active
+                                                modulesModel.setProperty(root.selectedModuleIndex, "active", nowActive)
+                                                modulesModel.setProperty(root.selectedModuleIndex, "status", nowActive ? "Active" : "Disabled")
+                                            }
+                                        }
+                                        XButton {
+                                            visible: launcherBridge.featureEnabled("modules.settings")
+                                            text: "Module Settings"
+                                            onClicked: settingsDialog.openFor(root.selectedModule().moduleName, root.settingsForModule(root.selectedModule().moduleId))
+                                        }
+                                        XButton {
+                                            visible: launcherBridge.featureEnabled("modules.updates")
+                                            text: root.selectedModule().updateAvailable ? "Install Update" : "Check for Updates"
+                                            onClicked: launcherBridge.requestModuleUpdate(root.selectedModule().moduleId)
+                                        }
+                                        XButton { text: "Verify"; onClicked: launcherBridge.notifyUnavailable("Verify Module") }
+                                        XButton { text: "Open Folder"; onClicked: launcherBridge.notifyUnavailable("Open Module Folder") }
+                                    }
+                                }
+                            }
 
-                                    Repeater {
-                                        model: [
-                                            ["Module ID", root.selectedModule().moduleId],
-                                            ["Version", root.selectedModule().version],
-                                            ["Type", root.selectedModule().typeName],
-                                            ["Supported Regions", root.selectedModule().regions],
-                                            ["Supported Game IDs", root.selectedModule().gameIds],
-                                            ["Runtime Dependency", root.selectedModule().dependency],
-                                            ["Renderer", root.selectedModule().renderer]
-                                        ]
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: width >= 780 && Theme.textScale <= 1.5 ? 2 : 1
+                                columnSpacing: Theme.spaceMd
+                                rowSpacing: Theme.spaceMd
 
-                                        delegate: RowLayout {
-                                            required property var modelData
+                                XPanel {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
+                                    implicitHeight: Math.max(moduleInfo.implicitHeight, capabilityInfo.implicitHeight) + Theme.spaceLg * 2
+                                    ColumnLayout {
+                                        id: moduleInfo
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                        anchors.margins: Theme.spaceLg
+                                        spacing: Theme.spaceSm
+                                        Text { text: "Module information"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                        XInfoRow { label: "Module ID"; value: root.selectedModule().moduleId }
+                                        XInfoRow { label: "Type"; value: root.selectedModule().moduleType }
+                                        XInfoRow { label: "Version"; value: root.selectedModule().version }
+                                        XInfoRow { label: "Supported regions"; value: root.selectedModule().regions }
+                                        XInfoRow { label: "Supported game IDs"; value: root.selectedModule().gameIds }
+                                        XInfoRow { label: "Runtime dependency"; value: root.selectedModule().runtimeDependency }
+                                        XInfoRow { label: "Renderer"; value: root.selectedModule().renderer }
+                                    }
+                                }
+
+                                XPanel {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
+                                    implicitHeight: Math.max(moduleInfo.implicitHeight, capabilityInfo.implicitHeight) + Theme.spaceLg * 2
+                                    ColumnLayout {
+                                        id: capabilityInfo
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                        anchors.margins: Theme.spaceLg
+                                        spacing: Theme.spaceSm
+                                        Text { text: "Capabilities & dependencies"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                        Text { text: "Declared capabilities"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                        Flow {
                                             Layout.fillWidth: true
-                                            Text { Layout.preferredWidth: 140; text: modelData[0]; color: Theme.textMuted; font.pixelSize: 10 }
-                                            Text { Layout.fillWidth: true; text: modelData[1]; color: Theme.text; font.pixelSize: 10; elide: Text.ElideRight }
+                                            spacing: Theme.spaceXs
+                                            Repeater {
+                                                model: root.selectedModule().capabilities.length > 0
+                                                    ? root.selectedModule().capabilities.split(" • ") : []
+                                                delegate: StatusPill {
+                                                    required property var modelData
+                                                    label: String(modelData)
+                                                    tone: Theme.textMuted
+                                                }
+                                            }
+                                        }
+                                        XInfoRow { label: "Xenon runtime"; value: launcherBridge.backendConnected ? "Connected" : "Front-end ready" }
+                                        XInfoRow { label: "Manifest"; value: "Loaded" }
+                                        XInfoRow { label: "Linked game"; value: root.selectedModule().linkedGame.length > 0 ? root.selectedModule().linkedGame : "Not configured" }
+                                    }
+                                }
+                            }
+
+                            XPanel {
+                                visible: root.testMode && root.fixtureMode !== "none"
+                                Layout.fillWidth: true
+                                implicitHeight: fixtureRow.implicitHeight + Theme.spaceLg * 2
+                                color: Theme.accentSoft
+                                GridLayout {
+                                    id: fixtureRow
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                    anchors.margins: Theme.spaceLg
+                                    columns: width >= 720 && Theme.textScale < 1.5 ? 2 : 1
+                                    columnSpacing: Theme.spaceMd
+                                    rowSpacing: Theme.spaceSm
+                                    Text { Layout.fillWidth: true; text: "Fixture data only. Module controls exercise the launcher front end and do not modify real module installations."; color: Theme.textMuted; wrapMode: Text.WordWrap; font.pixelSize: Theme.typeCaption }
+                                    XButton {
+                                        Layout.alignment: Qt.AlignRight
+                                        Layout.fillWidth: fixtureRow.columns === 1
+                                        text: root.selectedModule().linkedGame.length > 0 ? "Remove “" + root.selectedModule().linkedGame + "” from Library" : "Locate Game Content"
+                                        variant: root.selectedModule().linkedGame.length > 0 ? "danger" : "primary"
+                                        onClicked: {
+                                            if (root.selectedModule().linkedGame.length > 0)
+                                                modulesModel.setProperty(root.selectedModuleIndex, "linkedGame", "")
+                                            else
+                                                launcherBridge.notifyUnavailable("Locate Game Content")
                                         }
                                     }
-
-                                    Item { Layout.fillHeight: true }
                                 }
                             }
-                        }
 
-                        XPanel {
-                            Layout.preferredWidth: 250
-                            Layout.fillHeight: true
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 14
-                                spacing: 8
-
-                                Text { text: "Module Actions"; color: Theme.text; font.pixelSize: 16; font.weight: Font.DemiBold }
-
-                                XButton {
-                                    Layout.fillWidth: true
-                                    text: root.selectedModule().active ? "Disable Module" : "Enable Module"
-                                    variant: root.selectedModule().active ? "default" : "primary"
-                                    onClicked: {
-                                        var newState = !root.selectedModule().active
-                                        modulesModel.setProperty(root.selectedModuleIndex, "active", newState)
-                                        modulesModel.setProperty(root.selectedModuleIndex, "status", newState ? "Active" : "Disabled")
-                                        launcherBridge.notify("Module state changed", root.selectedModule().moduleName + (newState ? " enabled for this UI session." : " disabled for this UI session."))
-                                    }
-                                }
-
-                                XButton { Layout.fillWidth: true; text: "Check for Updates"; onClicked: launcherBridge.notifyUnavailable(text) }
-                                XButton { Layout.fillWidth: true; text: "Verify Module"; onClicked: launcherBridge.notifyUnavailable(text) }
-                                XButton { Layout.fillWidth: true; text: "Open Module Folder"; onClicked: launcherBridge.notifyUnavailable(text) }
-
-                                XButton {
-                                    visible: root.testMode
-                                    Layout.fillWidth: true
-                                    text: "Remove Test Module"
-                                    variant: "danger"
-                                    onClicked: {
-                                        modulesModel.remove(root.selectedModuleIndex)
-                                        if (modulesModel.count === 0)
-                                            root.selectedModuleIndex = -1
-                                        else
-                                            root.selectedModuleIndex = Math.min(root.selectedModuleIndex, modulesModel.count - 1)
-                                    }
-                                }
-
-                                Item { Layout.fillHeight: true }
-                            }
+                            Item { Layout.preferredHeight: Theme.spaceSm }
                         }
                     }
                 }
@@ -386,12 +489,21 @@ Item {
     }
 
     FileDialog {
-        id: importModuleDialog
+        id: moduleDialog
         title: "Import Xenon module"
-        fileMode: FileDialog.OpenFile
-        nameFilters: ["Xenon module packages (*.xenonmodule *.json)", "All files (*)"]
+        fileMode: FileDialog.OpenFiles
+        nameFilters: ["Xenon module packages (*.xenonmod *.zip)", "All files (*)"]
         onAccepted: launcherBridge.notify(
             "Module selected",
-            "A local module package was selected. Installation, validation, and registry insertion will be delegated to the module service once connected.")
+            "Selected " + selectedFiles.length + " local module package(s). Manifest validation will connect to the module registry backend later.")
     }
+
+    ModuleSettingsDialog {
+        id: settingsDialog
+        onSettingEdited: function(settingId, value) {
+            launcherBridge.notify("Module setting changed", settingId + " = " + String(value) + " (front-end preview)")
+        }
+    }
+
+    ModuleCatalogDialog { id: catalogDialog }
 }

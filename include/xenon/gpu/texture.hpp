@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/memory/coherency.hpp"
 
 namespace xenon::gpu {
 
@@ -72,6 +73,11 @@ struct TextureFormatInfo {
 // raw-compatible and return no value.
 [[nodiscard]] std::optional<std::uint8_t> raw_resolve_texture_format(
     ColorRenderTargetFormat format) noexcept;
+
+// Xenos depth resolves ignore the color-style copy destination format field.
+// The destination bit layout is always the actual depth render-target format.
+[[nodiscard]] std::uint8_t depth_resolve_texture_format(
+    DepthRenderTargetFormat format) noexcept;
 
 struct TextureSubresourceLayout {
   std::uint32_t mip_level{};
@@ -162,19 +168,34 @@ struct ResolveWriteResult {
     std::uint32_t source_row_pitch,
     std::span<std::byte> physical_memory);
 
+// Writes exact canonical Xenos D24S8 / D24FS8 words to the copy destination.
+// Depth never performs color conversion or sample averaging; the caller passes
+// the single sample selected by the backend-neutral resolve plan.
+[[nodiscard]] ResolveWriteResult write_depth_resolve(
+    const CopyResolveState& copy, DepthRenderTargetFormat source_format,
+    const ResolveRectangle& rectangle, std::span<const std::uint32_t> source,
+    std::uint32_t source_row_pitch,
+    std::span<std::byte> physical_memory);
+
 class TextureDirtyTracker {
  public:
   void track(std::uint64_t key, const TextureLayout& layout);
+  void track_clean(std::uint64_t key, const TextureLayout& layout,
+                   std::uint64_t clean_epoch);
   void erase(std::uint64_t key);
   void clear();
   void mark_dirty(std::uint32_t address, std::uint32_t size) noexcept;
   [[nodiscard]] bool consume_dirty(std::uint64_t key) noexcept;
+  [[nodiscard]] bool consume_dirty(
+      std::uint64_t key, const memory::GuestMemoryCoherency& coherency,
+      std::uint64_t through_epoch) noexcept;
   [[nodiscard]] bool is_dirty(std::uint64_t key) const noexcept;
 
  private:
   struct Entry {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges{};
     bool dirty{true};
+    std::uint64_t clean_epoch{};
   };
   std::unordered_map<std::uint64_t, Entry> entries_{};
   mutable std::mutex mutex_{};

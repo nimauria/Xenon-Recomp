@@ -31,9 +31,7 @@ namespace xenon::gpu::vulkan {
 class Backend::Impl {
  public:
   static constexpr std::size_t kTransientUploadBytes = 16u * 1024u * 1024u;
-  ~Impl() {
-    if (memory && texture_callback) memory->remove_physical_write_callback(texture_callback);
-  }
+  ~Impl() = default;
   Context context{};
   CommandQueue queue{};
   GuestMemoryMirror mirror{};
@@ -49,10 +47,10 @@ class Backend::Impl {
   std::unordered_map<EdramOwnerId, RenderTargetImage*> owner_render_targets{};
   std::unordered_map<std::uint64_t, std::unique_ptr<DepthTargetImage>> depth_targets{};
   std::unordered_map<std::uint64_t, EdramOwnerId> depth_target_owners{};
+  std::unordered_map<EdramOwnerId, DepthTargetImage*> owner_depth_targets{};
   std::unordered_map<std::uint64_t, std::unique_ptr<GraphicsPipeline>> pipelines{};
   std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> shader_textures{};
   TextureDirtyTracker texture_dirty{};
-  std::uint64_t texture_callback{};
   memory::AddressSpace* memory{};
   Edram* edram{};
   EdramOwnershipTracker edram_ownership{};
@@ -74,33 +72,71 @@ class Backend::Impl {
 
   bool flush_color_owner(EdramOwnerId owner) {
     const auto found = owner_render_targets.find(owner);
-    if (!edram || found == owner_render_targets.end() || !found->second ||
-        found->second->surface().msaa != MsaaSamples::X1) {
-      error = "Vulkan EDRAM alias transfer requires unsupported MSAA preservation";
+    if (!edram || found == owner_render_targets.end() || !found->second) {
+      error = "Vulkan EDRAM alias transfer has no native color owner";
       return false;
     }
     auto* image = found->second;
     const auto& surface = image->surface();
-    std::vector<std::byte> pixels;
-    std::uint32_t pitch{};
     const auto canonical_pitch = image->width() *
         (surface.is_64bpp ? 8u : 4u);
     std::vector<std::byte> canonical(
         std::size_t(canonical_pitch) * image->height());
-    if (!image->readback(queue, 0, 0, image->width(), image->height(),
-                         pixels, pitch) ||
-        !host_color_to_edram(image->guest_format(), image->width(),
-                             image->height(), pixels, pitch, canonical,
-                             canonical_pitch) ||
-        !store_edram_raw(*edram, surface, 0, 0, image->width(),
-                         image->height(), 0, canonical, canonical_pitch)) {
-      error = image->error().empty()
-                  ? "Vulkan EDRAM ownership readback failed"
-                  : image->error();
-      return false;
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+      std::vector<std::byte> pixels;
+      std::uint32_t pitch{};
+      if (!image->readback_sample(queue, sample, 0, 0, image->width(),
+                                  image->height(), pixels, pitch) ||
+          !host_color_to_edram(image->guest_format(), image->width(),
+                               image->height(), pixels, pitch, canonical,
+                               canonical_pitch) ||
+          !store_edram_raw(*edram, surface, 0, 0, image->width(),
+                           image->height(), sample, canonical,
+                           canonical_pitch)) {
+        error = image->error().empty()
+                    ? "Vulkan EDRAM ownership sample readback failed"
+                    : image->error();
+        return false;
+      }
     }
     edram_ownership.release(owner);
     return true;
+  }
+
+  bool flush_depth_owner(EdramOwnerId owner) {
+    const auto found = owner_depth_targets.find(owner);
+    if (!edram || found == owner_depth_targets.end() || !found->second) {
+      error = "Vulkan EDRAM alias transfer has no native depth owner";
+      return false;
+    }
+    auto* image = found->second;
+    const auto& surface = image->surface();
+    const auto canonical_pitch = image->width() * 4u;
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+      std::vector<std::uint32_t> pixels;
+      std::uint32_t pitch{};
+      if (!image->readback_sample(queue, sample, 0, 0, image->width(),
+                                  image->height(), pixels, pitch) ||
+          !store_edram_raw(*edram, surface, 0, 0, image->width(),
+                           image->height(), sample, std::as_bytes(std::span(pixels)),
+                           canonical_pitch)) {
+        error = image->error().empty()
+                    ? "Vulkan EDRAM depth ownership sample readback failed"
+                    : image->error();
+        return false;
+      }
+    }
+    edram_ownership.release(owner);
+    return true;
+  }
+
+  bool flush_owner(EdramOwnerId owner) {
+    if (owner_render_targets.contains(owner)) return flush_color_owner(owner);
+    if (owner_depth_targets.contains(owner)) return flush_depth_owner(owner);
+    error = "Vulkan EDRAM alias transfer has no native owner";
+    return false;
   }
 
   bool acquire_color_ownership(std::uint64_t key,
@@ -120,7 +156,7 @@ class Backend::Impl {
     plan = edram_ownership.plan(requested_owner, ownership_surface);
     for (const auto& change : plan.changes) {
       if (change.previous_owner != kCanonicalEdramOwner &&
-          !flush_color_owner(change.previous_owner)) return false;
+           !flush_owner(change.previous_owner)) return false;
     }
     plan = edram_ownership.plan(requested_owner, ownership_surface);
     if (plan.requires_preservation()) {
@@ -129,42 +165,27 @@ class Backend::Impl {
     }
 
     const auto& surface = requested.surface();
-    if (surface.msaa == MsaaSamples::X1) {
-      const auto canonical_pitch = requested.width() *
-          (surface.is_64bpp ? 8u : 4u);
-      const auto host_pitch = requested.width() *
-          color_host_bytes_per_pixel(requested.guest_format());
-      std::vector<std::byte> canonical(
-          std::size_t(canonical_pitch) * requested.height());
-      std::vector<std::byte> pixels(
-          std::size_t(host_pitch) * requested.height());
+    const auto canonical_pitch = requested.width() *
+        (surface.is_64bpp ? 8u : 4u);
+    const auto host_pitch = requested.width() *
+        color_host_bytes_per_pixel(requested.guest_format());
+    std::vector<std::byte> canonical(
+        std::size_t(canonical_pitch) * requested.height());
+    std::vector<std::byte> pixels(
+        std::size_t(host_pitch) * requested.height());
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
       if (!resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
-                             requested.height(), 0, canonical,
+                             requested.height(), sample, canonical,
                              canonical_pitch) ||
           !edram_color_to_host(requested.guest_format(), requested.width(),
                                requested.height(), canonical,
                                canonical_pitch, pixels, host_pitch) ||
-          !requested.upload(queue, pixels, host_pitch)) {
+          !requested.upload_sample(queue, sample, 0, 0, requested.width(),
+                                   requested.height(), pixels, host_pitch)) {
         error = requested.error().empty()
-                    ? "Vulkan canonical EDRAM upload failed"
+                    ? "Vulkan canonical EDRAM sample upload failed"
                     : requested.error();
-        return false;
-      }
-    } else {
-      bool all_zero = true;
-      for (const auto tile : plan.covered_tiles) {
-        const auto bytes = edram->bytes().subspan(
-            std::size_t(tile) * Edram::kTileBytes, Edram::kTileBytes);
-        if (std::any_of(bytes.begin(), bytes.end(),
-                        [](std::byte value) { return value != std::byte{}; })) {
-          all_zero = false;
-          break;
-        }
-      }
-      VkClearColorValue zero{};
-      if (!all_zero || !requested.clear(queue, zero)) {
-        error = all_zero ? requested.error()
-                         : "Vulkan nonzero MSAA EDRAM ownership upload is not implemented";
         return false;
       }
     }
@@ -184,28 +205,85 @@ class Backend::Impl {
       return false;
     }
     const auto owner = owner_it->second;
-    const auto plan = edram_ownership.plan(owner, ownership_surface);
+    auto plan = edram_ownership.plan(owner, ownership_surface);
     if (!plan.valid || plan.changes.empty()) return plan.valid;
-    if (edram_ownership.owned_tile_count(owner) ||
-        plan.requires_preservation()) {
-      error = "Vulkan depth/color EDRAM alias preservation is not implemented";
+    if (edram_ownership.owned_tile_count(owner) && !flush_depth_owner(owner)) {
       return false;
     }
-    for (const auto tile : plan.covered_tiles) {
-      const auto bytes = edram->bytes().subspan(
-          std::size_t(tile) * Edram::kTileBytes, Edram::kTileBytes);
-      if (std::any_of(bytes.begin(), bytes.end(),
-                      [](std::byte value) { return value != std::byte{}; })) {
-        error = "Vulkan nonzero canonical depth EDRAM upload is not implemented";
+    plan = edram_ownership.plan(owner, ownership_surface);
+    for (const auto& change : plan.changes) {
+      if (change.previous_owner != kCanonicalEdramOwner &&
+          !flush_owner(change.previous_owner)) return false;
+    }
+    plan = edram_ownership.plan(owner, ownership_surface);
+    if (plan.requires_preservation()) {
+      error = "Vulkan depth EDRAM ownership transfer did not reach canonical storage";
+      return false;
+    }
+    const auto& surface = requested.surface();
+    const auto canonical_pitch = requested.width() * 4u;
+    std::vector<std::uint32_t> pixels(
+        std::size_t(requested.width()) * requested.height());
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+      if (!resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
+                             requested.height(), sample,
+                             std::as_writable_bytes(std::span(pixels)),
+                             canonical_pitch) ||
+          !requested.upload_sample(queue, sample, 0, 0, requested.width(),
+                                   requested.height(), pixels,
+                                   canonical_pitch)) {
+        error = requested.error().empty()
+                    ? "Vulkan canonical EDRAM depth sample upload failed"
+                    : requested.error();
         return false;
       }
     }
-    if (!requested.clear(queue, 0.0f, 0) || !edram_ownership.commit(plan)) {
-      error = requested.error().empty()
-                  ? "Vulkan depth EDRAM ownership initialization failed"
-                  : requested.error();
+    if (!edram_ownership.commit(plan)) {
+      error = "Vulkan depth EDRAM ownership plan became stale";
       return false;
     }
+    return true;
+  }
+
+  bool make_region_canonical(const EdramSurfaceLayout& surface,
+                             EdramSurfaceRegion region) {
+    if (!edram || !surface.valid()) {
+      error = "Vulkan Xenos resolve clear has an invalid EDRAM surface";
+      return false;
+    }
+    std::unordered_set<EdramOwnerId> owners;
+    for (const auto tile : covered_edram_tiles(surface, region)) {
+      const auto owner = edram_ownership.owner(tile);
+      if (owner != kCanonicalEdramOwner) owners.insert(owner);
+    }
+    for (const auto owner : owners)
+      if (!flush_owner(owner)) return false;
+    return true;
+  }
+
+  bool clear_depth_resolve_region(const DrawResourceState& state,
+                                  const ResolveRectangle& rectangle,
+                                  MsaaSamples samples) {
+    if (!state.copy.depth_clear_enabled) return true;
+    if (!state.raster.surface_pitch || rectangle.bottom <= 0) {
+      error = "Vulkan Xenos post-resolve depth clear has an invalid surface extent";
+      return false;
+    }
+    const EdramSurfaceLayout surface{
+        state.depth_target.base_tile, state.raster.surface_pitch,
+        static_cast<std::uint32_t>(rectangle.bottom), samples, false, true};
+    const EdramSurfaceRegion region{rectangle.left, rectangle.top,
+                                     rectangle.right, rectangle.bottom};
+    if (!make_region_canonical(surface, region)) return false;
+    if (!clear_edram_surface_region(*edram, surface, rectangle.left,
+                                    rectangle.top, rectangle.right,
+                                    rectangle.bottom,
+                                    {state.copy.depth_clear, 0u})) {
+      error = "Vulkan regional depth resolve clear failed";
+      return false;
+    }
+    edram_ownership.make_canonical_region(surface, region);
     return true;
   }
 };
@@ -253,13 +331,12 @@ void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
     impl_->render_target_owners.clear();
     impl_->depth_target_owners.clear();
     impl_->owner_render_targets.clear();
+    impl_->owner_depth_targets.clear();
     impl_->edram_ownership.reset();
     impl_->next_edram_owner = 1;
     impl_->edram = &edram;
   }
   if (impl_->memory != &memory) {
-    if (impl_->memory && impl_->texture_callback)
-      impl_->memory->remove_physical_write_callback(impl_->texture_callback);
     impl_->textures.clear();
     impl_->texture_dirty.clear();
     if (!impl_->mirror.initialize(impl_->context.physical_device(),
@@ -270,11 +347,6 @@ void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
       return;
     }
     impl_->memory = &memory;
-    auto* state = impl_.get();
-    impl_->texture_callback = memory.add_physical_write_callback(
-        [state](std::uint32_t address, std::uint32_t size) {
-          state->texture_dirty.mark_dirty(address, size);
-        });
     if (!impl_->resources.bind_guest_memory(impl_->mirror.buffer(),
                                             memory::kPhysicalMemorySize)) {
       impl_->error = impl_->resources.error();
@@ -308,22 +380,73 @@ void Backend::consume(const ir::Command& command) {
       }
       const auto& rectangle = resolve_plan.rectangle;
       if (rectangle.empty()) return;
-      if (state.copy.copies_depth()) {
-        impl_->error = "Vulkan Xenos depth resolve is not implemented";
-        return;
-      }
       if (state.copy.command != CopyCommand::Raw &&
           state.copy.command != CopyCommand::Convert) {
         impl_->error = "Vulkan Xenos resolve command is unsupported";
         return;
       }
-      if (state.copy.depth_clear_enabled) {
-        impl_->error = "Vulkan Xenos post-resolve depth clear requires native depth transfer";
-        return;
-      }
       const auto samples = resolve_plan.samples;
-      if (!resolve_plan.native_color_average) {
-        impl_->error = "Vulkan Xenos resolve requires an unsupported sample selection";
+      if (resolve_plan.depth) {
+        const auto format = static_cast<DepthRenderTargetFormat>(
+            state.depth_target.format);
+        DepthTargetImage* source = nullptr;
+        std::uint64_t source_key{};
+        for (auto& [key, candidate] : impl_->depth_targets) {
+          const auto& surface = candidate->surface();
+          if (surface.base_tile != state.depth_target.base_tile ||
+              surface.pitch_pixels != state.raster.surface_pitch ||
+              surface.msaa != samples || !surface.depth ||
+              candidate->guest_format() != format ||
+              candidate->height() <
+                  static_cast<std::uint32_t>(rectangle.bottom)) {
+            continue;
+          }
+          if (!source || candidate->height() < source->height()) {
+            source = candidate.get();
+            source_key = key;
+          }
+        }
+        if (!source) {
+          impl_->error =
+              "Vulkan Xenos depth resolve source EDRAM surface is unavailable";
+          return;
+        }
+        if (!impl_->acquire_depth_ownership(source_key, *source,
+                                             source->surface())) return;
+        if (resolve_plan.selected_sample_count != 1) {
+          impl_->error = "Vulkan Xenos depth resolve selected multiple samples";
+          return;
+        }
+        std::uint32_t guest_sample{};
+        while (guest_sample < 4 &&
+               !(resolve_plan.guest_sample_mask & (1u << guest_sample))) {
+          ++guest_sample;
+        }
+        if (guest_sample >= 4) {
+          impl_->error = "Vulkan Xenos depth resolve selected no sample";
+          return;
+        }
+        std::vector<std::uint32_t> readback;
+        std::uint32_t row_pitch{};
+        if (!source->readback_sample(
+                impl_->queue, guest_sample, rectangle.left, rectangle.top,
+                rectangle.right, rectangle.bottom, readback, row_pitch)) {
+          impl_->error = source->error();
+          return;
+        }
+        const auto memory_span = std::span<std::byte>(
+            impl_->memory->physical_data(), memory::kPhysicalMemorySize);
+        const auto written = write_depth_resolve(
+            resolve_plan.copy, format, rectangle, readback, row_pitch,
+            memory_span);
+        if (!written.valid) {
+          impl_->error = written.error;
+          return;
+        }
+        impl_->memory->notify_external_write(written.modified_address,
+                                             written.modified_size);
+        if (!impl_->clear_depth_resolve_region(state, rectangle, samples))
+          return;
         return;
       }
       const auto source_slot =
@@ -361,11 +484,61 @@ void Backend::consume(const ir::Command& command) {
                                            source->surface())) return;
       std::vector<std::byte> readback;
       std::uint32_t row_pitch{};
-      if (!source->readback(impl_->queue, rectangle.left, rectangle.top,
-                            rectangle.right, rectangle.bottom, readback,
-                            row_pitch)) {
-        impl_->error = source->error();
-        return;
+      if (resolve_plan.native_color_average) {
+        if (!source->readback(impl_->queue, rectangle.left, rectangle.top,
+                              rectangle.right, rectangle.bottom, readback,
+                              row_pitch)) {
+          impl_->error = source->error();
+          return;
+        }
+      } else {
+        std::array<std::uint32_t, 2> selected_samples{};
+        std::uint32_t selected_count{};
+        for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
+          if (resolve_plan.guest_sample_mask & (1u << guest_sample)) {
+            if (selected_count < selected_samples.size())
+              selected_samples[selected_count] = guest_sample;
+            ++selected_count;
+          }
+        }
+        if (selected_count == 1) {
+          if (!source->readback_sample(
+                  impl_->queue, selected_samples[0], rectangle.left,
+                  rectangle.top, rectangle.right, rectangle.bottom, readback,
+                  row_pitch)) {
+            impl_->error = source->error();
+            return;
+          }
+        } else if (selected_count == 2) {
+          std::vector<std::byte> first;
+          std::vector<std::byte> second;
+          std::uint32_t first_pitch{};
+          std::uint32_t second_pitch{};
+          if (!source->readback_sample(
+                  impl_->queue, selected_samples[0], rectangle.left,
+                  rectangle.top, rectangle.right, rectangle.bottom, first,
+                  first_pitch) ||
+              !source->readback_sample(
+                  impl_->queue, selected_samples[1], rectangle.left,
+                  rectangle.top, rectangle.right, rectangle.bottom, second,
+                  second_pitch)) {
+            impl_->error = source->error();
+            return;
+          }
+          const auto width = static_cast<std::uint32_t>(rectangle.right -
+                                                        rectangle.left);
+          const auto height = static_cast<std::uint32_t>(rectangle.bottom -
+                                                         rectangle.top);
+          if (!average_host_color_samples(format, width, height, first,
+                                          first_pitch, second, second_pitch,
+                                          readback, row_pitch)) {
+            impl_->error = "Vulkan Xenos selected-sample resolve averaging failed";
+            return;
+          }
+        } else {
+          impl_->error = "Vulkan Xenos resolve selected an unsupported sample set";
+          return;
+        }
       }
       const auto memory_span = std::span<std::byte>(
           impl_->memory->physical_data(), memory::kPhysicalMemorySize);
@@ -397,6 +570,7 @@ void Backend::consume(const ir::Command& command) {
             source->surface(), {rectangle.left, rectangle.top,
                                 rectangle.right, rectangle.bottom});
       }
+      if (!impl_->clear_depth_resolve_region(state, rectangle, samples)) return;
       return;
     }
     impl_->pipeline_states.insert(state.pipeline_hash(*draw));
@@ -469,9 +643,12 @@ void Backend::consume(const ir::Command& command) {
       if (const auto existing = impl_->depth_targets.find(key);
           existing != impl_->depth_targets.end() &&
           existing->second->height() < surface.height_pixels) {
-        impl_->error =
-            "Vulkan depth target growth requires reversible EDRAM preservation";
-        return;
+        const auto owner = impl_->depth_target_owners.at(key);
+        if (impl_->edram_ownership.owned_tile_count(owner) &&
+            !impl_->flush_depth_owner(owner)) return;
+        impl_->owner_depth_targets.erase(owner);
+        impl_->depth_target_owners.erase(key);
+        impl_->depth_targets.erase(existing);
       }
       if (!impl_->depth_targets.contains(key)) {
         auto image = std::make_unique<DepthTargetImage>();
@@ -482,8 +659,11 @@ void Backend::consume(const ir::Command& command) {
           impl_->error = image->error();
           return;
         } else {
+          auto* image_pointer = image.get();
           impl_->depth_targets.emplace(key, std::move(image));
-          impl_->depth_target_owners.emplace(key, impl_->next_edram_owner++);
+          const auto owner = impl_->next_edram_owner++;
+          impl_->depth_target_owners.emplace(key, owner);
+          impl_->owner_depth_targets.emplace(owner, image_pointer);
         }
       }
       if (const auto found = impl_->depth_targets.find(key);
@@ -513,8 +693,10 @@ void Backend::consume(const ir::Command& command) {
         const auto& descriptor = *state.textures[slot];
         const auto key = descriptor.hash();
         auto existing = impl_->textures.find(key);
+        const auto texture_epoch = impl_->memory->coherency().current_epoch();
         const bool refresh = existing == impl_->textures.end() ||
-                             impl_->texture_dirty.consume_dirty(key);
+                             impl_->texture_dirty.consume_dirty(
+                                 key, impl_->memory->coherency(), texture_epoch);
         if (refresh) {
           const auto decoded = decode_texture(
               descriptor, {impl_->memory->physical_data(), memory::kPhysicalMemorySize});
@@ -530,8 +712,7 @@ void Backend::consume(const ir::Command& command) {
             impl_->error = image->error().empty() ? impl_->resources.error() : image->error();
             return;
           }
-          impl_->texture_dirty.track(key, decoded.layout);
-          (void)impl_->texture_dirty.consume_dirty(key);
+          impl_->texture_dirty.track_clean(key, decoded.layout, texture_epoch);
           impl_->textures[key] = std::move(image);
         } else if (!impl_->resources.bind_texture(slot, descriptor.dimension,
                                                   existing->second->view(),

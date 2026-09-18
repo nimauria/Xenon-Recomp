@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+
+<defs>
+  <pattern id="diag" width="28" height="28" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <line x1="0" y1="0" x2="0" y2="28" stroke="#C7D4E5" stroke-opacity="0.10" stroke-width="2"/>
+    <line x1="14" y1="0" x2="14" y2="28" stroke="#C7D4E5" stroke-opacity="0.06" stroke-width="1"/>
+  </pattern>
+</defs>
+<rect width="256" height="256" fill="url(#diag)"/>
+
+</svg>

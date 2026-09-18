@@ -1,10 +1,25 @@
 #include "xenon/gpu/vulkan/context.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <vector>
 
 namespace xenon::gpu::vulkan {
+namespace {
+bool supports_device_extension(VkPhysicalDevice device, const char* name) {
+  std::uint32_t count{};
+  if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) !=
+      VK_SUCCESS) return false;
+  std::vector<VkExtensionProperties> extensions(count);
+  if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count,
+                                            extensions.data()) != VK_SUCCESS)
+    return false;
+  return std::any_of(extensions.begin(), extensions.end(), [&](const auto& e) {
+    return std::strcmp(e.extensionName, name) == 0;
+  });
+}
+}  // namespace
 
 Context::~Context() { reset(); }
 
@@ -46,7 +61,8 @@ bool Context::initialize(const ContextConfig& config) {
     candidate_features.pNext = &candidate12;
     vkGetPhysicalDeviceFeatures2(candidate, &candidate_features);
     if (!candidate12.timelineSemaphore || !candidate13.synchronization2 ||
-        !candidate13.dynamicRendering) {
+        !candidate13.dynamicRendering ||
+        !candidate_features.features.sampleRateShading) {
       continue;
     }
     std::uint32_t queue_count = 0;
@@ -103,12 +119,21 @@ bool Context::initialize(const ContextConfig& config) {
   // filled rendering remains available and non-solid pipeline creation will
   // fail explicitly rather than being silently rendered as fill.
   enabled_features.fillModeNonSolid = features.features.fillModeNonSolid;
+  // Exact Xenos EDRAM ownership transfers address individual MSAA samples.
+  // Sample-rate fragment execution is required so writes can preserve every
+  // unrelated host sample instead of using a native averaging resolve.
+  enabled_features.sampleRateShading = VK_TRUE;
   const float priority = 1.0f;
   VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   queue_info.queueFamilyIndex = graphics_queue_family_;
   queue_info.queueCount = 1;
   queue_info.pQueuePriorities = &priority;
   VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  const char* device_extensions[]{VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME};
+  if (supports_device_extension(physical_device_, device_extensions[0])) {
+    device_info.enabledExtensionCount = 1;
+    device_info.ppEnabledExtensionNames = device_extensions;
+  }
   device_info.pNext = &features12;
   device_info.pEnabledFeatures = &enabled_features;
   device_info.queueCreateInfoCount = 1;
