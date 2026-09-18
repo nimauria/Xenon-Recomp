@@ -16,6 +16,6 @@ namespace xenon::launcher {
 //
 // IMPORTANT: Test data is never written to the user's real launcher state.
 // -----------------------------------------------------------------------------
-inline constexpr bool kTestMode = false;
+inline constexpr bool kTestMode = true;
 
 }  // namespace xenon::launcher
