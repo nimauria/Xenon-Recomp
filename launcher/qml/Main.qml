@@ -23,8 +23,11 @@ ApplicationWindow {
     property int backdropSettingsRevision: 0
     readonly property string backdropVariant: {
         var revision = backdropSettingsRevision
-        return launcherBridge.stringSetting(
-            "appearance/backdropVariant/" + Theme.effectiveThemeId, "default")
+        return launcherBridge.themeBackgroundVariant(Theme.effectiveThemeId)
+    }
+    readonly property string backdropSource: {
+        var revision = backdropSettingsRevision
+        return launcherBridge.themeBackgroundAsset(Theme.effectiveThemeId, root.backdropVariant)
     }
 
     readonly property bool layoutCompact: compactLayout
@@ -32,13 +35,33 @@ ApplicationWindow {
     readonly property bool sidebarCompact: compactLayout || sidebarMode === "Compact"
         || (sidebarMode === "Auto" && width < (1320 * Math.min(Theme.textScale, 1.30)))
 
-    property bool libraryLoaded: true
+    property bool libraryLoaded: false
     property bool modulesLoaded: false
     property bool profilesLoaded: false
     property bool settingsLoaded: false
 
     function settingBool(key, fallback) {
         return launcherBridge.boolSetting(key, fallback)
+    }
+
+    function applyThemeFromBackend() {
+        Theme.setSystemAppearance(launcherBridge.systemDark, launcherBridge.systemHighContrast)
+        var effectiveId = launcherBridge.effectiveThemeId()
+        Theme.applyAppearance(
+            launcherBridge.themeId,
+            effectiveId,
+            launcherBridge.themeDefinition(effectiveId),
+            launcherBridge.accentId,
+            launcherBridge.accentDefinition(launcherBridge.accentId))
+        Theme.setCornerStyle(launcherBridge.cornerStyle)
+        Theme.setAccessibility(
+            launcherBridge.numberSetting("accessibility/textScale", 1.0),
+            root.settingBool("accessibility/highContrast", false),
+            root.settingBool("accessibility/enhancedFocus", false))
+        Theme.setAdvancedAppearance(
+            launcherBridge.stringSetting("appearance/decorLevel", "Balanced"),
+            launcherBridge.numberSetting("appearance/panelOpacity", 0.94))
+        root.backdropSettingsRevision += 1
     }
 
     function toggleMaximize() {
@@ -48,13 +71,6 @@ ApplicationWindow {
         Qt.callLater(function() { root.requestActivate() })
     }
 
-    function pageIndexFromName(name) {
-        if (name === "Modules") return 1
-        if (name === "Profiles") return 2
-        if (name === "Settings") return 3
-        return 0
-    }
-
     function markPageLoaded(page) {
         if (page === 0) libraryLoaded = true
         else if (page === 1) modulesLoaded = true
@@ -62,32 +78,30 @@ ApplicationWindow {
         else if (page === 3) settingsLoaded = true
     }
 
+    function pageName(page) {
+        if (page === 1) return "Modules"
+        if (page === 2) return "Profiles"
+        if (page === 3) return "Settings"
+        return "Library"
+    }
+
     Component.onCompleted: {
         ProfileStore.reset(launcherBridge.profileName, launcherBridge.testMode)
-        Theme.setSystemAppearance(launcherBridge.systemDark, launcherBridge.systemHighContrast)
-        Theme.setTheme(launcherBridge.themeId)
-        Theme.setAccent(launcherBridge.accentId)
-        Theme.setCornerStyle(launcherBridge.cornerStyle)
-        Theme.setAccessibility(
-            launcherBridge.numberSetting("accessibility/textScale", 1.0),
-            settingBool("accessibility/highContrast", false))
+        root.applyThemeFromBackend()
 
-        var remember = settingBool("general/rememberPage", true)
-        if (remember) {
-            var remembered = launcherBridge.rememberedPage()
-            currentPage = Math.max(0, Math.min(remembered, 3))
-        } else {
-            currentPage = pageIndexFromName(launcherBridge.stringSetting("general/startupPage", "Library"))
-        }
-        markPageLoaded(currentPage)
+        currentPage = launcherBridge.initialPage()
+        launcherBridge.setCommunityPage(root.pageName(currentPage))
+        // Delay the first heavy page until the root window exists. This keeps a
+        // feature-page failure from turning into a completely silent startup.
+        Qt.callLater(function() { root.markPageLoaded(root.currentPage) })
     }
 
     onCurrentPageChanged: {
         markPageLoaded(currentPage)
         if (topBar)
             topBar.searchText = ""
-        if (settingBool("general/rememberPage", true))
-            launcherBridge.rememberPage(currentPage)
+        launcherBridge.rememberPage(currentPage)
+        launcherBridge.setCommunityPage(root.pageName(currentPage))
     }
 
     Shortcut { sequence: "Ctrl+1"; onActivated: root.currentPage = 0 }
@@ -97,28 +111,32 @@ ApplicationWindow {
 
     Connections {
         target: launcherBridge
-        function onThemeIdChanged() { Theme.setTheme(launcherBridge.themeId) }
-        function onAccentIdChanged() { Theme.setAccent(launcherBridge.accentId) }
+        function onThemeIdChanged() { root.applyThemeFromBackend() }
+        function onAccentIdChanged() { root.applyThemeFromBackend() }
+        function onCustomAccentColorChanged() { root.applyThemeFromBackend() }
         function onCornerStyleChanged() { Theme.setCornerStyle(launcherBridge.cornerStyle) }
-        function onSystemAppearanceChanged() {
-            Theme.setSystemAppearance(launcherBridge.systemDark, launcherBridge.systemHighContrast)
-        }
+        function onSystemAppearanceChanged() { root.applyThemeFromBackend() }
         function onNotificationRequested(title, message) { toast.show(title, message) }
         function onSettingChanged(key, value) {
             if (key === "general/compact")
                 root.compactLayout = root.settingBool(key, false)
             else if (key === "general/sidebarMode")
-                root.sidebarMode = String(value)
+                root.sidebarMode = launcherBridge.stringSetting(key, "Auto")
             else if (key === "appearance/themeBackdrop")
                 root.themeBackdropEnabled = root.settingBool(key, true)
             else if (key === "appearance/backdropIntensity")
                 root.backdropIntensity = launcherBridge.numberSetting(key, 0.72)
             else if (String(key).indexOf("appearance/backdropVariant/") === 0)
                 root.backdropSettingsRevision += 1
-            else if (key === "accessibility/textScale" || key === "accessibility/highContrast")
+            else if (key === "appearance/decorLevel" || key === "appearance/panelOpacity")
+                Theme.setAdvancedAppearance(
+                    launcherBridge.stringSetting("appearance/decorLevel", "Balanced"),
+                    launcherBridge.numberSetting("appearance/panelOpacity", 0.94))
+            else if (key === "accessibility/textScale" || key === "accessibility/highContrast" || key === "accessibility/enhancedFocus")
                 Theme.setAccessibility(
                     launcherBridge.numberSetting("accessibility/textScale", 1.0),
-                    root.settingBool("accessibility/highContrast", false))
+                    root.settingBool("accessibility/highContrast", false),
+                    root.settingBool("accessibility/enhancedFocus", false))
         }
     }
 
@@ -149,6 +167,7 @@ ApplicationWindow {
                 backdropEnabled: root.themeBackdropEnabled
                 backdropIntensity: root.backdropIntensity
                 backdropVariant: root.backdropVariant
+                backdropSource: root.backdropSource
                 currentIndex: root.currentPage
                 onPageRequested: function(index) { root.currentPage = index }
                 onCompactToggleRequested: {
@@ -168,6 +187,7 @@ ApplicationWindow {
                     visible: root.themeBackdropEnabled
                     intensity: root.backdropIntensity
                     variant: root.backdropVariant
+                    source: root.backdropSource
                 }
 
                 StackLayout {
@@ -177,7 +197,7 @@ ApplicationWindow {
 
                     Loader {
                         active: root.libraryLoaded
-                        asynchronous: false
+                        asynchronous: true
                         sourceComponent: Component {
                             LibraryPage {
                                 searchText: root.globalSearchText

@@ -7,7 +7,7 @@ Popup {
 
     width: 330
     padding: Theme.spaceLg
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
 
     background: Rectangle {
         color: Theme.surfaceRaised
@@ -27,6 +27,22 @@ Popup {
         XInfoRow { label: "Profiles"; value: "Ctrl+3" }
         XInfoRow { label: "Settings"; value: "Ctrl+," }
         XInfoRow { label: "Find settings"; value: "Ctrl+F" }
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+        Text { text: "Community & support"; color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+        Text {
+            Layout.fillWidth: true
+            text: String(launcherBridge.communityInfo.supportText || "Join the Xenon community for support and development updates.")
+            color: Theme.textMuted
+            wrapMode: Text.WordWrap
+            font.pixelSize: Theme.typeCaption
+            lineHeight: 1.25
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceSm
+            XButton { Layout.fillWidth: true; text: "Join Discord"; variant: "primary"; onClicked: launcherBridge.openDiscordCommunity() }
+            XButton { Layout.fillWidth: true; text: "GitHub"; onClicked: launcherBridge.openProjectCommunity() }
+        }
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
         Text {
             Layout.fillWidth: true

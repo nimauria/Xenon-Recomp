@@ -7,7 +7,7 @@ Popup {
     id: root
 
     property bool createMode: true
-    // all = create flow, profile = identity/preferences, paths = content-location overrides
+    // all = create flow, profile = identity/preferences, runtime = per-profile runtime overrides, paths = content-location overrides
     property string editSection: "all"
     property int editingIndex: -1
     property string profileId: ""
@@ -21,9 +21,11 @@ Popup {
     property string screenshotPath: ""
     property bool customLocations: false
     property string region: "Auto (Global)"
-    property string startupPage: "Library"
+    property string startupPage: "Launcher default"
     property bool offline: true
     property bool isolatedSettings: false
+    property var runtimeOverrides: ({})
+    readonly property var runtimeDefinitions: launcherBridge.profileRuntimeDefinitions()
     property string baselineSnapshot: ""
     property bool allowDirtyClose: false
     property bool reopenForUnsavedPrompt: false
@@ -34,6 +36,70 @@ Popup {
     readonly property bool dirty: root.currentSnapshot() !== root.baselineSnapshot
 
     signal submitted(var data)
+
+    function runtimeDefinition(key) {
+        for (var i = 0; i < runtimeDefinitions.length; ++i) {
+            if (String(runtimeDefinitions[i].key) === String(key))
+                return runtimeDefinitions[i]
+        }
+        return ({ key: key, title: key, description: "", options: [], effectiveDefault: "" })
+    }
+
+    function runtimeOptionLabels(key) {
+        var options = runtimeDefinition(key).options || []
+        var labels = []
+        for (var i = 0; i < options.length; ++i)
+            labels.push(String(options[i].label))
+        return labels
+    }
+
+    function runtimeOptionValues(key) {
+        var options = runtimeDefinition(key).options || []
+        var values = []
+        for (var i = 0; i < options.length; ++i)
+            values.push(options[i].value)
+        return values
+    }
+
+    function runtimeValue(key) {
+        if (runtimeOverrides && runtimeOverrides[key] !== undefined)
+            return runtimeOverrides[key]
+        return runtimeDefinition(key).effectiveDefault
+    }
+
+    function setRuntimeValue(key, value) {
+        var updated = {}
+        if (runtimeOverrides) {
+            for (var existing in runtimeOverrides)
+                updated[existing] = runtimeOverrides[existing]
+        }
+        updated[key] = value
+        runtimeOverrides = updated
+    }
+
+    function runtimeOptionIndex(key) {
+        var values = runtimeOptionValues(key)
+        var current = runtimeValue(key)
+        for (var i = 0; i < values.length; ++i) {
+            if (String(values[i]) === String(current) || Number(values[i]) === Number(current))
+                return i
+        }
+        return 0
+    }
+
+    function setRuntimeOption(key, index) {
+        var values = runtimeOptionValues(key)
+        if (index >= 0 && index < values.length)
+            setRuntimeValue(key, values[index])
+    }
+
+    function ensureRuntimeOverrides() {
+        var defaults = launcherBridge.profileRuntimeDefaults()
+        var updated = {}
+        for (var key in defaults)
+            updated[key] = runtimeOverrides && runtimeOverrides[key] !== undefined ? runtimeOverrides[key] : defaults[key]
+        runtimeOverrides = updated
+    }
 
     function currentSnapshot() {
         return JSON.stringify({
@@ -49,7 +115,8 @@ Popup {
             region: region,
             startupPage: startupPage,
             offline: offline,
-            isolatedSettings: isolatedSettings
+            isolatedSettings: isolatedSettings,
+            runtimeOverrides: isolatedSettings ? runtimeOverrides : ({})
         })
     }
 
@@ -61,7 +128,7 @@ Popup {
         createMode = true
         editSection = "all"
         editingIndex = -1
-        profileId = ProfileStore.newProfileId()
+        profileId = ""
         profileName = ""
         description = ""
         avatarPath = ""
@@ -72,9 +139,10 @@ Popup {
         screenshotPath = ""
         customLocations = false
         region = "Auto (Global)"
-        startupPage = "Library"
+        startupPage = "Launcher default"
         offline = true
         isolatedSettings = false
+        runtimeOverrides = launcherBridge.profileRuntimeDefaults()
         nameField.text = ""
         descriptionField.text = ""
         validationText.visible = false
@@ -87,7 +155,7 @@ Popup {
 
     function openForEdit(index, data, section) {
         createMode = false
-        editSection = section === "paths" ? "paths" : "profile"
+        editSection = section === "paths" ? "paths" : (section === "runtime" ? "runtime" : "profile")
         editingIndex = index
         profileId = String(data.profileId || "")
         profileName = String(data.profileName || "")
@@ -100,16 +168,19 @@ Popup {
         screenshotPath = String(data.screenshotPath || "")
         customLocations = gamePath.length > 0 || savePath.length > 0 || screenshotPath.length > 0
         region = String(data.region || "Auto (Global)")
-        startupPage = String(data.startupPage || "Library")
+        startupPage = String(data.startupPage || "Launcher default")
         offline = Boolean(data.offline)
         isolatedSettings = Boolean(data.isolatedSettings)
+        runtimeOverrides = data.runtimeOverrides || ({})
+        if (isolatedSettings)
+            ensureRuntimeOverrides()
         nameField.text = profileName
         descriptionField.text = description
         validationText.visible = false
         open()
         Qt.callLater(function() {
             root.captureBaseline()
-            if (root.editSection !== "paths")
+            if (root.editSection === "profile")
                 nameField.forceActiveFocus()
         })
     }
@@ -137,29 +208,22 @@ Popup {
             return
         }
 
-        var finalAvatar = avatarPath
-        if (removeAvatarOnSave) {
-            launcherBridge.removeProfileAvatar(profileId)
-            finalAvatar = ""
-        } else if (pendingAvatarSource.length > 0) {
-            var imported = launcherBridge.importProfileAvatar(profileId, pendingAvatarSource)
-            if (imported.length > 0)
-                finalAvatar = imported
-        }
-
         validationText.visible = false
         submitted({
             profileId: profileId,
             profileName: trimmed,
             description: descriptionField.text.trim(),
-            avatarPath: finalAvatar,
+            avatarPath: avatarPath,
+            pendingAvatarSource: pendingAvatarSource,
+            removeAvatarOnSave: removeAvatarOnSave,
             gamePath: customLocations ? gamePath : "",
             savePath: customLocations ? savePath : "",
             screenshotPath: customLocations ? screenshotPath : "",
             region: region,
             startupPage: startupPage,
             offline: offline,
-            isolatedSettings: isolatedSettings
+            isolatedSettings: isolatedSettings,
+            runtimeOverrides: isolatedSettings ? runtimeOverrides : ({})
         })
         baselineSnapshot = currentSnapshot()
         close()
@@ -249,7 +313,10 @@ Popup {
 
                 Text {
                     Layout.fillWidth: true
-                    text: root.createMode ? "Create profile" : (root.editSection === "paths" ? "Edit content locations" : "Edit profile")
+                    text: root.createMode ? "Create profile"
+                        : root.editSection === "paths" ? "Edit content locations"
+                        : root.editSection === "runtime" ? "Profile runtime settings"
+                        : "Edit profile"
                     color: Theme.text
                     font.pixelSize: Theme.typeSubtitle
                     font.weight: Font.DemiBold
@@ -261,7 +328,9 @@ Popup {
                         ? "Create a local profile and optionally override launcher defaults."
                         : root.editSection === "paths"
                           ? "Choose profile-specific folders or inherit the launcher defaults."
-                          : "Edit profile identity and per-profile defaults."
+                          : root.editSection === "runtime"
+                            ? "Override launcher runtime, graphics, input and audio defaults for this profile."
+                            : "Edit profile identity and per-profile defaults."
                     color: Theme.textMuted
                     font.pixelSize: Theme.typeCaption
                     wrapMode: Text.WordWrap
@@ -305,7 +374,7 @@ Popup {
 
                     GridLayout {
                         id: avatarLayout
-                        visible: root.editSection !== "paths"
+                        visible: root.editSection !== "paths" && root.editSection !== "runtime"
                         Layout.fillWidth: true
                         columns: width >= 560 && Theme.textScale < 1.5 ? 2 : 1
                         columnSpacing: Theme.spaceLg
@@ -353,7 +422,7 @@ Popup {
                     }
 
                     ColumnLayout {
-                        visible: root.editSection !== "paths"
+                        visible: root.editSection !== "paths" && root.editSection !== "runtime"
                         Layout.fillWidth: true
                         spacing: Theme.spaceXs
                         Text { text: "Display name"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
@@ -390,7 +459,7 @@ Popup {
                     }
 
                     ColumnLayout {
-                        visible: root.editSection !== "paths"
+                        visible: root.editSection !== "paths" && root.editSection !== "runtime"
                         Layout.fillWidth: true
                         spacing: Theme.spaceXs
                         RowLayout {
@@ -417,7 +486,7 @@ Popup {
                     }
 
                     GridLayout {
-                        visible: root.editSection !== "paths"
+                        visible: root.editSection !== "paths" && root.editSection !== "runtime"
                         Layout.fillWidth: true
                         columns: width > 560 ? 2 : 1
                         columnSpacing: Theme.spaceMd
@@ -439,7 +508,7 @@ Popup {
                             Text { text: "Startup page"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                             XComboBox {
                                 Layout.fillWidth: true
-                                model: ["Library", "Modules", "Profiles"]
+                                model: ["Launcher default", "Library", "Modules", "Profiles", "Settings"]
                                 currentIndex: Math.max(0, model.indexOf(root.startupPage))
                                 onActivated: function(index) { root.startupPage = model[index] }
                             }
@@ -478,9 +547,140 @@ Popup {
                     XSettingsCard {
                         visible: root.editSection !== "paths"
                         title: "Profile-specific runtime settings"
-                        description: "Keep future runtime overrides isolated from launcher-wide defaults."
+                        description: root.isolatedSettings
+                            ? "This profile uses its own runtime, graphics, input and audio defaults."
+                            : "Inherit runtime, graphics, input and audio defaults from Settings."
                         actionWidth: 72
-                        XSwitch { checked: root.isolatedSettings; onUserToggled: function(value) { root.isolatedSettings = value } }
+                        XSwitch {
+                            checked: root.isolatedSettings
+                            onUserToggled: function(value) {
+                                root.isolatedSettings = value
+                                if (value)
+                                    root.ensureRuntimeOverrides()
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        visible: root.isolatedSettings && (root.createMode || root.editSection === "runtime")
+                        Layout.fillWidth: true
+                        spacing: Theme.spaceSm
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text { text: "Runtime overrides"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "These values are validated by Launcher Core and replace the matching launcher-wide defaults only for this profile."
+                                    color: Theme.textMuted
+                                    font.pixelSize: Theme.typeCaption
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                            XButton {
+                                text: "Use current defaults"
+                                variant: "ghost"
+                                onClicked: root.runtimeOverrides = launcherBridge.profileRuntimeDefaults()
+                            }
+                        }
+
+                        XSettingsCard {
+                            title: root.runtimeDefinition("runtime/graphicsBackend").title
+                            description: root.runtimeDefinition("runtime/graphicsBackend").description
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("runtime/graphicsBackend")
+                                currentIndex: root.runtimeOptionIndex("runtime/graphicsBackend")
+                                onActivated: function(index) { root.setRuntimeOption("runtime/graphicsBackend", index) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("graphics/shaderCache").title
+                            description: root.runtimeDefinition("graphics/shaderCache").description
+                            actionWidth: 72
+                            XSwitch {
+                                checked: Boolean(root.runtimeValue("graphics/shaderCache"))
+                                onUserToggled: function(value) { root.setRuntimeValue("graphics/shaderCache", value) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("graphics/shaderCacheMode").title
+                            description: root.runtimeDefinition("graphics/shaderCacheMode").description
+                            enabled: Boolean(root.runtimeValue("graphics/shaderCache"))
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("graphics/shaderCacheMode")
+                                currentIndex: root.runtimeOptionIndex("graphics/shaderCacheMode")
+                                onActivated: function(index) { root.setRuntimeOption("graphics/shaderCacheMode", index) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("input/preferredDevice").title
+                            description: root.runtimeDefinition("input/preferredDevice").description
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("input/preferredDevice")
+                                currentIndex: root.runtimeOptionIndex("input/preferredDevice")
+                                onActivated: function(index) { root.setRuntimeOption("input/preferredDevice", index) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("input/deadzone").title
+                            description: root.runtimeDefinition("input/deadzone").description
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("input/deadzone")
+                                currentIndex: root.runtimeOptionIndex("input/deadzone")
+                                onActivated: function(index) { root.setRuntimeOption("input/deadzone", index) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("input/rumble").title
+                            description: root.runtimeDefinition("input/rumble").description
+                            actionWidth: 72
+                            XSwitch {
+                                checked: Boolean(root.runtimeValue("input/rumble"))
+                                onUserToggled: function(value) { root.setRuntimeValue("input/rumble", value) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("audio/masterVolume").title
+                            description: root.runtimeDefinition("audio/masterVolume").description
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("audio/masterVolume")
+                                currentIndex: root.runtimeOptionIndex("audio/masterVolume")
+                                onActivated: function(index) { root.setRuntimeOption("audio/masterVolume", index) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("audio/muteUnfocused").title
+                            description: root.runtimeDefinition("audio/muteUnfocused").description
+                            actionWidth: 72
+                            XSwitch {
+                                checked: Boolean(root.runtimeValue("audio/muteUnfocused"))
+                                onUserToggled: function(value) { root.setRuntimeValue("audio/muteUnfocused", value) }
+                            }
+                        }
+                        XSettingsCard {
+                            title: root.runtimeDefinition("audio/latencyProfile").title
+                            description: root.runtimeDefinition("audio/latencyProfile").description
+                            actionWidth: 230
+                            XComboBox {
+                                Layout.preferredWidth: 220
+                                model: root.runtimeOptionLabels("audio/latencyProfile")
+                                currentIndex: root.runtimeOptionIndex("audio/latencyProfile")
+                                onActivated: function(index) { root.setRuntimeOption("audio/latencyProfile", index) }
+                            }
+                        }
                     }
                 }
             }
@@ -509,7 +709,10 @@ Popup {
                 spacing: Theme.spaceSm
                 XButton { text: "Cancel"; onClicked: root.requestClose() }
                 XButton {
-                    text: root.createMode ? "Create profile" : (root.editSection === "paths" ? "Save paths" : "Save changes")
+                    text: root.createMode ? "Create profile"
+                        : root.editSection === "paths" ? "Save paths"
+                        : root.editSection === "runtime" ? "Save runtime settings"
+                        : "Save changes"
                     variant: "primary"
                     enabled: root.editSection === "paths" ? true : root.nameIsValid
                     onClicked: root.submit()
@@ -535,7 +738,10 @@ Popup {
         message: root.createMode
             ? "This profile has unsaved details. Save it before closing?"
             : "You have unsaved profile changes. Save them before closing?"
-        confirmText: root.createMode ? "Create profile" : (root.editSection === "paths" ? "Save paths" : "Save changes")
+        confirmText: root.createMode ? "Create profile"
+            : root.editSection === "paths" ? "Save paths"
+            : root.editSection === "runtime" ? "Save runtime settings"
+            : "Save changes"
         cancelText: "Cancel"
         secondaryText: "Discard changes"
         secondaryDestructive: true

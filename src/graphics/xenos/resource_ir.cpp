@@ -364,7 +364,13 @@ ResolvePlan plan_resolve(const DrawResourceState& state,
         static_cast<std::uint8_t>(mapped->sample);
     ++result.selected_sample_count;
   }
+  // Keep two-sample resolves on the explicit selected-sample path. Native API
+  // UNORM resolves may round half-way channel values differently across D3D12
+  // and Vulkan drivers, while Xenon-visible resolve bytes must be deterministic.
+  // The four-sample path remains native until the generic N-sample averaging
+  // helper is introduced.
   result.native_color_average = !result.depth &&
+      result.selected_sample_count > 2u &&
       is_full_color_resolve(selection, result.samples);
   result.valid = result.selected_sample_count != 0;
   if (!result.valid) result.error = "Xenos resolve selected no samples";

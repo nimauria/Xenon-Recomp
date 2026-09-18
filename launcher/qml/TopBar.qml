@@ -151,7 +151,7 @@ Rectangle {
             iconName: "help"
             tooltip: "Help and keyboard shortcuts"
             variant: "ghost"
-            onClicked: helpPopup.open()
+            onClicked: helpPopup.visible ? helpPopup.close() : helpPopup.open()
 
             HelpPopover {
                 id: helpPopup
@@ -172,13 +172,8 @@ Rectangle {
         anchors.leftMargin: Theme.spaceLg
         width: Math.min(300, parent.width * 0.28)
         height: 18
-        source: Theme.effectiveThemeId === "industrial"
-            ? "qrc:/theme-art/decor/amber/divider_notch_amber.svg"
-            : Theme.effectiveThemeId === "carbon"
-              ? "qrc:/theme-art/decor/green/divider_notch_green.svg"
-              : Theme.effectiveThemeId === "xenon-dark"
-                ? "qrc:/theme-art/decor/blue/divider_notch_blue.svg" : ""
-        visible: source.toString().length > 0
+        source: Theme.decorAsset("divider_notch")
+        visible: Theme.decorLevel !== "Minimal" && source.toString().length > 0
         fillMode: Image.PreserveAspectFit
         opacity: 0.36
         smooth: true

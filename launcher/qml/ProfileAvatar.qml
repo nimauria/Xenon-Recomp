@@ -9,6 +9,7 @@ Item {
     property bool editable: false
     signal changeRequested()
     signal removeRequested()
+    readonly property bool imageReady: avatarImage.status === Image.Ready
 
     implicitWidth: 96
     implicitHeight: 96
@@ -22,9 +23,10 @@ Item {
         clip: true
 
         Image {
+            id: avatarImage
             anchors.fill: parent
             source: root.avatarSource
-            visible: root.avatarSource.length > 0
+            visible: root.imageReady
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: true
@@ -34,7 +36,7 @@ Item {
 
         Text {
             anchors.centerIn: parent
-            visible: root.avatarSource.length === 0
+            visible: !root.imageReady
             text: root.displayName.length > 0 ? root.displayName.charAt(0).toUpperCase() : "?"
             color: Theme.accent
             font.pixelSize: Math.min(root.width, root.height) * 0.38

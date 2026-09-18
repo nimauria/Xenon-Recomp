@@ -9,6 +9,7 @@ Rectangle {
     property bool backdropEnabled: true
     property real backdropIntensity: 0.72
     property string backdropVariant: "default"
+    property string backdropSource: ""
     signal pageRequested(int index)
     signal compactToggleRequested()
 
@@ -17,18 +18,15 @@ Rectangle {
     border.width: Theme.borderWidth
     border.color: Theme.divider
 
-    readonly property string railSource: Theme.effectiveThemeId === "industrial"
-        ? "qrc:/theme-art/decor/amber/rail_vertical_amber.svg"
-        : Theme.effectiveThemeId === "carbon"
-          ? "qrc:/theme-art/decor/green/rail_vertical_green.svg"
-          : Theme.effectiveThemeId === "xenon-dark"
-            ? "qrc:/theme-art/decor/blue/rail_vertical_blue.svg" : ""
+    readonly property string railSource: Theme.decorAsset("rail_vertical")
+
 
     ThemeBackdrop {
         anchors.fill: parent
         visible: root.backdropEnabled
         intensity: root.backdropIntensity
         variant: root.backdropVariant
+        source: root.backdropSource
         subtle: true
     }
 
@@ -39,7 +37,7 @@ Rectangle {
         width: 8
         height: Math.min(240, parent.height * 0.48)
         source: root.railSource
-        visible: source.toString().length > 0
+        visible: Theme.decorLevel !== "Minimal" && source.toString().length > 0
         fillMode: Image.Stretch
         opacity: root.compact ? 0.42 : 0.22
         smooth: true

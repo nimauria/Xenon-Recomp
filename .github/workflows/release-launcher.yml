@@ -1,0 +1,102 @@
+name: Release Xenon Launcher
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-x64:
+    name: Windows x64 launcher
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            throw "Release tags must use semantic versions such as v0.1.0 or v0.2.0-beta.1. Got: $tag"
+          }
+          "XENON_RELEASE_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "XENON_RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install Qt 6.10.3
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip aqtinstall
+          aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 -O C:\Qt
+          "QT_ROOT=C:\Qt\6.10.3\msvc2022_64" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Configure launcher
+        shell: pwsh
+        run: |
+          cmake -S . -B build/release-launcher `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT" `
+            -DXENON_BUILD_LAUNCHER=ON `
+            -DXENON_LAUNCHER_VERSION_OVERRIDE="$env:XENON_RELEASE_VERSION" `
+            -DXENON_LAUNCHER_UPDATE_REPOSITORY="${{ github.repository }}" `
+            -DXENON_BUILD_TESTS=OFF `
+            -DXENON_ENABLE_MEMORY=OFF `
+            -DXENON_ENABLE_GRAPHICS=OFF `
+            -DXENON_ENABLE_VULKAN=OFF `
+            -DXENON_ENABLE_D3D12=OFF `
+            -DXENON_ENABLE_DXC=OFF `
+            -DXENON_ENABLE_AUDIO=OFF `
+            -DXENON_ENABLE_INPUT=OFF `
+            -DXENON_ENABLE_NETWORK=OFF
+
+      - name: Build launcher
+        shell: pwsh
+        run: cmake --build build/release-launcher --target xenon_launcher --config Release --parallel
+
+      - name: Deploy Qt runtime
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "build/release-launcher/launcher/Release/xenon_launcher.exe"
+          & "$env:QT_ROOT\bin\windeployqt.exe" `
+            --release `
+            --compiler-runtime `
+            --qmldir "launcher/qml" `
+            $exe
+
+      - name: Package portable launcher
+        shell: pwsh
+        run: |
+          $source = Resolve-Path "build/release-launcher/launcher/Release"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $asset = "dist/xenon-launcher-windows-x64.zip"
+          if (Test-Path $asset) { Remove-Item $asset -Force }
+          Compress-Archive -Path "$source\*" -DestinationPath $asset -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenon-launcher-windows-x64.zip" | Set-Content -NoNewline "$asset.sha256"
+
+      - name: Publish GitHub release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:XENON_RELEASE_TAG
+          $asset = "dist/xenon-launcher-windows-x64.zip"
+          $checksum = "$asset.sha256"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset $checksum --clobber
+          } else {
+            $args = @(
+              "release", "create", $tag,
+              $asset, $checksum,
+              "--verify-tag",
+              "--generate-notes",
+              "--title", "Xenon Launcher $tag"
+            )
+            if ($env:XENON_RELEASE_VERSION.Contains('-')) { $args += "--prerelease" }
+            gh @args
+          }

@@ -18,6 +18,7 @@ include(Warnings)
 include(Dependencies)
 
 option(XENON_BUILD_TESTS "Build Xenon Recomp tests" ON)
+option(XENON_BUILD_BENCHMARKS "Build Xenon Memory V2 benchmarks" ON)
 option(XENON_BUILD_LAUNCHER "Build the Xenon launcher UI when Qt 6 is available" ON)
 option(XENON_ENABLE_MEMORY "Build the production Xenon memory subsystem" ON)
 option(XENON_ENABLE_GRAPHICS "Build the Xenos graphics frontend" ON)
@@ -27,6 +28,7 @@ option(XENON_ENABLE_DXC "Build the HLSL/DXC shader compiler when DXC is availabl
 option(XENON_ENABLE_AUDIO "Enable audio subsystem" OFF)
 option(XENON_ENABLE_INPUT "Enable input subsystem" OFF)
 option(XENON_ENABLE_NETWORK "Enable networking subsystem" OFF)
+option(XENON_ENABLE_FILESYSTEM "Build the Xenon virtual filesystem subsystem" ON)
 
 if(XENON_ENABLE_GRAPHICS AND NOT XENON_ENABLE_MEMORY)
   message(FATAL_ERROR "XENON_ENABLE_GRAPHICS requires XENON_ENABLE_MEMORY")
@@ -41,6 +43,22 @@ target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_compile_features(xenon_core PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_core)
 add_library(Xenon::Core ALIAS xenon_core)
+
+# -----------------------------------------------------------------------------
+# Filesystem: host-independent Xbox-style VFS and host directory device.
+# Kept independent of guest Memory; Xbox kernel/XAM marshalling is layered above.
+if(XENON_ENABLE_FILESYSTEM)
+  add_library(xenon_filesystem STATIC
+    src/filesystem/virtual/path.cpp
+    src/filesystem/virtual/device.cpp
+    src/filesystem/virtual/virtual_file_system.cpp
+    src/filesystem/host/host_path_device.cpp
+  )
+  target_include_directories(xenon_filesystem PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_features(xenon_filesystem PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_filesystem)
+  add_library(Xenon::Filesystem ALIAS xenon_filesystem)
+endif()
 
 # -----------------------------------------------------------------------------
 # CPU: Xenon PPC/VMX128 frontend -> Xenon IR -> optimizer -> native C++ AOT.
@@ -90,6 +108,13 @@ if(XENON_ENABLE_MEMORY)
   add_library(Xenon::Memory ALIAS xenon_memory)
 endif()
 
+if(XENON_BUILD_BENCHMARKS AND XENON_ENABLE_MEMORY)
+  add_executable(xenon_memory_v2_benchmarks
+    tests/memory/memory_benchmarks.cpp)
+  target_link_libraries(xenon_memory_v2_benchmarks PRIVATE xenon_memory)
+  xenon_enable_test_asserts(xenon_memory_v2_benchmarks)
+endif()
+
 # -----------------------------------------------------------------------------
 # Graphics: Xenos PM4/shader/EDRAM frontend. Vulkan and D3D12 remain backends.
 if(XENON_ENABLE_GRAPHICS)
@@ -102,6 +127,7 @@ if(XENON_ENABLE_GRAPHICS)
     src/graphics/xenos/resource_ir.cpp
     src/graphics/xenos/resource_barrier.cpp
     src/graphics/xenos/texture.cpp
+    src/graphics/xenos/presentation.cpp
     src/graphics/xenos/edram.cpp
     src/graphics/xenos/edram_surface.cpp
     src/graphics/xenos/edram_ownership.cpp
@@ -169,6 +195,7 @@ if(XENON_ENABLE_GRAPHICS)
         src/graphics/vulkan/render_target.cpp
         src/graphics/vulkan/depth_target.cpp
         src/graphics/vulkan/texture.cpp
+        src/graphics/vulkan/presentation.cpp
         src/graphics/vulkan/backend.cpp)
       target_include_directories(xenon_graphics_vulkan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
       target_link_libraries(xenon_graphics_vulkan PUBLIC xenon_graphics Vulkan::Vulkan)
@@ -195,6 +222,7 @@ if(XENON_ENABLE_GRAPHICS)
       src/graphics/d3d12/render_target.cpp
       src/graphics/d3d12/depth_target.cpp
       src/graphics/d3d12/texture.cpp
+      src/graphics/d3d12/presentation.cpp
       src/graphics/d3d12/backend.cpp)
     target_include_directories(xenon_graphics_d3d12 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(xenon_graphics_d3d12 PUBLIC xenon_graphics d3d12 dxgi dxguid)
@@ -212,6 +240,13 @@ endif()
 # Tests
 if(XENON_BUILD_TESTS)
   enable_testing()
+
+  if(XENON_ENABLE_FILESYSTEM)
+    add_executable(xenon_filesystem_tests tests/filesystem/filesystem_tests.cpp)
+    target_link_libraries(xenon_filesystem_tests PRIVATE xenon_filesystem)
+    xenon_enable_test_asserts(xenon_filesystem_tests)
+    add_test(NAME xenon_filesystem_tests COMMAND xenon_filesystem_tests)
+  endif()
 
   add_executable(xenon_cpu_tests tests/cpu/ppc/cpu_tests.cpp)
   target_link_libraries(xenon_cpu_tests PRIVATE xenon_cpu)
@@ -350,6 +385,27 @@ if(XENON_BUILD_TESTS)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
 
+    # Cross-backend canonical EDRAM handoff regression. Always syntax-check
+    # the common fixture; the full suite runs when both native backends exist.
+    add_executable(xenon_cross_backend_canonical_tests
+      tests/graphics/backends/cross_backend_canonical.cpp)
+    target_link_libraries(xenon_cross_backend_canonical_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_cross_backend_canonical_tests
+        PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_cross_backend_canonical_tests
+        PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_cross_backend_canonical_tests
+        PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_cross_backend_canonical_tests
+        PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    xenon_enable_test_asserts(xenon_cross_backend_canonical_tests)
+    add_test(NAME xenon_cross_backend_canonical_tests
+      COMMAND xenon_cross_backend_canonical_tests)
+
     add_executable(xenon_shader_decoder_tests tests/graphics/xenos/shader_decoder.cpp)
     set_target_properties(xenon_shader_decoder_tests PROPERTIES
       OUTPUT_NAME xenon_shader_decoder_gpu09_tests)
@@ -383,6 +439,11 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_texture_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_texture_tests)
     add_test(NAME xenon_texture_tests COMMAND xenon_texture_tests)
+
+    add_executable(xenon_presentation_tests tests/graphics/xenos/presentation.cpp)
+    target_link_libraries(xenon_presentation_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_presentation_tests)
+    add_test(NAME xenon_presentation_tests COMMAND xenon_presentation_tests)
 
     add_executable(xenon_edram_surface_tests
       tests/graphics/xenos/edram_surface.cpp)

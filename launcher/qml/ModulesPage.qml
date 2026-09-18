@@ -8,6 +8,13 @@ Item {
 
     property string searchText: ""
     property int selectedModuleIndex: -1
+    property string selectedModuleId: ""
+    property string contextModuleId: ""
+    property string pendingRemoveModuleId: ""
+    property string pendingRemoveModuleName: ""
+    property string pendingDisableModuleId: ""
+    property string pendingDisableModuleName: ""
+    property int pendingDisableLinkedGames: 0
     property string fixtureMode: launcherBridge.stringSetting(
         "developer/fixtureMode", launcherBridge.testMode ? "generic" : "none")
 
@@ -21,7 +28,14 @@ Item {
             moduleName: "", moduleType: "", version: "", status: "",
             active: false, updateAvailable: false, description: "", moduleId: "",
             regions: "", gameIds: "", runtimeDependency: "", renderer: "",
-            artwork: "", capabilities: "", linkedGame: ""
+            artwork: "", capabilities: "", linkedGame: "", linkedGameCount: 0,
+            linkedGames: "", settingsCount: 0, dlcDefinitionCount: 0,
+            repositoryUrl: "", publisher: "", license: "", catalogKnown: false,
+            catalogVerified: false, updateStatus: "idle", updateMessage: "",
+            availableVersion: "", impactMessage: "", downloadProgress: 0.0,
+            canDownloadUpdate: false, canInstallUpdate: false, path: "",
+            releaseUrl: "", releaseName: "", releaseNotes: "", publishedAt: "",
+            assetName: "", assetSize: 0
         }
     }
 
@@ -29,6 +43,14 @@ Item {
         if (!hasModules || selectedModuleIndex < 0 || selectedModuleIndex >= modulesModel.count)
             return emptyModule()
         return modulesModel.get(selectedModuleIndex)
+    }
+
+    function indexForModuleId(moduleId) {
+        for (var i = 0; i < modulesModel.count; ++i) {
+            if (String(modulesModel.get(i).moduleId) === String(moduleId))
+                return i
+        }
+        return -1
     }
 
     function matchesSearch(name, type, id) {
@@ -43,125 +65,220 @@ Item {
     function selectFirstMatchingModule() {
         if (!hasModules) {
             selectedModuleIndex = -1
+            selectedModuleId = ""
             return
         }
         for (var i = 0; i < modulesModel.count; ++i) {
             var module = modulesModel.get(i)
             if (matchesSearch(module.moduleName, module.moduleType, module.moduleId)) {
                 selectedModuleIndex = i
+                selectedModuleId = String(module.moduleId)
                 return
             }
         }
         selectedModuleIndex = -1
+        selectedModuleId = ""
     }
 
     onSearchTextChanged: selectFirstMatchingModule()
 
-    function genericSettings() {
-        return [
-            { id: "renderer", label: "Renderer override", description: "Use the launcher default or select a module-supported renderer.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
-            { id: "offline", label: "Offline mode", description: "Force offline-compatible services for this module.", type: "bool", defaultValue: true },
-            { id: "debugOverlay", label: "Debug overlay", description: "Show module diagnostics while launching test content.", type: "bool", defaultValue: false }
-        ]
-    }
-
-    function gracemeriaSettings() {
-        return [
-            { id: "region", label: "Game region", description: "Choose which supported executable/content region the module should prefer.", type: "choice", defaultValue: "Automatic", options: ["Automatic", "NTSC-U", "PAL"] },
-            { id: "renderer", label: "Renderer override", description: "Override the launcher renderer for this module.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
-            { id: "offline", label: "Offline mode", description: "Use local service fallbacks while online services are unavailable.", type: "bool", defaultValue: true },
-            { id: "skipIntro", label: "Skip intro videos", description: "Example module-defined preference used only by the UI preview.", type: "bool", defaultValue: false },
-            { id: "cache", label: "Shader cache profile", description: "Example scalable manifest choice.", type: "choice", defaultValue: "Automatic", options: ["Automatic", "Conservative", "Aggressive"] }
-        ]
-    }
-
-    // Settings remain outside ListModel delegates. Real modules will expose the
-    // same schema through the module manifest/service API, and this resolver
-    // can be replaced without changing ModuleSettingsDialog.
     function settingsForModule(moduleId) {
-        if (moduleId === "org.nimauria.project-gracemeria")
-            return gracemeriaSettings()
-        if (String(moduleId).indexOf("xenon.test.") === 0)
-            return genericSettings()
-        return []
+        return launcherBridge.moduleSettingsSchema(moduleId)
     }
 
-    function populateFixtures() {
+    function populateBackendModules() {
+        var preserveId = selectedModuleId.length > 0 ? selectedModuleId
+                                                     : (selectedModuleIndex >= 0 && selectedModuleIndex < modulesModel.count
+                                                        ? String(modulesModel.get(selectedModuleIndex).moduleId) : "")
         modulesModel.clear()
-        selectedModuleIndex = -1
-        if (!testMode || fixtureMode === "none")
-            return
+        var items = launcherBridge.moduleEntries()
+        for (var i = 0; i < items.length; ++i)
+            modulesModel.append(items[i])
 
-        if (fixtureMode === "gracemeria") {
-            modulesModel.append({
-                moduleName: "Project Gracemeria",
-                moduleType: "Game Module",
-                version: "preview",
-                status: "Active",
-                active: true,
-                updateAvailable: false,
-                description: "Project Gracemeria launcher preview. No commercial game content is bundled; users provide their own local files.",
-                moduleId: "org.nimauria.project-gracemeria",
-                regions: "NTSC-U / PAL",
-                gameIds: "Module declared",
-                runtimeDependency: "Xenon Recomp",
-                renderer: "Vulkan / Direct3D 12",
-                artwork: "",
-                capabilities: "Game identification • DLC catalogue • Saves • Offline services • Module settings",
-                linkedGame: "Ace Combat 6: Fires of Liberation"
-            })
+        var preserved = preserveId.length > 0 ? indexForModuleId(preserveId) : -1
+        if (preserved >= 0) {
+            selectedModuleIndex = preserved
+            selectedModuleId = preserveId
         } else {
-            modulesModel.append({
-                moduleName: "Test Flight Module", moduleType: "Game Module", version: "0.1-test",
-                status: "Active", active: true, updateAvailable: false,
-                description: "Fictional game module used to exercise discovery, compatibility, update and module settings UI.",
-                moduleId: "xenon.test.flight", regions: "Test Region A / B", gameIds: "TEST0001",
-                runtimeDependency: "Xenon Recomp", renderer: "Vulkan", artwork: "",
-                capabilities: "Game identification • DLC catalogue • Save data • Offline launch",
-                linkedGame: "Xenon Test Flight"
-            })
-            modulesModel.append({
-                moduleName: "Test Arena Module", moduleType: "Game Module", version: "0.2-test",
-                status: "Disabled", active: false, updateAvailable: true,
-                description: "Second fictional module used to verify disabled states and update indicators.",
-                moduleId: "xenon.test.arena", regions: "Module-defined", gameIds: "TEST0002",
-                runtimeDependency: "Xenon Recomp", renderer: "Automatic", artwork: "",
-                capabilities: "Game identification • Local content validation",
-                linkedGame: ""
-            })
-            modulesModel.append({
-                moduleName: "Test Compatibility Pack", moduleType: "Support Package", version: "0.1-test",
-                status: "Installed", active: true, updateAvailable: false,
-                description: "Fictional shared support package used to exercise non-game module presentation.",
-                moduleId: "xenon.test.compat", regions: "Global", gameIds: "Multiple",
-                runtimeDependency: "Xenon Recomp", renderer: "N/A", artwork: "",
-                capabilities: "Compatibility metadata • Validation definitions",
-                linkedGame: ""
-            })
+            selectFirstMatchingModule()
         }
-        if (modulesModel.count > 0)
-            selectedModuleIndex = 0
     }
 
-    Component.onCompleted: populateFixtures()
+    function selectIndex(index) {
+        if (index < 0 || index >= modulesModel.count)
+            return
+        selectedModuleIndex = index
+        selectedModuleId = String(modulesModel.get(index).moduleId)
+    }
+
+    function openSettingsFor(moduleId) {
+        var index = indexForModuleId(moduleId)
+        if (index >= 0)
+            selectIndex(index)
+        var module = selectedModule()
+        settingsDialog.openFor(module.moduleName, settingsForModule(moduleId))
+    }
+
+    function requestModuleToggle(moduleId) {
+        var index = indexForModuleId(moduleId)
+        if (index < 0)
+            return
+        selectIndex(index)
+        var module = selectedModule()
+        if (Boolean(module.active) && Number(module.linkedGameCount || 0) > 0) {
+            pendingDisableModuleId = moduleId
+            pendingDisableModuleName = String(module.moduleName || moduleId)
+            pendingDisableLinkedGames = Number(module.linkedGameCount || 0)
+            disableModuleConfirm.open()
+            return
+        }
+        launcherBridge.setModuleEnabled(moduleId, !Boolean(module.active))
+    }
+
+    function performModuleAction(actionId, moduleId) {
+        var index = indexForModuleId(moduleId)
+        if (index >= 0)
+            selectIndex(index)
+        var module = selectedModule()
+
+        if (actionId === "toggleEnabled")
+            requestModuleToggle(moduleId)
+        else if (actionId === "settings")
+            openSettingsFor(moduleId)
+        else if (actionId === "checkUpdate")
+            launcherBridge.requestModuleUpdateCheck(moduleId)
+        else if (actionId === "downloadUpdate")
+            launcherBridge.requestModuleUpdateDownload(moduleId)
+        else if (actionId === "installUpdate")
+            launcherBridge.requestModuleUpdateInstall(moduleId)
+        else if (actionId === "verify")
+            launcherBridge.verifyModule(moduleId)
+        else if (actionId === "openFolder")
+            launcherBridge.openFolder(launcherBridge.modulePath(moduleId))
+        else if (actionId === "openRepository")
+            launcherBridge.openExternalUrl(String(module.repositoryUrl || ""))
+        else if (actionId === "copyId")
+            launcherBridge.copyText(moduleId)
+        else if (actionId === "remove") {
+            pendingRemoveModuleId = moduleId
+            pendingRemoveModuleName = String(module.moduleName || moduleId)
+            removeModuleConfirm.open()
+        }
+    }
+
+    function performPageAction(actionId) {
+        if (actionId === "browseCatalog")
+            catalogDialog.open()
+        else if (actionId === "importLocal")
+            moduleDialog.open()
+        else if (actionId === "importFolder")
+            moduleFolderDialog.open()
+        else if (actionId === "refreshInstalled")
+            launcherBridge.refreshModules()
+        else if (actionId === "refreshCatalog")
+            launcherBridge.requestModuleCatalogRefresh()
+        else if (actionId === "checkAllUpdates")
+            launcherBridge.requestAllModuleUpdateChecks()
+    }
+
+    function openContextFor(moduleId, item, x, y) {
+        var index = indexForModuleId(moduleId)
+        if (index >= 0)
+            selectIndex(index)
+        contextModuleId = moduleId
+        moduleContextMenu.actions = launcherBridge.moduleActions(moduleId)
+        var mapped = item.mapToItem(root, x, y)
+        moduleContextMenu.x = Math.max(0, Math.min(root.width - moduleContextMenu.width, mapped.x))
+        moduleContextMenu.y = Math.max(0, Math.min(root.height - moduleContextMenu.height, mapped.y))
+        moduleContextMenu.open()
+    }
+
+    function activeCount() {
+        var count = 0
+        for (var i = 0; i < modulesModel.count; ++i)
+            if (modulesModel.get(i).active) ++count
+        return count
+    }
+
+    function updateCount() {
+        var count = 0
+        for (var i = 0; i < modulesModel.count; ++i)
+            if (modulesModel.get(i).updateAvailable) ++count
+        return count
+    }
+
+    Component.onCompleted: populateBackendModules()
 
     Connections {
         target: launcherBridge
         function onSettingChanged(key, value) {
             if (key === "developer/fixtureMode") {
-                root.fixtureMode = String(value)
-                root.populateFixtures()
+                root.fixtureMode = launcherBridge.stringSetting(key, launcherBridge.testMode ? "generic" : "none")
+                root.populateBackendModules()
             }
         }
+        function onModulesChanged() { root.populateBackendModules() }
+        function onModuleUpdateStateChanged(moduleId) { root.populateBackendModules() }
+        function onModuleCatalogChanged() { root.populateBackendModules() }
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
-        XSectionHeader {
-            title: "Modules"
-            description: "Modules add game-specific behaviour without coupling individual games to the Xenon runtime."
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceMd
+
+            XSectionHeader {
+                Layout.fillWidth: true
+                title: "Modules"
+                description: "Install, configure and update game-specific Xenon modules without coupling games to the runtime."
+            }
+
+            XIconButton {
+                id: pageActionsButton
+                iconName: "more"
+                tooltip: "Module page actions"
+                variant: "filled"
+                onClicked: pageActionsMenu.open()
+
+                XActionMenu {
+                    id: pageActionsMenu
+                    x: pageActionsButton.width - width
+                    y: pageActionsButton.height + Theme.spaceXs
+                    menuWidth: 280
+                    actions: launcherBridge.modulePageActions()
+                    onActionTriggered: function(actionId) { root.performPageAction(actionId) }
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.spaceSm
+            StatusPill { label: modulesModel.count + " installed"; tone: Theme.textMuted }
+            StatusPill { label: root.activeCount() + " enabled"; tone: Theme.success }
+            StatusPill {
+                visible: root.updateCount() > 0
+                label: root.updateCount() + " update" + (root.updateCount() === 1 ? "" : "s")
+                tone: Theme.warning
+            }
+            StatusPill {
+                visible: root.testMode && root.fixtureMode !== "none"
+                label: root.fixtureMode === "gracemeria" ? "GRACEMERIA PREVIEW" : "TEST"
+                tone: Theme.warning
+            }
+            Item { Layout.fillWidth: true }
+            XButton {
+                text: "Check All Updates"
+                onClicked: launcherBridge.requestAllModuleUpdateChecks()
+            }
+            XButton {
+                text: "Browse Catalog"
+                variant: "primary"
+                onClicked: catalogDialog.open()
+            }
         }
 
         RowLayout {
@@ -170,8 +287,8 @@ Item {
             spacing: Theme.spaceMd
 
             XPanel {
-                Layout.preferredWidth: Math.max(310, Math.min(380, parent.width * 0.29))
-                Layout.minimumWidth: 280
+                Layout.preferredWidth: Math.max(320, Math.min(400, parent.width * 0.30))
+                Layout.minimumWidth: 290
                 Layout.fillHeight: true
 
                 ColumnLayout {
@@ -181,9 +298,22 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        Text { Layout.fillWidth: true; text: "Installed modules"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
-                        StatusPill { visible: root.testMode && root.fixtureMode !== "none"; label: root.fixtureMode === "gracemeria" ? "GRACEMERIA PREVIEW" : "TEST"; tone: Theme.warning }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Installed modules"
+                            color: Theme.text
+                            font.pixelSize: Theme.typeBodyLarge
+                            font.weight: Font.DemiBold
+                        }
                         Text { text: modulesModel.count.toString(); color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                    }
+
+                    XTextField {
+                        Layout.fillWidth: true
+                        placeholderText: "Search modules…"
+                        accessibleName: "Search installed modules"
+                        text: root.searchText
+                        onTextChanged: root.searchText = text
                     }
 
                     StackLayout {
@@ -194,7 +324,7 @@ Item {
                         EmptyState {
                             glyph: "◇"
                             title: "No modules installed"
-                            description: "Import a local Xenon module package or browse the public module catalog. Modules never contain commercial game data."
+                            description: "Browse the GitHub-backed Xenon module catalog or import a local module package."
                             primaryText: "Browse Modules"
                             secondaryText: "Import Local Module"
                             onPrimaryClicked: catalogDialog.open()
@@ -211,6 +341,7 @@ Item {
                             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                             delegate: Rectangle {
+                                id: moduleDelegate
                                 required property int index
                                 required property string moduleName
                                 required property string moduleType
@@ -219,10 +350,12 @@ Item {
                                 required property bool active
                                 required property bool updateAvailable
                                 required property string moduleId
+                                required property string updateStatus
+                                required property int linkedGameCount
 
                                 readonly property bool matches: root.matchesSearch(moduleName, moduleType, moduleId)
                                 width: moduleList.width - (moduleList.ScrollBar.vertical.visible ? 8 : 0)
-                                height: matches ? Math.round(94 + Math.max(0, Theme.textScale - 1.0) * 36) : 0
+                                height: matches ? Math.round(100 + Math.max(0, Theme.textScale - 1.0) * 40) : 0
                                 visible: matches
                                 radius: Theme.controlRadius
                                 activeFocusOnTab: true
@@ -233,9 +366,10 @@ Item {
                                 border.width: activeFocus ? Theme.focusWidth : Theme.borderWidth
                                 border.color: activeFocus ? Theme.focusRing
                                              : root.selectedModuleIndex === index ? Theme.accent : Theme.border
-                                Keys.onReturnPressed: root.selectedModuleIndex = index
-                                Keys.onEnterPressed: root.selectedModuleIndex = index
-                                Accessible.onPressAction: root.selectedModuleIndex = index
+                                opacity: active ? 1.0 : 0.78
+                                Keys.onReturnPressed: root.selectIndex(index)
+                                Keys.onEnterPressed: root.selectIndex(index)
+                                Accessible.onPressAction: root.selectIndex(index)
 
                                 RowLayout {
                                     anchors.fill: parent
@@ -250,7 +384,7 @@ Item {
                                         Text {
                                             anchors.centerIn: parent
                                             text: moduleType === "Game Module" ? "G" : "S"
-                                            color: active ? Theme.success : Theme.accent
+                                            color: active ? Theme.success : Theme.textMuted
                                             font.pixelSize: Theme.typeBodyLarge
                                             font.weight: Font.DemiBold
                                         }
@@ -261,30 +395,66 @@ Item {
                                         spacing: 2
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            Text { Layout.fillWidth: true; text: moduleName; color: Theme.text; elide: Text.ElideRight; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: moduleName
+                                                color: Theme.text
+                                                elide: Text.ElideRight
+                                                font.pixelSize: Theme.typeBody
+                                                font.weight: Font.DemiBold
+                                            }
                                             Rectangle { visible: updateAvailable; width: 8; height: 8; radius: 4; color: Theme.warning }
                                         }
-                                        Text { text: moduleType + " • " + version; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
-                                        Text { text: updateAvailable ? "Update available" : status; color: updateAvailable ? Theme.warning : active ? Theme.success : Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                        Text {
+                                            text: moduleType + " • " + version
+                                            color: Theme.textMuted
+                                            font.pixelSize: Theme.typeCaption
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            text: !active ? "Disabled" : updateAvailable ? "Update available" : linkedGameCount > 0 ? linkedGameCount + " linked game" + (linkedGameCount === 1 ? "" : "s") : status
+                                            color: !active ? Theme.warning : updateAvailable ? Theme.warning : active ? Theme.success : Theme.textMuted
+                                            font.pixelSize: Theme.typeCaption
+                                            elide: Text.ElideRight
+                                        }
                                     }
                                 }
 
-                                MouseArea { id: moduleMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.selectedModuleIndex = index }
+                                MouseArea {
+                                    id: moduleMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: function(mouse) {
+                                        root.selectIndex(index)
+                                        if (mouse.button === Qt.RightButton)
+                                            root.openContextFor(moduleId, moduleDelegate, mouse.x, mouse.y)
+                                    }
+                                }
                             }
                         }
                     }
 
-                    XButton {
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: "+  Import Module"
-                        variant: "primary"
-                        onClicked: moduleDialog.open()
-                    }
-                    XButton {
-                        visible: launcherBridge.featureEnabled("modules.catalog")
-                        Layout.fillWidth: true
-                        text: "Browse Module Catalog"
-                        onClicked: catalogDialog.open()
+                        spacing: Theme.spaceSm
+                        XButton {
+                            Layout.fillWidth: true
+                            text: "+  Import Package"
+                            variant: "primary"
+                            onClicked: moduleDialog.open()
+                        }
+                        XButton {
+                            text: "Folder"
+                            onClicked: moduleFolderDialog.open()
+                        }
+                        XIconButton {
+                            glyph: "↻"
+                            tooltip: "Refresh installed modules"
+                            variant: "filled"
+                            onClicked: launcherBridge.refreshModules()
+                        }
                     }
                 }
             }
@@ -301,7 +471,7 @@ Item {
                     EmptyState {
                         glyph: "◇"
                         title: "Select a module"
-                        description: "Select an installed module to inspect metadata, capabilities and module-defined settings."
+                        description: "Select an installed module to inspect its metadata, linked games, capabilities, settings and update state."
                         primaryText: ""
                         secondaryText: ""
                     }
@@ -318,9 +488,10 @@ Item {
                             spacing: Theme.spaceMd
 
                             XPanel {
+                                id: selectedHeader
                                 Layout.fillWidth: true
                                 implicitHeight: moduleHeaderColumn.implicitHeight + Theme.spaceXl * 2
-                                color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+                                color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
                                 decorated: true
 
                                 ColumnLayout {
@@ -334,26 +505,52 @@ Item {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         spacing: Theme.spaceMd
-                                        Text {
+                                        ColumnLayout {
                                             Layout.fillWidth: true
-                                            text: root.selectedModule().moduleName
-                                            color: Theme.text
-                                            font.pixelSize: Theme.typeTitle
-                                            font.weight: Font.DemiBold
-                                            wrapMode: Text.WordWrap
+                                            spacing: 2
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: root.selectedModule().moduleName
+                                                color: Theme.text
+                                                font.pixelSize: Theme.typeTitle
+                                                font.weight: Font.DemiBold
+                                                wrapMode: Text.WordWrap
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: root.selectedModule().moduleType + " • Version " + root.selectedModule().version
+                                                color: Theme.textMuted
+                                                font.pixelSize: Theme.typeCaption
+                                            }
                                         }
                                         StatusPill {
-                                            label: root.selectedModule().active ? "Active" : root.selectedModule().status
-                                            tone: root.selectedModule().active ? Theme.success : Theme.textMuted
+                                            label: root.selectedModule().active ? "Enabled" : "Disabled"
+                                            tone: root.selectedModule().active ? Theme.success : Theme.warning
                                         }
-                                    }
-
-                                    Text {
-                                        Layout.fillWidth: true
-                                        text: root.selectedModule().moduleType + " • Version " + root.selectedModule().version
-                                        color: Theme.textMuted
-                                        font.pixelSize: Theme.typeCaption
-                                        wrapMode: Text.WordWrap
+                                        StatusPill {
+                                            visible: root.selectedModule().catalogVerified
+                                            label: "OFFICIAL"
+                                            tone: Theme.accent
+                                        }
+                                        XIconButton {
+                                            id: moduleMoreButton
+                                            iconName: "more"
+                                            tooltip: "Module actions"
+                                            variant: "filled"
+                                            onClicked: {
+                                                moduleMoreMenu.actions = launcherBridge.moduleActions(root.selectedModule().moduleId)
+                                                moduleMoreMenu.open()
+                                            }
+                                            XActionMenu {
+                                                id: moduleMoreMenu
+                                                x: moduleMoreButton.width - width
+                                                y: moduleMoreButton.height + Theme.spaceXs
+                                                menuWidth: 285
+                                                onActionTriggered: function(actionId) {
+                                                    root.performModuleAction(actionId, root.selectedModule().moduleId)
+                                                }
+                                            }
+                                        }
                                     }
 
                                     Text {
@@ -367,29 +564,131 @@ Item {
 
                                     Flow {
                                         Layout.fillWidth: true
-                                        Layout.topMargin: Theme.spaceXs
                                         spacing: Theme.spaceSm
                                         XButton {
                                             text: root.selectedModule().active ? "Disable" : "Enable"
                                             variant: root.selectedModule().active ? "default" : "primary"
+                                            onClicked: root.requestModuleToggle(root.selectedModule().moduleId)
+                                        }
+                                        XButton {
+                                            visible: root.selectedModule().settingsCount > 0
+                                            text: "Module Settings"
+                                            onClicked: root.openSettingsFor(root.selectedModule().moduleId)
+                                        }
+                                        XButton {
+                                            text: root.selectedModule().canInstallUpdate ? "Install Update"
+                                                : root.selectedModule().canDownloadUpdate ? "Download Update"
+                                                : "Check for Updates"
+                                            variant: root.selectedModule().canInstallUpdate || root.selectedModule().canDownloadUpdate ? "primary" : "default"
+                                            enabled: root.selectedModule().updateStatus !== "checking" && root.selectedModule().updateStatus !== "downloading"
                                             onClicked: {
-                                                var nowActive = !root.selectedModule().active
-                                                modulesModel.setProperty(root.selectedModuleIndex, "active", nowActive)
-                                                modulesModel.setProperty(root.selectedModuleIndex, "status", nowActive ? "Active" : "Disabled")
+                                                if (root.selectedModule().canInstallUpdate)
+                                                    launcherBridge.requestModuleUpdateInstall(root.selectedModule().moduleId)
+                                                else if (root.selectedModule().canDownloadUpdate)
+                                                    launcherBridge.requestModuleUpdateDownload(root.selectedModule().moduleId)
+                                                else
+                                                    launcherBridge.requestModuleUpdateCheck(root.selectedModule().moduleId)
                                             }
                                         }
                                         XButton {
-                                            visible: launcherBridge.featureEnabled("modules.settings")
-                                            text: "Module Settings"
-                                            onClicked: settingsDialog.openFor(root.selectedModule().moduleName, root.settingsForModule(root.selectedModule().moduleId))
+                                            text: "Verify"
+                                            onClicked: launcherBridge.verifyModule(root.selectedModule().moduleId)
                                         }
                                         XButton {
-                                            visible: launcherBridge.featureEnabled("modules.updates")
-                                            text: root.selectedModule().updateAvailable ? "Install Update" : "Check for Updates"
-                                            onClicked: launcherBridge.requestModuleUpdate(root.selectedModule().moduleId)
+                                            enabled: String(root.selectedModule().path || "").length > 0
+                                            text: "Open Folder"
+                                            onClicked: launcherBridge.openFolder(launcherBridge.modulePath(root.selectedModule().moduleId))
                                         }
-                                        XButton { text: "Verify"; onClicked: launcherBridge.notifyUnavailable("Verify Module") }
-                                        XButton { text: "Open Folder"; onClicked: launcherBridge.notifyUnavailable("Open Module Folder") }
+                                    }
+                                }
+
+                                TapHandler {
+                                    acceptedButtons: Qt.RightButton
+                                    gesturePolicy: TapHandler.WithinBounds
+                                    onTapped: function(eventPoint, button) {
+                                        root.openContextFor(root.selectedModule().moduleId, selectedHeader,
+                                                            eventPoint.position.x, eventPoint.position.y)
+                                    }
+                                }
+                            }
+
+                            XPanel {
+                                visible: !root.selectedModule().active && root.selectedModule().linkedGameCount > 0
+                                Layout.fillWidth: true
+                                implicitHeight: disabledImpact.implicitHeight + Theme.spaceLg * 2
+                                color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.10)
+                                RowLayout {
+                                    id: disabledImpact
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: Theme.spaceLg
+                                    spacing: Theme.spaceMd
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.selectedModule().impactMessage
+                                        color: Theme.text
+                                        wrapMode: Text.WordWrap
+                                        font.pixelSize: Theme.typeBody
+                                    }
+                                    XButton {
+                                        text: "Enable Module"
+                                        variant: "primary"
+                                        onClicked: launcherBridge.setModuleEnabled(root.selectedModule().moduleId, true)
+                                    }
+                                }
+                            }
+
+                            XPanel {
+                                Layout.fillWidth: true
+                                implicitHeight: updateColumn.implicitHeight + Theme.spaceLg * 2
+                                ColumnLayout {
+                                    id: updateColumn
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: Theme.spaceLg
+                                    spacing: Theme.spaceSm
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "Module updater"
+                                            color: Theme.text
+                                            font.pixelSize: Theme.typeBodyLarge
+                                            font.weight: Font.DemiBold
+                                        }
+                                        StatusPill {
+                                            label: root.selectedModule().updateStatus === "update-available" ? "UPDATE AVAILABLE"
+                                                 : root.selectedModule().updateStatus === "ready-to-install" ? "READY"
+                                                 : root.selectedModule().updateStatus === "up-to-date" ? "CURRENT"
+                                                 : String(root.selectedModule().updateStatus || "IDLE").toUpperCase()
+                                            tone: root.selectedModule().updateAvailable ? Theme.warning
+                                                : root.selectedModule().updateStatus === "up-to-date" ? Theme.success : Theme.textMuted
+                                        }
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: root.selectedModule().updateMessage || "Use the official catalog entry to check this module's GitHub Releases."
+                                        color: Theme.textMuted
+                                        wrapMode: Text.WordWrap
+                                        font.pixelSize: Theme.typeCaption
+                                    }
+                                    XInfoRow {
+                                        label: "Installed"
+                                        value: root.selectedModule().version || "Unknown"
+                                    }
+                                    XInfoRow {
+                                        visible: String(root.selectedModule().availableVersion || "").length > 0
+                                        label: "Available"
+                                        value: root.selectedModule().availableVersion
+                                    }
+                                    ProgressBar {
+                                        visible: root.selectedModule().updateStatus === "downloading"
+                                        Layout.fillWidth: true
+                                        from: 0; to: 1
+                                        value: Number(root.selectedModule().downloadProgress || 0)
                                     }
                                 }
                             }
@@ -403,7 +702,7 @@ Item {
                                 XPanel {
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignTop
-                                    implicitHeight: Math.max(moduleInfo.implicitHeight, capabilityInfo.implicitHeight) + Theme.spaceLg * 2
+                                    implicitHeight: moduleInfo.implicitHeight + Theme.spaceLg * 2
                                     ColumnLayout {
                                         id: moduleInfo
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -418,21 +717,76 @@ Item {
                                         XInfoRow { label: "Supported game IDs"; value: root.selectedModule().gameIds }
                                         XInfoRow { label: "Runtime dependency"; value: root.selectedModule().runtimeDependency }
                                         XInfoRow { label: "Renderer"; value: root.selectedModule().renderer }
+                                        XInfoRow { label: "Settings"; value: root.selectedModule().settingsCount + " declared" }
+                                        XInfoRow { label: "DLC definitions"; value: root.selectedModule().dlcDefinitionCount + " declared" }
                                     }
                                 }
 
                                 XPanel {
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignTop
-                                    implicitHeight: Math.max(moduleInfo.implicitHeight, capabilityInfo.implicitHeight) + Theme.spaceLg * 2
+                                    implicitHeight: catalogInfo.implicitHeight + Theme.spaceLg * 2
+                                    ColumnLayout {
+                                        id: catalogInfo
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                        anchors.margins: Theme.spaceLg
+                                        spacing: Theme.spaceSm
+                                        Text { text: "Catalog & source"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                        XInfoRow { label: "Official catalog"; value: root.selectedModule().catalogKnown ? "Listed" : "Not listed" }
+                                        XInfoRow { label: "Publisher"; value: root.selectedModule().publisher || "Module-defined" }
+                                        XInfoRow { label: "License"; value: root.selectedModule().license || "Module-defined" }
+                                        XInfoRow { label: "Package trust"; value: root.selectedModule().catalogVerified ? "Official catalog + GitHub SHA-256" : "Local / unmanaged" }
+                                        XInfoRow { label: "Repository"; value: root.selectedModule().repositoryUrl || "Not declared" }
+                                        XButton {
+                                            visible: String(root.selectedModule().repositoryUrl || "").length > 0
+                                            text: "Open Repository"
+                                            onClicked: launcherBridge.openExternalUrl(root.selectedModule().repositoryUrl)
+                                        }
+                                    }
+                                }
+
+                                XPanel {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
+                                    implicitHeight: linkedInfo.implicitHeight + Theme.spaceLg * 2
+                                    ColumnLayout {
+                                        id: linkedInfo
+                                        anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                                        anchors.margins: Theme.spaceLg
+                                        spacing: Theme.spaceSm
+                                        Text { text: "Library integration"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                        XInfoRow { label: "Linked games"; value: root.selectedModule().linkedGameCount.toString() }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: root.selectedModule().linkedGames.length > 0 ? root.selectedModule().linkedGames : "No current Library entries depend on this module."
+                                            color: Theme.textMuted
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: Theme.typeCaption
+                                        }
+                                        Text {
+                                            visible: !root.selectedModule().active && root.selectedModule().linkedGameCount > 0
+                                            Layout.fillWidth: true
+                                            text: "Disabled modules do not hide their games. Library keeps those entries visible and marks them as Module disabled until you re-enable the module."
+                                            color: Theme.warning
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: Theme.typeCaption
+                                        }
+                                    }
+                                }
+
+                                XPanel {
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignTop
+                                    implicitHeight: capabilityInfo.implicitHeight + Theme.spaceLg * 2
                                     ColumnLayout {
                                         id: capabilityInfo
                                         anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                                         anchors.margins: Theme.spaceLg
                                         spacing: Theme.spaceSm
-                                        Text { text: "Capabilities & dependencies"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                                        Text { text: "Capabilities"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
                                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
-                                        Text { text: "Declared capabilities"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                                         Flow {
                                             Layout.fillWidth: true
                                             spacing: Theme.spaceXs
@@ -448,35 +802,6 @@ Item {
                                         }
                                         XInfoRow { label: "Xenon runtime"; value: launcherBridge.backendConnected ? "Connected" : "Front-end ready" }
                                         XInfoRow { label: "Manifest"; value: "Loaded" }
-                                        XInfoRow { label: "Linked game"; value: root.selectedModule().linkedGame.length > 0 ? root.selectedModule().linkedGame : "Not configured" }
-                                    }
-                                }
-                            }
-
-                            XPanel {
-                                visible: root.testMode && root.fixtureMode !== "none"
-                                Layout.fillWidth: true
-                                implicitHeight: fixtureRow.implicitHeight + Theme.spaceLg * 2
-                                color: Theme.accentSoft
-                                GridLayout {
-                                    id: fixtureRow
-                                    anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
-                                    anchors.margins: Theme.spaceLg
-                                    columns: width >= 720 && Theme.textScale < 1.5 ? 2 : 1
-                                    columnSpacing: Theme.spaceMd
-                                    rowSpacing: Theme.spaceSm
-                                    Text { Layout.fillWidth: true; text: "Fixture data only. Module controls exercise the launcher front end and do not modify real module installations."; color: Theme.textMuted; wrapMode: Text.WordWrap; font.pixelSize: Theme.typeCaption }
-                                    XButton {
-                                        Layout.alignment: Qt.AlignRight
-                                        Layout.fillWidth: fixtureRow.columns === 1
-                                        text: root.selectedModule().linkedGame.length > 0 ? "Remove “" + root.selectedModule().linkedGame + "” from Library" : "Locate Game Content"
-                                        variant: root.selectedModule().linkedGame.length > 0 ? "danger" : "primary"
-                                        onClicked: {
-                                            if (root.selectedModule().linkedGame.length > 0)
-                                                modulesModel.setProperty(root.selectedModuleIndex, "linkedGame", "")
-                                            else
-                                                launcherBridge.notifyUnavailable("Locate Game Content")
-                                        }
                                     }
                                 }
                             }
@@ -489,20 +814,68 @@ Item {
         }
     }
 
+    XActionMenu {
+        id: moduleContextMenu
+        menuWidth: 285
+        onActionTriggered: function(actionId) { root.performModuleAction(actionId, root.contextModuleId) }
+    }
+
+    XConfirmDialog {
+        id: disableModuleConfirm
+        title: "Disable “" + root.pendingDisableModuleName + "”?"
+        message: (root.pendingDisableLinkedGames === 1
+                  ? "1 Library game depends on this module."
+                  : root.pendingDisableLinkedGames + " Library games depend on this module.")
+                 + " The game" + (root.pendingDisableLinkedGames === 1 ? " will" : "s will")
+                 + " remain visible, but cannot be launched until the module is enabled again."
+        confirmText: "Disable Module"
+        destructive: true
+        onConfirmed: {
+            launcherBridge.setModuleEnabled(root.pendingDisableModuleId, false)
+            root.pendingDisableModuleId = ""
+            root.pendingDisableModuleName = ""
+            root.pendingDisableLinkedGames = 0
+        }
+    }
+
+    XConfirmDialog {
+        id: removeModuleConfirm
+        title: "Remove module?"
+        message: "Removing “" + root.pendingRemoveModuleName + "” deletes only its launcher-managed module directory. Games that depend on it stay in Library and will be marked Module missing until the module is installed again."
+        confirmText: "Remove Module"
+        destructive: true
+        onConfirmed: {
+            if (launcherBridge.removeModule(root.pendingRemoveModuleId))
+                root.populateBackendModules()
+            root.pendingRemoveModuleId = ""
+            root.pendingRemoveModuleName = ""
+        }
+    }
+
     FileDialog {
         id: moduleDialog
-        title: "Import Xenon module"
+        title: "Import Xenon module package"
         fileMode: FileDialog.OpenFiles
-        nameFilters: ["Xenon module packages (*.xenonmod *.zip)", "All files (*)"]
-        onAccepted: launcherBridge.notify(
-            "Module selected",
-            "Selected " + selectedFiles.length + " local module package(s). Manifest validation will connect to the module registry backend later.")
+        nameFilters: ["Xenon module packages (*.xenonmod.zip *.zip)", "ZIP packages (*.zip)"]
+        onAccepted: {
+            if (launcherBridge.importModulePackages(selectedFiles))
+                root.populateBackendModules()
+        }
+    }
+
+    FolderDialog {
+        id: moduleFolderDialog
+        title: "Import unpacked Xenon module folder"
+        onAccepted: {
+            if (launcherBridge.importModulePackages([selectedFolder]))
+                root.populateBackendModules()
+        }
     }
 
     ModuleSettingsDialog {
         id: settingsDialog
         onSettingEdited: function(settingId, value) {
-            launcherBridge.notify("Module setting changed", settingId + " = " + String(value) + " (front-end preview)")
+            launcherBridge.setModuleSetting(root.selectedModule().moduleId, settingId, value)
         }
     }
 

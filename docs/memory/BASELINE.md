@@ -102,8 +102,10 @@ implementation model.
 
 A reservation token contains both the physical granule and its write generation. Writes
 through any virtual/physical alias invalidate a reservation on the same granule. GPU/APU
-DMA writers using `physical_data()` must call `notify_external_write`, which performs the
-same invalidation and shared-memory notification path.
+and DMA writers use `write_physical`, `fill_physical` or a bounded
+`PhysicalWriteSpan`; those APIs automatically invalidate reservations and publish shared
+CPU/GPU coherency and executable-page generations. Raw `physical_data()` access is
+read-only outside the memory implementation.
 
 ## MMIO
 

@@ -22,8 +22,12 @@ class GuestMemoryCoherency {
  public:
   static constexpr std::uint32_t kPageCount =
       kPhysicalMemorySize / kBasePageSize;
+  static constexpr std::uint32_t kWriteJournalCapacity = 65536u;
 
-  GuestMemoryCoherency() : page_epochs_(kPageCount) {
+  GuestMemoryCoherency()
+      : page_epochs_(kPageCount),
+        write_journal_epochs_(kWriteJournalCapacity),
+        write_journal_ranges_(kWriteJournalCapacity) {
     for (auto& epoch : page_epochs_) {
       epoch.store(0, std::memory_order_relaxed);
     }
@@ -55,6 +59,12 @@ class GuestMemoryCoherency {
   [[nodiscard]] std::atomic<std::uint32_t>* active_writers_data() noexcept {
     return &active_writers_;
   }
+  [[nodiscard]] std::atomic<std::uint64_t>* write_journal_epochs_data() noexcept {
+    return write_journal_epochs_.data();
+  }
+  [[nodiscard]] std::atomic<std::uint64_t>* write_journal_ranges_data() noexcept {
+    return write_journal_ranges_.data();
+  }
 
   std::uint64_t mark_write(std::uint32_t physical_address,
                            std::uint32_t width) noexcept {
@@ -74,6 +84,8 @@ class GuestMemoryCoherency {
     for (std::uint32_t page = first_page; page <= last_page; ++page) {
       page_epochs_[page].store(epoch, std::memory_order_release);
     }
+    publish_journal(epoch, physical_address,
+                    static_cast<std::uint32_t>(end - physical_address));
     active_writers_.fetch_sub(1u, std::memory_order_release);
     return epoch;
   }
@@ -88,6 +100,7 @@ class GuestMemoryCoherency {
     for (auto& page_epoch : page_epochs_) {
       page_epoch.store(epoch, std::memory_order_release);
     }
+    publish_journal(epoch, 0u, kPhysicalMemorySize);
     active_writers_.fetch_sub(1u, std::memory_order_release);
     return epoch;
   }
@@ -126,8 +139,8 @@ class GuestMemoryCoherency {
     out.clear();
     if (through_epoch <= since_epoch) return;
     const std::uint32_t max_pages = max_range_bytes
-                                        ? std::max(1u, max_range_bytes /
-                                                           kBasePageSize)
+                                        ? (std::max)(1u, max_range_bytes /
+                                                             kBasePageSize)
                                         : kPageCount;
     for (std::uint32_t page = 0; page < kPageCount;) {
       const auto epoch = page_epochs_[page].load(std::memory_order_acquire);
@@ -148,8 +161,54 @@ class GuestMemoryCoherency {
     }
   }
 
+  // Returns byte-precise writes when the requested epoch interval is still in
+  // the bounded lock-free journal. Consumers fall back to page ranges if a
+  // slow consumer has allowed the journal to wrap.
+  [[nodiscard]] bool collect_exact_dirty_ranges(
+      std::uint64_t since_epoch, std::uint64_t through_epoch,
+      std::vector<DirtyPhysicalRange>& out) const {
+    out.clear();
+    if (through_epoch <= since_epoch) return true;
+    if (through_epoch - since_epoch > kWriteJournalCapacity) return false;
+    out.reserve(static_cast<std::size_t>(through_epoch - since_epoch));
+    for (auto epoch = since_epoch + 1u; epoch <= through_epoch; ++epoch) {
+      const auto index = static_cast<std::uint32_t>(epoch) &
+                         (kWriteJournalCapacity - 1u);
+      const auto before =
+          write_journal_epochs_[index].load(std::memory_order_acquire);
+      if (before != epoch) {
+        out.clear();
+        return false;
+      }
+      const auto packed =
+          write_journal_ranges_[index].load(std::memory_order_relaxed);
+      const auto after =
+          write_journal_epochs_[index].load(std::memory_order_acquire);
+      if (after != epoch) {
+        out.clear();
+        return false;
+      }
+      const auto address = static_cast<std::uint32_t>(packed >> 32u);
+      const auto size = static_cast<std::uint32_t>(packed);
+      if (size) out.push_back({address, size});
+    }
+    return true;
+  }
+
  private:
+  void publish_journal(std::uint64_t epoch, std::uint32_t address,
+                       std::uint32_t size) noexcept {
+    const auto index = static_cast<std::uint32_t>(epoch) &
+                       (kWriteJournalCapacity - 1u);
+    write_journal_ranges_[index].store(
+        (std::uint64_t{address} << 32u) | size, std::memory_order_relaxed);
+    write_journal_epochs_[index].store(epoch, std::memory_order_release);
+  }
+
   std::vector<std::atomic<std::uint64_t>> page_epochs_{};
+  static_assert((kWriteJournalCapacity & (kWriteJournalCapacity - 1u)) == 0u);
+  std::vector<std::atomic<std::uint64_t>> write_journal_epochs_{};
+  std::vector<std::atomic<std::uint64_t>> write_journal_ranges_{};
   std::atomic<std::uint64_t> write_epoch_{0};
   std::atomic<std::uint32_t> active_writers_{0};
 };

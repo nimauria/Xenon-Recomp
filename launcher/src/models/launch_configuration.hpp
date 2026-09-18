@@ -1,0 +1,47 @@
+#pragma once
+
+#include <QString>
+#include <QVariantList>
+#include <QVariantMap>
+
+namespace xenon::launcher {
+
+// Stable launcher-side contract assembled before control crosses RuntimeBridge.
+// Keep game-specific values inside module_settings rather than adding per-title
+// fields to this generic structure.
+struct LaunchConfiguration {
+  QString game_id;
+  QString title;
+  QString content_path;
+
+  QString module_id;
+  QString module_name;
+  QString module_path;
+  QString module_version;
+  QVariantMap module_settings;
+
+  QString profile_id;
+  QString profile_name;
+  QString region;
+
+  QString renderer;
+  bool shader_cache = true;
+  QString shader_cache_mode;
+  QString input_preferred_device;
+  double input_deadzone = 0.10;
+  bool input_rumble = true;
+  double audio_master_volume = 1.0;
+  bool audio_mute_unfocused = false;
+  QString audio_latency_profile;
+  QString game_root;
+  QString managed_game_path;
+  QVariantList dlc;
+  QString save_path;
+  QString screenshots_path;
+  bool offline = true;
+  bool isolated_settings = false;
+
+  [[nodiscard]] QVariantMap toVariantMap() const;
+};
+
+}  // namespace xenon::launcher

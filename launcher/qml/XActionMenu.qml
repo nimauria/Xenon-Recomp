@@ -30,6 +30,7 @@ Popup {
 
             delegate: ColumnLayout {
                 required property var modelData
+                visible: modelData.visible === undefined ? true : Boolean(modelData.visible)
                 Layout.fillWidth: true
                 spacing: 2
 
@@ -41,11 +42,16 @@ Popup {
                 }
 
                 Button {
+                    id: actionButton
                     Layout.fillWidth: true
                     Layout.preferredHeight: Theme.controlHeight
                     hoverEnabled: true
+                    enabled: modelData.enabled === undefined ? true : Boolean(modelData.enabled)
                     focusPolicy: Qt.StrongFocus
                     Accessible.name: modelData.label
+                    Accessible.description: enabled ? "" : String(modelData.disabledReason || "Unavailable")
+                    ToolTip.visible: hovered && !enabled && String(modelData.disabledReason || "").length > 0
+                    ToolTip.text: String(modelData.disabledReason || "")
 
                     contentItem: RowLayout {
                         spacing: Theme.spaceSm
@@ -53,7 +59,7 @@ Popup {
                         Text {
                             Layout.preferredWidth: 20
                             text: modelData.icon || ""
-                            color: modelData.destructive ? Theme.danger : Theme.textMuted
+                            color: !actionButton.enabled ? Theme.textMuted : modelData.destructive ? Theme.danger : Theme.textMuted
                             font.pixelSize: Theme.typeBody
                             horizontalAlignment: Text.AlignHCenter
                         }
@@ -61,7 +67,7 @@ Popup {
                         Text {
                             Layout.fillWidth: true
                             text: modelData.label
-                            color: modelData.destructive ? Theme.danger : Theme.text
+                            color: !actionButton.enabled ? Theme.textMuted : modelData.destructive ? Theme.danger : Theme.text
                             font.pixelSize: Theme.typeBody
                             elide: Text.ElideRight
                         }

@@ -2,6 +2,7 @@
 
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/ir.hpp"
+#include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/register_file.hpp"
 #include "xenon/memory/address_space.hpp"
 
@@ -17,6 +18,22 @@ class Backend {
                                 Edram& edram) = 0;
   virtual void consume(const ir::Command& command) = 0;
   virtual void end_submission() = 0;
+  // Makes GPU-authored guest physical memory visible to the CPU on demand.
+  // Normal rendering and memexport remain GPU-resident until a CPU consumer
+  // explicitly requests the range.
+  [[nodiscard]] virtual bool make_guest_memory_cpu_visible(
+      std::uint32_t physical_address, std::uint32_t size) = 0;
+  // Makes the canonical 10 MiB Xenos EDRAM byte store authoritative by
+  // synchronously flushing every native color/depth owner that still contains
+  // newer bits. Used for backend migration, captures and save-state/debug
+  // checkpoints; normal rendering should keep EDRAM native/GPU-resident.
+  [[nodiscard]] virtual bool make_edram_canonical() = 0;
+  // Presents an explicit runtime-provided scanout resource. Native window /
+  // surface attachment is backend-specific, while frame semantics stay common.
+  [[nodiscard]] virtual PresentStatus present(const PresentationFrame& frame) = 0;
+  [[nodiscard]] virtual bool resize_presentation(std::uint32_t width,
+                                                 std::uint32_t height) = 0;
+  [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;
 };
 
 class NullBackend final : public Backend {
@@ -26,6 +43,18 @@ class NullBackend final : public Backend {
   }
   void consume(const ir::Command&) override { ++command_count_; }
   void end_submission() override {}
+  [[nodiscard]] bool make_guest_memory_cpu_visible(
+      std::uint32_t, std::uint32_t) override {
+    return true;
+  }
+  [[nodiscard]] bool make_edram_canonical() override { return true; }
+  [[nodiscard]] PresentStatus present(const PresentationFrame&) override {
+    return PresentStatus::NotConfigured;
+  }
+  [[nodiscard]] bool resize_presentation(std::uint32_t, std::uint32_t) override {
+    return false;
+  }
+  [[nodiscard]] bool presentation_ready() const noexcept override { return false; }
   [[nodiscard]] std::size_t command_count() const noexcept { return command_count_; }
 
  private:

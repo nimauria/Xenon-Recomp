@@ -25,6 +25,14 @@ class GraphicsSystem {
   // clears the pending stream. Backends retain their own shadow state across
   // submissions via RegisterWrite commands.
   void execute_ir(Backend& backend);
+  // Explicit GPU -> CPU visibility hook for Memory v2 / CPU consumers.
+  [[nodiscard]] bool make_guest_memory_cpu_visible(
+      Backend& backend, std::uint32_t physical_address, std::uint32_t size);
+  // Explicit native-owner -> canonical EDRAM checkpoint for backend switching,
+  // capture/save-state and validation.
+  [[nodiscard]] bool make_edram_canonical(Backend& backend);
+  [[nodiscard]] PresentStatus present(Backend& backend,
+                                      const PresentationFrame& frame);
 
   [[nodiscard]] RegisterFile& registers() noexcept { return registers_; }
   [[nodiscard]] const RegisterFile& registers() const noexcept { return registers_; }

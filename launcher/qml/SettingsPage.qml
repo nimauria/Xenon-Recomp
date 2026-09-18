@@ -8,60 +8,130 @@ Item {
     property string searchText: ""
     property int categoryIndex: 0
     property int settingsRevision: 0
+    property var launcherUpdateState: launcherBridge.launcherUpdateState()
 
-    readonly property var categories: [
-        { name: "General",       key: "settings.general",       page: 0,  keywords: "startup language sidebar navigation animations" },
-        { name: "Appearance",    key: "settings.appearance",    page: 1,  keywords: "theme accent background density corners colour color" },
-        { name: "Library",       key: "settings.library",       page: 2,  keywords: "games dlc compatibility missing content" },
-        { name: "Paths",         key: "settings.paths",         page: 3,  keywords: "folders directories games saves profiles modules screenshots cache" },
-        { name: "Runtime",       key: "settings.runtime",       page: 4,  keywords: "cpu renderer offline runtime" },
-        { name: "Graphics",      key: "settings.graphics",      page: 5,  keywords: "vulkan d3d12 renderer graphics shader" },
-        { name: "Input",         key: "settings.input",         page: 6,  keywords: "controller keyboard gamepad input" },
-        { name: "Audio",         key: "settings.audio",         page: 7,  keywords: "sound audio volume device" },
-        { name: "Network",       key: "settings.network",       page: 8,  keywords: "network online multiplayer" },
-        { name: "Updates",       key: "settings.updates",       page: 9,  keywords: "updates modules catalog github releases" },
-        { name: "Accessibility", key: "settings.accessibility", page: 10, keywords: "text size scale contrast motion keyboard accessibility" },
-        { name: "Developer",     key: "settings.developer",     page: 11, keywords: "test fixture diagnostics gracemeria development" },
-        { name: "About",         key: "settings.about",         page: 12, keywords: "version system qt github licence diagnostics" }
-    ]
-
+    readonly property var categories: launcherBridge.settingsCategories()
     readonly property var visibleCategories: categories.filter(function(category) {
-        if (!launcherBridge.featureEnabled(category.key))
+        if (!launcherBridge.featureEnabled(category.feature))
             return false
         var needle = root.searchText.trim().toLowerCase()
         return needle.length === 0
-            || category.name.toLowerCase().indexOf(needle) !== -1
-            || category.keywords.indexOf(needle) !== -1
+            || String(category.name).toLowerCase().indexOf(needle) !== -1
+            || String(category.keywords).toLowerCase().indexOf(needle) !== -1
     })
 
-    readonly property var themeNames: ["System", "Xenon Dark", "Carbon", "Industrial", "Light"]
-    readonly property var themeIds: ["system", "xenon-dark", "carbon", "industrial", "light"]
-    readonly property var accentNames: ["Theme Default", "Cyan", "Emerald", "Amber", "Violet", "Rose"]
-    readonly property var accentIds: ["default", "cyan", "emerald", "amber", "violet", "rose"]
-    readonly property var cornerNames: ["Rounded", "Soft", "Square"]
-    readonly property var cornerIds: ["rounded", "soft", "square"]
-    readonly property var textSizeNames: ["100%", "110%", "125%", "150%", "175%", "200%"]
-    readonly property var textSizeValues: [1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
-    readonly property var fixtureNames: ["None", "Generic Xenon UI", "Project Gracemeria UI Preview"]
-    readonly property var fixtureIds: ["none", "generic", "gracemeria"]
+    readonly property var themeEntries: launcherBridge.themeCatalog()
+    readonly property var accentEntries: launcherBridge.accentCatalog()
+    readonly property var cornerEntries: launcherBridge.cornerStyleCatalog()
+    readonly property var backgroundEntries: launcherBridge.themeBackgroundVariants(Theme.effectiveThemeId)
 
-    readonly property var backgroundVariantNames: {
-        if (Theme.effectiveThemeId === "xenon-dark") return ["Orbit", "Tech", "HUD"]
-        if (Theme.effectiveThemeId === "carbon") return ["Nebula", "Tech"]
-        if (Theme.effectiveThemeId === "industrial") return ["Orbit", "Tech"]
-        return ["Minimal"]
+    function labels(entries) {
+        var result = []
+        for (var i = 0; i < entries.length; ++i)
+            result.push(String(entries[i].label !== undefined ? entries[i].label : entries[i].name))
+        return result
     }
-    readonly property var backgroundVariantIds: {
-        if (Theme.effectiveThemeId === "xenon-dark") return ["orbit", "tech", "hud"]
-        if (Theme.effectiveThemeId === "carbon") return ["nebula", "tech"]
-        if (Theme.effectiveThemeId === "industrial") return ["orbit", "tech"]
-        return ["minimal"]
+
+    function ids(entries) {
+        var result = []
+        for (var i = 0; i < entries.length; ++i)
+            result.push(entries[i].id)
+        return result
+    }
+
+    function optionEntries(key) {
+        var r = settingsRevision
+        return launcherBridge.settingOptions(key)
+    }
+
+    function optionLabels(key) { return root.labels(root.optionEntries(key)) }
+    function optionValues(key) {
+        var entries = root.optionEntries(key)
+        var result = []
+        for (var i = 0; i < entries.length; ++i)
+            result.push(entries[i].value)
+        return result
+    }
+
+    function valuesEqual(left, right) {
+        if (typeof left === "number" || typeof right === "number")
+            return Math.abs(Number(left) - Number(right)) < 0.000001
+        return String(left) === String(right)
+    }
+
+    function indexFor(list, value) {
+        for (var i = 0; i < list.length; ++i)
+            if (root.valuesEqual(list[i], value)) return i
+        return 0
+    }
+
+    function optionIndex(key) {
+        return root.indexFor(root.optionValues(key), launcherBridge.settingValue(key, launcherBridge.settingDefaultValue(key)))
+    }
+
+    function saveOption(key, index) {
+        var values = root.optionValues(key)
+        if (index >= 0 && index < values.length)
+            root.save(key, values[index])
     }
 
     function categoryVisibleIndex(page) {
         for (var i = 0; i < visibleCategories.length; ++i)
             if (visibleCategories[i].page === page) return i
         return 0
+    }
+
+    function getBool(key, fallback) { var r = settingsRevision; return launcherBridge.boolSetting(key, fallback) }
+    function getString(key, fallback) { var r = settingsRevision; return launcherBridge.stringSetting(key, fallback) }
+    function getNumber(key, fallback) { var r = settingsRevision; return launcherBridge.numberSetting(key, fallback) }
+    function save(key, value) { launcherBridge.setSettingValue(key, value) }
+
+
+    function updateStatusLabel() {
+        var status = String(root.launcherUpdateState.status || "idle")
+        if (status === "checking") return "Checking"
+        if (status === "update-available") return "Update available"
+        if (status === "downloading") return "Downloading"
+        if (status === "ready-to-install") return "Ready to install"
+        if (status === "installing") return "Installing"
+        if (status === "up-to-date") return "Up to date"
+        if (status === "asset-unavailable") return "Package unavailable"
+        if (status === "no-releases") return "No releases"
+        if (status === "error") return "Update error"
+        return "Ready"
+    }
+
+    function updateStatusTone() {
+        var status = String(root.launcherUpdateState.status || "idle")
+        if (status === "up-to-date" || status === "ready-to-install") return Theme.success
+        if (status === "update-available" || status === "checking" || status === "downloading" || status === "installing") return Theme.warning
+        if (status === "error" || status === "asset-unavailable") return Theme.danger
+        return Theme.textMuted
+    }
+
+    function formatBytes(value) {
+        var bytes = Number(value || 0)
+        if (bytes < 1024) return Math.round(bytes) + " B"
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB"
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MiB"
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB"
+    }
+
+    function releaseNotesPreview() {
+        var notes = String(root.launcherUpdateState.releaseNotes || "").trim()
+        if (notes.length === 0) return "No release notes were provided for this build."
+        notes = notes.replace(/\r/g, "").replace(/\n+/g, " ")
+        return notes.length > 420 ? notes.slice(0, 417) + "…" : notes
+    }
+
+    function runtimeServiceLabel(service) {
+        if (launcherBridge.runtimeCapability(service)) return "Connected"
+        if (launcherBridge.runtimeCapability(service + "Compiled")) return "Compiled • service pending"
+        return "Backend pending"
+    }
+
+    function runtimeServiceTone(service) {
+        return launcherBridge.runtimeCapability(service) ? Theme.success : Theme.warning
     }
 
     onSearchTextChanged: Qt.callLater(function() {
@@ -78,18 +148,14 @@ Item {
             root.categoryIndex = root.visibleCategories[0].page
     })
 
-    function indexFor(list, value) {
-        var index = list.indexOf(value)
-        return index < 0 ? 0 : index
-    }
-    function getBool(key, fallback) { var r = settingsRevision; return launcherBridge.boolSetting(key, fallback) }
-    function getString(key, fallback) { var r = settingsRevision; return launcherBridge.stringSetting(key, fallback) }
-    function getNumber(key, fallback) { var r = settingsRevision; return launcherBridge.numberSetting(key, fallback) }
-    function save(key, value) { launcherBridge.setSettingValue(key, value) }
-
     Connections {
         target: launcherBridge
         function onSettingChanged(key, value) { root.settingsRevision += 1 }
+        function onThemeIdChanged() { root.settingsRevision += 1 }
+        function onAccentIdChanged() { root.settingsRevision += 1 }
+        function onCustomAccentColorChanged() { root.settingsRevision += 1 }
+        function onCornerStyleChanged() { root.settingsRevision += 1 }
+        function onUpdateStateChanged() { root.launcherUpdateState = launcherBridge.launcherUpdateState() }
     }
 
     ColumnLayout {
@@ -100,7 +166,7 @@ Item {
             title: "Settings"
             description: root.searchText.trim().length > 0
                 ? "Showing settings categories related to “" + root.searchText.trim() + "”."
-                : "Launcher preferences apply immediately. Backend-specific options appear only when their Xenon service is available."
+                : "Launcher preferences are validated and persisted by Launcher Core. Runtime-owned controls activate as their Xenon services become available."
         }
 
         XPanel {
@@ -108,7 +174,7 @@ Item {
             Layout.preferredHeight: Theme.textScale >= 1.5
                 ? Math.max(64, Theme.controlHeight + Theme.spaceLg * 2)
                 : Math.max(56, Theme.controlHeight + Theme.spaceLg)
-            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, 0.94)
+            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, Theme.panelOpacity)
 
             StackLayout {
                 anchors.fill: parent
@@ -162,7 +228,7 @@ Item {
         XPanel {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, 0.94)
+            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, Theme.panelOpacity)
 
             StackLayout {
                 anchors.fill: parent
@@ -173,66 +239,104 @@ Item {
                 XSettingsPage {
                     title: "General"
                     description: "Core launcher behaviour and navigation preferences."
+
                     XSettingsCard {
                         title: "Launcher language"
-                        description: "Language used throughout the Xenon interface."
+                        description: "Language used throughout the Xenon interface. Additional translations can be added without changing Launcher Core."
                         XComboBox { Layout.fillWidth: true; model: ["English (UK)"]; enabled: false }
                     }
+
                     XSettingsCard {
                         title: "Startup page"
-                        description: "Page shown when Xenon opens unless Remember last page is enabled."
+                        description: "Page shown when Xenon opens unless Open last page on startup is enabled."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: ["Library", "Modules", "Profiles", "Settings"]
-                            currentIndex: Math.max(0, model.indexOf(root.getString("general/startupPage", "Library")))
-                            onActivated: function(index) { root.save("general/startupPage", model[index]) }
+                            model: root.optionLabels("general/startupPage")
+                            currentIndex: root.optionIndex("general/startupPage")
+                            onActivated: function(index) { root.saveOption("general/startupPage", index) }
                         }
                     }
+
                     XSettingsCard {
                         title: "Sidebar layout"
                         description: "Auto adapts to the window. Compact keeps icon-only primary navigation."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: ["Auto", "Expanded", "Compact"]
-                            currentIndex: Math.max(0, model.indexOf(root.getString("general/sidebarMode", "Auto")))
-                            onActivated: function(index) { root.save("general/sidebarMode", model[index]) }
+                            model: root.optionLabels("general/sidebarMode")
+                            currentIndex: root.optionIndex("general/sidebarMode")
+                            onActivated: function(index) { root.saveOption("general/sidebarMode", index) }
                         }
                     }
+
                     XSettingsCard {
-                        title: "Remember last page"
-                        description: "Resume where you left off on the next launch."
-                        XSwitch { checked: root.getBool("general/rememberPage", true); onUserToggled: function(value) { root.save("general/rememberPage", value) } }
+                        title: "Open last page on startup"
+                        description: "Resume the page that was active when Xenon last closed."
+                        XSwitch { checked: root.getBool("general/restoreLastPage", false); onUserToggled: function(value) { root.save("general/restoreLastPage", value) } }
                     }
+
                     XSettingsCard {
                         title: "Interface animations"
-                        description: "Use subtle transitions and hover motion. Reduce motion overrides this."
+                        description: "Use subtle transitions and hover motion. Reduce motion overrides non-essential animation."
                         XSwitch { checked: root.getBool("general/animations", true); onUserToggled: function(value) { root.save("general/animations", value) } }
+                    }
+
+                    XSettingsCard {
+                        title: "Reset general settings"
+                        description: "Restore registered General preferences without changing profiles, paths or theme choices."
+                        XButton { Layout.fillWidth: true; text: "Reset General"; onClicked: launcherBridge.resetSettingsCategory("general") }
                     }
                 }
 
                 XSettingsPage {
                     title: "Appearance"
-                    description: "Choose a base theme and let Xenon branding follow the active accent automatically."
+                    description: "Theme definitions, accents and background assets are supplied by Launcher Core rather than hard-coded by this page."
+
                     XSettingsCard {
                         title: "Theme"
-                        description: "System follows the operating system light/dark preference."
+                        description: "System follows the operating-system light/dark preference."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.themeNames
-                            currentIndex: root.indexFor(root.themeIds, launcherBridge.themeId)
-                            onActivated: function(index) { launcherBridge.themeId = root.themeIds[index]; Theme.setTheme(root.themeIds[index]) }
+                            model: root.labels(root.themeEntries)
+                            currentIndex: root.indexFor(root.ids(root.themeEntries), launcherBridge.themeId)
+                            onActivated: function(index) { launcherBridge.themeId = root.ids(root.themeEntries)[index] }
                         }
                     }
+
                     XSettingsCard {
                         title: "Accent colour"
-                        description: "Brand marks, focus states and primary actions recolour with the active accent."
+                        description: "Brand marks, focus states and primary actions recolour from one semantic accent definition."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.accentNames
-                            currentIndex: root.indexFor(root.accentIds, launcherBridge.accentId)
-                            onActivated: function(index) { launcherBridge.accentId = root.accentIds[index]; Theme.setAccent(root.accentIds[index]) }
+                            model: root.labels(root.accentEntries)
+                            currentIndex: root.indexFor(root.ids(root.accentEntries), launcherBridge.accentId)
+                            onActivated: function(index) { launcherBridge.accentId = root.ids(root.accentEntries)[index] }
                         }
                     }
+
+                    XSettingsCard {
+                        visible: launcherBridge.accentId === "custom"
+                        title: "Custom accent"
+                        description: "Use a CSS-style colour such as #35D7EA. Launcher Core derives strong, soft and readable text variants automatically."
+                        actionWidth: 300
+                        Rectangle {
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
+                            radius: Theme.controlRadius
+                            color: Theme.accent
+                            border.width: Theme.borderWidth
+                            border.color: Theme.border
+                        }
+                        XTextField {
+                            Layout.fillWidth: true
+                            text: launcherBridge.customAccentColor
+                            placeholderText: "#35D7EA"
+                            onEditingFinished: {
+                                launcherBridge.customAccentColor = text
+                                text = launcherBridge.customAccentColor
+                            }
+                        }
+                    }
+
                     XSettingsCard {
                         title: "Interface density"
                         description: "Compact reduces page margins and collapses primary navigation."
@@ -243,55 +347,105 @@ Item {
                             onActivated: function(index) { root.save("general/compact", index === 1) }
                         }
                     }
+
                     XSettingsCard {
                         title: "Control corners"
                         description: "Changes panel, field and button corner styling."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.cornerNames
-                            currentIndex: root.indexFor(root.cornerIds, launcherBridge.cornerStyle)
-                            onActivated: function(index) { launcherBridge.cornerStyle = root.cornerIds[index]; Theme.setCornerStyle(root.cornerIds[index]) }
+                            model: root.labels(root.cornerEntries)
+                            currentIndex: root.indexFor(root.ids(root.cornerEntries), launcherBridge.cornerStyle)
+                            onActivated: function(index) { launcherBridge.cornerStyle = root.ids(root.cornerEntries)[index] }
                         }
                     }
+
+                    XSettingsCard {
+                        title: "Decorative detail"
+                        description: "Controls Xenon HUD rails, corner marks and technical ornaments independently of the background artwork."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("appearance/decorLevel")
+                            currentIndex: root.optionIndex("appearance/decorLevel")
+                            onActivated: function(index) { root.saveOption("appearance/decorLevel", index) }
+                        }
+                    }
+
+                    XSettingsCard {
+                        title: "Panel opacity"
+                        description: "Set launcher panel opacity directly. 0% is fully transparent and 100% is fully opaque. High contrast always forces 100%."
+                        actionWidth: 320
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            layoutDirection: Qt.LeftToRight
+                            spacing: Theme.spaceSm
+
+                            XSlider {
+                                id: panelOpacitySlider
+                                Layout.fillWidth: true
+                                from: 0
+                                to: 100
+                                stepSize: 1
+                                value: Math.round(root.getNumber("appearance/panelOpacity", 0.94) * 100)
+                                accessibleName: "Panel opacity"
+                                accessibleDescription: "Adjust panel opacity from zero to one hundred percent"
+                                onMoved: root.save("appearance/panelOpacity", value / 100.0)
+                            }
+
+                            Text {
+                                Layout.preferredWidth: 48
+                                horizontalAlignment: Text.AlignRight
+                                text: Math.round(panelOpacitySlider.value) + "%"
+                                color: Theme.text
+                                font.pixelSize: Theme.typeBody
+                                font.weight: Font.DemiBold
+                            }
+                        }
+                    }
+
                     XSettingsCard {
                         title: "Themed background graphics"
                         description: "Show Xenon-owned decorative background graphics behind launcher content."
                         XSwitch { checked: root.getBool("appearance/themeBackdrop", true); onUserToggled: function(value) { root.save("appearance/themeBackdrop", value) } }
                     }
+
                     XSettingsCard {
                         title: "Theme background"
                         description: Theme.effectiveThemeId === "light"
                             ? "The Light theme uses the minimal vector treatment."
-                            : "Choose artwork designed specifically for the active base theme. Game pages still use module-provided artwork separately."
+                            : "Choose artwork registered for the active base theme. Game pages still use module-provided artwork separately."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.backgroundVariantNames
-                            enabled: root.backgroundVariantIds.length > 1
-                            currentIndex: root.indexFor(
-                                root.backgroundVariantIds,
-                                root.getString("appearance/backdropVariant/" + Theme.effectiveThemeId, root.backgroundVariantIds[0]))
+                            model: root.labels(root.backgroundEntries)
+                            enabled: root.backgroundEntries.length > 1
+                            currentIndex: root.indexFor(root.ids(root.backgroundEntries), launcherBridge.themeBackgroundVariant(Theme.effectiveThemeId))
                             onActivated: function(index) {
-                                root.save("appearance/backdropVariant/" + Theme.effectiveThemeId, root.backgroundVariantIds[index])
+                                root.save("appearance/backdropVariant/" + Theme.effectiveThemeId, root.ids(root.backgroundEntries)[index])
                             }
                         }
                     }
+
                     XSettingsCard {
                         title: "Background strength"
                         description: "Adjust the visibility of Xenon-owned theme graphics without affecting module artwork."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: ["Subtle", "Standard", "Strong"]
-                            currentIndex: {
-                                var value = launcherBridge.numberSetting("appearance/backdropIntensity", 0.72)
-                                return value < 0.55 ? 0 : value > 0.85 ? 2 : 1
-                            }
-                            onActivated: function(index) { root.save("appearance/backdropIntensity", [0.42, 0.72, 1.0][index]) }
+                            model: root.optionLabels("appearance/backdropIntensity")
+                            currentIndex: root.optionIndex("appearance/backdropIntensity")
+                            onActivated: function(index) { root.saveOption("appearance/backdropIntensity", index) }
                         }
                     }
+
                     XSettingsCard {
                         title: "Game artwork backgrounds"
                         description: "Allow installed game modules to provide artwork for their own pages."
                         XSwitch { checked: root.getBool("appearance/artworkBackgrounds", true); onUserToggled: function(value) { root.save("appearance/artworkBackgrounds", value) } }
+                    }
+
+                    XSettingsCard {
+                        title: "Reset appearance"
+                        description: "Restore the base theme, accent, custom colour, corner style and all background/decor settings."
+                        XButton { Layout.fillWidth: true; text: "Reset Appearance"; onClicked: launcherBridge.resetSettingsCategory("appearance") }
                     }
                 }
 
@@ -308,30 +462,40 @@ Item {
                         description: "Choose whether module-catalogued DLC that is not locally installed remains visible."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: ["Show in catalogue", "Hide missing content"]
-                            currentIndex: root.getString("library/missingContent", "Show in catalogue") === "Hide missing content" ? 1 : 0
-                            onActivated: function(index) { root.save("library/missingContent", model[index]) }
+                            model: root.optionLabels("library/missingContent")
+                            currentIndex: root.optionIndex("library/missingContent")
+                            onActivated: function(index) { root.saveOption("library/missingContent", index) }
                         }
+                    }
+                    XSettingsCard {
+                        title: "Reset library presentation"
+                        description: "Restore Library display preferences without removing games, modules or DLC."
+                        XButton { Layout.fillWidth: true; text: "Reset Library"; onClicked: launcherBridge.resetSettingsCategory("library") }
                     }
                 }
 
                 XSettingsPage {
                     title: "Paths"
                     description: "Launcher-wide defaults. Individual profiles may optionally override Games, Saves and Screenshots."
-                    XPathField { label: "Game library"; helperText: "Default location for user-provided game content."; pathValue: root.getString("paths/games", launcherBridge.defaultGameLibraryPath); onPathEdited: function(path) { root.save("paths/games", path) } }
-                    XPathField { label: "Save data"; helperText: "Default location for profile save data."; pathValue: root.getString("paths/saves", launcherBridge.defaultSaveDataPath); onPathEdited: function(path) { root.save("paths/saves", path) } }
-                    XPathField { label: "Profiles"; helperText: "Profiles, local profile images and profiles.json are stored here."; pathValue: root.getString("paths/profiles", launcherBridge.defaultProfilesPath); onPathEdited: function(path) { root.save("paths/profiles", path); ProfileStore.persist() } }
-                    XPathField { label: "Modules"; helperText: "Installed Xenon modules and support packages."; pathValue: root.getString("paths/modules", launcherBridge.defaultModulesPath); onPathEdited: function(path) { root.save("paths/modules", path) } }
-                    XPathField { label: "Screenshots"; helperText: "Default screenshot location."; pathValue: root.getString("paths/screenshots", launcherBridge.defaultScreenshotsPath); onPathEdited: function(path) { root.save("paths/screenshots", path) } }
-                    XPathField { label: "Cache"; helperText: "Launcher/runtime cache files."; pathValue: root.getString("paths/cache", launcherBridge.cachePath); onPathEdited: function(path) { root.save("paths/cache", path) } }
+                    XPathField { label: "Game library"; helperText: "Default location for user-provided game content."; pathValue: root.getString("paths/games", launcherBridge.defaultGameLibraryPath); allowClear: true; onPathEdited: function(path) { root.save("paths/games", path) } }
+                    XPathField { label: "Save data"; helperText: "Default location for profile save data."; pathValue: root.getString("paths/saves", launcherBridge.defaultSaveDataPath); allowClear: true; onPathEdited: function(path) { root.save("paths/saves", path) } }
+                    XPathField { label: "Profiles"; helperText: "Profiles, local profile images and profiles.json are stored here."; pathValue: root.getString("paths/profiles", launcherBridge.defaultProfilesPath); allowClear: true; onPathEdited: function(path) { root.save("paths/profiles", path) } }
+                    XPathField { label: "Modules"; helperText: "Installed Xenon modules and support packages."; pathValue: root.getString("paths/modules", launcherBridge.defaultModulesPath); allowClear: true; onPathEdited: function(path) { root.save("paths/modules", path) } }
+                    XPathField { label: "Screenshots"; helperText: "Default screenshot location."; pathValue: root.getString("paths/screenshots", launcherBridge.defaultScreenshotsPath); allowClear: true; onPathEdited: function(path) { root.save("paths/screenshots", path) } }
+                    XPathField { label: "Cache"; helperText: "Launcher/runtime cache files."; pathValue: root.getString("paths/cache", launcherBridge.cachePath); allowClear: true; onPathEdited: function(path) { root.save("paths/cache", path) } }
+                    XSettingsCard {
+                        title: "Reset all paths"
+                        description: "Return every launcher-wide storage location to its platform default. Profiles and modules are reloaded through Launcher Core."
+                        XButton { Layout.fillWidth: true; text: "Reset Paths"; onClicked: launcherBridge.resetSettingsCategory("paths") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Runtime"
-                    description: "Runtime preferences become authoritative when the Xenon backend is connected."
+                    description: "Runtime preferences are validated now and become authoritative session inputs when the corresponding Xenon service is connected."
                     XSettingsCard {
                         title: "Default graphics backend"
-                        description: "Modules may impose additional compatibility requirements."
+                        description: "Only renderers compiled for this host are offered. Modules may impose additional compatibility requirements."
                         XComboBox {
                             Layout.fillWidth: true
                             model: launcherBridge.availableGraphicsBackends
@@ -344,87 +508,424 @@ Item {
                         description: "Prefer local/offline service fallbacks when a module supports them."
                         XSwitch { checked: root.getBool("runtime/offline", true); onUserToggled: function(value) { root.save("runtime/offline", value) } }
                     }
+                    XSettingsCard {
+                        title: "Runtime connection"
+                        description: "Launcher Core is isolated from runtime implementation details through RuntimeBridge."
+                        StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Disconnected"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+                    }
+                    XSettingsCard {
+                        title: "Reset runtime preferences"
+                        description: "Restore automatic renderer selection and the default offline preference."
+                        XButton { Layout.fillWidth: true; text: "Reset Runtime"; onClicked: launcherBridge.resetSettingsCategory("runtime") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Graphics"
-                    description: "Host graphics preferences. Device-specific controls appear when the renderer backend is connected."
-                    XSettingsCard { title: "Renderer capability detection"; description: "Current front-end build exposes host-aware backend choices; adapter probing is backend-owned."; StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Backend pending"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning } }
-                    XSettingsCard { title: "Shader cache"; description: "Prepare the UI contract for renderer-managed shader caches."; XSwitch { checked: root.getBool("graphics/shaderCache", true); onUserToggled: function(value) { root.save("graphics/shaderCache", value) } } }
+                    description: "Host graphics preferences are persisted now; renderer-specific device controls will appear when the live graphics service exposes them."
+                    XSettingsCard {
+                        title: "Renderer capability detection"
+                        description: "The launcher only presents backends compiled for the current Xenon build and host platform."
+                        StatusPill { label: root.runtimeServiceLabel("graphics"); tone: root.runtimeServiceTone("graphics") }
+                    }
+                    XSettingsCard {
+                        title: "Shader cache"
+                        description: "Allow renderer-managed shader cache data when the graphics session API is active."
+                        XSwitch { checked: root.getBool("graphics/shaderCache", true); onUserToggled: function(value) { root.save("graphics/shaderCache", value) } }
+                    }
+                    XSettingsCard {
+                        visible: root.getBool("graphics/shaderCache", true)
+                        title: "Shader cache mode"
+                        description: "Persistent keeps reusable host shader data between sessions; Session only discards it when Xenon closes."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("graphics/shaderCacheMode")
+                            currentIndex: root.optionIndex("graphics/shaderCacheMode")
+                            onActivated: function(index) { root.saveOption("graphics/shaderCacheMode", index) }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Reset graphics preferences"
+                        description: "Restore launcher-side graphics defaults."
+                        XButton { Layout.fillWidth: true; text: "Reset Graphics"; onClicked: launcherBridge.resetSettingsCategory("graphics") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Input"
-                    description: "Input mappings and controller discovery will populate when Xenon Input is connected."
-                    XSettingsCard { title: "Input service"; description: "Keyboard/controller configuration is front-end ready but runtime-backed enumeration is pending."; StatusPill { label: "Backend pending"; tone: Theme.warning } }
+                    description: "Launcher-side input preferences are ready now; live device enumeration and mappings remain owned by Xenon Input."
+                    XSettingsCard {
+                        title: "Input service"
+                        description: "Shows whether this build contains and exposes the live input subsystem."
+                        StatusPill { label: root.runtimeServiceLabel("input"); tone: root.runtimeServiceTone("input") }
+                    }
+                    XSettingsCard {
+                        title: "Preferred device"
+                        description: "Default device family requested when a game profile does not override input selection."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("input/preferredDevice")
+                            currentIndex: root.optionIndex("input/preferredDevice")
+                            onActivated: function(index) { root.saveOption("input/preferredDevice", index) }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Controller deadzone"
+                        description: "Default stick deadzone passed to Xenon Input once live device profiles are available."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("input/deadzone")
+                            currentIndex: root.optionIndex("input/deadzone")
+                            onActivated: function(index) { root.saveOption("input/deadzone", index) }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Controller rumble"
+                        description: "Allow vibration when supported by the selected controller and game module."
+                        XSwitch { checked: root.getBool("input/rumble", true); onUserToggled: function(value) { root.save("input/rumble", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Reset input preferences"
+                        description: "Restore launcher-side input defaults without deleting future per-device mappings."
+                        XButton { Layout.fillWidth: true; text: "Reset Input"; onClicked: launcherBridge.resetSettingsCategory("input") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Audio"
-                    description: "Audio device and latency controls will populate when Xenon Audio is connected."
-                    XSettingsCard { title: "Audio service"; description: "Device enumeration and latency tuning are runtime-backed."; StatusPill { label: "Backend pending"; tone: Theme.warning } }
+                    description: "Launcher-side audio policy is ready now; device enumeration remains owned by Xenon Audio."
+                    XSettingsCard {
+                        title: "Audio service"
+                        description: "Shows whether this build contains and exposes the live audio subsystem."
+                        StatusPill { label: root.runtimeServiceLabel("audio"); tone: root.runtimeServiceTone("audio") }
+                    }
+                    XSettingsCard {
+                        title: "Master volume"
+                        description: "Default runtime output level before game-specific mixing."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("audio/masterVolume")
+                            currentIndex: root.optionIndex("audio/masterVolume")
+                            onActivated: function(index) { root.saveOption("audio/masterVolume", index) }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Latency profile"
+                        description: "Requests a latency/buffering policy from Xenon Audio when the service is available."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("audio/latencyProfile")
+                            currentIndex: root.optionIndex("audio/latencyProfile")
+                            onActivated: function(index) { root.saveOption("audio/latencyProfile", index) }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Mute when unfocused"
+                        description: "Silence game audio while the Xenon launcher/game session is not the active application."
+                        XSwitch { checked: root.getBool("audio/muteUnfocused", false); onUserToggled: function(value) { root.save("audio/muteUnfocused", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Reset audio preferences"
+                        description: "Restore launcher-side audio defaults."
+                        XButton { Layout.fillWidth: true; text: "Reset Audio"; onClicked: launcherBridge.resetSettingsCategory("audio") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Network"
-                    description: "Hidden until the Xenon networking service advertises this capability."
+                    description: "This category becomes visible when Xenon networking advertises its frontend capability."
+                    XSettingsCard {
+                        title: "Network service"
+                        description: "Online identity, matchmaking and service-replacement controls remain runtime-owned."
+                        StatusPill { label: root.runtimeServiceLabel("network"); tone: root.runtimeServiceTone("network") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "Updates"
-                    description: "Keep Xenon and open-source modules current. Update sources are managed by Xenon rather than exposed as editable paths."
+                    description: "Launcher Core checks Project Xenon GitHub Releases, verifies downloaded packages with SHA-256, and stages installation outside the QML layer."
 
                     XSettingsCard {
-                        title: "Launcher updates"
-                        description: "Check the official Project Xenon release source. The frontend core will download and verify updates when the update service is connected."
-                        actionWidth: 250
+                        title: "Launcher update status"
+                        description: String(root.launcherUpdateState.statusMessage || "Ready to check for updates.")
+                        actionWidth: 360
+                        StatusPill { label: root.updateStatusLabel(); tone: root.updateStatusTone() }
                         XButton {
-                            Layout.fillWidth: true
                             text: "Check for updates"
+                            enabled: !Boolean(root.launcherUpdateState.busy)
                             onClicked: launcherBridge.requestLauncherUpdateCheck()
                         }
                     }
-
+                    XSettingsCard {
+                        title: "Installed version"
+                        description: "The version embedded into this launcher build. Release builds receive their semantic version from the GitHub release tag."
+                        StatusPill { label: String(root.launcherUpdateState.currentVersion || launcherBridge.version); tone: Theme.textMuted }
+                    }
+                    XSettingsCard {
+                        visible: String(root.launcherUpdateState.availableVersion || "").length > 0
+                        title: "Latest release • " + String(root.launcherUpdateState.availableVersion || "")
+                        description: root.releaseNotesPreview()
+                        actionWidth: 310
+                        XButton {
+                            visible: String(root.launcherUpdateState.releaseUrl || "").length > 0
+                            text: "View on GitHub"
+                            onClicked: launcherBridge.openExternalUrl(String(root.launcherUpdateState.releaseUrl))
+                        }
+                    }
+                    XSettingsCard {
+                        visible: Boolean(root.launcherUpdateState.canDownload) || String(root.launcherUpdateState.status) === "downloading"
+                        title: "Download update"
+                        description: String(root.launcherUpdateState.assetName || "")
+                            + (Number(root.launcherUpdateState.assetSize || 0) > 0 ? " • " + root.formatBytes(root.launcherUpdateState.assetSize) : "")
+                            + " • SHA-256 verification required before installation"
+                        actionWidth: 330
+                        XButton {
+                            visible: String(root.launcherUpdateState.status) !== "downloading"
+                            text: "Download & verify"
+                            variant: "primary"
+                            onClicked: launcherBridge.requestLauncherUpdateDownload()
+                        }
+                        XButton {
+                            visible: String(root.launcherUpdateState.status) === "downloading"
+                            text: "Cancel download"
+                            onClicked: launcherBridge.cancelLauncherUpdateDownload()
+                        }
+                    }
+                    XSettingsCard {
+                        visible: String(root.launcherUpdateState.status) === "downloading"
+                        title: "Download progress"
+                        description: root.formatBytes(root.launcherUpdateState.downloadedBytes)
+                            + (Number(root.launcherUpdateState.downloadTotalBytes || 0) > 0
+                               ? " of " + root.formatBytes(root.launcherUpdateState.downloadTotalBytes)
+                               : " downloaded")
+                        actionWidth: 330
+                        ProgressBar {
+                            Layout.fillWidth: true
+                            from: 0
+                            to: 1
+                            indeterminate: Number(root.launcherUpdateState.downloadTotalBytes || 0) <= 0
+                            value: Number(root.launcherUpdateState.downloadProgress || 0)
+                        }
+                    }
+                    XSettingsCard {
+                        visible: Boolean(root.launcherUpdateState.canInstall) || String(root.launcherUpdateState.status) === "ready-to-install"
+                        title: "Install verified update"
+                        description: Boolean(root.launcherUpdateState.installerSupported)
+                            ? "The launcher will close, replace its deployed files using the staged verified package, and restart automatically. The previous installation is kept until the updated launcher starts successfully."
+                            : "The update is verified and staged, but automatic replacement is not implemented for this platform yet."
+                        actionWidth: 280
+                        XButton {
+                            text: "Install & restart"
+                            variant: "primary"
+                            enabled: Boolean(root.launcherUpdateState.canInstall)
+                            onClicked: launcherBridge.requestLauncherUpdateInstall()
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Automatic update checks"
+                        description: "Check GitHub in the background when the selected interval is due. Failed automatic checks remain silent and are reflected in this status page."
+                        XSwitch { checked: root.getBool("updates/automaticChecks", true); onUserToggled: function(value) { root.save("updates/automaticChecks", value) } }
+                    }
+                    XSettingsCard {
+                        visible: root.getBool("updates/automaticChecks", true)
+                        title: "Check interval"
+                        description: "At startup checks every launch; Daily and Weekly use the last successful GitHub check time; Manual disables scheduled checks."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("updates/checkInterval")
+                            currentIndex: root.optionIndex("updates/checkInterval")
+                            onActivated: function(index) { root.saveOption("updates/checkInterval", index) }
+                        }
+                    }
                     XSettingsCard {
                         title: "Pre-release builds"
-                        description: "Include development builds when checking for launcher updates."
+                        description: "Include GitHub prereleases when selecting the newest semantic version. Draft releases are always ignored."
                         XSwitch { checked: root.getBool("updates/prerelease", false); onUserToggled: function(value) { root.save("updates/prerelease", value) } }
                     }
-
+                    XSettingsCard {
+                        title: "Update source"
+                        description: "GitHub repository: " + String(root.launcherUpdateState.repository || "nimauria/Xenon-Recomp")
+                            + (String(root.launcherUpdateState.lastCheckedAt || "").length > 0
+                               ? " • Last successful check: " + String(root.launcherUpdateState.lastCheckedAt)
+                               : " • Not checked successfully yet")
+                        actionWidth: 220
+                        XButton {
+                            text: "Open repository"
+                            onClicked: launcherBridge.openExternalUrl("https://github.com/" + String(root.launcherUpdateState.repository || "nimauria/Xenon-Recomp"))
+                        }
+                    }
                     XSettingsCard {
                         title: "Module updates"
-                        description: "Automatically check installed open-source modules for newer compatible releases."
+                        description: "Automatically check installed catalog modules against their own GitHub Releases. Module packages and update state are completely separate from Xenon Launcher releases."
                         XSwitch { checked: root.getBool("updates/modules", true); onUserToggled: function(value) { root.save("updates/modules", value) } }
                     }
-
+                    XSettingsCard {
+                        title: "Module pre-release builds"
+                        description: "Allow the module updater to select prerelease module packages. This does not change the Xenon Launcher release channel."
+                        XSwitch { checked: root.getBool("updates/modulePrerelease", false); onUserToggled: function(value) { root.save("updates/modulePrerelease", value) } }
+                    }
                     XSettingsCard {
                         title: "Official module catalog"
                         description: "Xenon discovers public module repositories and releases through the built-in catalog service. Commercial game files, updates and DLC are never distributed by the catalog."
                         actionWidth: 250
-                        XButton {
-                            Layout.fillWidth: true
-                            text: "Refresh catalog"
-                            onClicked: launcherBridge.requestModuleCatalogRefresh()
+                        XButton { Layout.fillWidth: true; text: "Refresh catalog"; onClicked: launcherBridge.requestModuleCatalogRefresh() }
+                    }
+                    XSettingsCard {
+                        title: "Reset update preferences"
+                        description: "Restore automatic checks, stable-channel preference and module update defaults. Downloaded/staged packages are not installed by a reset."
+                        XButton { Layout.fillWidth: true; text: "Reset Updates"; onClicked: launcherBridge.resetSettingsCategory("updates") }
+                    }
+                }
+
+                XSettingsPage {
+                    title: "Community"
+                    description: "Support links and optional Discord integration for the Xenon community."
+
+                    XPanel {
+                        Layout.fillWidth: true
+                        implicitHeight: communityPanelColumn.implicitHeight + Theme.spaceXl * 2
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+                        decorated: true
+                        ColumnLayout {
+                            id: communityPanelColumn
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: Theme.spaceXl
+                            spacing: Theme.spaceMd
+                            Text {
+                                text: "Xenon Discord"
+                                color: Theme.text
+                                font.pixelSize: Theme.typeSubtitle
+                                font.weight: Font.DemiBold
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: 700
+                                text: String(launcherBridge.communityInfo.supportText || "Join the Xenon community for support and development updates.")
+                                color: Theme.textMuted
+                                font.pixelSize: Theme.typeBody
+                                wrapMode: Text.WordWrap
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceSm
+                                XButton { text: "Join Xenon Discord"; variant: "primary"; onClicked: launcherBridge.openDiscordCommunity() }
+                                XButton { text: "Project GitHub"; onClicked: launcherBridge.openProjectCommunity() }
+                                XButton {
+                                    text: "Copy invite"
+                                    onClicked: {
+                                        launcherBridge.copyText(String(launcherBridge.communityInfo.discordInvite || ""))
+                                        launcherBridge.notify("Discord invite copied", "The Xenon Discord invite was copied to the clipboard.")
+                                    }
+                                }
+                            }
                         }
+                    }
+
+                    XSettingsCard {
+                        title: "Discord Rich Presence"
+                        description: "Share what Xenon is doing with the Discord desktop client. This is optional and disabled by default."
+                        XSwitch {
+                            checked: root.getBool("community/discordRichPresence", false)
+                            onUserToggled: function(value) { root.save("community/discordRichPresence", value) }
+                        }
+                    }
+
+                    XSettingsCard {
+                        visible: root.getBool("community/discordRichPresence", false)
+                        title: "Show game title"
+                        description: "When a game session is running, include its title in Rich Presence. Turn this off to show only that Xenon is being used."
+                        XSwitch {
+                            checked: root.getBool("community/discordShowGameTitle", true)
+                            onUserToggled: function(value) { root.save("community/discordShowGameTitle", value) }
+                        }
+                    }
+
+                    XSettingsCard {
+                        title: "Discord provider"
+                        description: String(launcherBridge.discordPresenceState.providerStatus || "Discord Rich Presence provider status unavailable.")
+                        actionWidth: 300
+                        StatusPill {
+                            label: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? "Ready" : "Setup required"
+                            tone: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? Theme.success : Theme.warning
+                        }
+                        XButton {
+                            text: "Refresh presence"
+                            enabled: Boolean(launcherBridge.discordPresenceState.providerAvailable)
+                                && root.getBool("community/discordRichPresence", false)
+                            onClicked: launcherBridge.refreshDiscordPresence()
+                        }
+                    }
+
+                    XPanel {
+                        visible: root.getBool("community/discordRichPresence", false)
+                        Layout.fillWidth: true
+                        implicitHeight: presencePreviewColumn.implicitHeight + Theme.spaceLg * 2
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+                        ColumnLayout {
+                            id: presencePreviewColumn
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: Theme.spaceLg
+                            spacing: Theme.spaceSm
+                            Text { text: "Rich Presence preview"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                            XInfoRow { label: "Details"; value: String((launcherBridge.discordPresenceState.activity || {}).details || "Browsing the game library") }
+                            XInfoRow { label: "State"; value: String((launcherBridge.discordPresenceState.activity || {}).state || "Powered by Xenon") }
+                            XInfoRow { label: "Application ID"; value: String(launcherBridge.discordPresenceState.applicationId || "Not configured") }
+                            XInfoRow { label: "Game title sharing"; value: Boolean(launcherBridge.discordPresenceState.showGameTitle) ? "Enabled" : "Hidden" }
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Discord displays the application name from the Xenon Discord application itself. The activity then uses the lines above and can expose Join Xenon Discord and Project Xenon buttons."
+                                color: Theme.textMuted
+                                font.pixelSize: Theme.typeCaption
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+
+                    XSettingsCard {
+                        title: "Reset community preferences"
+                        description: "Turn Rich Presence back off and restore its privacy defaults. Community links are built into Xenon and are not removed."
+                        XButton { Layout.fillWidth: true; text: "Reset Community"; onClicked: launcherBridge.resetSettingsCategory("community") }
                     }
                 }
 
                 XSettingsPage {
                     title: "Accessibility"
-                    description: "Improve readability, focus visibility and motion comfort. Xenon also follows supported OS accessibility hints."
+                    description: "Readability, focus and motion settings are applied by the shared Theme layer and follow supported OS accessibility hints."
                     XSettingsCard {
                         title: "Text size"
-                        description: "Text scales independently of game rendering. Smaller UI text grows more strongly than large headings, while layouts reflow at higher scales."
+                        description: "Text scales independently of game rendering. Smaller UI text grows more strongly than large headings while layouts reflow."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.textSizeNames
-                            currentIndex: root.indexFor(root.textSizeValues, root.getNumber("accessibility/textScale", 1.0))
-                            onActivated: function(index) { var value = root.textSizeValues[index]; root.save("accessibility/textScale", value); Theme.setAccessibility(value, root.getBool("accessibility/highContrast", false)) }
+                            model: root.optionLabels("accessibility/textScale")
+                            currentIndex: root.optionIndex("accessibility/textScale")
+                            onActivated: function(index) { root.saveOption("accessibility/textScale", index) }
                         }
                     }
-                    XSettingsCard { title: "High contrast"; description: "Strengthen borders and foreground contrast in addition to OS high-contrast hints."; XSwitch { checked: root.getBool("accessibility/highContrast", false); onUserToggled: function(value) { root.save("accessibility/highContrast", value); Theme.setAccessibility(root.getNumber("accessibility/textScale", 1.0), value) } } }
-                    XSettingsCard { title: "Reduce motion"; description: "Disable non-essential interface animation and shorten state transitions."; XSwitch { checked: root.getBool("accessibility/reduceMotion", false); onUserToggled: function(value) { root.save("accessibility/reduceMotion", value) } } }
-                    XSettingsCard { title: "Keyboard navigation"; description: "Primary destinations and controls expose visible keyboard focus."; StatusPill { label: "Enabled"; tone: Theme.success } }
+                    XSettingsCard {
+                        title: "High contrast"
+                        description: "Strengthen borders and foreground contrast in addition to OS high-contrast hints."
+                        XSwitch { checked: root.getBool("accessibility/highContrast", false); onUserToggled: function(value) { root.save("accessibility/highContrast", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Enhanced focus ring"
+                        description: "Use a stronger keyboard-focus outline even when high-contrast mode is not enabled."
+                        XSwitch { checked: root.getBool("accessibility/enhancedFocus", false); onUserToggled: function(value) { root.save("accessibility/enhancedFocus", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Reduce motion"
+                        description: "Disable non-essential interface animation and shorten state transitions."
+                        XSwitch { checked: root.getBool("accessibility/reduceMotion", false); onUserToggled: function(value) { root.save("accessibility/reduceMotion", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Keyboard navigation"
+                        description: "Primary destinations and controls expose visible keyboard focus and standard tab navigation."
+                        StatusPill { label: "Enabled"; tone: Theme.success }
+                    }
+                    XSettingsCard {
+                        title: "Reset accessibility"
+                        description: "Restore launcher accessibility overrides while continuing to follow OS-level accessibility hints."
+                        XButton { Layout.fillWidth: true; text: "Reset Accessibility"; onClicked: launcherBridge.resetSettingsCategory("accessibility") }
+                    }
                 }
 
                 XSettingsPage {
@@ -435,16 +936,21 @@ Item {
                         description: "Switch between generic fictional data, a Project Gracemeria UI preview, or an empty launcher without recompiling."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.fixtureNames
-                            currentIndex: root.indexFor(root.fixtureIds, root.getString("developer/fixtureMode", launcherBridge.testMode ? "generic" : "none"))
-                            onActivated: function(index) { root.save("developer/fixtureMode", root.fixtureIds[index]) }
+                            model: root.optionLabels("developer/fixtureMode")
+                            currentIndex: root.optionIndex("developer/fixtureMode")
+                            onActivated: function(index) { root.saveOption("developer/fixtureMode", index) }
                         }
+                    }
+                    XSettingsCard {
+                        title: "Verbose launcher logging"
+                        description: "Keep extra frontend-backend diagnostics available for development builds."
+                        XSwitch { checked: root.getBool("developer/verboseLogging", false); onUserToggled: function(value) { root.save("developer/verboseLogging", value) } }
                     }
                     XSettingsCard { title: "Runtime service"; description: "Reports whether the launcher is connected to the Xenon backend service registry."; StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Not connected"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning } }
                     XPanel {
                         Layout.fillWidth: true
                         implicitHeight: developerColumn.implicitHeight + Theme.spaceLg * 2
-                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
                         ColumnLayout {
                             id: developerColumn
                             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -454,33 +960,31 @@ Item {
                             Text { Layout.fillWidth: true; text: launcherBridge.developerDiagnostics(); color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption; wrapMode: Text.WrapAnywhere; textFormat: Text.PlainText }
                             RowLayout {
                                 Layout.fillWidth: true
-
-                                Item {
-                                    Layout.fillWidth: true
-                                }
-
+                                Item { Layout.fillWidth: true }
                                 XButton {
                                     text: "Copy diagnostics"
                                     onClicked: {
                                         launcherBridge.copyText(launcherBridge.developerDiagnostics())
-                                        launcherBridge.notify(
-                                            "Diagnostics copied",
-                                            "Developer diagnostics were copied to the clipboard."
-                                        )
+                                        launcherBridge.notify("Diagnostics copied", "Developer diagnostics were copied to the clipboard.")
                                     }
                                 }
                             }
                         }
                     }
+                    XSettingsCard {
+                        title: "Reset developer settings"
+                        description: "Restore fixture and launcher diagnostic preferences."
+                        XButton { Layout.fillWidth: true; text: "Reset Developer"; onClicked: launcherBridge.resetSettingsCategory("developer") }
+                    }
                 }
 
                 XSettingsPage {
                     title: "About Xenon"
-                    description: "User-focused launcher information and project links."
+                    description: "User-focused launcher information, diagnostics and project links."
                     XPanel {
                         Layout.fillWidth: true
                         implicitHeight: aboutColumn.implicitHeight + Theme.spaceXl * 2
-                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
                         decorated: true
                         ColumnLayout {
                             id: aboutColumn
@@ -506,15 +1010,22 @@ Item {
                             XInfoRow { label: "System"; value: launcherBridge.platformName + " • " + launcherBridge.hostArchitecture }
                             XInfoRow { label: "Qt"; value: launcherBridge.qtVersion }
                             XInfoRow { label: "Runtime"; value: launcherBridge.backendConnected ? "Connected" : "Front-end only" }
+                            XInfoRow { label: "Theme"; value: Theme.name + " • " + launcherBridge.accentId }
                             XInfoRow { label: "Active profile"; value: launcherBridge.profileName }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: Theme.spaceSm
                                 XButton { text: "Copy system summary"; onClicked: { launcherBridge.copyText(launcherBridge.userDiagnostics()); launcherBridge.notify("Summary copied", "A user-focused system summary was copied to the clipboard.") } }
-                                XButton { text: "Project GitHub"; onClicked: launcherBridge.openExternalUrl("https://github.com/nimauria/Xenon-Recomp") }
+                                XButton { text: "Join Discord"; variant: "primary"; onClicked: launcherBridge.openDiscordCommunity() }
+                                XButton { text: "Project GitHub"; onClicked: launcherBridge.openProjectCommunity() }
                                 Item { Layout.fillWidth: true }
                             }
                         }
+                    }
+                    XSettingsCard {
+                        title: "Reset all launcher settings"
+                        description: "Restore all registered preferences and launcher-wide paths. Game library entries, profiles and installed modules are not deleted."
+                        XButton { Layout.fillWidth: true; text: "Reset All Settings"; variant: "danger"; onClicked: resetAllConfirm.open() }
                     }
                 }
             }
@@ -530,5 +1041,14 @@ Item {
                 secondaryText: ""
             }
         }
+    }
+
+    XConfirmDialog {
+        id: resetAllConfirm
+        title: "Reset all launcher settings?"
+        message: "This restores launcher preferences and paths to their defaults. Profiles, library entries, modules, saves and game content are not deleted."
+        confirmText: "Reset Settings"
+        destructive: true
+        onConfirmed: launcherBridge.resetAllSettings()
     }
 }

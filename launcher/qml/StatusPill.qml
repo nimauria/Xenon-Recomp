@@ -12,7 +12,7 @@ Rectangle {
     radius: implicitHeight / 2
     color: Theme.highContrast
         ? Theme.surfaceAlt
-        : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.94)
+        : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
     border.width: Theme.borderWidth
     border.color: Theme.border
 

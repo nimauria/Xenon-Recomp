@@ -549,11 +549,12 @@ ResolveWriteResult write_raw_resolve(
     result.error = "raw resolve could not acquire physical write span";
     return result;
   }
-  auto destination_bytes = write.bytes();
   for (auto& [address, block] : blocks) {
     apply_endian128(block, copy.destination_endian);
-    std::memcpy(destination_bytes.data() + (address - first), block.data(),
-                block.size());
+    if (!write.write(address - first, block)) {
+      result.error = "raw resolve write span overflow";
+      return result;
+    }
   }
   result.modified_address = first;
   result.modified_size = last - first;

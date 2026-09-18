@@ -6,62 +6,22 @@ Item {
     property real intensity: 1.0
     property bool subtle: false
     property string variant: "default"
+    property string source: ""
 
     clip: true
 
     readonly property real strength: Math.max(0.0, Math.min(1.0, intensity))
-    readonly property string resolvedVariant: {
-        if (variant && variant !== "default")
-            return variant
-        if (Theme.effectiveThemeId === "industrial") return "orbit"
-        if (Theme.effectiveThemeId === "carbon") return "nebula"
-        if (Theme.effectiveThemeId === "xenon-dark") return "orbit"
-        return "minimal"
-    }
-
-    function backgroundSource() {
-        var id = Theme.effectiveThemeId
-        var v = root.resolvedVariant
-        if (id === "xenon-dark") {
-            if (v === "tech") return "qrc:/theme-art/backgrounds/theme-xenon-dark-tech.png"
-            if (v === "hud") return "qrc:/theme-art/backgrounds/theme-xenon-dark-hud.png"
-            if (v === "orbit") return "qrc:/theme-art/backgrounds/theme-xenon-dark-orbit.png"
-        }
-        if (id === "industrial") {
-            if (v === "tech") return "qrc:/theme-art/backgrounds/theme-industrial-tech.png"
-            if (v === "orbit") return "qrc:/theme-art/backgrounds/theme-industrial-orbit.png"
-        }
-        if (id === "carbon") {
-            if (v === "tech") return "qrc:/theme-art/backgrounds/theme-carbon-tech.png"
-            if (v === "nebula") return "qrc:/theme-art/backgrounds/theme-carbon-nebula.png"
-        }
-        return ""
-    }
-
-    function sideDecorationSource() {
-        if (Theme.effectiveThemeId === "industrial")
-            return "qrc:/theme-art/decor/amber/side_strip_amber.svg"
-        if (Theme.effectiveThemeId === "carbon")
-            return "qrc:/theme-art/decor/green/side_strip_green.svg"
-        if (Theme.effectiveThemeId === "xenon-dark")
-            return "qrc:/theme-art/decor/blue/side_strip_blue.svg"
-        return ""
-    }
+    readonly property bool decorationsEnabled: Theme.decorLevel !== "Minimal"
+    readonly property bool fullDecorations: Theme.decorLevel === "Full" && !root.subtle
 
     function decorThemePath(asset) {
-        if (Theme.effectiveThemeId === "industrial")
-            return "qrc:/theme-art/decor/amber/" + asset + "_amber.svg"
-        if (Theme.effectiveThemeId === "carbon")
-            return "qrc:/theme-art/decor/green/" + asset + "_green.svg"
-        if (Theme.effectiveThemeId === "xenon-dark")
-            return "qrc:/theme-art/decor/blue/" + asset + "_blue.svg"
-        return ""
+        return Theme.decorAsset(asset)
     }
 
     Image {
         id: rasterBackdrop
         anchors.fill: parent
-        source: root.backgroundSource()
+        source: root.source
         visible: source.toString().length > 0
         fillMode: Image.PreserveAspectCrop
         horizontalAlignment: Image.AlignLeft
@@ -72,7 +32,6 @@ Item {
         opacity: root.strength * (root.subtle ? 0.28 : 0.72)
     }
 
-    // Keep the artwork clearly visible while retaining enough contrast for text.
     Rectangle {
         anchors.fill: parent
         visible: rasterBackdrop.visible
@@ -85,8 +44,8 @@ Item {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: Math.min(140, parent.width * 0.13)
-        source: root.sideDecorationSource()
-        visible: source.toString().length > 0 && parent.width >= 520
+        source: root.decorThemePath("side_strip")
+        visible: root.decorationsEnabled && source.toString().length > 0 && parent.width >= 520
         fillMode: Image.Stretch
         opacity: root.strength * (root.subtle ? 0.16 : 0.42)
         smooth: true
@@ -99,7 +58,7 @@ Item {
         width: 52
         height: Math.min(240, parent.height * 0.46)
         source: root.decorThemePath("rail_vertical")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 780
+        visible: root.fullDecorations && source.toString().length > 0 && parent.width >= 780
         fillMode: Image.Stretch
         opacity: root.strength * 0.30
         smooth: true
@@ -113,7 +72,7 @@ Item {
         width: Math.min(190, parent.width * 0.18)
         height: width
         source: root.decorThemePath("hud_arc_left")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 820
+        visible: root.fullDecorations && source.toString().length > 0 && parent.width >= 820
         fillMode: Image.PreserveAspectFit
         opacity: root.strength * 0.28
         smooth: true
@@ -125,7 +84,7 @@ Item {
         width: Math.min(180, parent.width * 0.18)
         height: width
         source: root.decorThemePath("corner_top_left")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 760
+        visible: root.decorationsEnabled && !root.subtle && source.toString().length > 0 && parent.width >= 760
         fillMode: Image.PreserveAspectFit
         opacity: root.strength * 0.36
         smooth: true
@@ -137,7 +96,7 @@ Item {
         width: Math.min(180, parent.width * 0.18)
         height: width
         source: root.decorThemePath("corner_bottom_right")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 760
+        visible: root.decorationsEnabled && !root.subtle && source.toString().length > 0 && parent.width >= 760
         fillMode: Image.PreserveAspectFit
         opacity: root.strength * 0.30
         smooth: true
@@ -151,7 +110,7 @@ Item {
         width: 132
         height: 28
         source: root.decorThemePath("slashes")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 900
+        visible: root.fullDecorations && source.toString().length > 0 && parent.width >= 900
         fillMode: Image.PreserveAspectFit
         opacity: root.strength * 0.42
         smooth: true
@@ -165,7 +124,7 @@ Item {
         width: Math.min(300, parent.width * 0.26)
         height: 18
         source: root.decorThemePath("divider_long")
-        visible: !root.subtle && source.toString().length > 0 && parent.width >= 900
+        visible: root.fullDecorations && source.toString().length > 0 && parent.width >= 900
         fillMode: Image.PreserveAspectFit
         opacity: root.strength * 0.26
         smooth: true
@@ -177,7 +136,7 @@ Item {
             ? "qrc:/theme-art/decor/neutral/hex_overlay.svg"
             : "qrc:/theme-art/decor/neutral/diagonal_lines_overlay.svg"
         fillMode: Image.Tile
-        opacity: root.strength * (root.subtle ? 0.03 : 0.07)
+        opacity: root.strength * (Theme.decorLevel === "Minimal" ? 0.02 : root.subtle ? 0.03 : 0.07)
         smooth: true
     }
 
@@ -189,7 +148,7 @@ Item {
         width: 54
         height: 54
         source: "qrc:/theme-art/decor/neutral/glow_dot.svg"
-        visible: !root.subtle
+        visible: root.fullDecorations
         opacity: root.strength * 0.34
         smooth: true
     }

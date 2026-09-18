@@ -1,0 +1,23 @@
+{
+  "schema": "xenon.module-catalog",
+  "version": 1,
+  "modules": [
+    {
+      "id": "org.nimauria.project-gracemeria",
+      "name": "Project Gracemeria",
+      "type": "Game Module",
+      "description": "Native recompilation module for Ace Combat 6, powered by Xenon Recomp. Users provide their own legally obtained game content.",
+      "repository": "nimauria/Project-Gracemeria",
+      "publisher": "Nimauria",
+      "license": "MIT",
+      "verified": true,
+      "tags": ["Ace Combat 6", "Game Module"],
+      "releaseAssets": {
+        "windows-x64": "project-gracemeria-windows-x64.xenonmod.zip",
+        "windows-arm64": "project-gracemeria-windows-arm64.xenonmod.zip",
+        "linux-x64": "project-gracemeria-linux-x64.xenonmod.zip",
+        "linux-arm64": "project-gracemeria-linux-arm64.xenonmod.zip"
+      }
+    }
+  ]
+}

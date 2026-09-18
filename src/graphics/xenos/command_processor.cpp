@@ -331,10 +331,33 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
 
 void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload) {
   if (payload.empty()) throw std::runtime_error("PM4_MEM_WRITE missing address");
-  std::uint32_t address = payload[0];
-  for (std::size_t i = 1; i < payload.size(); ++i, address += 4u) {
-    write_physical_dword(address, payload[i]);
+  if (payload.size() == 1u) return;
+
+  const auto address_with_endian = payload[0];
+  const Endian endian = static_cast<Endian>(address_with_endian & 0x3u);
+  const auto physical_base =
+      cpu_to_gpu_address(address_with_endian & ~0x3u);
+  const auto word_count = payload.size() - 1u;
+  const auto byte_count64 = std::uint64_t{word_count} * 4u;
+  if (byte_count64 > std::numeric_limits<std::uint32_t>::max() ||
+      std::uint64_t{physical_base} + byte_count64 > memory::kPhysicalMemorySize) {
+    throw std::out_of_range("Xenos physical write outside RAM");
   }
+
+  auto write = memory_.physical_write_span(
+      physical_base, static_cast<std::uint32_t>(byte_count64));
+  if (!write) throw std::runtime_error("Xenos physical write has no backing");
+  for (std::size_t i = 0; i < word_count; ++i) {
+    const auto logical_value = payload[i + 1u];
+    const auto stored = gpu_swap(logical_value, endian);
+    const auto encoded = encode_le32(stored);
+    if (!write.write(static_cast<std::uint32_t>(i * 4u), encoded)) {
+      throw std::runtime_error("Xenos physical write span overflow");
+    }
+    stream_.emit(ir::PhysicalMemoryWrite{
+        static_cast<std::uint32_t>(physical_base + i * 4u), logical_value, endian});
+  }
+  stats_.physical_writes += word_count;
 }
 
 void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,

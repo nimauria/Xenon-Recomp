@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 
+#include "xenon/memory/gpu_coherency.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 
 namespace {
@@ -40,6 +41,78 @@ void write_memexport_stream(xenon::gpu::ResourceStateTracker& tracker,
                      (0x4B0u << 20u)});
   tracker.apply({reg + 3u,
                  (index_count & 0x7FFFFFu) | (0x96u << 23u)});
+}
+
+
+void test_guest_memory_coherency_ranges() {
+  using xenon::memory::GuestMemoryGpuCoherency;
+
+  GuestMemoryGpuCoherency tracker;
+  tracker.reset(0x10000u);
+  auto cpu = tracker.cpu_dirty_ranges();
+  assert(cpu.size() == 1 && cpu[0].address == 0 &&
+         cpu[0].size == 0x10000u);
+  tracker.mark_cpu_uploaded(0, 0x10000u);
+  assert(tracker.cpu_dirty_ranges().empty());
+
+  // A shader owns this byte range after memexport.
+  tracker.mark_gpu_write(0x2000u, 0x1000u);
+  assert(tracker.has_gpu_dirty(0x2400u, 4));
+
+  // A four-byte CPU write in the middle wins only for those bytes. The rest of
+  // the GPU-authored range must stay GPU-owned so a later CPU upload cannot
+  // clobber unrelated memexport data on the same page.
+  tracker.mark_cpu_write(0x2400u, 4u);
+  const auto gpu = tracker.gpu_dirty_ranges();
+  assert(gpu.size() == 2);
+  assert(gpu[0].address == 0x2000u && gpu[0].size == 0x400u);
+  assert(gpu[1].address == 0x2404u && gpu[1].size == 0xBFCu);
+  cpu = tracker.cpu_dirty_ranges();
+  assert(cpu.size() == 1 && cpu[0].address == 0x2400u && cpu[0].size == 4u);
+
+  // CPU visibility is demand-driven and may cover only a subrange.
+  tracker.mark_gpu_downloaded(0x2800u, 0x100u);
+  assert(!tracker.has_gpu_dirty(0x2800u, 0x100u));
+  assert(tracker.has_gpu_dirty(0x2700u, 0x100u));
+  assert(tracker.has_gpu_dirty(0x2900u, 0x100u));
+
+  // A later GPU export supersedes pending CPU ownership for exactly the bytes
+  // it writes. Adjacent CPU dirt remains uploadable.
+  tracker.mark_cpu_write(0x4000u, 0x100u);
+  tracker.mark_gpu_write(0x4040u, 0x20u);
+  cpu = tracker.cpu_dirty_ranges(0x4000u, 0x100u);
+  assert(cpu.size() == 2);
+  assert(cpu[0].address == 0x4000u && cpu[0].size == 0x40u);
+  assert(cpu[1].address == 0x4060u && cpu[1].size == 0xA0u);
+
+  // Xenon Memory, rather than either native API, builds requested-range upload
+  // plans and tracks which bytes are valid in the device mirror.
+  xenon::memory::GuestMemoryCoherency memory_writes;
+  GuestMemoryGpuCoherency planned;
+  planned.reset(0x10000u, false);
+  memory_writes.mark_write(0x100u, 4u);
+  memory_writes.mark_write(0x300u, 8u);
+  auto plan = planned.plan_upload(memory_writes, 0x300u, 4u, 2u);
+  assert(plan.exact_history);
+  assert(plan.ranges.size() == 2u);
+  assert(plan.ranges[0].address == 0x300u && plan.ranges[0].size == 2u);
+  assert(plan.ranges[1].address == 0x302u && plan.ranges[1].size == 2u);
+  assert(!planned.device_range_valid(0x300u, 4u));
+  for (const auto& range : plan.ranges)
+    planned.commit_cpu_upload(range.address, range.size);
+  assert(planned.device_range_valid(0x300u, 4u));
+  assert(!planned.device_range_valid(0x100u, 4u));
+
+  // Dirt outside the first request remains pending even though the journal
+  // epoch has advanced, and a later exact CPU write invalidates only its byte.
+  plan = planned.plan_upload(memory_writes, 0x100u, 4u);
+  assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x100u &&
+         plan.ranges[0].size == 4u);
+  memory_writes.mark_write(0x301u, 1u);
+  plan = planned.plan_upload(memory_writes, 0x301u, 1u);
+  assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x301u &&
+         plan.ranges[0].size == 1u);
+  assert(!planned.device_range_valid(0x300u, 4u));
 }
 
 void test_memexport_stream_planning() {
@@ -544,6 +617,7 @@ void test_preferred_polygon_offset() {
 }  // namespace
 
 int main() {
+  test_guest_memory_coherency_ranges();
   test_memexport_stream_planning();
   test_memexport_dynamic_and_invalid_streams_stay_explicit();
   test_texture_descriptor();

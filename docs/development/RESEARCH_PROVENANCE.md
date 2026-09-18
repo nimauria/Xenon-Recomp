@@ -7,7 +7,10 @@ coverage; their implementation structures are not runtime dependencies of Xenon.
 Primary research references used during CPU bring-up:
 
 - IBM / PowerPC architectural documentation for fixed-point, floating-point, control,
-  synchronization and vector semantics.
+  synchronization and vector semantics. For Memory V2 ordering, IBM's `sync`,
+  `lwsync`, `eieio` and `isync` documentation was cross-checked with Linux POWER
+  memory-barrier documentation. ARM64 host lowering was cross-checked against Arm's
+  documented DMB/DSB/ISB ordering model.
 - AltiVec Technology Programming Environments Manual for VMX element, vector memory and
   vector arithmetic behavior.
 - Xenia (`xenia-project/xenia`, BSD-licensed) as a broad Xbox 360 PPC/VMX128 research

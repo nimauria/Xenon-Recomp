@@ -22,6 +22,18 @@ Rectangle {
         }
 
         Text {
+            readonly property var session: launcherBridge.currentSession
+            visible: String(session.state || "idle") !== "idle"
+            text: "SESSION • " + String(session.title || session.gameId || "Game") + " • " + String(session.stateLabel || "")
+            color: String(session.state || "") === "failed" ? Theme.danger
+                : String(session.state || "") === "running" ? Theme.success : Theme.warning
+            font.pixelSize: Theme.typeCaption
+            font.weight: Font.DemiBold
+            elide: Text.ElideRight
+            Layout.maximumWidth: 420
+        }
+
+        Text {
             visible: launcherBridge.testMode
             text: "TEST MODE • FICTIONAL UI DATA"
             color: Theme.warning
