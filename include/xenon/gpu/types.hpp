@@ -16,6 +16,7 @@ enum class PacketType : std::uint8_t {
 enum class ShaderStage : std::uint8_t {
   Vertex,
   Pixel,
+  Geometry,
 };
 
 enum class PrimitiveType : std::uint8_t {
@@ -41,11 +42,45 @@ enum class PrimitiveType : std::uint8_t {
   TwoDTriStrip = 0x16,
 };
 
+// VGT_DRAW_INITIATOR fields shared by all normalized draw packets.
+enum class DrawSource : std::uint8_t {
+  Dma = 0,
+  Immediate = 1,
+  AutoIndex = 2,
+  Reserved = 3,
+};
+
+enum class MajorMode : std::uint8_t {
+  Implicit = 0,
+  Explicit = 1,
+  Reserved2 = 2,
+  Reserved3 = 3,
+};
+
+enum class IndexFormat : std::uint8_t {
+  UInt16 = 0,
+  UInt32 = 1,
+};
+
+[[nodiscard]] constexpr bool is_explicit_major_mode(
+    MajorMode mode, PrimitiveType /*primitive*/) noexcept {
+  return mode == MajorMode::Explicit;
+}
+
 enum class Endian : std::uint8_t {
   None = 0,
   Swap8In16 = 1,
   Swap8In32 = 2,
   Swap16In32 = 3,
+};
+
+enum class Endian128 : std::uint8_t {
+  None = 0,
+  Swap8In16 = 1,
+  Swap8In32 = 2,
+  Swap16In32 = 3,
+  Swap8In64 = 4,
+  Swap8In128 = 5,
 };
 
 // Xenos type-3 PM4 opcodes. These are command-processor operations, not host

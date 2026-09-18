@@ -12,8 +12,12 @@
 #include "xenon/memory/address_space.hpp"
 
 using xenon::gpu::CommandProcessor;
+using xenon::gpu::DrawSource;
 using xenon::gpu::Endian;
+using xenon::gpu::IndexFormat;
+using xenon::gpu::MajorMode;
 using xenon::gpu::PacketType;
+using xenon::gpu::PrimitiveType;
 using xenon::gpu::RegisterFile;
 using xenon::gpu::Type3Opcode;
 using xenon::gpu::decode_packet_header;
@@ -46,6 +50,18 @@ void write_words(AddressSpace& memory, std::uint32_t base,
     store_be32(memory, address, word);
     address += 4;
   }
+}
+
+constexpr std::uint32_t make_draw_initiator(
+    PrimitiveType primitive, DrawSource source, std::uint32_t index_count,
+    IndexFormat format = IndexFormat::UInt16,
+    MajorMode major_mode = MajorMode::Implicit, bool not_eop = false) {
+  return static_cast<std::uint32_t>(primitive) |
+         (static_cast<std::uint32_t>(source) << 6) |
+         (static_cast<std::uint32_t>(major_mode) << 8) |
+         (static_cast<std::uint32_t>(format) << 11) |
+         (static_cast<std::uint32_t>(not_eop) << 12) |
+         (index_count << 16);
 }
 
 void test_headers() {
@@ -112,6 +128,45 @@ void test_constants(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x4900) == 0x01020304);
 }
 
+void test_type3_predication(AddressSpace& memory, CommandProcessor& cp,
+                            RegisterFile& regs,
+                            xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t failed = 0x01001400;
+  constexpr std::uint32_t passed = 0x01001500;
+  constexpr std::uint32_t test_register = 0x2F00;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+
+  write_words(memory, failed,
+              {make_packet_type3(Type3Opcode::SetBinMask, 2), 1u, 0u,
+               make_packet_type3(Type3Opcode::SetBinSelect, 2), 0u, 0u,
+               make_packet_type3(Type3Opcode::SetConstant2, 2, true),
+               test_register, 0xDEADBEEFu,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1, true), initiator});
+  const auto skipped_before = cp.statistics().predicated_packets_skipped;
+  const auto draws_before = cp.statistics().draws;
+  const auto stream_before = stream.size();
+  cp.execute_buffer(failed, 11);
+  assert(regs.read(test_register) == 0);
+  assert(cp.statistics().draws == draws_before);
+  assert(cp.statistics().predicated_packets_skipped == skipped_before + 2);
+  // Only the two unpredicated bin-state packets are observable in IR.
+  assert(stream.size() == stream_before + 2);
+
+  write_words(memory, passed,
+              {make_packet_type3(Type3Opcode::SetBinSelect, 2), 1u, 0u,
+               make_packet_type3(Type3Opcode::SetConstant2, 2, true),
+               test_register, 0xCAFEBABEu,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1, true), initiator});
+  cp.execute_buffer(passed, 8);
+  assert(regs.read(test_register) == 0xCAFEBABEu);
+  assert(cp.statistics().draws == draws_before + 1);
+  assert(cp.statistics().predicated_packets_skipped == skipped_before + 2);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(draw.predicate);
+}
+
 void test_load_constant_context(AddressSpace& memory, CommandProcessor& cp,
                                 RegisterFile& regs) {
   constexpr std::uint32_t constants = 0x01100000;
@@ -169,24 +224,138 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
 }
 
 void test_draw_ir(AddressSpace& memory, CommandProcessor& cp,
-                  xenon::gpu::ir::Stream& stream) {
+                  RegisterFile& regs, xenon::gpu::ir::Stream& stream) {
   constexpr std::uint32_t base = 0x01007000;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
   write_words(memory, base,
-              {make_packet_type3(Type3Opcode::DrawIndx2, 2),
-               0x00000004, 0x00000003});
+              {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
   const auto before = stream.size();
-  cp.execute_buffer(base, 3);
+  cp.execute_buffer(base, 2);
   assert(cp.statistics().draws >= 1);
-  assert(stream.size() == before + 1);
+  // DRAW_INDX_2 implicitly writes VGT_DRAW_INITIATOR before the normalized draw.
+  assert(stream.size() == before + 2);
   const auto& command = stream.commands().back();
   assert(std::holds_alternative<xenon::gpu::ir::DrawPacket>(command));
   const auto& draw = std::get<xenon::gpu::ir::DrawPacket>(command);
   assert(draw.opcode == Type3Opcode::DrawIndx2);
-  assert(draw.payload.size() == 2);
-  assert(draw.payload[0] == 4);
-  assert(draw.payload[1] == 3);
+  assert(draw.primitive_type == PrimitiveType::TriangleList);
+  assert(draw.source == DrawSource::AutoIndex);
+  assert(draw.index_count == 3);
+  assert(!draw.index_buffer.valid);
+  assert(draw.raw_payload.size() == 1);
+  assert(draw.raw_payload[0] == initiator);
+  assert(regs.read(0x21FC) == initiator);
 }
 
+void test_dma_draw_ir(AddressSpace& memory, CommandProcessor& cp,
+                      RegisterFile& regs, xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t base = 0x01007400;
+  constexpr std::uint32_t index_base = 0x01400000;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleStrip, DrawSource::Dma, 12, IndexFormat::UInt32,
+      MajorMode::Explicit, true);
+  constexpr std::uint32_t dma_size =
+      (static_cast<std::uint32_t>(Endian::Swap8In32) << 30) | 12u;
+  constexpr std::uint32_t viz_query = 0xA5A50001u;
+  write_words(memory, base,
+              {make_packet_type3(Type3Opcode::DrawIndx, 4), viz_query,
+               initiator, index_base, dma_size});
+  const auto before = stream.size();
+  cp.execute_buffer(base, 5);
+  // Initiator + DMA base + DMA size register writes, then the draw.
+  assert(stream.size() == before + 4);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(draw.primitive_type == PrimitiveType::TriangleStrip);
+  assert(draw.source == DrawSource::Dma);
+  assert(draw.explicit_major_mode);
+  assert(draw.not_eop);
+  assert(draw.index_format == IndexFormat::UInt32);
+  assert(draw.index_count == 12);
+  assert(draw.viz_query_condition == viz_query);
+  assert(draw.index_buffer.valid);
+  assert(draw.index_buffer.physical_address == index_base);
+  assert(draw.index_buffer.length_bytes == 48);
+  assert(draw.index_buffer.index_count == 12);
+  assert(draw.index_buffer.format == IndexFormat::UInt32);
+  assert(draw.index_buffer.endian == Endian::Swap8In32);
+  assert(regs.read(0x21FA) == index_base);
+  assert(regs.read(0x21FB) == dma_size);
+  assert(regs.read(0x21FC) == initiator);
+}
+
+
+
+void test_binned_draw_ir(AddressSpace& memory, CommandProcessor& cp,
+                         RegisterFile& regs, xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t base = 0x01007800;
+  constexpr std::uint32_t index_base = 0x01410000;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::Dma, 6, IndexFormat::UInt16);
+  constexpr std::uint32_t dma_size =
+      (static_cast<std::uint32_t>(Endian::Swap16In32) << 30) | 6u;
+  constexpr std::uint32_t bin_offset = 0x20u;
+  constexpr std::uint32_t bin_base = 0x120u;
+  constexpr std::uint32_t bin_size = 6u;
+  constexpr std::uint64_t bin_mask = UINT64_C(0x89ABCDEF01234567);
+  constexpr std::uint64_t bin_select = UINT64_C(0x76543210FEDCBA98);
+  constexpr std::uint32_t viz_query = 0xABCD0001u;
+
+  write_words(memory, base,
+              {make_packet_type3(Type3Opcode::SetBinBaseOffset, 1), bin_offset,
+               make_packet_type3(Type3Opcode::SetBinMask, 2),
+               static_cast<std::uint32_t>(bin_mask),
+               static_cast<std::uint32_t>(bin_mask >> 32),
+               make_packet_type3(Type3Opcode::SetBinSelect, 2),
+               static_cast<std::uint32_t>(bin_select),
+               static_cast<std::uint32_t>(bin_select >> 32),
+               make_packet_type3(Type3Opcode::DrawIndxBin, 6), viz_query,
+               initiator, bin_base, bin_size, index_base, dma_size});
+
+  const auto before = stream.size();
+  cp.execute_buffer(base, 15);
+  // Three bin-state packets + initiator/DMA implicit writes + normalized draw.
+  assert(stream.size() == before + 7);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(draw.binned);
+  assert(draw.opcode == Type3Opcode::DrawIndxBin);
+  assert(draw.viz_query_condition == viz_query);
+  assert(draw.binning.valid);
+  assert(draw.binning.base == bin_base);
+  assert(draw.binning.size == bin_size);
+  assert(draw.binning.base_offset == bin_offset);
+  assert(draw.binning.effective_base == bin_base + bin_offset);
+  assert(draw.binning.mask == bin_mask);
+  assert(draw.binning.select == bin_select);
+  assert(draw.index_buffer.valid);
+  assert(draw.index_buffer.physical_address == index_base);
+  assert(draw.index_buffer.length_bytes == 12u);
+  assert(draw.index_buffer.endian == Endian::Swap16In32);
+  assert(regs.read(0x21FA) == index_base);
+  assert(regs.read(0x21FB) == dma_size);
+  assert(regs.read(0x21FC) == initiator);
+
+  constexpr std::uint32_t base2 = 0x01007C00;
+  constexpr std::uint32_t immediate_initiator = make_draw_initiator(
+      PrimitiveType::LineList, DrawSource::Immediate, 4, IndexFormat::UInt16);
+  write_words(memory, base2,
+              {make_packet_type3(Type3Opcode::DrawIndx2Bin, 5),
+               immediate_initiator, 0x200u, 4u,
+               0x00010000u, 0x00030002u});
+  cp.execute_buffer(base2, 6);
+  const auto& immediate_draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(immediate_draw.binned);
+  assert(immediate_draw.binning.valid);
+  assert(immediate_draw.binning.base == 0x200u);
+  assert(immediate_draw.binning.size == 4u);
+  assert(immediate_draw.binning.base_offset == bin_offset);
+  assert(immediate_draw.immediate_index_dwords.size() == 2u);
+  assert(immediate_draw.immediate_index_dwords[0] == 0x00010000u);
+  assert(immediate_draw.immediate_index_dwords[1] == 0x00030002u);
+}
 
 void test_shader_loads(AddressSpace& memory, CommandProcessor& cp,
                        xenon::gpu::ir::Stream& stream) {
@@ -227,6 +396,64 @@ void test_shader_loads(AddressSpace& memory, CommandProcessor& cp,
   assert(immediate_load.program.dwords().size() == 6);
 }
 
+
+void test_draw_shader_bindings(AddressSpace& memory, CommandProcessor& cp,
+                               xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t base = 0x0100C000;
+  constexpr std::uint32_t vs0 = 0x01020304u;
+  constexpr std::uint32_t vs1 = 0x11121314u;
+  constexpr std::uint32_t vs2 = 0x21222324u;
+  constexpr std::uint32_t ps0 = 0x31323334u;
+  constexpr std::uint32_t ps1 = 0x41424344u;
+  constexpr std::uint32_t ps2 = 0x51525354u;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+
+  write_words(memory, base,
+              {make_packet_type3(Type3Opcode::ImLoadImmediate, 5),
+               0u, 3u, vs0, vs1, vs2,
+               make_packet_type3(Type3Opcode::ImLoadImmediate, 5),
+               1u, 3u, ps0, ps1, ps2,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+
+  const auto before = stream.size();
+  cp.execute_buffer(base, 14);
+  assert(stream.size() == before + 4);
+  const auto& vs_load =
+      std::get<xenon::gpu::ir::ShaderLoad>(stream.commands()[before]);
+  const auto& ps_load =
+      std::get<xenon::gpu::ir::ShaderLoad>(stream.commands()[before + 1]);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(vs_load.program.stage() == xenon::gpu::ShaderStage::Vertex);
+  assert(ps_load.program.stage() == xenon::gpu::ShaderStage::Pixel);
+  assert(draw.vertex_shader.valid);
+  assert(draw.pixel_shader.valid);
+  assert(draw.vertex_shader.hash == vs_load.program.hash());
+  assert(draw.pixel_shader.hash == ps_load.program.hash());
+  assert(draw.vertex_shader.start_slot == 0);
+  assert(draw.pixel_shader.start_slot == 0);
+}
+
+void test_immediate_draw_ir(AddressSpace& memory, CommandProcessor& cp,
+                            xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t base = 0x0100D000;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::LineList, DrawSource::Immediate, 4, IndexFormat::UInt16);
+  write_words(memory, base,
+              {make_packet_type3(Type3Opcode::DrawIndx2, 3), initiator,
+               0x00010000u, 0x00030002u});
+  const auto before = stream.size();
+  cp.execute_buffer(base, 4);
+  assert(stream.size() == before + 2);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(draw.source == DrawSource::Immediate);
+  assert(draw.index_count == 4);
+  assert(draw.immediate_index_dwords.size() == 2);
+  assert(draw.immediate_index_dwords[0] == 0x00010000u);
+  assert(draw.immediate_index_dwords[1] == 0x00030002u);
+}
 
 void test_shader_control_flow_unpack() {
   const std::uint32_t a0 = 0x123u | (5u << 12) | (1u << 15) | (0xABCu << 16);
@@ -277,15 +504,17 @@ void test_edram() {
 void test_graphics_system_backend(AddressSpace& memory) {
   xenon::gpu::GraphicsSystem graphics(memory);
   constexpr std::uint32_t base = 0x0100B000;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleStrip, DrawSource::AutoIndex, 6);
   write_words(memory, base,
               {make_packet_type0(0x44, 1), 0x12345678,
-               make_packet_type3(Type3Opcode::DrawIndx2, 2), 4, 6});
-  graphics.submit_buffer(base, 5);
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  graphics.submit_buffer(base, 4);
   xenon::gpu::NullBackend backend;
   const auto pending = graphics.stream().size();
   graphics.execute_ir(backend);
   assert(backend.command_count() == pending);
-  assert(backend.command_count() == 2);
+  assert(backend.command_count() == 3);
   assert(graphics.stream().size() == 0);
   assert(graphics.registers().read(0x44) == 0x12345678);
 }
@@ -315,12 +544,17 @@ int main() {
 
   test_register_packets(memory, cp, regs);
   test_constants(memory, cp, regs);
+  test_type3_predication(memory, cp, regs, stream);
   test_load_constant_context(memory, cp, regs);
   test_mem_write(memory, cp);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
-  test_draw_ir(memory, cp, stream);
+  test_draw_ir(memory, cp, regs, stream);
+  test_dma_draw_ir(memory, cp, regs, stream);
+  test_binned_draw_ir(memory, cp, regs, stream);
   test_shader_loads(memory, cp, stream);
+  test_draw_shader_bindings(memory, cp, stream);
+  test_immediate_draw_ir(memory, cp, stream);
   test_shader_control_flow_unpack();
   test_edram();
   test_graphics_system_backend(memory);
