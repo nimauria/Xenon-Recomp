@@ -56,6 +56,13 @@ Public API: `include/xenon/gpu/`
 Implementation:
 
 - `src/graphics/xenos/` — Xenos-visible PM4, registers, shader microcode, EDRAM and graphics IR.
+  Shared EDRAM surface addressing and primitive conversion also live here so
+  Vulkan and D3D12 cannot develop divergent interpretations of guest draws.
+- `include/xenon/gpu/resource_ir.hpp` — GPU 08 fetch/render-state decoding and
+  the backend-neutral native resource ABI.
+- `include/xenon/gpu/texture.hpp` — GPU 09 format catalogue, subresource layout,
+  Xenos detiling and guest-memory dirty tracking.
+- `src/graphics/dxc/` — optional HLSL-to-DXIL/SPIR-V compiler and shader cache.
 - `src/graphics/vulkan/` — Vulkan host backend.
 - `src/graphics/d3d12/` — optional Windows D3D12 backend.
 

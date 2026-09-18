@@ -71,6 +71,11 @@ struct ReservationState {
   void clear() noexcept { *this = {}; }
 };
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+// The tail padding is intentional: each CPU state begins on a cache line.
+#pragma warning(disable : 4324)
+#endif
 struct alignas(64) CpuState {
   std::array<std::uint64_t, 32> gpr{};
   std::array<std::uint64_t, 32> fpr_bits{};
@@ -135,5 +140,8 @@ struct alignas(64) CpuState {
 };
 
 static_assert(alignof(CpuState) >= 64);
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 }  // namespace xenon::cpu

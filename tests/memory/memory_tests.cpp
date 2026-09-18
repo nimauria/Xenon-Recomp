@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <utility>
+#include <vector>
 
 #include "xenon/memory/address_space.hpp"
 
@@ -114,9 +116,39 @@ int main() {
   assert(raw != nullptr);
   raw[0] = std::byte{0xAA};
   mem.notify_external_write(phys, 1);
+  std::array<std::byte, 4> snapshot{};
+  assert(mem.copy_physical_range(phys, snapshot));
+  assert(snapshot[0] == std::byte{0xAA});
+  assert(!mem.copy_physical_range(kPhysicalMemorySize - 1u, snapshot));
   assert(observed_phys == phys && observed_width == 1);
   assert(!mem.store_conditional32(0x00100000u, token_dma, 0xAAAAAAAAu));
   mem.remove_physical_write_callback(write_observer);
+
+  // A CPU store crossing virtually adjacent but physically discontiguous
+  // pages must dirty both physical ranges independently for GPU mirrors.
+  constexpr GuestAddress split_virtual = 0x00300000u;
+  constexpr std::uint32_t split_physical_a = 0x04000000u;
+  constexpr std::uint32_t split_physical_b = 0x08000000u;
+  assert(mem.map_virtual_to_physical(split_virtual, split_physical_a,
+                                     kBasePageSize, kReadWrite));
+  assert(mem.map_virtual_to_physical(split_virtual + kBasePageSize,
+                                     split_physical_b, kBasePageSize,
+                                     kReadWrite));
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> split_notifications;
+  const auto split_observer = mem.add_physical_write_callback(
+      [&](std::uint32_t p, std::uint32_t w) {
+        split_notifications.emplace_back(p, w);
+      });
+  mem.write32_be(split_virtual + kBasePageSize - 2u, 0x12345678u);
+  assert((split_notifications ==
+          std::vector<std::pair<std::uint32_t, std::uint32_t>>{
+              {split_physical_a + kBasePageSize - 2u, 2u},
+              {split_physical_b, 2u}}));
+  mem.remove_physical_write_callback(split_observer);
+  assert(mem.release(split_virtual));
+  assert(mem.release(split_virtual + kBasePageSize));
+  assert(mem.free_physical(split_physical_a, kBasePageSize));
+  assert(mem.free_physical(split_physical_b, kBasePageSize));
 
   // MMIO can override any guest virtual range, as real Xbox devices do.
   std::uint32_t mmio_last = 0;
@@ -152,6 +184,17 @@ int main() {
   assert(mem.release(allocated));
   q = mem.query(allocated);
   assert(q && q->state == PageState::Free);
+
+  // Whole-address-space reset is observable by an attached native GPU mirror.
+  std::uint32_t reset_address = 0xFFFFFFFFu, reset_width = 0;
+  const auto reset_observer = mem.add_physical_write_callback(
+      [&](std::uint32_t p, std::uint32_t w) {
+        reset_address = p;
+        reset_width = w;
+      });
+  mem.reset();
+  assert(reset_address == 0 && reset_width == kPhysicalMemorySize);
+  mem.remove_physical_write_callback(reset_observer);
 
   std::cout << "xenon_memory_tests: ok\n";
 }

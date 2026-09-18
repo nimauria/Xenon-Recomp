@@ -80,6 +80,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] std::byte* physical_data(std::uint32_t physical_address = 0);
   [[nodiscard]] const std::byte* physical_data(
       std::uint32_t physical_address = 0) const;
+  [[nodiscard]] bool copy_physical_range(std::uint32_t physical_address,
+                                         std::span<std::byte> destination) const;
 
   void zero(GuestAddress address, std::uint32_t size);
   void fill(GuestAddress address, std::uint32_t size, std::uint8_t value);
@@ -208,6 +210,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void write_integer(GuestAddress address, T value, bool little_endian);
 
   void note_physical_write(std::uint32_t physical_address, std::uint32_t width);
+  void note_physical_write_addresses(
+      std::span<const std::uint32_t> physical_addresses);
   [[nodiscard]] std::uint64_t reservation_version(
       std::uint32_t physical_address) const;
   [[nodiscard]] std::uint32_t physical_alias_address(GuestAddress address) const;
