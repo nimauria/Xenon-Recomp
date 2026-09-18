@@ -28,11 +28,13 @@ class VirtualFileSystem {
   [[nodiscard]] FsError register_device(std::shared_ptr<Device> device);
   [[nodiscard]] FsError unregister_device(std::string_view mount_point);
   void clear_devices();
+  [[nodiscard]] std::vector<MountInfo> mounts() const;
 
   [[nodiscard]] FsError register_symbolic_link(std::string_view alias,
                                                std::string_view target);
   [[nodiscard]] FsError unregister_symbolic_link(std::string_view alias);
   void clear_symbolic_links();
+  [[nodiscard]] std::vector<SymbolicLinkInfo> symbolic_links() const;
 
   // Relative guest paths are resolved beneath this guest path. "game:" is a
   // useful default for recompiled titles, but callers may change or clear it.
@@ -45,9 +47,13 @@ class VirtualFileSystem {
                              FileInfo& out_info) const;
   [[nodiscard]] FsError open(std::string_view guest_path,
                              const OpenOptions& options,
-                             std::unique_ptr<FileHandle>& out_file) const;
+                             std::unique_ptr<FileHandle>& out_file,
+                             OpenAction* out_action = nullptr) const;
   [[nodiscard]] FsError list(
       std::string_view guest_path,
+      std::vector<DirectoryEntry>& out_entries) const;
+  [[nodiscard]] FsError query_directory(
+      std::string_view guest_path, const DirectoryQuery& query,
       std::vector<DirectoryEntry>& out_entries) const;
   [[nodiscard]] FsError create_directory(std::string_view guest_path,
                                          bool recursive = false) const;
@@ -55,6 +61,8 @@ class VirtualFileSystem {
   [[nodiscard]] FsError rename(std::string_view old_guest_path,
                                std::string_view new_guest_path,
                                bool replace_existing = false) const;
+  [[nodiscard]] FsError disk_space(std::string_view guest_path,
+                                   DiskSpace& out_space) const;
 
  private:
   [[nodiscard]] FsError make_absolute(std::string_view guest_path,

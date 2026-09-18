@@ -28,6 +28,13 @@ enum class MemoryOrderingDomain : std::uint8_t {
   CacheInhibited,
 };
 
+[[nodiscard]] constexpr bool is_io_ordering_domain(
+    MemoryOrderingDomain domain) noexcept {
+  return domain == MemoryOrderingDomain::Device ||
+         domain == MemoryOrderingDomain::WriteCombined ||
+         domain == MemoryOrderingDomain::CacheInhibited;
+}
+
 struct BarrierSemantics {
   bool load_before_load{};
   bool load_before_store{};
@@ -63,7 +70,7 @@ struct BarrierSemantics {
     BarrierKind kind, OrderedAccess before, OrderedAccess after,
     MemoryOrderingDomain domain = MemoryOrderingDomain::Normal) noexcept {
   const auto semantics = barrier_semantics(kind);
-  if (semantics.device_only && domain == MemoryOrderingDomain::Normal) {
+  if (semantics.device_only && !is_io_ordering_domain(domain)) {
     return false;
   }
   if (before == OrderedAccess::Load && after == OrderedAccess::Load) {

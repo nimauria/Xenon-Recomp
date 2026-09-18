@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "xenon/filesystem/host_path_device.hpp"
+#include "xenon/filesystem/null_device.hpp"
 #include "xenon/filesystem/path.hpp"
 #include "xenon/filesystem/virtual_file_system.hpp"
 
@@ -281,6 +282,134 @@ void test_traversal_cannot_escape_mount() {
          fs::FsError::InvalidPath);
 }
 
+
+void test_wildcard_directory_queries_and_metadata() {
+  TempDirectory temp;
+  std::filesystem::create_directories(temp.path() / "Data" / "SubDir");
+  {
+    std::ofstream(temp.path() / "Data" / "ALPHA.BIN", std::ios::binary) << "alpha";
+    std::ofstream(temp.path() / "Data" / "beta.bin", std::ios::binary) << "beta";
+    std::ofstream(temp.path() / "Data" / "notes.txt", std::ios::binary) << "notes";
+  }
+
+  fs::VirtualFileSystem vfs;
+  mount_host(vfs, temp.path());
+
+  fs::DirectoryQuery query{};
+  query.pattern = "*.bin";
+  query.include_directories = false;
+  std::vector<fs::DirectoryEntry> entries;
+  assert(vfs.query_directory("game:\\Data", query, entries) == fs::FsError::None);
+  assert(entries.size() == 2);
+  assert(fs::guest_path_equal(entries[0].name, "ALPHA.BIN"));
+  assert(fs::guest_path_equal(entries[1].name, "beta.bin"));
+
+  query.pattern = "?eta.*";
+  query.max_entries = 1;
+  assert(vfs.query_directory("game:\\Data", query, entries) == fs::FsError::None);
+  assert(entries.size() == 1);
+  assert(fs::guest_path_equal(entries.front().name, "beta.bin"));
+
+  query.pattern = "*";
+  query.max_entries = 0;
+  query.include_files = false;
+  query.include_directories = true;
+  assert(vfs.query_directory("game:\\Data", query, entries) == fs::FsError::None);
+  assert(entries.size() == 1);
+  assert(entries.front().info.is_directory);
+  assert((entries.front().info.attributes & fs::FileAttributeDirectory) != 0);
+
+  fs::FileInfo info{};
+  assert(vfs.stat("game:\\Data\\ALPHA.BIN", info) == fs::FsError::None);
+  assert(info.size == 5);
+  assert(info.allocation_size >= info.size);
+  assert((info.attributes & fs::FileAttributeNormal) != 0);
+}
+
+void test_open_actions_and_share_modes() {
+  TempDirectory temp;
+  fs::VirtualFileSystem vfs;
+  mount_host(vfs, temp.path());
+
+  fs::OpenOptions options{};
+  options.access = fs::FileAccess::Read | fs::FileAccess::Write;
+  options.disposition = fs::CreateDisposition::OpenIf;
+  fs::OpenAction action = fs::OpenAction::None;
+  std::unique_ptr<fs::FileHandle> first;
+  assert(vfs.open("game:\\shared.bin", options, first, &action) == fs::FsError::None);
+  assert(action == fs::OpenAction::Created);
+  first.reset();
+
+  options.access = fs::FileAccess::Read;
+  options.share = fs::ShareAccess::Read;
+  assert(vfs.open("game:\\shared.bin", options, first, &action) == fs::FsError::None);
+  assert(action == fs::OpenAction::Opened);
+
+  fs::OpenOptions writer{};
+  writer.access = fs::FileAccess::Write;
+  writer.share = fs::ShareAccess::All;
+  writer.disposition = fs::CreateDisposition::Open;
+  std::unique_ptr<fs::FileHandle> second;
+  assert(vfs.open("game:\\SHARED.bin", writer, second) ==
+         fs::FsError::SharingViolation);
+  assert(vfs.remove("game:\\shared.bin") == fs::FsError::SharingViolation);
+  first.reset();
+
+  assert(vfs.open("game:\\shared.bin", writer, second, &action) == fs::FsError::None);
+  assert(action == fs::OpenAction::Opened);
+  second.reset();
+
+  writer.disposition = fs::CreateDisposition::Overwrite;
+  assert(vfs.open("game:\\shared.bin", writer, second, &action) == fs::FsError::None);
+  assert(action == fs::OpenAction::Overwritten);
+  second.reset();
+
+  writer.disposition = fs::CreateDisposition::Supersede;
+  assert(vfs.open("game:\\shared.bin", writer, second, &action) == fs::FsError::None);
+  assert(action == fs::OpenAction::Superseded);
+  second.reset();
+}
+
+void test_mount_link_introspection_and_disk_space() {
+  TempDirectory temp;
+  fs::VirtualFileSystem vfs;
+  auto device = mount_host(vfs, temp.path());
+
+  const auto mounts = vfs.mounts();
+  assert(mounts.size() == 1);
+  assert(fs::guest_path_equal(mounts.front().mount_point, device->mount_point()));
+  assert(!mounts.front().read_only);
+
+  const auto links = vfs.symbolic_links();
+  assert(links.size() == 2);
+
+  fs::DiskSpace space{};
+  assert(vfs.disk_space("game:", space) == fs::FsError::None);
+  assert(space.capacity > 0);
+  assert(space.capacity >= space.available);
+}
+
+void test_null_device() {
+  fs::VirtualFileSystem vfs;
+  auto null_device = std::make_shared<fs::NullDevice>("\\Device\\NullStorage");
+  assert(vfs.register_device(null_device) == fs::FsError::None);
+  assert(vfs.register_symbolic_link("cache:", null_device->mount_point()) ==
+         fs::FsError::None);
+
+  fs::FileInfo root_info{};
+  assert(vfs.stat("cache:", root_info) == fs::FsError::None);
+  assert(root_info.is_directory);
+  assert(root_info.read_only);
+
+  std::vector<fs::DirectoryEntry> entries;
+  assert(vfs.list("cache:", entries) == fs::FsError::None);
+  assert(entries.empty());
+
+  fs::FileInfo missing{};
+  assert(vfs.stat("cache:\\probe.dat", missing) == fs::FsError::NotFound);
+  assert(vfs.create_directory("cache:\\foo") == fs::FsError::ReadOnly);
+}
+
 }  // namespace
 
 int main() {
@@ -293,5 +422,9 @@ int main() {
   test_symbolic_link_loop_guard();
   test_host_symlink_escape_is_rejected_when_supported();
   test_traversal_cannot_escape_mount();
+  test_wildcard_directory_queries_and_metadata();
+  test_open_actions_and_share_modes();
+  test_mount_link_introspection_and_disk_space();
+  test_null_device();
   return 0;
 }

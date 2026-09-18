@@ -1,27 +1,22 @@
 # Launcher third-party dependencies
 
-This directory is for optional binary SDKs used by the launcher. Dependency payloads are not
-committed to Xenon.
+This directory is reserved for optional binary SDKs used by the launcher. Dependency payloads are
+not committed to Xenon.
 
-## Discord Social SDK
+## Discord Social SDK (future / optional)
 
-Download the **C++ Discord Social SDK** from the Discord Developer Portal for the Xenon application,
-then either:
+Discord Rich Presence is currently disabled in normal Xenon builds, so **nothing needs to be placed
+here** to build or use the launcher. Discord community/support links do not depend on the SDK.
 
-```powershell
-.\\launcher\\scripts\\install-discord-sdk.ps1 -Archive C:\\path\\to\\discord_social_sdk.zip
-```
-
-or point the build directly at an extracted SDK:
+The existing SDK integration is retained for future development. When Rich Presence is deliberately
+enabled with `-EnableDiscordRichPresence` / `XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE=ON`, the
+helper installer can stage Discord's C++ package here:
 
 ```powershell
-.\\launcher\\scripts\\build-launcher.ps1 `
-  -DiscordSdkRoot C:\\path\\to\\discord_social_sdk `
-  -RequireDiscordSdk `
-  -Deploy -Run
+.\launcher\scripts\install-discord-sdk.ps1 -Archive C:\path\to\discord_social_sdk.zip
 ```
 
-The installer places the package at:
+Expected local layout:
 
 ```text
 launcher/third_party/discord_social_sdk/
@@ -30,8 +25,6 @@ launcher/third_party/discord_social_sdk/
 └── bin/release/discord_partner_sdk.dll
 ```
 
-The normal launcher build auto-detects that location. `discord_partner_sdk.dll` is copied next to
-`xenon_launcher.exe` after linking, so no manual runtime copy is required.
-
-The SDK directory is intentionally ignored by Git. Keep Discord's downloaded license/notices with
-the local package and follow Discord's distribution terms when publishing launcher builds.
+The SDK directory is intentionally ignored by Git. Keep any downloaded license/notices with the
+local package and follow Discord's distribution terms if Rich Presence is enabled in a published
+build later.

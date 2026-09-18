@@ -2,15 +2,15 @@
 
 Filesystem v1 establishes the host-independent VFS boundary used by future
 Xbox kernel/XAM file APIs and by game modules. It is intentionally independent
-of Xenon Memory and the graphics backends.
+of Xenon Memory, CPU execution internals, and the graphics backends.
 
 ## Design rules
 
 - Xenon owns reusable Xbox/runtime filesystem behaviour; game-specific paths,
   content layouts, patches, and validation rules belong to the game module.
-- The VFS works on host `std::span` buffers and host strings. Guest pointers are
-  not accepted here. The later Xbox API layer is responsible for marshalling
-  guest structures through Xenon Memory.
+- The VFS works on host buffers and host strings. Guest pointers are not
+  accepted here. The later Xbox API layer is responsible for marshalling guest
+  structures through Xenon Memory.
 - Guest paths use Xbox-style `\\` separators and are matched case-insensitively.
 - Mount resolution chooses the longest matching device path, avoiding implicit
   registration-order dependencies for overlapping devices.
@@ -24,10 +24,12 @@ of Xenon Memory and the graphics backends.
 - Read-only device policy is enforced in the device, not left to the host OS.
 - Directory enumeration is deterministically sorted so behaviour does not
   depend on host filesystem iteration order.
+- Xbox-facing create/open/share semantics are represented in Xenon rather than
+  delegated blindly to whichever sharing behaviour the host C runtime chooses.
 
 ## Generation 1 scope
 
-Implemented in this first filesystem generation:
+Generation 1 established the baseline:
 
 - guest path normalization and comparison;
 - VFS device registration/unregistration;
@@ -46,24 +48,46 @@ Implemented in this first filesystem generation:
 - disk-space reporting;
 - focused filesystem unit tests.
 
+## Generation 2 scope
+
+Generation 2 makes the VFS a stronger substrate for the later `xboxkrnl` file
+bridge while remaining fully independent of Memory v2 and CPU v2:
+
+- case-insensitive `*` / `?` guest wildcard matching;
+- filtered directory queries with file/directory selection and result limits;
+- Xbox/NT-style open outcomes (`Created`, `Opened`, `Superseded`,
+  `Overwritten`);
+- explicit read/write/delete share-access flags;
+- live-handle share-conflict detection returning `SharingViolation`;
+- delete/rename checks that respect existing handles' delete-sharing policy;
+- richer file metadata with Xbox-style attribute bits and allocation size;
+- VFS-level disk-space querying;
+- mount and symbolic-link introspection for runtime diagnostics;
+- a `NullDevice` for intentionally empty/read-only optional device paths;
+- sanitizer regression coverage for the new query/share machinery.
+
+The host backend keeps share bookkeeping in Xenon-owned state so Linux and
+Windows do not silently expose different guest semantics solely because their
+native file-sharing rules differ.
+
 ## Deliberately deferred
 
-The following belong to later filesystem/runtime generations rather than this
-Memory-independent foundation:
+The following still belong to later filesystem/runtime generations:
 
 - `NtCreateFile`, `NtReadFile`, `NtWriteFile`, and other Xbox kernel exports;
 - guest pointer/structure marshalling;
-- kernel file objects and handles;
+- kernel file objects and the global kernel handle table;
 - overlapped/asynchronous I/O and completion ports;
-- Xbox wildcard/query-directory structure packing;
-- STFS/GDFX/ISO container devices;
+- packing Xbox `FILE_*_INFORMATION` structures into guest memory;
+- resumable `NtQueryDirectoryFile` cursors and exact DOS wildcard edge cases;
+- GDFX/ISO and STFS/container devices;
 - profile/content-manager policy and save-container semantics;
 - title-specific DLC/update discovery.
 
 ## Research references
 
-The architecture was cross-checked against Xenia's VFS/device model and the
-ReXGlue VFS used by current static-recompilation projects. Unleashed Recompiled
-and AC6_recomp were also treated as practical title-integration references.
-Xenon keeps its own implementation and follows its project rule that the shared
-runtime must not depend on any one game.
+The architecture is cross-checked against Xenia's VFS/device and file-action
+model and the ReXGlue VFS used by current static-recompilation projects.
+UnleashedRecomp and AC6_recomp are treated as practical title-integration
+references. Xenon keeps its own implementation and follows the project rule
+that the shared runtime must not depend on any one game.

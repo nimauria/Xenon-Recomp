@@ -28,10 +28,14 @@ class Device {
                                      FileInfo& out_info) const = 0;
   [[nodiscard]] virtual FsError open(std::string_view relative_path,
                                      const OpenOptions& options,
-                                     std::unique_ptr<FileHandle>& out_file) = 0;
+                                     std::unique_ptr<FileHandle>& out_file,
+                                     OpenAction* out_action = nullptr) = 0;
   [[nodiscard]] virtual FsError list(
       std::string_view relative_path,
       std::vector<DirectoryEntry>& out_entries) const = 0;
+  [[nodiscard]] virtual FsError query_directory(
+      std::string_view relative_path, const DirectoryQuery& query,
+      std::vector<DirectoryEntry>& out_entries) const;
   [[nodiscard]] virtual FsError create_directory(std::string_view relative_path,
                                                  bool recursive) = 0;
   [[nodiscard]] virtual FsError remove(std::string_view relative_path) = 0;

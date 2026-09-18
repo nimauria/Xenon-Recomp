@@ -122,9 +122,8 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
-  const auto dirty_ranges =
-      coherency_.plan_readback(address, width, kTransferSize);
-  if (dirty_ranges.empty()) return true;
+  const auto plan = coherency_.plan_readback(address, width, kTransferSize);
+  if (plan.ranges.empty()) return true;
 
   std::span<std::byte> readback_bytes;
   if (!readback_.map(readback_bytes)) {
@@ -132,7 +131,7 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
     return false;
   }
 
-  for (const auto& range : dirty_ranges) {
+  for (const auto& range : plan.ranges) {
       const auto chunk_address = range.address;
       const auto chunk_size = range.size;
       const auto state_before_copy = state_;
@@ -155,16 +154,20 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
       }
       state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
+      std::uint64_t publication_epoch = 0u;
       if (!memory_->write_physical(
-              chunk_address, readback_bytes.first(chunk_size))) {
+              chunk_address, readback_bytes.first(chunk_size),
+              &publication_epoch)) {
         error_ = "D3D12 guest-memory readback destination is outside physical RAM";
         return false;
       }
 
-      // write_physical publishes CPU-visible reservation/coherency state. The
-      // planner then records that these downloaded bytes are identical on both
-      // sides without executing a synchronous write callback.
-      coherency_.commit_gpu_download(chunk_address, chunk_size);
+      // Xenon Memory acknowledges this mirror's exact publication epoch. That
+      // prevents a GPU->CPU download from echoing back as a false CPU upload
+      // while retaining unrelated CPU/DMA writes published in the same window.
+      (void)coherency_.commit_gpu_download(
+          memory_->coherency(), plan, chunk_address, chunk_size,
+          publication_epoch);
   }
   return true;
 }

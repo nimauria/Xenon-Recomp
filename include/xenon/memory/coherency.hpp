@@ -14,6 +14,12 @@ struct DirtyPhysicalRange {
   std::uint32_t size{};
 };
 
+struct DirtyPhysicalWrite {
+  std::uint64_t epoch{};
+  std::uint32_t address{};
+  std::uint32_t size{};
+};
+
 // Backend-neutral CPU/GPU/DMA dirty state. Writers publish a monotonically
 // increasing epoch to every touched physical 4 KiB page. Consumers keep their
 // own last-seen epoch, so Vulkan, D3D12 and future UMA/mobile paths do not need
@@ -161,12 +167,13 @@ class GuestMemoryCoherency {
     }
   }
 
-  // Returns byte-precise writes when the requested epoch interval is still in
-  // the bounded lock-free journal. Consumers fall back to page ranges if a
-  // slow consumer has allowed the journal to wrap.
-  [[nodiscard]] bool collect_exact_dirty_ranges(
+  // Returns byte-precise writes, including the publication epoch of each
+  // write, while the requested interval is still in the bounded lock-free
+  // journal. Epoch identity lets a coherency consumer acknowledge a write it
+  // performed itself without accidentally suppressing unrelated CPU writes.
+  [[nodiscard]] bool collect_exact_dirty_writes(
       std::uint64_t since_epoch, std::uint64_t through_epoch,
-      std::vector<DirtyPhysicalRange>& out) const {
+      std::vector<DirtyPhysicalWrite>& out) const {
     out.clear();
     if (through_epoch <= since_epoch) return true;
     if (through_epoch - since_epoch > kWriteJournalCapacity) return false;
@@ -190,7 +197,24 @@ class GuestMemoryCoherency {
       }
       const auto address = static_cast<std::uint32_t>(packed >> 32u);
       const auto size = static_cast<std::uint32_t>(packed);
-      if (size) out.push_back({address, size});
+      if (size) out.push_back({epoch, address, size});
+    }
+    return true;
+  }
+
+  // Compatibility range-only view used by non-source-aware consumers.
+  [[nodiscard]] bool collect_exact_dirty_ranges(
+      std::uint64_t since_epoch, std::uint64_t through_epoch,
+      std::vector<DirtyPhysicalRange>& out) const {
+    std::vector<DirtyPhysicalWrite> writes;
+    if (!collect_exact_dirty_writes(since_epoch, through_epoch, writes)) {
+      out.clear();
+      return false;
+    }
+    out.clear();
+    out.reserve(writes.size());
+    for (const auto& write : writes) {
+      out.push_back({write.address, write.size});
     }
     return true;
   }

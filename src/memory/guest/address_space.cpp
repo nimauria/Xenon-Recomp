@@ -144,54 +144,191 @@ class AddressSpace::PhysicalBacking {
 
   bool initialize() {
     if (data_) return true;
-    auto* reservation = host_vm::reserve(kPhysicalMemorySize);
-    if (!reservation) return false;
-    if (!host_vm::commit(reservation, kPhysicalMemorySize,
-                         host_vm::Protection::ReadWrite)) {
-      host_vm::release(reservation, kPhysicalMemorySize);
+    shared_ = host_vm::create_shared(kPhysicalMemorySize);
+    if (!shared_.valid()) return false;
+    auto* mapping = host_vm::map_shared(shared_, 0, kPhysicalMemorySize,
+                                        host_vm::Protection::ReadWrite);
+    if (!mapping) {
+      shared_ = {};
       return false;
     }
-    data_ = static_cast<std::byte*>(reservation);
+    data_ = static_cast<std::byte*>(mapping);
+    freshly_created_ = true;
     return true;
   }
 
   void dispose() noexcept {
-    if (!data_) return;
-    host_vm::release(data_, kPhysicalMemorySize);
-    data_ = nullptr;
+    if (data_) {
+      (void)host_vm::unmap(data_, kPhysicalMemorySize);
+      data_ = nullptr;
+    }
+    shared_ = {};
   }
 
   void reset() {
     if (!data_) return;
-    if (!host_vm::discard(data_, kPhysicalMemorySize,
-                          host_vm::Protection::ReadWrite)) {
-      // The host VM abstraction is allowed to fall back internally, but a
-      // failed discard here must never leave guest RAM containing stale data.
-      std::memset(data_, 0, kPhysicalMemorySize);
+    // A newly-created shared object is already zero-filled by both the POSIX
+    // and Windows host contracts. Avoid faulting in all 512 MiB merely to zero
+    // it again on first AddressSpace initialization. Later explicit resets do
+    // clear the live shared backing so every host alias observes the reset.
+    if (freshly_created_) {
+      freshly_created_ = false;
+      return;
     }
+    std::memset(data_, 0, kPhysicalMemorySize);
   }
 
   void discard_page(std::uint32_t page) noexcept {
     discard_range(page, 1u);
   }
 
-  void discard_range(std::uint32_t first_page, std::uint32_t page_count) noexcept {
+  void discard_range(std::uint32_t first_page,
+                     std::uint32_t page_count) noexcept {
     if (!data_ || !page_count || first_page >= kPhysicalPageCount ||
         std::uint64_t(first_page) + page_count > kPhysicalPageCount) {
       return;
     }
     auto* address = data_ + std::size_t(first_page) * kBasePageSize;
     const auto size = std::size_t(page_count) * kBasePageSize;
-    if (!host_vm::discard(address, size, host_vm::Protection::ReadWrite)) {
-      std::memset(address, 0, size);
-    }
+    std::memset(address, 0, size);
   }
 
   std::byte* data() noexcept { return data_; }
   const std::byte* data() const noexcept { return data_; }
+  const host_vm::SharedMemory& shared() const noexcept { return shared_; }
 
  private:
+  host_vm::SharedMemory shared_{};
   std::byte* data_{};
+  bool freshly_created_{};
+};
+
+class AddressSpace::GuestAperture {
+ public:
+  static constexpr std::uint64_t kSize = std::uint64_t{1} << 32u;
+  static constexpr std::uint32_t kInvalidPage = 0xFFFFFFFFu;
+
+  GuestAperture() = default;
+  ~GuestAperture() { dispose(); }
+
+  bool initialize(const host_vm::SharedMemory& shared) {
+    if (active()) return true;
+    if (sizeof(void*) < 8u || !shared.valid() ||
+        !host_vm::supports_fixed_shared_mapping() ||
+        kSize > (std::numeric_limits<std::size_t>::max)()) {
+      return false;
+    }
+    auto* reservation = host_vm::reserve(static_cast<std::size_t>(kSize));
+    if (!reservation) return false;
+    base_ = static_cast<std::byte*>(reservation);
+    shared_ = &shared;
+    mapped_physical_pages_.assign(kPageCount, kInvalidPage);
+    if (!reset()) {
+      dispose();
+      return false;
+    }
+    return true;
+  }
+
+  void dispose() noexcept {
+    if (base_) {
+      host_vm::release(base_, static_cast<std::size_t>(kSize));
+      base_ = nullptr;
+    }
+    shared_ = nullptr;
+    mapped_physical_pages_.clear();
+  }
+
+  [[nodiscard]] bool active() const noexcept {
+    return base_ && shared_ && shared_->valid();
+  }
+
+  [[nodiscard]] std::byte* base() const noexcept { return base_; }
+
+  [[nodiscard]] bool mapping_matches(std::uint32_t guest_page,
+                                     std::uint32_t physical_page) const noexcept {
+    return active() && guest_page < mapped_physical_pages_.size() &&
+           mapped_physical_pages_[guest_page] == physical_page;
+  }
+
+  [[nodiscard]] bool page_mapped(std::uint32_t guest_page) const noexcept {
+    return active() && guest_page < mapped_physical_pages_.size() &&
+           mapped_physical_pages_[guest_page] != kInvalidPage;
+  }
+
+  bool map_run(std::uint32_t guest_page, std::uint32_t physical_page,
+               std::uint32_t page_count) noexcept {
+    if (!active() || !page_count || guest_page >= kPageCount ||
+        physical_page >= kPhysicalPageCount ||
+        std::uint64_t(guest_page) + page_count > kPageCount ||
+        std::uint64_t(physical_page) + page_count > kPhysicalPageCount) {
+      return false;
+    }
+    auto* target = base_ + std::size_t(guest_page) * kBasePageSize;
+    const auto offset = std::size_t(physical_page) * kBasePageSize;
+    const auto size = std::size_t(page_count) * kBasePageSize;
+    if (!host_vm::map_shared_fixed(*shared_, target, offset, size,
+                                   host_vm::Protection::ReadWrite)) {
+      return false;
+    }
+    for (std::uint32_t i = 0; i < page_count; ++i) {
+      mapped_physical_pages_[guest_page + i] = physical_page + i;
+    }
+    return true;
+  }
+
+  bool clear_run(std::uint32_t guest_page,
+                 std::uint32_t page_count) noexcept {
+    if (!active() || !page_count || guest_page >= kPageCount ||
+        std::uint64_t(guest_page) + page_count > kPageCount) {
+      return false;
+    }
+    auto* target = base_ + std::size_t(guest_page) * kBasePageSize;
+    const auto size = std::size_t(page_count) * kBasePageSize;
+    if (!host_vm::restore_reservation(target, size)) return false;
+    std::fill_n(mapped_physical_pages_.begin() + guest_page, page_count,
+                kInvalidPage);
+    return true;
+  }
+
+  bool reset() noexcept {
+    if (!active()) return false;
+    if (!host_vm::restore_reservation(base_, static_cast<std::size_t>(kSize))) {
+      return false;
+    }
+    std::fill(mapped_physical_pages_.begin(), mapped_physical_pages_.end(),
+              kInvalidPage);
+
+    const auto map_static = [&](GuestAddress guest_base,
+                                std::uint32_t physical_base,
+                                std::uint32_t size) noexcept {
+      return map_run(guest_base >> kPageShift,
+                     physical_base >> kPageShift,
+                     size >> kPageShift);
+    };
+
+    const auto gpu_size = kGpuWritebackEnd - kGpuWritebackBase + 1u;
+    const auto physical64k_size = kPhysical64KEnd - kPhysical64KBase + 1u;
+    const auto physical16m_size = kPhysical16MEnd - kPhysical16MBase + 1u;
+    const auto physical4k_region_size =
+        kPhysical4KHeapEnd - kPhysical4KBase + 1u;
+    const auto physical4k_size = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        physical4k_region_size,
+        std::uint64_t{kPhysicalMemorySize} - kPhysical4KViewOffset));
+
+    return map_static(kGpuWritebackBase, 0u, gpu_size) &&
+           map_static(kPhysical64KBase, 0u,
+                      std::min(physical64k_size, kPhysicalMemorySize)) &&
+           map_static(kPhysical16MBase, 0u,
+                      std::min(physical16m_size, kPhysicalMemorySize)) &&
+           map_static(kPhysical4KBase, kPhysical4KViewOffset,
+                      physical4k_size);
+  }
+
+ private:
+  std::byte* base_{};
+  const host_vm::SharedMemory* shared_{};
+  std::vector<std::uint32_t> mapped_physical_pages_{};
 };
 
 
@@ -411,7 +548,7 @@ class AddressSpace::PhysicalReverseMappings {
   Map mappings_{};
 };
 
-PhysicalWriteSpan::~PhysicalWriteSpan() noexcept { complete(); }
+PhysicalWriteSpan::~PhysicalWriteSpan() noexcept { (void)complete(); }
 
 PhysicalWriteSpan::PhysicalWriteSpan(PhysicalWriteSpan&& other) noexcept
     : owner_(std::exchange(other.owner_, nullptr)),
@@ -423,7 +560,7 @@ PhysicalWriteSpan::PhysicalWriteSpan(PhysicalWriteSpan&& other) noexcept
 
 PhysicalWriteSpan& PhysicalWriteSpan::operator=(PhysicalWriteSpan&& other) noexcept {
   if (this == &other) return *this;
-  complete();
+  (void)complete();
   owner_ = std::exchange(other.owner_, nullptr);
   physical_address_ = other.physical_address_;
   bytes_ = other.bytes_;
@@ -457,26 +594,41 @@ bool PhysicalWriteSpan::fill(std::uint32_t offset, std::uint32_t size,
   return true;
 }
 
-void PhysicalWriteSpan::complete() noexcept {
-  if (!owner_) return;
+std::uint64_t PhysicalWriteSpan::commit() noexcept { return complete(); }
+
+std::uint64_t PhysicalWriteSpan::complete() noexcept {
+  if (!owner_) return 0u;
   auto* owner = std::exchange(owner_, nullptr);
   const auto address = physical_address_;
   const auto size = static_cast<std::uint32_t>(bytes_.size());
   bytes_ = {};
-  if (size) owner->complete_physical_write(address, size, reservation_participant_);
+  const auto epoch = size ? owner->complete_physical_write(
+                                address, size, reservation_participant_)
+                          : 0u;
   reservation_participant_ = false;
+  return epoch;
 }
 
-AddressSpace::AddressSpace()
+AddressSpace::AddressSpace(GuestTranslationMode mode)
     : physical_(std::make_unique<PhysicalBacking>()),
+      guest_aperture_(std::make_unique<GuestAperture>()),
       physical_allocator_(std::make_unique<PhysicalRangeAllocator>()),
       physical_reverse_mappings_(std::make_unique<PhysicalReverseMappings>()),
       pages_(kPageCount),
       hot_pages_(kPageCount),
       physical_page_used_(kPhysicalPageCount),
       physical_mapping_refs_(kPhysicalPageCount),
+      reservation_seen_bitmap_(kReservationBitmapWordCount),
       executable_page_generations_(kPhysicalPageCount),
-      reservation_seen_bitmap_(kReservationBitmapWordCount) {
+      direct_aperture_requested_(
+          mode == GuestTranslationMode::DirectAperture ||
+          (mode == GuestTranslationMode::Auto &&
+#if defined(XENON_MEMORY_DEFAULT_DIRECT_APERTURE) && XENON_MEMORY_DEFAULT_DIRECT_APERTURE
+           true
+#else
+           false
+#endif
+           )) {
   for (auto& entry : hot_pages_) entry.store(0u, std::memory_order_relaxed);
   for (auto& generation : executable_page_generations_) {
     generation.store(0u, std::memory_order_relaxed);
@@ -493,6 +645,9 @@ xenon::cpu::FastMemoryView AddressSpace::make_fast_memory_view() noexcept {
   xenon::cpu::FastMemoryView view{};
   if (initialized_ && physical_ && physical_->data()) {
     view.physical_base = physical_->data();
+    if (guest_aperture_ && guest_aperture_->active()) {
+      view.guest_aperture_base = guest_aperture_->base();
+    }
     view.page_table = hot_pages_.data();
     view.page_count = kPageCount;
     view.page_shift = kPageShift;
@@ -522,10 +677,28 @@ xenon::cpu::MemoryAccessContext AddressSpace::access_context() noexcept {
   return xenon::cpu::MemoryAccessContext(*this, make_fast_memory_view());
 }
 
+bool AddressSpace::direct_aperture_active() const noexcept {
+  return initialized_ && guest_aperture_ && guest_aperture_->active();
+}
+
+bool AddressSpace::direct_aperture_maps(GuestAddress address) const noexcept {
+  if (!direct_aperture_active()) return false;
+  const auto page = address >> kPageShift;
+  if (page >= hot_pages_.size()) return false;
+  return (hot_pages_[page].load(std::memory_order_acquire) &
+          xenon::cpu::fast_memory::kDirectAperture) != 0u;
+}
+
 bool AddressSpace::initialize() {
   std::lock_guard lock(mutex_);
   if (initialized_) return true;
   if (!physical_->initialize()) return false;
+  if (direct_aperture_requested_ && guest_aperture_) {
+    // The aperture is an optional acceleration layer. Failure must never make
+    // Xbox-visible memory initialization fail; compact translation remains the
+    // portable fallback.
+    (void)guest_aperture_->initialize(physical_->shared());
+  }
   initialized_ = true;
   reset();
   return true;
@@ -549,6 +722,12 @@ void AddressSpace::reset() {
   reservation_next_generation_.store(1u, std::memory_order_relaxed);
   reservation_commit_gate_.store(0u, std::memory_order_relaxed);
   active_reservation_ops_.store(0u, std::memory_order_relaxed);
+  for (auto& entry : hot_pages_) entry.store(0u, std::memory_order_relaxed);
+  if (guest_aperture_ && guest_aperture_->active() &&
+      active_fast_readers_.load(std::memory_order_acquire) == 0u &&
+      !guest_aperture_->reset()) {
+    guest_aperture_->dispose();
+  }
 
   // The first 16 MiB are the GPU writeback/XPS physical window. Keep them out
   // of the anonymous physical-frame allocator while preserving direct aliases.
@@ -629,9 +808,9 @@ std::uint64_t AddressSpace::make_hot_entry(std::uint32_t page_index) const {
       has(page.current_protect, Protect::WriteCombine));
 }
 
-void AddressSpace::publish_hot_page(std::uint32_t page_index) {
+void AddressSpace::publish_hot_entry(std::uint32_t page_index,
+                                     std::uint64_t entry) {
   if (page_index >= kPageCount) return;
-  const auto entry = make_hot_entry(page_index);
   if ((entry & (xenon::cpu::fast_memory::kMapped |
                 xenon::cpu::fast_memory::kExecute)) ==
       (xenon::cpu::fast_memory::kMapped |
@@ -647,14 +826,144 @@ void AddressSpace::publish_hot_page(std::uint32_t page_index) {
   hot_pages_[page_index].store(entry, std::memory_order_release);
 }
 
+void AddressSpace::publish_hot_page(std::uint32_t page_index) {
+  if (page_index >= kPageCount) return;
+  auto desired = make_hot_entry(page_index);
+  if (!guest_aperture_ || !guest_aperture_->active()) {
+    publish_hot_entry(page_index, desired);
+    return;
+  }
+
+  const bool eligible =
+      (desired & xenon::cpu::fast_memory::kMapped) != 0u &&
+      (desired & xenon::cpu::fast_memory::kSlow) == 0u;
+  const auto physical_page = static_cast<std::uint32_t>(
+      desired & xenon::cpu::fast_memory::kPhysicalPageMask);
+  if (eligible && guest_aperture_->mapping_matches(page_index, physical_page)) {
+    publish_hot_entry(page_index,
+                      desired | xenon::cpu::fast_memory::kDirectAperture);
+    return;
+  }
+  if (!eligible && !guest_aperture_->page_mapped(page_index)) {
+    publish_hot_entry(page_index, desired);
+    return;
+  }
+
+  // First remove direct-aperture use from the published entry. Contexts created
+  // after this point use compact physical translation. If an older context is
+  // still alive it may have cached the former direct entry, so don't alter the
+  // fixed host mapping until the old read-side population has drained.
+  publish_hot_entry(page_index, desired);
+  if (active_fast_readers_.load(std::memory_order_acquire) != 0u) return;
+
+  if (eligible) {
+    if (guest_aperture_->map_run(page_index, physical_page, 1u)) {
+      publish_hot_entry(page_index,
+                        desired | xenon::cpu::fast_memory::kDirectAperture);
+    }
+  } else {
+    (void)guest_aperture_->clear_run(page_index, 1u);
+  }
+}
+
 void AddressSpace::publish_hot_range(GuestAddress base, std::uint32_t size) {
   if (!size) return;
   const auto first = base >> kPageShift;
   const auto last64 = (std::uint64_t{base} + size - 1u) >> kPageShift;
   const auto last = static_cast<std::uint32_t>(
       std::min<std::uint64_t>(last64, kPageCount - 1u));
-  for (std::uint32_t page = first; page <= last; ++page) {
-    publish_hot_page(page);
+  const auto count = last - first + 1u;
+
+  if (!guest_aperture_ || !guest_aperture_->active()) {
+    for (std::uint32_t page = first; page <= last; ++page) {
+      publish_hot_entry(page, make_hot_entry(page));
+    }
+    return;
+  }
+
+  // Mapping management is a cold operation, so a temporary desired-entry
+  // vector is preferable to thousands of fixed mmap calls or duplicated scans.
+  std::vector<std::uint64_t> desired(count);
+  std::vector<std::uint8_t> needs_change(count, 0u);
+  bool any_change = false;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const auto page = first + i;
+    auto entry = make_hot_entry(page);
+    desired[i] = entry;
+    const bool eligible =
+        (entry & xenon::cpu::fast_memory::kMapped) != 0u &&
+        (entry & xenon::cpu::fast_memory::kSlow) == 0u;
+    const auto physical_page = static_cast<std::uint32_t>(
+        entry & xenon::cpu::fast_memory::kPhysicalPageMask);
+    const bool matches =
+        eligible && guest_aperture_->mapping_matches(page, physical_page);
+    const bool change = matches ? false
+                                : (eligible || guest_aperture_->page_mapped(page));
+    needs_change[i] = change ? 1u : 0u;
+    any_change |= change;
+
+    // Unchanged direct aliases remain direct. Pages whose host mapping needs
+    // alteration are first published without kDirectAperture, forming the
+    // grace-period boundary for pre-existing contexts.
+    publish_hot_entry(page, matches
+                                ? entry | xenon::cpu::fast_memory::kDirectAperture
+                                : entry);
+  }
+
+  if (!any_change ||
+      active_fast_readers_.load(std::memory_order_acquire) != 0u) {
+    return;
+  }
+
+  std::uint32_t i = 0u;
+  while (i < count) {
+    if (!needs_change[i]) {
+      ++i;
+      continue;
+    }
+    const auto page = first + i;
+    const auto entry = desired[i];
+    const bool eligible =
+        (entry & xenon::cpu::fast_memory::kMapped) != 0u &&
+        (entry & xenon::cpu::fast_memory::kSlow) == 0u;
+
+    if (!eligible) {
+      std::uint32_t run = 1u;
+      while (i + run < count && needs_change[i + run]) {
+        const auto next = desired[i + run];
+        if ((next & xenon::cpu::fast_memory::kMapped) != 0u &&
+            (next & xenon::cpu::fast_memory::kSlow) == 0u) {
+          break;
+        }
+        ++run;
+      }
+      (void)guest_aperture_->clear_run(page, run);
+      i += run;
+      continue;
+    }
+
+    const auto first_physical = static_cast<std::uint32_t>(
+        entry & xenon::cpu::fast_memory::kPhysicalPageMask);
+    std::uint32_t run = 1u;
+    while (i + run < count && needs_change[i + run]) {
+      const auto next = desired[i + run];
+      const bool next_eligible =
+          (next & xenon::cpu::fast_memory::kMapped) != 0u &&
+          (next & xenon::cpu::fast_memory::kSlow) == 0u;
+      const auto next_physical = static_cast<std::uint32_t>(
+          next & xenon::cpu::fast_memory::kPhysicalPageMask);
+      if (!next_eligible || next_physical != first_physical + run) break;
+      ++run;
+    }
+
+    if (guest_aperture_->map_run(page, first_physical, run)) {
+      for (std::uint32_t j = 0; j < run; ++j) {
+        publish_hot_entry(first + i + j,
+                          desired[i + j] |
+                              xenon::cpu::fast_memory::kDirectAperture);
+      }
+    }
+    i += run;
   }
 }
 
@@ -1311,12 +1620,16 @@ bool AddressSpace::copy_physical_range(
 }
 
 bool AddressSpace::write_physical(std::uint32_t physical_address,
-                                  std::span<const std::byte> source) {
+                                  std::span<const std::byte> source,
+                                  std::uint64_t* published_epoch) {
+  if (published_epoch) *published_epoch = 0u;
   if (source.empty()) return true;
   auto write = physical_write_span(
       physical_address, static_cast<std::uint32_t>(source.size()));
-  if (!write) return false;
-  return write.write(0u, source);
+  if (!write || !write.write(0u, source)) return false;
+  const auto epoch = write.commit();
+  if (published_epoch) *published_epoch = epoch;
+  return true;
 }
 
 bool AddressSpace::fill_physical(std::uint32_t physical_address,
@@ -1924,12 +2237,12 @@ bool AddressSpace::begin_physical_write(std::uint32_t physical_address,
       view, physical_address, width);
 }
 
-void AddressSpace::complete_physical_write(
+std::uint64_t AddressSpace::complete_physical_write(
     std::uint32_t physical_address, std::uint32_t width,
     bool reservation_participant) noexcept {
-  if (!width || physical_address >= kPhysicalMemorySize) return;
+  if (!width || physical_address >= kPhysicalMemorySize) return 0u;
   auto view = make_fast_memory_view();
-  xenon::cpu::reservation_monitor_detail::finish_write(
+  return xenon::cpu::reservation_monitor_detail::finish_write(
       view, physical_address, width, reservation_participant);
 }
 
@@ -2259,6 +2572,34 @@ std::uint32_t AddressSpace::executable_generation(
              ? executable_page_generations_[physical_page].load(
                    std::memory_order_acquire)
              : 0u;
+}
+
+xenon::cpu::MemoryOrderingDomain AddressSpace::ordering_domain(
+    GuestAddress address) const noexcept {
+  const auto page_index = address >> kPageShift;
+  if (page_index < hot_pages_.size()) {
+    const auto entry = hot_pages_[page_index].load(std::memory_order_acquire);
+    if (entry & xenon::cpu::fast_memory::kNoCache) {
+      return xenon::cpu::MemoryOrderingDomain::CacheInhibited;
+    }
+    if (entry & xenon::cpu::fast_memory::kWriteCombine) {
+      return xenon::cpu::MemoryOrderingDomain::WriteCombined;
+    }
+    if (entry & xenon::cpu::fast_memory::kSlow) {
+      if (const auto* region = region_for(address);
+          region && region->kind == RegionKind::Mmio) {
+        return xenon::cpu::MemoryOrderingDomain::Device;
+      }
+      // MMIO overlays may live outside the dedicated top-of-address-space
+      // region, so consult the cold dispatcher only for pages already marked
+      // slow. Ordinary RAM never takes this lock for domain classification.
+      std::lock_guard lock(mutex_);
+      if (find_mmio(address, 1u)) {
+        return xenon::cpu::MemoryOrderingDomain::Device;
+      }
+    }
+  }
+  return xenon::cpu::MemoryOrderingDomain::Normal;
 }
 
 void AddressSpace::barrier(xenon::cpu::BarrierKind kind) {

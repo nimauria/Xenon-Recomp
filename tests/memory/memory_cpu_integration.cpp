@@ -97,7 +97,12 @@ int main() {
   xm_sync(state, memory, runtime);
   xm_lwsync(state, memory, runtime);
   xm_eieio(state, memory, runtime);
-  xm_isync(state, memory, runtime);
+  const auto isync_result = xm_isync(state, memory, runtime);
+  // isync is a real native-translation boundary: already-fetched guest
+  // instructions are discarded by returning to the dispatcher at the next PC.
+  assert(isync_result.reason == FlowReason::Branch);
+  assert(isync_result.next_address == 0x1028u);
+  assert(state.nia == 0x1028u);
 
   // Generated PPC string operations use MemoryAccessContext range access. Put
   // the six-byte transfer across a 4 KiB boundary so both hot pages are used.

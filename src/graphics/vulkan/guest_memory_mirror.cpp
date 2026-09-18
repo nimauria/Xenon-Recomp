@@ -138,9 +138,8 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
-  const auto dirty_ranges =
-      coherency_.plan_readback(address, width, kTransferSize);
-  if (dirty_ranges.empty()) return true;
+  const auto plan = coherency_.plan_readback(address, width, kTransferSize);
+  if (plan.ranges.empty()) return true;
 
   std::span<std::byte> readback_bytes;
   if (!readback_.map(readback_bytes)) {
@@ -148,7 +147,7 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
     return false;
   }
 
-  for (const auto& range : dirty_ranges) {
+  for (const auto& range : plan.ranges) {
       const auto chunk_address = range.address;
       const auto chunk_size = range.size;
       if (!queue_->execute([&](VkCommandBuffer command) {
@@ -196,12 +195,16 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
       shader_read_state_ = false;
       shader_write_state_ = false;
 
+      std::uint64_t publication_epoch = 0u;
       if (!memory_->write_physical(
-              chunk_address, readback_bytes.first(chunk_size))) {
+              chunk_address, readback_bytes.first(chunk_size),
+              &publication_epoch)) {
         error_ = "Vulkan guest-memory readback destination is outside physical RAM";
         return false;
       }
-      coherency_.commit_gpu_download(chunk_address, chunk_size);
+      (void)coherency_.commit_gpu_download(
+          memory_->coherency(), plan, chunk_address, chunk_size,
+          publication_epoch);
   }
   return true;
 }

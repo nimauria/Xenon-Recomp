@@ -823,15 +823,18 @@ Item {
 
                     XSettingsCard {
                         title: "Discord Rich Presence"
-                        description: "Share what Xenon is doing with the Discord desktop client. This is optional and disabled by default."
+                        description: Boolean(launcherBridge.discordPresenceState.providerAvailable)
+                            ? "Share Xenon activity with the Discord desktop client. This remains optional and disabled by default."
+                            : "Planned integration. Rich Presence is intentionally disabled in this build; Discord community and support links still work normally."
                         XSwitch {
-                            checked: root.getBool("community/discordRichPresence", false)
+                            enabled: Boolean(launcherBridge.discordPresenceState.providerAvailable)
+                            checked: Boolean(launcherBridge.discordPresenceState.enabled)
                             onUserToggled: function(value) { root.save("community/discordRichPresence", value) }
                         }
                     }
 
                     XSettingsCard {
-                        visible: root.getBool("community/discordRichPresence", false)
+                        visible: Boolean(launcherBridge.discordPresenceState.enabled)
                         title: "Show game title"
                         description: "When a game session is running, include its title in Rich Presence. Turn this off to show only that Xenon is being used."
                         XSwitch {
@@ -842,22 +845,22 @@ Item {
 
                     XSettingsCard {
                         title: "Discord provider"
-                        description: String(launcherBridge.discordPresenceState.providerStatus || "Discord Rich Presence provider status unavailable.")
+                        description: String(launcherBridge.discordPresenceState.providerStatus || "Discord Rich Presence is unavailable in this build.")
                         actionWidth: 300
                         StatusPill {
-                            label: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? "Ready" : "Setup required"
-                            tone: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? Theme.success : Theme.warning
+                            label: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? "Available" : "Planned"
+                            tone: Boolean(launcherBridge.discordPresenceState.providerAvailable) ? Theme.success : Theme.textMuted
                         }
                         XButton {
+                            visible: Boolean(launcherBridge.discordPresenceState.providerAvailable)
                             text: "Refresh presence"
-                            enabled: Boolean(launcherBridge.discordPresenceState.providerAvailable)
-                                && root.getBool("community/discordRichPresence", false)
+                            enabled: Boolean(launcherBridge.discordPresenceState.enabled)
                             onClicked: launcherBridge.refreshDiscordPresence()
                         }
                     }
 
                     XPanel {
-                        visible: root.getBool("community/discordRichPresence", false)
+                        visible: Boolean(launcherBridge.discordPresenceState.enabled)
                         Layout.fillWidth: true
                         implicitHeight: presencePreviewColumn.implicitHeight + Theme.spaceLg * 2
                         color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)

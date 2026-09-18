@@ -50,6 +50,8 @@ std::string_view to_string(FsError error) noexcept {
       return "cross_device";
     case FsError::TooManyLinks:
       return "too_many_links";
+    case FsError::SharingViolation:
+      return "sharing_violation";
   }
   return "unknown";
 }
@@ -143,6 +145,40 @@ bool guest_path_is_absolute(std::string_view path) noexcept {
   const auto separator = path.find_first_of("\\/");
   return colon != std::string_view::npos &&
          (separator == std::string_view::npos || colon < separator);
+}
+
+bool guest_wildcard_match(std::string_view pattern,
+                          std::string_view value) noexcept {
+  std::size_t pattern_index = 0;
+  std::size_t value_index = 0;
+  std::size_t star_index = std::string_view::npos;
+  std::size_t star_value = 0;
+
+  while (value_index < value.size()) {
+    if (pattern_index < pattern.size() &&
+        (pattern[pattern_index] == '?' ||
+         ascii_lower(pattern[pattern_index]) == ascii_lower(value[value_index]))) {
+      ++pattern_index;
+      ++value_index;
+      continue;
+    }
+    if (pattern_index < pattern.size() && pattern[pattern_index] == '*') {
+      star_index = pattern_index++;
+      star_value = value_index;
+      continue;
+    }
+    if (star_index != std::string_view::npos) {
+      pattern_index = star_index + 1;
+      value_index = ++star_value;
+      continue;
+    }
+    return false;
+  }
+
+  while (pattern_index < pattern.size() && pattern[pattern_index] == '*') {
+    ++pattern_index;
+  }
+  return pattern_index == pattern.size();
 }
 
 std::string guest_path_key(std::string_view path) {

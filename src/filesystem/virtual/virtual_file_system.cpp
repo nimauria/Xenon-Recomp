@@ -62,6 +62,19 @@ void VirtualFileSystem::clear_devices() {
   devices_.clear();
 }
 
+std::vector<MountInfo> VirtualFileSystem::mounts() const {
+  std::shared_lock lock(mutex_);
+  std::vector<MountInfo> result;
+  result.reserve(devices_.size());
+  for (const auto& device : devices_) {
+    result.push_back({device->mount_point(), device->read_only()});
+  }
+  std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+    return guest_path_key(lhs.mount_point) < guest_path_key(rhs.mount_point);
+  });
+  return result;
+}
+
 FsError VirtualFileSystem::register_symbolic_link(std::string_view alias,
                                                    std::string_view target) {
   std::string normalized_alias;
@@ -94,6 +107,19 @@ FsError VirtualFileSystem::unregister_symbolic_link(std::string_view alias) {
 void VirtualFileSystem::clear_symbolic_links() {
   std::unique_lock lock(mutex_);
   symbolic_links_.clear();
+}
+
+std::vector<SymbolicLinkInfo> VirtualFileSystem::symbolic_links() const {
+  std::shared_lock lock(mutex_);
+  std::vector<SymbolicLinkInfo> result;
+  result.reserve(symbolic_links_.size());
+  for (const auto& [alias, target] : symbolic_links_) {
+    result.push_back({alias, target});
+  }
+  std::sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+    return guest_path_key(lhs.alias) < guest_path_key(rhs.alias);
+  });
+  return result;
 }
 
 FsError VirtualFileSystem::set_working_directory(std::string_view guest_path) {
@@ -207,12 +233,13 @@ FsError VirtualFileSystem::stat(std::string_view guest_path,
 
 FsError VirtualFileSystem::open(std::string_view guest_path,
                                 const OpenOptions& options,
-                                std::unique_ptr<FileHandle>& out_file) const {
+                                std::unique_ptr<FileHandle>& out_file,
+                                OpenAction* out_action) const {
   out_file.reset();
   ResolvedPath resolved;
   const auto error = resolve(guest_path, resolved);
   if (error != FsError::None) return error;
-  return resolved.device->open(resolved.relative_path, options, out_file);
+  return resolved.device->open(resolved.relative_path, options, out_file, out_action);
 }
 
 FsError VirtualFileSystem::list(
@@ -223,6 +250,17 @@ FsError VirtualFileSystem::list(
   const auto error = resolve(guest_path, resolved);
   if (error != FsError::None) return error;
   return resolved.device->list(resolved.relative_path, out_entries);
+}
+
+FsError VirtualFileSystem::query_directory(
+    std::string_view guest_path, const DirectoryQuery& query,
+    std::vector<DirectoryEntry>& out_entries) const {
+  out_entries.clear();
+  ResolvedPath resolved;
+  const auto error = resolve(guest_path, resolved);
+  if (error != FsError::None) return error;
+  return resolved.device->query_directory(resolved.relative_path, query,
+                                          out_entries);
 }
 
 FsError VirtualFileSystem::create_directory(std::string_view guest_path,
@@ -252,6 +290,14 @@ FsError VirtualFileSystem::rename(std::string_view old_guest_path,
   if (source.device.get() != destination.device.get()) return FsError::CrossDevice;
   return source.device->rename(source.relative_path, destination.relative_path,
                                replace_existing);
+}
+
+FsError VirtualFileSystem::disk_space(std::string_view guest_path,
+                                      DiskSpace& out_space) const {
+  ResolvedPath resolved;
+  const auto error = resolve(guest_path, resolved);
+  if (error != FsError::None) return error;
+  return resolved.device->disk_space(out_space);
 }
 
 }  // namespace xenon::filesystem

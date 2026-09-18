@@ -13,6 +13,8 @@ endif()
 
 option(XENON_LAUNCHER_TEST_MODE
   "Populate the Xenon launcher with fictional front-end test data" OFF)
+option(XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE
+  "Build the optional Discord Rich Presence provider" OFF)
 set(XENON_LAUNCHER_VERSION_OVERRIDE "" CACHE STRING
   "Override the launcher version embedded in release builds")
 set(XENON_LAUNCHER_UPDATE_REPOSITORY "nimauria/Xenon-Recomp" CACHE STRING
@@ -39,75 +41,84 @@ set(XENON_DISCORD_SOCIAL_SDK_RUNTIME "" CACHE FILEPATH
   "Discord Social SDK runtime shared library to deploy beside the launcher executable")
 option(XENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK
   "Fail launcher configuration when the Discord Social SDK cannot be found" OFF)
-
-# Prefer an explicit cache path, then the environment, then Xenon's conventional
-# local vendor directory. The SDK itself is intentionally not committed: Discord
-# distributes it through the Developer Portal for the application owner.
-if(NOT XENON_DISCORD_SOCIAL_SDK_ROOT AND DEFINED ENV{DISCORD_SOCIAL_SDK_ROOT})
-  file(TO_CMAKE_PATH "$ENV{DISCORD_SOCIAL_SDK_ROOT}" _xenon_discord_env_root)
-  set(XENON_DISCORD_SOCIAL_SDK_ROOT "${_xenon_discord_env_root}" CACHE PATH
-      "Root of the Discord Social SDK C++ package (contains include/, lib/ and bin/)" FORCE)
-endif()
-if(NOT XENON_DISCORD_SOCIAL_SDK_ROOT)
-  foreach(_xenon_discord_candidate IN ITEMS
-      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord_social_sdk"
-      "${CMAKE_SOURCE_DIR}/third_party/discord_social_sdk")
-    if(EXISTS "${_xenon_discord_candidate}/include/discordpp.h")
-      set(XENON_DISCORD_SOCIAL_SDK_ROOT "${_xenon_discord_candidate}" CACHE PATH
-          "Root of the Discord Social SDK C++ package (contains include/, lib/ and bin/)" FORCE)
-      break()
-    endif()
-  endforeach()
+if(XENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK AND NOT XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE)
+  set(XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE ON CACHE BOOL
+      "Build the optional Discord Rich Presence provider" FORCE)
 endif()
 
-if(XENON_DISCORD_SOCIAL_SDK_ROOT)
-  if(NOT XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR)
-    set(XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR
-        "${XENON_DISCORD_SOCIAL_SDK_ROOT}/include" CACHE PATH
-        "Directory containing Discord Social SDK discordpp.h (normally inferred from XENON_DISCORD_SOCIAL_SDK_ROOT)" FORCE)
+# Rich Presence is intentionally dormant by default. Community/support links remain
+# available without the Discord SDK. Enable this option explicitly when Xenon is
+# ready to ship Rich Presence.
+if(XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE)
+  # Prefer an explicit cache path, then the environment, then Xenon's conventional
+  # local vendor directory. The SDK itself is intentionally not committed: Discord
+  # distributes it through the Developer Portal for the application owner.
+  if(NOT XENON_DISCORD_SOCIAL_SDK_ROOT AND DEFINED ENV{DISCORD_SOCIAL_SDK_ROOT})
+    file(TO_CMAKE_PATH "$ENV{DISCORD_SOCIAL_SDK_ROOT}" _xenon_discord_env_root)
+    set(XENON_DISCORD_SOCIAL_SDK_ROOT "${_xenon_discord_env_root}" CACHE PATH
+        "Root of the Discord Social SDK C++ package (contains include/, lib/ and bin/)" FORCE)
+  endif()
+  if(NOT XENON_DISCORD_SOCIAL_SDK_ROOT)
+    foreach(_xenon_discord_candidate IN ITEMS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/discord_social_sdk"
+        "${CMAKE_SOURCE_DIR}/third_party/discord_social_sdk")
+      if(EXISTS "${_xenon_discord_candidate}/include/discordpp.h")
+        set(XENON_DISCORD_SOCIAL_SDK_ROOT "${_xenon_discord_candidate}" CACHE PATH
+            "Root of the Discord Social SDK C++ package (contains include/, lib/ and bin/)" FORCE)
+        break()
+      endif()
+    endforeach()
   endif()
 
-  # Discord's standalone C++ archive uses debug/release subdirectories. Xenon's
-  # normal Ninja build is single-config, so select the matching package here.
-  string(TOLOWER "${CMAKE_BUILD_TYPE}" _xenon_discord_build_type)
-  if(_xenon_discord_build_type STREQUAL "debug")
-    set(_xenon_discord_config_dir "debug")
-  else()
-    set(_xenon_discord_config_dir "release")
-  endif()
+  if(XENON_DISCORD_SOCIAL_SDK_ROOT)
+    if(NOT XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR)
+      set(XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR
+          "${XENON_DISCORD_SOCIAL_SDK_ROOT}/include" CACHE PATH
+          "Directory containing Discord Social SDK discordpp.h (normally inferred from XENON_DISCORD_SOCIAL_SDK_ROOT)" FORCE)
+    endif()
 
-  if(WIN32)
-    if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
-      set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
-          "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/discord_partner_sdk.lib"
-          CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
+    # Discord's standalone C++ archive uses debug/release subdirectories. Xenon's
+    # normal Ninja build is single-config, so select the matching package here.
+    string(TOLOWER "${CMAKE_BUILD_TYPE}" _xenon_discord_build_type)
+    if(_xenon_discord_build_type STREQUAL "debug")
+      set(_xenon_discord_config_dir "debug")
+    else()
+      set(_xenon_discord_config_dir "release")
     endif()
-    if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
-      set(XENON_DISCORD_SOCIAL_SDK_RUNTIME
-          "${XENON_DISCORD_SOCIAL_SDK_ROOT}/bin/${_xenon_discord_config_dir}/discord_partner_sdk.dll"
-          CACHE FILEPATH "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
-    endif()
-  elseif(APPLE)
-    # Kept overrideable because recent Social SDK drops may package macOS as a
-    # framework instead of the legacy dylib layout.
-    if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
-      set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
-          "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/libdiscord_partner_sdk.dylib"
-          CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
-    endif()
-    if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
-      set(XENON_DISCORD_SOCIAL_SDK_RUNTIME "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}" CACHE FILEPATH
-          "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
-    endif()
-  else()
-    if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
-      set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
-          "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/libdiscord_partner_sdk.so"
-          CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
-    endif()
-    if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
-      set(XENON_DISCORD_SOCIAL_SDK_RUNTIME "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}" CACHE FILEPATH
-          "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
+
+    if(WIN32)
+      if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
+        set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
+            "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/discord_partner_sdk.lib"
+            CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
+      endif()
+      if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
+        set(XENON_DISCORD_SOCIAL_SDK_RUNTIME
+            "${XENON_DISCORD_SOCIAL_SDK_ROOT}/bin/${_xenon_discord_config_dir}/discord_partner_sdk.dll"
+            CACHE FILEPATH "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
+      endif()
+    elseif(APPLE)
+      # Kept overrideable because recent Social SDK drops may package macOS as a
+      # framework instead of the legacy dylib layout.
+      if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
+        set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
+            "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/libdiscord_partner_sdk.dylib"
+            CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
+      endif()
+      if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
+        set(XENON_DISCORD_SOCIAL_SDK_RUNTIME "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}" CACHE FILEPATH
+            "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
+      endif()
+    else()
+      if(NOT XENON_DISCORD_SOCIAL_SDK_LIBRARY)
+        set(XENON_DISCORD_SOCIAL_SDK_LIBRARY
+            "${XENON_DISCORD_SOCIAL_SDK_ROOT}/lib/${_xenon_discord_config_dir}/libdiscord_partner_sdk.so"
+            CACHE FILEPATH "Discord Social SDK import/shared library" FORCE)
+      endif()
+      if(NOT XENON_DISCORD_SOCIAL_SDK_RUNTIME)
+        set(XENON_DISCORD_SOCIAL_SDK_RUNTIME "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}" CACHE FILEPATH
+            "Discord Social SDK runtime shared library to deploy beside the launcher executable" FORCE)
+      endif()
     endif()
   endif()
 endif()
@@ -221,41 +232,43 @@ target_compile_features(xenon_launcher_core PUBLIC cxx_std_20)
 
 set(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK OFF)
 set(_xenon_discord_missing "")
-if(NOT XENON_LAUNCHER_DISCORD_APPLICATION_ID)
-  list(APPEND _xenon_discord_missing "application ID")
-endif()
-if(NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR}/discordpp.h")
-  list(APPEND _xenon_discord_missing "discordpp.h")
-endif()
-if(NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
-  list(APPEND _xenon_discord_missing "link library")
-endif()
-if(WIN32 AND NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_RUNTIME}")
-  list(APPEND _xenon_discord_missing "discord_partner_sdk.dll")
-endif()
-
-if(NOT _xenon_discord_missing)
-  set(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK ON)
-  target_include_directories(xenon_launcher_core PRIVATE "${XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR}")
-  target_link_libraries(xenon_launcher_core PRIVATE "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
-endif()
-
-if(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK)
-  message(STATUS "Xenon launcher Discord Rich Presence: Social SDK provider enabled")
-  message(STATUS "  Discord SDK root: ${XENON_DISCORD_SOCIAL_SDK_ROOT}")
-  message(STATUS "  Discord SDK library: ${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
-  message(STATUS "  Discord SDK runtime: ${XENON_DISCORD_SOCIAL_SDK_RUNTIME}")
-elseif(XENON_LAUNCHER_DISCORD_APPLICATION_ID)
-  string(JOIN ", " _xenon_discord_missing_text ${_xenon_discord_missing})
-  if(XENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK)
-    message(FATAL_ERROR
-      "Xenon launcher Discord Rich Presence was required but the Social SDK is incomplete: ${_xenon_discord_missing_text}. "
-      "Download the C++ SDK from the Discord Developer Portal and set XENON_DISCORD_SOCIAL_SDK_ROOT.")
+if(XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE)
+  if(NOT XENON_LAUNCHER_DISCORD_APPLICATION_ID)
+    list(APPEND _xenon_discord_missing "application ID")
   endif()
-  message(STATUS
-    "Xenon launcher Discord Rich Presence: application ID configured, Social SDK not linked (${_xenon_discord_missing_text})")
+  if(NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR}/discordpp.h")
+    list(APPEND _xenon_discord_missing "discordpp.h")
+  endif()
+  if(NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
+    list(APPEND _xenon_discord_missing "link library")
+  endif()
+  if(WIN32 AND NOT EXISTS "${XENON_DISCORD_SOCIAL_SDK_RUNTIME}")
+    list(APPEND _xenon_discord_missing "discord_partner_sdk.dll")
+  endif()
+
+  if(NOT _xenon_discord_missing)
+    set(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK ON)
+    target_include_directories(xenon_launcher_core PRIVATE "${XENON_DISCORD_SOCIAL_SDK_INCLUDE_DIR}")
+    target_link_libraries(xenon_launcher_core PRIVATE "${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
+  endif()
+
+  if(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK)
+    message(STATUS "Xenon launcher Discord Rich Presence: provider enabled")
+    message(STATUS "  Discord SDK root: ${XENON_DISCORD_SOCIAL_SDK_ROOT}")
+    message(STATUS "  Discord SDK library: ${XENON_DISCORD_SOCIAL_SDK_LIBRARY}")
+    message(STATUS "  Discord SDK runtime: ${XENON_DISCORD_SOCIAL_SDK_RUNTIME}")
+  else()
+    string(JOIN ", " _xenon_discord_missing_text ${_xenon_discord_missing})
+    if(XENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK)
+      message(FATAL_ERROR
+        "Xenon launcher Discord Rich Presence was required but the Social SDK is incomplete: ${_xenon_discord_missing_text}. "
+        "Download the C++ SDK from the Discord Developer Portal and set XENON_DISCORD_SOCIAL_SDK_ROOT.")
+    endif()
+    message(STATUS
+      "Xenon launcher Discord Rich Presence: requested but unavailable (${_xenon_discord_missing_text})")
+  endif()
 else()
-  message(STATUS "Xenon launcher Discord Rich Presence: provider disabled (no application ID configured)")
+  message(STATUS "Xenon launcher Discord Rich Presence: disabled (community links remain available)")
 endif()
 
 set(XENON_LAUNCHER_HAS_MEMORY OFF)
@@ -290,6 +303,7 @@ target_compile_definitions(xenon_launcher_core PRIVATE
   XENON_LAUNCHER_VERSION="${XENON_LAUNCHER_VERSION_VALUE}"
   XENON_LAUNCHER_UPDATE_REPOSITORY="${XENON_LAUNCHER_UPDATE_REPOSITORY}"
   XENON_LAUNCHER_DISCORD_APPLICATION_ID="${XENON_LAUNCHER_DISCORD_APPLICATION_ID}"
+  XENON_LAUNCHER_DISCORD_RICH_PRESENCE_ENABLED=$<BOOL:${XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE}>
   XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK=$<BOOL:${XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK}>
   XENON_LAUNCHER_TEST_MODE=$<BOOL:${XENON_LAUNCHER_TEST_MODE}>
   XENON_LAUNCHER_RUNTIME_MEMORY=$<BOOL:${XENON_LAUNCHER_HAS_MEMORY}>

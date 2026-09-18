@@ -9,6 +9,7 @@ param(
     [switch]$Run,
     [switch]$FullRuntime,
     [string]$DiscordSdkRoot = $env:DISCORD_SOCIAL_SDK_ROOT,
+    [switch]$EnableDiscordRichPresence,
     [switch]$RequireDiscordSdk
 )
 
@@ -66,7 +67,8 @@ function Find-DiscordSdkRoot {
 }
 
 $QtRoot = Find-QtRoot $QtRoot
-$DiscordSdkRoot = Find-DiscordSdkRoot $DiscordSdkRoot
+if ($RequireDiscordSdk) { $EnableDiscordRichPresence = $true }
+$DiscordSdkRoot = if ($EnableDiscordRichPresence) { Find-DiscordSdkRoot $DiscordSdkRoot } else { $null }
 $qtBin = Join-Path $QtRoot "bin"
 $env:CMAKE_PREFIX_PATH = $QtRoot
 $env:Path = "$qtBin;$env:Path"
@@ -93,24 +95,30 @@ $configureArgs = @(
     "-DCMAKE_PREFIX_PATH=$QtRoot",
     "-DXENON_BUILD_LAUNCHER=ON",
     "-DXENON_LAUNCHER_TEST_MODE=$testModeValue",
+    "-DXENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE=$(if ($EnableDiscordRichPresence) { 'ON' } else { 'OFF' })",
     "-DXENON_BUILD_TESTS=OFF",
     "-DXENON_ENABLE_AUDIO=OFF",
     "-DXENON_ENABLE_INPUT=OFF",
     "-DXENON_ENABLE_NETWORK=OFF"
 )
 
-if ($DiscordSdkRoot) {
-    Write-Host "Discord Social SDK: $DiscordSdkRoot" -ForegroundColor Cyan
-    $configureArgs += "-DXENON_DISCORD_SOCIAL_SDK_ROOT=$DiscordSdkRoot"
-} elseif ($RequireDiscordSdk) {
-    throw "Discord Social SDK was required but was not found. Run launcher\scripts\install-discord-sdk.ps1 -Archive <sdk.zip>, pass -DiscordSdkRoot <path>, or set DISCORD_SOCIAL_SDK_ROOT."
+if ($EnableDiscordRichPresence) {
+    if ($DiscordSdkRoot) {
+        Write-Host "Discord Social SDK: $DiscordSdkRoot" -ForegroundColor Cyan
+        $configureArgs += "-DXENON_DISCORD_SOCIAL_SDK_ROOT=$DiscordSdkRoot"
+    } elseif ($RequireDiscordSdk) {
+        throw "Discord Social SDK was required but was not found. Run launcher\scripts\install-discord-sdk.ps1 -Archive <sdk.zip>, pass -DiscordSdkRoot <path>, or set DISCORD_SOCIAL_SDK_ROOT."
+    } else {
+        Write-Host "Discord Rich Presence requested, but the optional Social SDK was not found." -ForegroundColor DarkYellow
+    }
+
+    if ($RequireDiscordSdk) {
+        $configureArgs += "-DXENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK=ON"
+    }
 } else {
-    Write-Host "Discord Social SDK not found; Rich Presence provider will remain unavailable." -ForegroundColor DarkYellow
+    Write-Host "Discord Rich Presence disabled; Discord community/support links remain available." -ForegroundColor DarkGray
 }
 
-if ($RequireDiscordSdk) {
-    $configureArgs += "-DXENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK=ON"
-}
 
 if (-not $FullRuntime) {
     $configureArgs += @(
@@ -133,7 +141,7 @@ if (-not (Test-Path $exe)) {
     throw "Build completed without producing $exe"
 }
 
-if ($DiscordSdkRoot) {
+if ($EnableDiscordRichPresence -and $DiscordSdkRoot) {
     $discordRuntime = Join-Path (Split-Path $exe -Parent) "discord_partner_sdk.dll"
     if (Test-Path $discordRuntime) {
         Write-Host "Discord Rich Presence runtime deployed: $discordRuntime" -ForegroundColor Green
