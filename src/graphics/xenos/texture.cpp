@@ -180,6 +180,12 @@ std::optional<std::uint8_t> raw_resolve_texture_format(
   }
 }
 
+std::uint8_t depth_resolve_texture_format(
+    DepthRenderTargetFormat format) noexcept {
+  return format == DepthRenderTargetFormat::D24FS8 ? std::uint8_t{23}
+                                                   : std::uint8_t{22};
+}
+
 std::uint64_t tiled_offset_2d(std::uint32_t x, std::uint32_t y,
                               std::uint32_t pitch,
                               std::uint32_t bytes_per_block) noexcept {
@@ -671,9 +677,44 @@ ResolveWriteResult write_converted_resolve(
                            width * destination_bytes, physical_memory);
 }
 
+ResolveWriteResult write_depth_resolve(
+    const CopyResolveState& copy, DepthRenderTargetFormat source_format,
+    const ResolveRectangle& rectangle, std::span<const std::uint32_t> source,
+    std::uint32_t source_row_pitch, std::span<std::byte> physical_memory) {
+  ResolveWriteResult result{};
+  if (copy.command != CopyCommand::Raw && copy.command != CopyCommand::Convert) {
+    result.error = "Xenos depth resolve command is unsupported";
+    return result;
+  }
+
+  // Direct3D 9 commonly programs the color-style 8_8_8_8 destination format
+  // for depth copies. Xenos actually stores the selected depth sample in the
+  // depth target's native 24_8 / 24_8_FLOAT bit layout, with stencil intact.
+  auto raw_copy = copy;
+  raw_copy.command = CopyCommand::Raw;
+  raw_copy.destination_format = depth_resolve_texture_format(source_format);
+  raw_copy.destination_exponent_bias = 0;
+  raw_copy.destination_red_blue_swap = false;
+  return write_raw_resolve(raw_copy, rectangle, std::as_bytes(source),
+                           source_row_pitch, physical_memory);
+}
+
 void TextureDirtyTracker::track(std::uint64_t key, const TextureLayout& layout) {
   const std::scoped_lock lock(mutex_);
   Entry entry{};
+  for (const auto& sub : layout.subresources) {
+    entry.ranges.emplace_back(sub.guest_address,
+                              std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
+  }
+  entries_[key] = std::move(entry);
+}
+void TextureDirtyTracker::track_clean(std::uint64_t key,
+                                      const TextureLayout& layout,
+                                      std::uint64_t clean_epoch) {
+  const std::scoped_lock lock(mutex_);
+  Entry entry{};
+  entry.dirty = false;
+  entry.clean_epoch = clean_epoch;
   for (const auto& sub : layout.subresources) {
     entry.ranges.emplace_back(sub.guest_address,
                               std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
@@ -707,6 +748,32 @@ bool TextureDirtyTracker::consume_dirty(std::uint64_t key) noexcept {
   if (it == entries_.end() || !it->second.dirty) return false;
   it->second.dirty = false;
   return true;
+}
+bool TextureDirtyTracker::consume_dirty(
+    std::uint64_t key, const memory::GuestMemoryCoherency& coherency,
+    std::uint64_t through_epoch) noexcept {
+  const std::scoped_lock lock(mutex_);
+  const auto it = entries_.find(key);
+  if (it == entries_.end()) return false;
+  auto& entry = it->second;
+  bool dirty = entry.dirty;
+  if (!dirty) {
+    for (const auto& range : entry.ranges) {
+      if (range.first >= memory::kPhysicalMemorySize) continue;
+      const auto width64 = std::min<std::uint64_t>(
+          range.second - range.first, memory::kPhysicalMemorySize - range.first);
+      if (width64 && coherency.range_changed_since(
+                         static_cast<std::uint32_t>(range.first),
+                         static_cast<std::uint32_t>(width64),
+                         entry.clean_epoch, through_epoch)) {
+        dirty = true;
+        break;
+      }
+    }
+  }
+  entry.dirty = false;
+  entry.clean_epoch = through_epoch;
+  return dirty;
 }
 bool TextureDirtyTracker::is_dirty(std::uint64_t key) const noexcept {
   const std::scoped_lock lock(mutex_);

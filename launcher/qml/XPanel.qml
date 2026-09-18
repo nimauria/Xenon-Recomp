@@ -1,8 +1,8 @@
 import QtQuick
 
 Rectangle {
-    radius: 10
+    radius: Theme.panelRadius
     color: Theme.surface
-    border.width: 1
+    border.width: Theme.borderWidth
     border.color: Theme.border
 }

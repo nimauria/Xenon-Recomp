@@ -668,22 +668,22 @@ Vector128 execute_vector(VectorSemantic semantic, std::uint32_t guest_word,
 // VMX memory/permute helpers shared by the AOT backend and tests.
 Vector128 vector_load_shift_left(std::uint64_t ea) noexcept;
 Vector128 vector_load_shift_right(std::uint64_t ea) noexcept;
-Vector128 vector_load_element(const Vector128& old, MemoryPort& memory,
+Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& memory,
                               GuestAddress ea, unsigned width);
-void vector_store_element(const Vector128& value, MemoryPort& memory,
+void vector_store_element(const Vector128& value, MemoryAccessContext& memory,
                           GuestAddress ea, unsigned width);
-Vector128 vector_load_left(const Vector128& old, MemoryPort& memory,
+Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
                            GuestAddress ea);
-Vector128 vector_load_right(const Vector128& old, MemoryPort& memory,
+Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
                             GuestAddress ea);
-void vector_store_left(const Vector128& value, MemoryPort& memory,
+void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
                        GuestAddress ea);
-void vector_store_right(const Vector128& value, MemoryPort& memory,
+void vector_store_right(const Vector128& value, MemoryAccessContext& memory,
                         GuestAddress ea);
 
-void string_load(CpuState& state, MemoryPort& memory, GuestAddress ea,
+void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                  std::uint32_t count, unsigned first_reg);
-void string_store(CpuState& state, MemoryPort& memory, GuestAddress ea,
+void string_store(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                   std::uint32_t count, unsigned first_reg);
 
 }  // namespace xenon::cpu::aot

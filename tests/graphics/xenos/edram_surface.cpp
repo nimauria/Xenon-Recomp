@@ -120,6 +120,67 @@ int main() {
                                canonical_bytes));
     assert(std::memcmp(canonical.data(), returned.data(), canonical_bytes) == 0);
   }
+
+  // Selected Xenos color resolves average Samples01 / Samples23 only. Verify
+  // the common host-storage averaging path without relying on a full native
+  // MSAA resolve, including a widened transport format.
+  for (const auto format : {ColorRenderTargetFormat::R8G8B8A8,
+                            ColorRenderTargetFormat::R8G8B8A8Gamma,
+                            ColorRenderTargetFormat::R16G16Float,
+                            ColorRenderTargetFormat::R32G32Float}) {
+    const auto bytes_per_pixel = color_host_bytes_per_pixel(format);
+    std::vector<std::byte> first(bytes_per_pixel * 2u);
+    std::vector<std::byte> second(bytes_per_pixel * 2u);
+    const ColorSample first_left{{0.0f, 0.25f, 0.5f, 1.0f}};
+    const ColorSample second_left{{1.0f, 0.75f, 0.5f, 0.0f}};
+    const ColorSample first_right{{0.25f, 0.0f, 1.0f, 0.5f}};
+    const ColorSample second_right{{0.75f, 1.0f, 0.0f, 0.5f}};
+    assert(encode_host_color_sample(
+        format, first_left,
+        std::span(first).subspan(0, bytes_per_pixel)));
+    assert(encode_host_color_sample(
+        format, first_right,
+        std::span(first).subspan(bytes_per_pixel, bytes_per_pixel)));
+    assert(encode_host_color_sample(
+        format, second_left,
+        std::span(second).subspan(0, bytes_per_pixel)));
+    assert(encode_host_color_sample(
+        format, second_right,
+        std::span(second).subspan(bytes_per_pixel, bytes_per_pixel)));
+
+    std::vector<std::byte> averaged;
+    std::uint32_t averaged_pitch{};
+    assert(average_host_color_samples(
+        format, 2, 1, first, bytes_per_pixel * 2u, second,
+        bytes_per_pixel * 2u, averaged, averaged_pitch));
+    assert(averaged_pitch == bytes_per_pixel * 2u);
+    ColorSample left{};
+    ColorSample right{};
+    assert(decode_host_color_sample(
+        format, std::span(averaged).subspan(0, bytes_per_pixel), left));
+    assert(decode_host_color_sample(
+        format,
+        std::span(averaged).subspan(bytes_per_pixel, bytes_per_pixel), right));
+    const auto close = [](float actual, float expected) {
+      return std::abs(actual - expected) <= 0.01f;
+    };
+    assert(close(left.components[0], 0.5f));
+    assert(close(left.components[1], 0.5f));
+    assert(close(right.components[0], 0.5f));
+    assert(close(right.components[1], 0.5f));
+    if (format == ColorRenderTargetFormat::R8G8B8A8 ||
+        format == ColorRenderTargetFormat::R8G8B8A8Gamma) {
+      assert(close(left.components[2], 0.5f));
+      assert(close(left.components[3], 0.5f));
+      assert(close(right.components[2], 0.5f));
+      assert(close(right.components[3], 0.5f));
+    } else {
+      assert(close(left.components[2], 0.0f));
+      assert(close(left.components[3], 1.0f));
+      assert(close(right.components[2], 0.0f));
+      assert(close(right.components[3], 1.0f));
+    }
+  }
   assert(!map_guest_sample_to_host(MsaaSamples::X1, 1));
   assert(!map_guest_sample_to_host(MsaaSamples::X4, 4));
 

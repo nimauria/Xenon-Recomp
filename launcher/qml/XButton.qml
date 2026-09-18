@@ -1,36 +1,50 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Basic
 
 Button {
     id: control
 
-    property string variant: "default" // default, primary, danger, ghost
+    property string automationId: ""
+    objectName: automationId
 
-    implicitHeight: 42
-    implicitWidth: Math.max(110, contentItem.implicitWidth + 30)
+    property string variant: "default" // default, primary, danger, ghost
+    property string accessibleDescription: ""
+
+    implicitHeight: Theme.controlHeight
+    implicitWidth: Math.max(104, contentItem.implicitWidth + 30)
+    hoverEnabled: true
+    focusPolicy: Qt.StrongFocus
+
+    Accessible.name: text
+    Accessible.description: accessibleDescription
+    Accessible.role: Accessible.Button
 
     contentItem: Text {
         text: control.text
-        color: control.variant === "primary" ? Theme.accentText
+        color: !control.enabled ? Theme.textMuted
+             : control.variant === "primary" ? Theme.accentText
              : control.variant === "danger" ? Theme.danger
              : Theme.text
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
-        font.pixelSize: 13
+        font.pixelSize: Theme.typeBody
         font.weight: control.variant === "primary" ? Font.DemiBold : Font.Medium
-        opacity: control.enabled ? 1.0 : 0.45
+        elide: Text.ElideRight
     }
 
     background: Rectangle {
-        radius: 8
-        color: control.variant === "primary" ? Theme.accent
-             : control.variant === "danger" ? Theme.surfaceAlt
-             : control.variant === "ghost" ? "transparent"
-             : (control.hovered ? Theme.surfaceHover : Theme.surfaceAlt)
-        border.width: control.variant === "primary" ? 0 : 1
-        border.color: control.variant === "danger" ? Theme.danger
-                    : control.hovered ? Theme.accent
+        radius: Theme.controlRadius
+        color: !control.enabled ? Theme.surfaceAlt
+             : control.variant === "primary" ? (control.down ? Theme.accentStrong : Theme.accent)
+             : control.variant === "danger" ? (control.hovered ? Theme.surfaceHover : Theme.surfaceAlt)
+             : control.variant === "ghost" ? (control.hovered ? Theme.surfaceHover : "transparent")
+             : (control.down ? Theme.surfaceHover : control.hovered ? Theme.surfaceHover : Theme.surfaceAlt)
+        border.width: control.activeFocus ? Theme.focusWidth : Theme.borderWidth
+        border.color: control.activeFocus ? Theme.focusRing
+                    : control.variant === "primary" ? Theme.accentStrong
+                    : control.variant === "danger" ? Theme.danger
+                    : control.hovered ? Theme.accentStrong
                     : Theme.border
-        opacity: control.enabled ? 1.0 : 0.55
+        opacity: control.enabled ? 1.0 : 0.58
     }
 }

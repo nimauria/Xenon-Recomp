@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -23,16 +22,13 @@ class GuestMemoryMirror {
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
-  static constexpr std::uint32_t kPageSize = 4096;
   static constexpr std::uint32_t kUploadSize = 16u * 1024u * 1024u;
-  void mark_dirty(std::uint32_t address, std::uint32_t width);
   memory::AddressSpace* memory_{};
   CommandQueue* queue_{};
   Buffer mirror_{};
   Buffer upload_{};
-  std::uint64_t callback_id_{};
-  std::vector<std::uint8_t> dirty_pages_{};
-  std::mutex dirty_mutex_{};
+  std::uint64_t synchronized_epoch_{};
+  std::vector<memory::DirtyPhysicalRange> dirty_ranges_{};
   bool shader_read_state_{};
   std::string error_{};
 };

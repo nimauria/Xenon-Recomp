@@ -1,6 +1,9 @@
+#include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -44,6 +47,47 @@ int main() {
   assert(mem.read32_be(0x00100000u) == 0xCAFEBABEu);
   mem.write32_be(0x00100004u, 0x01234567u);
   assert(mem.read32_be(0xA0000000u + mem.get_physical_address(0x00100004u)) == 0x01234567u);
+
+  // Memory V2: generated PPC acquires one concrete access context and common
+  // aligned RAM operations translate through the compact hot page table.
+  auto fast = mem.access_context();
+  assert(fast.has_fast_path());
+  const auto coherency_before = mem.coherency().current_epoch();
+  fast.write32_be(0x00100040u, 0xAABBCCDDu);
+  assert(fast.read32_be(0x00100040u) == 0xAABBCCDDu);
+  const auto coherency_after = mem.coherency().current_epoch();
+  assert(coherency_after > coherency_before);
+  assert(mem.coherency().range_changed_since(
+      mem.get_physical_address(0x00100040u), sizeof(std::uint32_t),
+      coherency_before, coherency_after));
+
+  // Six Xenon hardware-thread shaped stress: disjoint aligned words share the
+  // same guest mapping while normal RAM access remains lock-free at AddressSpace.
+  std::array<std::thread, 6> workers{};
+  for (std::uint32_t thread = 0; thread < workers.size(); ++thread) {
+    workers[thread] = std::thread([&, thread] {
+      auto access = mem.access_context();
+      const GuestAddress address = 0x00100200u + thread * 64u;
+      for (std::uint32_t i = 0; i < 2000u; ++i) {
+        access.write64_be(address, (std::uint64_t{thread} << 32u) | i);
+        assert(access.read64_be(address) ==
+               ((std::uint64_t{thread} << 32u) | i));
+      }
+    });
+  }
+  for (auto& worker : workers) worker.join();
+
+  // Range operations use page-chunked native copies/fills. Overlap keeps the
+  // old snapshot semantics rather than degenerating into byte-at-a-time calls.
+  for (std::uint32_t i = 0; i < 64u; ++i) fast.write8(0x00100400u + i, i);
+  mem.copy(0x00100408u, 0x00100400u, 48u);
+  for (std::uint32_t i = 0; i < 48u; ++i) {
+    assert(fast.read8(0x00100408u + i) == i);
+  }
+  mem.fill(0x00100FF0u, 32u, 0x5Au);
+  for (std::uint32_t i = 0; i < 32u; ++i) {
+    assert(fast.read8(0x00100FF0u + i) == 0x5Au);
+  }
 
   // The dedicated 0x7F GPU/writeback view aliases physical RAM at 0.
   mem.write32_be(0x7F000100u, 0xDEADC0DEu);
@@ -99,6 +143,37 @@ int main() {
   assert(mem.read32_be(0xA0000000u + shared_phys) == 0x31415926u);
   assert(mem.free_physical(shared_phys, 0x2000u));
 
+  // Memory V2 physical ownership: an anonymous page may outlive its owning
+  // virtual allocation while another guest mapping still aliases it. It must
+  // not return to the physical allocator until the final mapping disappears.
+  {
+    AddressSpace ownership_mem;
+    assert(ownership_mem.initialize());
+    constexpr GuestAddress owner_va = 0x00100000u;
+    constexpr GuestAddress alias_va = 0x00200000u;
+    assert(ownership_mem.commit_fixed(owner_va, kBasePageSize, kReadWrite));
+    const auto owner_phys = ownership_mem.get_physical_address(owner_va);
+    assert(owner_phys != 0xFFFFFFFFu);
+    assert(ownership_mem.map_virtual_to_physical(
+        alias_va, owner_phys, kBasePageSize, kReadWrite));
+    ownership_mem.write32_be(owner_va, 0x44556677u);
+    assert(ownership_mem.release(owner_va));
+    assert(ownership_mem.read32_be(alias_va) == 0x44556677u);
+
+    std::uint32_t while_aliased{};
+    assert(ownership_mem.allocate_physical(kBasePageSize, kBasePageSize,
+                                           false, while_aliased));
+    assert(while_aliased != owner_phys);
+    assert(ownership_mem.release(alias_va));
+    assert(ownership_mem.free_physical(while_aliased, kBasePageSize));
+
+    std::uint32_t after_alias_release{};
+    assert(ownership_mem.allocate_physical(kBasePageSize, kBasePageSize,
+                                           false, after_alias_release));
+    assert(after_alias_release == owner_phys);
+    assert(ownership_mem.free_physical(after_alias_release, kBasePageSize));
+  }
+
   // 64 KiB virtual allocations use the second guest heap and preserve alignment.
   GuestAddress large_alloc{};
   assert(mem.allocate(0x18000u, 0x10000u, kReadWrite, true, large_alloc, kLargePageSize));
@@ -144,6 +219,12 @@ int main() {
           std::vector<std::pair<std::uint32_t, std::uint32_t>>{
               {split_physical_a + kBasePageSize - 2u, 2u},
               {split_physical_b, 2u}}));
+  split_notifications.clear();
+  mem.fill(split_virtual + kBasePageSize - 2u, 4u, 0xA5u);
+  assert((split_notifications ==
+          std::vector<std::pair<std::uint32_t, std::uint32_t>>{
+              {split_physical_a + kBasePageSize - 2u, 2u},
+              {split_physical_b, 2u}}));
   mem.remove_physical_write_callback(split_observer);
   assert(mem.release(split_virtual));
   assert(mem.release(split_virtual + kBasePageSize));
@@ -164,7 +245,11 @@ int main() {
       },
       "test-device"));
   assert(mem.read32_be(0x7FEA0010u) == 0x12345678u);
-  mem.write32_be(0x7FEA0010u, 0x89ABCDEFu);
+  // The hot page marks MMIO as slow, so the concrete context dispatches to the
+  // existing device semantics rather than treating the physical alias as RAM.
+  auto mmio_access = mem.access_context();
+  assert(mmio_access.read32_be(0x7FEA0010u) == 0x12345678u);
+  mmio_access.write32_be(0x7FEA0010u, 0x89ABCDEFu);
   assert(mmio_last == 0x89ABCDEFu);
 
   std::uint32_t invalidated = 0;

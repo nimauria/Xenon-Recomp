@@ -262,10 +262,41 @@ void test_copy_resolve_state() {
   assert(resolve_plan.selected_sample_count == 1);
   assert(resolve_plan.host_sample_for_guest[2] == 2);
   assert(!resolve_plan.native_color_average);
+  plan_state.copy.sample_select = CopySampleSelect::Samples01;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
+  assert(resolve_plan.guest_sample_mask == 0x3);
+  assert(resolve_plan.selected_sample_count == 2);
+  assert(resolve_plan.host_sample_for_guest[0] == 0);
+  assert(resolve_plan.host_sample_for_guest[1] == 1);
+  plan_state.copy.sample_select = CopySampleSelect::Samples23;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
+  assert(resolve_plan.guest_sample_mask == 0xC);
+  assert(resolve_plan.selected_sample_count == 2);
+  assert(resolve_plan.host_sample_for_guest[2] == 2);
+  assert(resolve_plan.host_sample_for_guest[3] == 3);
   plan_state.copy.sample_select = CopySampleSelect::Samples0123;
   resolve_plan = plan_resolve(plan_state, memory);
   assert(resolve_plan.valid && resolve_plan.native_color_average);
   assert(resolve_plan.guest_sample_mask == 0xF);
+
+  // Depth resolves never average. Pair/full selections sanitize to one guest
+  // sample before the native backend sees the plan.
+  plan_state.copy.source_select = 4;
+  plan_state.copy.sample_select = CopySampleSelect::Samples0123;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && resolve_plan.depth);
+  assert(!resolve_plan.native_color_average);
+  assert(resolve_plan.copy.sample_select == CopySampleSelect::Sample0);
+  assert(resolve_plan.guest_sample_mask == 0x1);
+  assert(resolve_plan.selected_sample_count == 1);
+  plan_state.copy.sample_select = CopySampleSelect::Samples23;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && resolve_plan.depth);
+  assert(resolve_plan.copy.sample_select == CopySampleSelect::Sample2);
+  assert(resolve_plan.guest_sample_mask == 0x4);
+  assert(resolve_plan.selected_sample_count == 1);
 
   tracker.apply({0x2080, 8u | (8u << 16)});
   tracker.apply({0x2205, 1u << 16});

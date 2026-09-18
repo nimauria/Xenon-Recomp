@@ -26,7 +26,8 @@ class RenderTargetImage {
   [[nodiscard]] bool initialize(VkPhysicalDevice physical_device,
                                 VkDevice device, CommandQueue& queue,
                                 const EdramSurfaceLayout& layout,
-                                ColorRenderTargetFormat format);
+                                ColorRenderTargetFormat format,
+                                bool native_2x_supported = true);
   [[nodiscard]] bool clear(CommandQueue& queue,
                            const VkClearColorValue& value);
   [[nodiscard]] bool upload(CommandQueue& queue,
@@ -41,6 +42,10 @@ class RenderTargetImage {
       CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::vector<std::byte>& destination, std::uint32_t& row_pitch);
+  [[nodiscard]] bool upload_sample(
+      CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
+      std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+      std::span<const std::byte> source, std::uint32_t row_pitch);
   void reset() noexcept;
   [[nodiscard]] VkImage image() const noexcept { return image_; }
   [[nodiscard]] VkImageView view() const noexcept { return view_; }
@@ -69,6 +74,7 @@ class RenderTargetImage {
   std::uint32_t mip_height_{};
   std::uint32_t bytes_per_pixel_{};
   EdramSurfaceLayout surface_{};
+  MsaaSamples host_msaa_{MsaaSamples::X1};
   VkImageLayout layout_{VK_IMAGE_LAYOUT_UNDEFINED};
   std::string error_{};
 };

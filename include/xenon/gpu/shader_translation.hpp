@@ -55,6 +55,10 @@ class HlslShaderLowerer {
 [[nodiscard]] LoweredShader make_transfer_fullscreen_vertex_shader();
 [[nodiscard]] LoweredShader make_color_sample_read_shader(MsaaSamples samples);
 [[nodiscard]] LoweredShader make_color_sample_write_shader();
+[[nodiscard]] LoweredShader make_depth_sample_read_shader(MsaaSamples samples);
+[[nodiscard]] LoweredShader make_depth_sample_write_shader();
+[[nodiscard]] LoweredShader make_depth_only_sample_write_shader();
+[[nodiscard]] LoweredShader make_stencil_mask_write_shader();
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};
@@ -62,6 +66,7 @@ struct ShaderCompileOptions {
   bool optimize{true};
   bool warnings_as_errors{true};
   std::string spirv_environment{"vulkan1.3"};
+  bool spirv_stencil_export{};
 };
 
 struct CompiledShader {

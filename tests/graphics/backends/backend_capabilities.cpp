@@ -1,11 +1,16 @@
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <span>
+#include <string_view>
+#include <vector>
 
 #include "xenon/gpu/backend_capabilities.hpp"
+#include "xenon/gpu/depth_format.hpp"
 
 #if defined(XENON_TEST_DXC)
 #include "xenon/gpu/dxc_shader_compiler.hpp"
@@ -79,6 +84,94 @@ Output main() {
 })";
   shader.complete = true;
   return shader;
+}
+
+template <typename DepthTarget, typename Queue>
+void validate_depth_sample_transfer_matrix(
+    DepthTarget& target, Queue& queue,
+    xenon::gpu::DepthRenderTargetFormat depth_format,
+    xenon::gpu::MsaaSamples guest_msaa, bool force_x2_on_x4,
+    std::string_view backend_label) {
+  constexpr std::uint32_t kWidth = 4;
+  constexpr std::uint32_t kHeight = 4;
+  constexpr float kClearHostDepth = 0.375f;
+  constexpr std::uint8_t kClearStencil = 0xC7;
+
+  assert(target.clear(queue, kClearHostDepth, kClearStencil));
+  const auto guest_sample_count = 1u << static_cast<unsigned>(guest_msaa);
+  std::array<std::vector<std::uint32_t>, 4> expected{};
+  constexpr std::array<float, 9> depths{
+      0.0f, 0.125f, 0.5f, 0.875f, 1.0f,
+      1.25f, 1.5f, 1.75f, 1.99999f};
+
+  for (std::uint32_t sample = 0; sample < guest_sample_count; ++sample) {
+    expected[sample].resize(kWidth * kHeight);
+    for (std::size_t pixel = 0; pixel < expected[sample].size(); ++pixel) {
+      auto depth = depths[(pixel + sample * 3u) % depths.size()];
+      if (depth_format == xenon::gpu::DepthRenderTargetFormat::D24S8)
+        depth = (std::min)(depth, 1.0f);
+      expected[sample][pixel] = xenon::gpu::pack_depth_stencil(
+          depth_format, depth,
+          static_cast<std::uint8_t>(0x11u + sample * 0x38u + pixel));
+    }
+    const bool uploaded = target.upload_sample(
+        queue, sample, 0, 0, kWidth, kHeight, expected[sample], kWidth * 4u);
+    if (!uploaded)
+      std::cerr << backend_label << " depth upload failed: "
+                << target.error() << '\n';
+    assert(uploaded);
+  }
+
+  for (std::uint32_t sample = 0; sample < guest_sample_count; ++sample) {
+    std::vector<std::uint32_t> returned;
+    std::uint32_t pitch{};
+    const bool read = target.readback_sample(
+        queue, sample, 0, 0, kWidth, kHeight, returned, pitch);
+    if (!read)
+      std::cerr << backend_label << " depth readback failed: "
+                << target.error() << '\n';
+    assert(read);
+    assert(pitch == kWidth * 4u && returned == expected[sample]);
+  }
+
+  const auto read_native = [&](std::uint32_t host_sample,
+                               const std::vector<std::uint32_t>& wanted) {
+    std::vector<std::uint32_t> returned;
+    std::uint32_t pitch{};
+    assert(target.readback_native_sample(
+        queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
+    assert(pitch == kWidth * 4u && returned == wanted);
+  };
+
+  if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
+    assert(target.host_msaa() == xenon::gpu::MsaaSamples::X1);
+    read_native(0, expected[0]);
+  } else if (guest_msaa == xenon::gpu::MsaaSamples::X4) {
+    assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
+    for (std::uint32_t sample = 0; sample < 4; ++sample)
+      read_native(sample, expected[sample]);
+  } else {
+    assert(guest_msaa == xenon::gpu::MsaaSamples::X2);
+    if (force_x2_on_x4)
+      assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
+
+    if (target.host_msaa() == xenon::gpu::MsaaSamples::X2) {
+      // Native D3D10+/Vulkan 2x sample order is reversed relative to Xenos.
+      read_native(1, expected[0]);
+      read_native(0, expected[1]);
+    } else {
+      assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
+      // Xenos 2x uses host samples 0 and 3 when a 4x attachment is used as
+      // fallback. Samples 1 and 2 are padding and must remain untouched.
+      read_native(0, expected[0]);
+      read_native(3, expected[1]);
+      const auto clear_word = xenon::gpu::host_to_depth_stencil(
+          depth_format, kClearHostDepth, kClearStencil);
+      const std::vector<std::uint32_t> untouched(kWidth * kHeight, clear_word);
+      read_native(1, untouched);
+      read_native(2, untouched);
+    }
+  }
 }
 
 }  // namespace
@@ -183,7 +276,46 @@ int main() {
                                   vulkan_context.device(), vulkan_depth_surface,
                                   xenon::gpu::DepthRenderTargetFormat::D24S8));
   assert(vulkan_depth.clear(vulkan_queue, 1.0f, 0));
+  std::vector<std::uint32_t> vulkan_depth_readback;
+  std::uint32_t vulkan_depth_pitch{};
+  assert(vulkan_depth.readback_sample(vulkan_queue, 0, 0, 0, 4, 4,
+                                      vulkan_depth_readback,
+                                      vulkan_depth_pitch));
+  assert(vulkan_depth_pitch == 16 && vulkan_depth_readback.size() == 16);
+  for (const auto packed : vulkan_depth_readback)
+    assert(packed == xenon::gpu::pack_depth_stencil(
+                         xenon::gpu::DepthRenderTargetFormat::D24S8,
+                         1.0f, 0));
 #if defined(XENON_TEST_DXC)
+  for (const auto depth_format : {
+           xenon::gpu::DepthRenderTargetFormat::D24S8,
+           xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
+    struct Case {
+      xenon::gpu::MsaaSamples msaa;
+      bool native_2x;
+      bool force_x2_on_x4;
+    };
+    constexpr std::array cases{
+        Case{xenon::gpu::MsaaSamples::X1, true, false},
+        Case{xenon::gpu::MsaaSamples::X2, true, false},
+        Case{xenon::gpu::MsaaSamples::X2, false, true},
+        Case{xenon::gpu::MsaaSamples::X4, true, false},
+    };
+    for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
+      const auto& test_case = cases[case_index];
+      xenon::gpu::EdramSurfaceLayout transfer_surface{
+          80u + 32u * static_cast<unsigned>(depth_format) +
+              static_cast<std::uint32_t>(case_index) * 4u,
+          4, 4, test_case.msaa, false, true};
+      xenon::gpu::vulkan::DepthTargetImage transfer_target;
+      assert(transfer_target.initialize(
+          vulkan_context.physical_device(), vulkan_context.device(),
+          transfer_surface, depth_format, test_case.native_2x));
+      validate_depth_sample_transfer_matrix(
+          transfer_target, vulkan_queue, depth_format, test_case.msaa,
+          test_case.force_x2_on_x4, "Vulkan");
+    }
+  }
   xenon::gpu::EdramSurfaceLayout vulkan_msaa_surface{
       96, 8, 8, xenon::gpu::MsaaSamples::X4, false, false};
   xenon::gpu::vulkan::RenderTargetImage vulkan_msaa_target;
@@ -191,22 +323,56 @@ int main() {
       vulkan_context.physical_device(), vulkan_context.device(), vulkan_queue,
       vulkan_msaa_surface, xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
   VkClearColorValue vulkan_msaa_clear{};
-  vulkan_msaa_clear.float32[0] = 0.25f;
-  vulkan_msaa_clear.float32[1] = 0.5f;
-  vulkan_msaa_clear.float32[2] = 0.75f;
   vulkan_msaa_clear.float32[3] = 1.0f;
   assert(vulkan_msaa_target.clear(vulkan_queue, vulkan_msaa_clear));
-  std::vector<std::byte> first_sample;
-  std::uint32_t first_sample_pitch{};
-  assert(vulkan_msaa_target.readback_sample(
-      vulkan_queue, 0, 0, 0, 8, 8, first_sample, first_sample_pitch));
-  assert(first_sample_pitch == 32u && first_sample.size() == 256u);
-  for (std::uint32_t guest_sample = 1; guest_sample < 4; ++guest_sample) {
+  constexpr std::array<std::array<std::uint8_t, 4>, 4> sample_colors{{
+      {{255, 0, 0, 255}}, {{0, 255, 0, 255}},
+      {{0, 0, 255, 255}}, {{255, 255, 255, 255}}}};
+  for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
+    std::vector<std::byte> upload(8u * 8u * 4u);
+    for (std::size_t pixel = 0; pixel < 64; ++pixel)
+      std::memcpy(upload.data() + pixel * 4,
+                  sample_colors[guest_sample].data(), 4);
+    assert(vulkan_msaa_target.upload_sample(
+        vulkan_queue, guest_sample, 0, 0, 8, 8, upload, 8u * 4u));
+  }
+  for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
     std::vector<std::byte> selected;
     std::uint32_t selected_pitch{};
     assert(vulkan_msaa_target.readback_sample(
         vulkan_queue, guest_sample, 0, 0, 8, 8, selected, selected_pitch));
-    assert(selected_pitch == first_sample_pitch && selected == first_sample);
+    assert(selected_pitch == 32u && selected.size() == 256u);
+    for (std::size_t pixel = 0; pixel < 64; ++pixel)
+      assert(std::memcmp(selected.data() + pixel * 4,
+                         sample_colors[guest_sample].data(), 4) == 0);
+  }
+  xenon::gpu::EdramSurfaceLayout vulkan_x2_surface{
+      112, 8, 8, xenon::gpu::MsaaSamples::X2, false, false};
+  for (const bool native_2x : {true, false}) {
+    xenon::gpu::vulkan::RenderTargetImage target;
+    assert(target.initialize(vulkan_context.physical_device(),
+                             vulkan_context.device(), vulkan_queue,
+                             vulkan_x2_surface,
+                             xenon::gpu::ColorRenderTargetFormat::R8G8B8A8,
+                             native_2x));
+    assert(target.clear(vulkan_queue, vulkan_msaa_clear));
+    for (std::uint32_t guest_sample = 0; guest_sample < 2; ++guest_sample) {
+      std::vector<std::byte> upload(8u * 8u * 4u);
+      for (std::size_t pixel = 0; pixel < 64; ++pixel)
+        std::memcpy(upload.data() + pixel * 4,
+                    sample_colors[guest_sample].data(), 4);
+      assert(target.upload_sample(vulkan_queue, guest_sample, 0, 0, 8, 8,
+                                  upload, 32));
+    }
+    for (std::uint32_t guest_sample = 0; guest_sample < 2; ++guest_sample) {
+      std::vector<std::byte> selected;
+      std::uint32_t pitch{};
+      assert(target.readback_sample(vulkan_queue, guest_sample, 0, 0, 8, 8,
+                                    selected, pitch));
+      for (std::size_t pixel = 0; pixel < 64; ++pixel)
+        assert(std::memcmp(selected.data() + pixel * 4,
+                           sample_colors[guest_sample].data(), 4) == 0);
+    }
   }
   xenon::gpu::DxcShaderCompiler vulkan_compiler;
   assert(vulkan_compiler.available());
@@ -461,6 +627,89 @@ int main() {
                                  xenon::gpu::DepthRenderTargetFormat::D24S8));
     assert(d3d_depth.clear(queue, 1.0f, 0));
 #if defined(XENON_TEST_DXC)
+    for (const auto depth_format : {
+             xenon::gpu::DepthRenderTargetFormat::D24S8,
+             xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
+      struct Case {
+        xenon::gpu::MsaaSamples msaa;
+        bool native_2x;
+        bool force_x2_on_x4;
+      };
+      constexpr std::array cases{
+          Case{xenon::gpu::MsaaSamples::X1, true, false},
+          Case{xenon::gpu::MsaaSamples::X2, true, false},
+          Case{xenon::gpu::MsaaSamples::X2, false, true},
+          Case{xenon::gpu::MsaaSamples::X4, true, false},
+      };
+      for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
+        const auto& test_case = cases[case_index];
+        xenon::gpu::EdramSurfaceLayout transfer_surface{
+            80u + 32u * static_cast<unsigned>(depth_format) +
+                static_cast<std::uint32_t>(case_index) * 4u,
+            4, 4, test_case.msaa, false, true};
+        xenon::gpu::d3d12::DepthTargetImage transfer_target;
+        assert(transfer_target.initialize(context.device(), transfer_surface,
+                                          depth_format, test_case.native_2x));
+        validate_depth_sample_transfer_matrix(
+            transfer_target, queue, depth_format, test_case.msaa,
+            test_case.force_x2_on_x4, "D3D12");
+      }
+    }
+    xenon::gpu::EdramSurfaceLayout d3d_msaa_surface{
+        96, 8, 8, xenon::gpu::MsaaSamples::X4, false, false};
+    xenon::gpu::d3d12::RenderTargetImage d3d_msaa_target;
+    assert(d3d_msaa_target.initialize(
+        context.device(), d3d_msaa_surface,
+        xenon::gpu::ColorRenderTargetFormat::R8G8B8A8));
+    const float d3d_msaa_clear[4]{0, 0, 0, 1};
+    assert(d3d_msaa_target.clear(queue, d3d_msaa_clear));
+    constexpr std::array<std::array<std::uint8_t, 4>, 4> d3d_sample_colors{{
+        {{255, 0, 0, 255}}, {{0, 255, 0, 255}},
+        {{0, 0, 255, 255}}, {{255, 255, 255, 255}}}};
+    for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
+      std::vector<std::byte> sample_upload(8u * 8u * 4u);
+      for (std::size_t pixel = 0; pixel < 64; ++pixel)
+        std::memcpy(sample_upload.data() + pixel * 4,
+                    d3d_sample_colors[guest_sample].data(), 4);
+      assert(d3d_msaa_target.upload_sample(
+          queue, guest_sample, 0, 0, 8, 8, sample_upload, 8u * 4u));
+    }
+    for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
+      std::vector<std::byte> selected;
+      std::uint32_t selected_pitch{};
+      assert(d3d_msaa_target.readback_sample(
+          queue, guest_sample, 0, 0, 8, 8, selected, selected_pitch));
+      assert(selected_pitch == 32u && selected.size() == 256u);
+      for (std::size_t pixel = 0; pixel < 64; ++pixel)
+        assert(std::memcmp(selected.data() + pixel * 4,
+                           d3d_sample_colors[guest_sample].data(), 4) == 0);
+    }
+    xenon::gpu::EdramSurfaceLayout d3d_x2_surface{
+        112, 8, 8, xenon::gpu::MsaaSamples::X2, false, false};
+    for (const bool native_2x : {true, false}) {
+      xenon::gpu::d3d12::RenderTargetImage target;
+      assert(target.initialize(
+          context.device(), d3d_x2_surface,
+          xenon::gpu::ColorRenderTargetFormat::R8G8B8A8, native_2x));
+      assert(target.clear(queue, d3d_msaa_clear));
+      for (std::uint32_t guest_sample = 0; guest_sample < 2; ++guest_sample) {
+        std::vector<std::byte> upload(8u * 8u * 4u);
+        for (std::size_t pixel = 0; pixel < 64; ++pixel)
+          std::memcpy(upload.data() + pixel * 4,
+                      d3d_sample_colors[guest_sample].data(), 4);
+        assert(target.upload_sample(queue, guest_sample, 0, 0, 8, 8,
+                                    upload, 32));
+      }
+      for (std::uint32_t guest_sample = 0; guest_sample < 2; ++guest_sample) {
+        std::vector<std::byte> selected;
+        std::uint32_t pitch{};
+        assert(target.readback_sample(queue, guest_sample, 0, 0, 8, 8,
+                                      selected, pitch));
+        for (std::size_t pixel = 0; pixel < 64; ++pixel)
+          assert(std::memcmp(selected.data() + pixel * 4,
+                             d3d_sample_colors[guest_sample].data(), 4) == 0);
+      }
+    }
     xenon::gpu::DxcShaderCompiler d3d_compiler;
     assert(d3d_compiler.available());
     const auto d3d_vs = d3d_compiler.compile(test_vertex_shader());

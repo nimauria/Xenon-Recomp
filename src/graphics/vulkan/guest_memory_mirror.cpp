@@ -1,6 +1,5 @@
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
 
-#include <algorithm>
 #include <span>
 
 namespace xenon::gpu::vulkan {
@@ -29,35 +28,21 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   }
   memory_ = &memory;
   queue_ = &queue;
-  dirty_pages_.assign(memory::kPhysicalMemorySize / kPageSize, 1);
-  callback_id_ = memory.add_physical_write_callback(
-      [this](std::uint32_t address, std::uint32_t width) {
-        mark_dirty(address, width);
-      });
+  // Start at epoch zero so the first synchronization uploads every page
+  // dirtied by AddressSpace initialization/reset without a write callback.
+  synchronized_epoch_ = 0;
+  dirty_ranges_.clear();
   return true;
 }
 
 void GuestMemoryMirror::reset() noexcept {
-  if (memory_ && callback_id_) memory_->remove_physical_write_callback(callback_id_);
-  callback_id_ = 0;
   memory_ = nullptr;
   queue_ = nullptr;
   upload_.reset();
   mirror_.reset();
-  dirty_pages_.clear();
+  dirty_ranges_.clear();
+  synchronized_epoch_ = 0;
   shader_read_state_ = false;
-}
-
-void GuestMemoryMirror::mark_dirty(std::uint32_t address,
-                                   std::uint32_t width) {
-  if (!width || address >= memory::kPhysicalMemorySize) return;
-  const auto first = address / kPageSize;
-  const auto end = std::min<std::uint64_t>(
-      std::uint64_t{address} + width, memory::kPhysicalMemorySize);
-  const auto last = static_cast<std::uint32_t>((end - 1u) / kPageSize);
-  std::lock_guard lock(dirty_mutex_);
-  std::fill(dirty_pages_.begin() + first, dirty_pages_.begin() + last + 1u,
-            std::uint8_t{1});
 }
 
 bool GuestMemoryMirror::synchronize() {
@@ -70,26 +55,13 @@ bool GuestMemoryMirror::synchronize() {
     error_ = "failed to map Vulkan upload buffer";
     return false;
   }
-  for (std::uint32_t page = 0; page < dirty_pages_.size();) {
-    std::uint32_t first = page;
-    std::uint32_t count = 0;
-    {
-      std::lock_guard lock(dirty_mutex_);
-      while (first < dirty_pages_.size() && !dirty_pages_[first]) ++first;
-      if (first == dirty_pages_.size()) break;
-      const auto max_pages = kUploadSize / kPageSize;
-      while (first + count < dirty_pages_.size() && count < max_pages &&
-             dirty_pages_[first + count]) {
-        dirty_pages_[first + count] = 0;
-        ++count;
-      }
-    }
-    const auto address = first * kPageSize;
-    const auto size = count * kPageSize;
+  const auto through_epoch = memory_->coherency().current_epoch();
+  memory_->coherency().collect_dirty_ranges(
+      synchronized_epoch_, through_epoch, kUploadSize, dirty_ranges_);
+  for (const auto& range : dirty_ranges_) {
+    const auto address = range.address;
+    const auto size = range.size;
     if (!memory_->copy_physical_range(address, upload_bytes.first(size))) {
-      std::lock_guard lock(dirty_mutex_);
-      std::fill(dirty_pages_.begin() + first,
-                dirty_pages_.begin() + first + count, std::uint8_t{1});
       error_ = "failed to snapshot Xbox physical memory";
       return false;
     }
@@ -120,15 +92,14 @@ bool GuestMemoryMirror::synchronize() {
           dependency.pBufferMemoryBarriers = &after;
           vkCmdPipelineBarrier2(command, &dependency);
         })) {
-      std::lock_guard lock(dirty_mutex_);
-      std::fill(dirty_pages_.begin() + first,
-                dirty_pages_.begin() + first + count, std::uint8_t{1});
       error_ = queue_->error();
       return false;
     }
     shader_read_state_ = true;
-    page = first + count;
   }
+  // Publish consumption only after every queued upload has completed. If any
+  // range failed, the old epoch is retained and the next call retries it.
+  synchronized_epoch_ = through_epoch;
   return true;
 }
 

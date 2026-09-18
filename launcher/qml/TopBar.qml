@@ -7,20 +7,28 @@ Rectangle {
 
     property alias searchText: searchField.text
     property bool maximized: false
+    property bool compact: false
+    property int currentPage: 0
 
     signal minimizeRequested()
     signal maximizeRequested()
     signal closeRequested()
-    signal profilesRequested()
 
-    implicitHeight: 72
+    implicitHeight: Math.max(compact ? 60 : 68, Theme.controlHeight + Theme.spaceLg + Theme.spaceSm)
     color: Theme.header
-    border.width: 1
+    border.width: Theme.borderWidth
     border.color: Theme.divider
 
+    readonly property var searchPlaceholders: [
+        "Search your library…",
+        "Search installed modules…",
+        "Search profiles…",
+        "Find settings…"
+    ]
+
     MouseArea {
-        id: titleDragArea
         anchors.fill: parent
+        z: 0
         acceptedButtons: Qt.LeftButton
         onPressed: {
             if (root.Window.window)
@@ -29,157 +37,94 @@ Rectangle {
         onDoubleClicked: root.maximizeRequested()
     }
 
+    Shortcut {
+        sequence: "Ctrl+K"
+        onActivated: searchField.forceActiveFocus()
+    }
+    Shortcut {
+        sequence: "Ctrl+F"
+        onActivated: {
+            if (root.currentPage === 3)
+                searchField.forceActiveFocus()
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
-        anchors.leftMargin: 20
-        anchors.rightMargin: 8
-        spacing: 16
+        anchors.leftMargin: Theme.spaceLg
+        anchors.rightMargin: 0
+        spacing: Theme.spaceLg
+        z: 2
 
-        RowLayout {
-            Layout.preferredWidth: 360
-            spacing: 12
-
-            Item {
-                Layout.preferredWidth: 42
-                Layout.preferredHeight: 42
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 8
-                    height: 39
-                    radius: 4
-                    color: Theme.accent
-                    rotation: 45
-                }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 8
-                    height: 39
-                    radius: 4
-                    color: Theme.accent
-                    rotation: -45
-                }
-            }
-
-            ColumnLayout {
-                spacing: 0
-
-                Text {
-                    text: "XENON"
-                    color: Theme.text
-                    font.pixelSize: 24
-                    font.weight: Font.DemiBold
-                    font.letterSpacing: 4
-                }
-
-                Text {
-                    text: "PLAY   PRESERVE   REIMAGINE"
-                    color: Theme.textMuted
-                    font.pixelSize: 8
-                    font.letterSpacing: 2.8
-                }
-            }
+        XenonBrand {
+            // The full lockup contains intentionally tiny tagline text which is
+            // not suitable for launcher chrome. Render the clean mark+wordmark
+            // here and keep the tagline as accessible live text elsewhere.
+            Layout.preferredWidth: root.compact ? 142 : 188
+            Layout.preferredHeight: root.compact ? 34 : 40
+            asset: "lockup"
+            brandColor: Theme.accent
         }
 
-        TextField {
+        XTextField {
             id: searchField
+            automationId: "global-search"
             Layout.fillWidth: true
             Layout.maximumWidth: 680
-            Layout.preferredHeight: 42
-            placeholderText: "Search games, modules, or content..."
-            color: Theme.text
-            placeholderTextColor: Theme.textMuted
-            selectionColor: Theme.accent
-            selectedTextColor: Theme.accentText
-            leftPadding: 16
-            rightPadding: 16
-
-            background: Rectangle {
-                radius: 9
-                color: Theme.input
-                border.width: 1
-                border.color: searchField.activeFocus ? Theme.accent : Theme.border
-            }
+            Layout.preferredHeight: Theme.controlHeight
+            placeholderText: root.searchPlaceholders[Math.max(0, Math.min(root.currentPage, root.searchPlaceholders.length - 1))]
+            accessibleName: "Search current page"
+            accessibleDescription: placeholderText
+            Keys.onEscapePressed: clear()
         }
 
         Item { Layout.fillWidth: true }
 
-        ComboBox {
-            id: profileCombo
-            Layout.preferredWidth: 190
-            Layout.preferredHeight: 42
-            model: [launcherBridge.profileName, "Manage profiles…"]
+        XIconButton {
+            id: helpButton
+            iconName: "help"
+            tooltip: "Help and keyboard shortcuts"
+            variant: "ghost"
+            onClicked: helpPopup.open()
 
-            onActivated: function(index) {
-                if (index === 1) {
-                    root.profilesRequested()
-                    currentIndex = 0
-                }
+            HelpPopover {
+                id: helpPopup
+                x: helpButton.width - width
+                y: helpButton.height + Theme.spaceXs
             }
+        }
 
-            contentItem: Text {
-                text: "●  " + profileCombo.displayText
-                color: Theme.text
-                verticalAlignment: Text.AlignVCenter
-                leftPadding: 14
-                font.pixelSize: 13
-                font.weight: Font.Medium
-            }
-
-            background: Rectangle {
-                radius: 9
-                color: Theme.surface
-                border.width: 1
-                border.color: profileCombo.hovered ? Theme.accent : Theme.border
-            }
+        ProfileMenu {
+            Layout.preferredWidth: root.compact ? 176 : 210
+            Layout.preferredHeight: Theme.controlHeight
         }
 
         Rectangle {
             Layout.preferredWidth: 1
-            Layout.preferredHeight: 30
+            Layout.preferredHeight: 28
             color: Theme.divider
         }
 
-        Repeater {
-            model: [
-                { glyph: "−", role: "minimize" },
-                { glyph: root.maximized ? "❐" : "□", role: "maximize" },
-                { glyph: "×", role: "close" }
-            ]
+        XWindowButton {
+            automationId: "window-minimize"
+            kind: "minimize"
+            Layout.fillHeight: true
+            onClicked: root.minimizeRequested()
+        }
 
-            delegate: Rectangle {
-                required property var modelData
+        XWindowButton {
+            automationId: "window-maximize"
+            kind: "maximize"
+            maximized: root.maximized
+            Layout.fillHeight: true
+            onClicked: root.maximizeRequested()
+        }
 
-                Layout.preferredWidth: 44
-                Layout.fillHeight: true
-                color: buttonMouse.containsMouse
-                       ? (modelData.role === "close" ? Theme.danger : Theme.surfaceHover)
-                       : "transparent"
-
-                Text {
-                    anchors.centerIn: parent
-                    text: modelData.glyph
-                    color: buttonMouse.containsMouse && modelData.role === "close" ? "white" : Theme.textMuted
-                    font.pixelSize: modelData.role === "close" ? 24 : 20
-                }
-
-                MouseArea {
-                    id: buttonMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (modelData.role === "minimize")
-                            root.minimizeRequested()
-                        else if (modelData.role === "maximize")
-                            root.maximizeRequested()
-                        else
-                            root.closeRequested()
-                    }
-                }
-            }
+        XWindowButton {
+            automationId: "window-close"
+            kind: "close"
+            Layout.fillHeight: true
+            onClicked: root.closeRequested()
         }
     }
-
 }

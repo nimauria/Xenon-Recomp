@@ -21,7 +21,8 @@ class RenderTargetImage {
  public:
   [[nodiscard]] bool initialize(ID3D12Device* device,
                                 const EdramSurfaceLayout& layout,
-                                ColorRenderTargetFormat format);
+                                ColorRenderTargetFormat format,
+                                bool native_2x_supported = true);
   [[nodiscard]] bool clear(CommandQueue& queue,
                            const float value[4]);
   [[nodiscard]] bool upload(CommandQueue& queue,
@@ -32,6 +33,14 @@ class RenderTargetImage {
                               std::uint32_t bottom,
                               std::vector<std::byte>& destination,
                               std::uint32_t& row_pitch);
+  [[nodiscard]] bool readback_sample(
+      CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
+      std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+      std::vector<std::byte>& destination, std::uint32_t& row_pitch);
+  [[nodiscard]] bool upload_sample(
+      CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
+      std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+      std::span<const std::byte> source, std::uint32_t row_pitch);
   void reset() noexcept;
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE rtv() const noexcept { return rtv_; }
@@ -56,6 +65,7 @@ class RenderTargetImage {
   std::uint32_t height_{};
   std::uint32_t bytes_per_pixel_{};
   EdramSurfaceLayout surface_{};
+  MsaaSamples host_msaa_{MsaaSamples::X1};
   std::string error_{};
 };
 

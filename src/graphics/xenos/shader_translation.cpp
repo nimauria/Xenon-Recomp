@@ -753,10 +753,103 @@ cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };
 float4 main(float4 position : SV_Position,
             uint host_sample : SV_SampleIndex) : SV_Target0 {
   if (host_sample != sample) discard;
-  return Source.Load(int3(int2(position.xy) + int2(origin), 0));
+  return Source.Load(int3(int2(position.xy) - int2(origin), 0));
 }
 )hlsl";
   result.source_hash = hash_text("xenon.transfer.sample.write.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_depth_sample_read_shader(MsaaSamples samples) {
+  const auto count = 1u << static_cast<unsigned>(samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  if (count == 1)
+    out << "Texture2D<float> Depth : register(t0);\n"
+        << "Texture2D<uint4> Stencil : register(t1);\n";
+  else
+    out << "Texture2DMS<float," << count << "> Depth : register(t0);\n"
+        << "Texture2DMS<uint4," << count << "> Stencil : register(t1);\n";
+  out
+      << "cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };\n"
+      << "struct Output { float depth : SV_Target0; uint stencil : SV_Target1; };\n"
+      << "Output main(float4 position : SV_Position) { Output o;\n"
+      << "  int2 p=int2(position.xy)+int2(origin);\n"
+      << (count == 1
+              ? "  o.depth=Depth.Load(int3(p,0)); o.stencil=Stencil.Load(int3(p,0)).y; return o; }\n"
+              : "  o.depth=Depth.Load(p,sample); o.stencil=Stencil.Load(p,sample).y; return o; }\n");
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.depth.read.v1") ^ count;
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported depth transfer sample count");
+  return result;
+}
+
+LoweredShader make_depth_sample_write_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  result.hlsl = R"hlsl(
+Texture2D<float> Depth : register(t0);
+Texture2D<uint> Stencil : register(t1);
+cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };
+struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };
+Output main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) {
+  if (host_sample != sample) discard;
+  int2 p=int2(position.xy)-int2(origin);
+  Output o; o.depth=Depth.Load(int3(p,0));
+  o.stencil=Stencil.Load(int3(p,0)); return o;
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.transfer.depth.write.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_depth_only_sample_write_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  result.hlsl = R"hlsl(
+Texture2D<float> Depth : register(t0);
+cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint pad; };
+float main(float4 position : SV_Position,
+           uint host_sample : SV_SampleIndex) : SV_Depth {
+  if (host_sample != sample) discard;
+  return Depth.Load(int3(int2(position.xy)-int2(origin),0));
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.transfer.depth.write.only.v1");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_stencil_mask_write_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  result.hlsl = R"hlsl(
+Texture2D<uint> Stencil : register(t1);
+cbuffer Transfer : register(b0) { uint2 origin; uint sample; uint value; };
+void main(float4 position : SV_Position,
+          uint host_sample : SV_SampleIndex) {
+  if (host_sample != sample) discard;
+  if (Stencil.Load(int3(int2(position.xy)-int2(origin),0)) != value) discard;
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.transfer.stencil.mask.write.v1");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
   return result;

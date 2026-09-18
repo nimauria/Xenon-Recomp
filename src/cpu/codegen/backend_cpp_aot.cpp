@@ -155,19 +155,19 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::VUpdateCR6:o<<"  aot::update_cr6_from_vector_compare(state,"<<arg(i,0)<<");\n";break;
     case Op::VMakeLoadShiftLeft:return decl(i,"aot::vector_load_shift_left(static_cast<std::uint64_t>("+arg(i,0)+"+"+arg(i,1)+"))");
     case Op::VMakeLoadShiftRight:return decl(i,"aot::vector_load_shift_right(static_cast<std::uint64_t>("+arg(i,0)+"+"+arg(i,1)+"))");
-    case Op::VLoadElement:return decl(i,"aot::vector_load_element("+arg(i,0)+",memory,static_cast<GuestAddress>("+arg(i,1)+"),"+std::to_string(i.imm0)+")");
-    case Op::VStoreElement:o<<"  aot::vector_store_element("<<arg(i,0)<<",memory,static_cast<GuestAddress>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
-    case Op::VLoadLeft:return decl(i,"aot::vector_load_left("+arg(i,0)+",memory,static_cast<GuestAddress>("+arg(i,1)+"))");
-    case Op::VLoadRight:return decl(i,"aot::vector_load_right("+arg(i,0)+",memory,static_cast<GuestAddress>("+arg(i,1)+"))");
-    case Op::VStoreLeft:o<<"  aot::vector_store_left("<<arg(i,0)<<",memory,static_cast<GuestAddress>("<<arg(i,1)<<"));\n";break;
-    case Op::VStoreRight:o<<"  aot::vector_store_right("<<arg(i,0)<<",memory,static_cast<GuestAddress>("<<arg(i,1)<<"));\n";break;
+    case Op::VLoadElement:return decl(i,"aot::vector_load_element("+arg(i,0)+",memory_access,static_cast<GuestAddress>("+arg(i,1)+"),"+std::to_string(i.imm0)+")");
+    case Op::VStoreElement:o<<"  aot::vector_store_element("<<arg(i,0)<<",memory_access,static_cast<GuestAddress>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
+    case Op::VLoadLeft:return decl(i,"aot::vector_load_left("+arg(i,0)+",memory_access,static_cast<GuestAddress>("+arg(i,1)+"))");
+    case Op::VLoadRight:return decl(i,"aot::vector_load_right("+arg(i,0)+",memory_access,static_cast<GuestAddress>("+arg(i,1)+"))");
+    case Op::VStoreLeft:o<<"  aot::vector_store_left("<<arg(i,0)<<",memory_access,static_cast<GuestAddress>("<<arg(i,1)<<"));\n";break;
+    case Op::VStoreRight:o<<"  aot::vector_store_right("<<arg(i,0)<<",memory_access,static_cast<GuestAddress>("<<arg(i,1)<<"));\n";break;
 
-    case Op::Load:{std::string ea="static_cast<GuestAddress>("+arg(i,0)+")"; if(i.type==Type::I8)return decl(i,"memory.read8("+ea+")"); if(i.type==Type::V128)return decl(i,"memory.read128("+ea+")"); const bool little=i.imm0==static_cast<std::uint64_t>(ir::Endian::Little);std::string fn="memory.read"+std::to_string(bits(i.type))+(little?"_le":"_be");return decl(i,fn+"("+ea+")");}
-    case Op::Store:{std::string ea="static_cast<GuestAddress>("+arg(i,0)+")";Type st=static_cast<Type>(i.imm1);if(st==Type::I8)o<<"  memory.write8("<<ea<<","<<arg(i,1)<<");\n";else if(st==Type::V128)o<<"  memory.write128("<<ea<<","<<arg(i,1)<<");\n";else{bool little=i.imm0==static_cast<std::uint64_t>(ir::Endian::Little);o<<"  memory.write"<<bits(st)<<(little?"_le":"_be")<<"("<<ea<<","<<arg(i,1)<<");\n";}break;}
+    case Op::Load:{std::string ea="static_cast<GuestAddress>("+arg(i,0)+")"; if(i.type==Type::I8)return decl(i,"memory_access.read8("+ea+")"); if(i.type==Type::V128)return decl(i,"memory_access.read128("+ea+")"); const bool little=i.imm0==static_cast<std::uint64_t>(ir::Endian::Little);std::string fn="memory_access.read"+std::to_string(bits(i.type))+(little?"_le":"_be");return decl(i,fn+"("+ea+")");}
+    case Op::Store:{std::string ea="static_cast<GuestAddress>("+arg(i,0)+")";Type st=static_cast<Type>(i.imm1);if(st==Type::I8)o<<"  memory_access.write8("<<ea<<","<<arg(i,1)<<");\n";else if(st==Type::V128)o<<"  memory_access.write128("<<ea<<","<<arg(i,1)<<");\n";else{bool little=i.imm0==static_cast<std::uint64_t>(ir::Endian::Little);o<<"  memory_access.write"<<bits(st)<<(little?"_le":"_be")<<"("<<ea<<","<<arg(i,1)<<");\n";}break;}
     case Op::ReserveLoad:{bool w=i.type==Type::I32;o<<"  std::"<<(w?"uint32_t":"uint64_t")<<" tmp_res_"<<i.result<<"{}; state.reservation.token=memory.reserve"<<(w?32:64)<<"(static_cast<GuestAddress>("<<arg(i,0)<<"),tmp_res_"<<i.result<<"); state.reservation.valid=true; state.reservation.width="<<(w?4:8)<<"; state.reservation.address=static_cast<GuestAddress>("<<arg(i,0)<<"); state.reservation.observed_value=tmp_res_"<<i.result<<";\n"<<decl(i,"tmp_res_"+std::to_string(i.result));break;}
     case Op::StoreConditional:{bool w=static_cast<Type>(i.imm1)==Type::I32;std::string ea="static_cast<GuestAddress>("+arg(i,0)+")";std::string e="(state.reservation.valid && state.reservation.width=="+std::to_string(w?4:8)+" && state.reservation.address=="+ea+" && memory.store_conditional"+std::to_string(w?32:64)+"("+ea+",state.reservation.token,static_cast<"+(w?std::string("std::uint32_t"):std::string("std::uint64_t"))+">("+arg(i,1)+")))";o<<decl(i,e)<<"  state.reservation.clear();\n";break;}
-    case Op::StringLoad:o<<"  aot::string_load(state,memory,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
-    case Op::StringStore:o<<"  aot::string_store(state,memory,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
+    case Op::StringLoad:o<<"  aot::string_load(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
+    case Op::StringStore:o<<"  aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
     case Op::Barrier:{const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";o<<"  memory.barrier(BarrierKind::"<<k<<");\n";break;}
     case Op::CacheZero:o<<"  memory.zero_cache_block(static_cast<GuestAddress>("<<arg(i,0)<<"),"<<i.imm0<<");\n";break;
     case Op::ICacheInvalidate:o<<"  memory.instruction_cache_invalidate(static_cast<GuestAddress>("<<arg(i,0)<<"));\n";break;
@@ -251,6 +251,7 @@ std::string emit_one_in_function(const Instruction& i,
 std::string CppAotBackend::emit_function(const ir::Block& block,std::string_view name) const {
   std::ostringstream o;
   o<<"ExecutionResult "<<name<<"([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, [[maybe_unused]] RuntimeServices& runtime) {\n";
+  o<<"  auto memory_access = memory.access_context();\n";
   o<<"  state.cia="<<block.guest_address<<"u;\n";
   std::vector<Type> value_types;
   for (const auto& i : block.instructions) if (i.result != ir::kNoValue) { if (value_types.size() <= i.result) value_types.resize(i.result + 1, Type::Void); value_types[i.result] = i.type; }
@@ -280,6 +281,7 @@ std::string CppAotBackend::emit_function(const ir::Function& function,
   o << "ExecutionResult " << name
     << "([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, "
        "[[maybe_unused]] RuntimeServices& runtime) {\n";
+  o << "  auto memory_access = memory.access_context();\n";
   o << "  goto " << local_label(function.guest_address) << ";\n";
 
   for (std::size_t bi = 0; bi < function.blocks.size(); ++bi) {

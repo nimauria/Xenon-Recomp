@@ -1,21 +1,14 @@
 #include "xenon/memory/address_space.hpp"
+#include "xenon/memory/host_vm.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
 #include <limits>
-#include <new>
 #include <stdexcept>
 #include <utility>
 
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-#include <sys/mman.h>
-#elif defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 namespace xenon::memory {
 namespace {
@@ -88,73 +81,40 @@ class AddressSpace::PhysicalBacking {
 
   bool initialize() {
     if (data_) return true;
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#if defined(MAP_NORESERVE)
-    flags |= MAP_NORESERVE;
-#endif
-    void* p = mmap(nullptr, kPhysicalMemorySize, PROT_READ | PROT_WRITE, flags, -1, 0);
-    if (p == MAP_FAILED) return false;
-    data_ = static_cast<std::byte*>(p);
-    mapped_ = true;
-#elif defined(_WIN32)
-    void* p = VirtualAlloc(nullptr, kPhysicalMemorySize,
-                           MEM_RESERVE, PAGE_READWRITE);
-    if (!p) return false;
-    if (!VirtualAlloc(p, kPhysicalMemorySize, MEM_COMMIT, PAGE_READWRITE)) {
-      VirtualFree(p, 0, MEM_RELEASE);
+    auto* reservation = host_vm::reserve(kPhysicalMemorySize);
+    if (!reservation) return false;
+    if (!host_vm::commit(reservation, kPhysicalMemorySize,
+                         host_vm::Protection::ReadWrite)) {
+      host_vm::release(reservation, kPhysicalMemorySize);
       return false;
     }
-    data_ = static_cast<std::byte*>(p);
-    mapped_ = true;
-#else
-    fallback_ = std::make_unique<std::byte[]>(kPhysicalMemorySize);
-    if (!fallback_) return false;
-    std::memset(fallback_.get(), 0, kPhysicalMemorySize);
-    data_ = fallback_.get();
-#endif
+    data_ = static_cast<std::byte*>(reservation);
     return true;
   }
 
-  void dispose() {
+  void dispose() noexcept {
     if (!data_) return;
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-    if (mapped_) munmap(data_, kPhysicalMemorySize);
-#elif defined(_WIN32)
-    if (mapped_) VirtualFree(data_, 0, MEM_RELEASE);
-#endif
-    fallback_.reset();
+    host_vm::release(data_, kPhysicalMemorySize);
     data_ = nullptr;
-    mapped_ = false;
   }
 
   void reset() {
     if (!data_) return;
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-#if defined(MADV_DONTNEED)
-    if (mapped_) {
-      madvise(data_, kPhysicalMemorySize, MADV_DONTNEED);
-      return;
-    }
-#endif
-#elif defined(_WIN32)
-    if (mapped_) {
-      if (VirtualFree(data_, kPhysicalMemorySize, MEM_DECOMMIT)) {
-        if (VirtualAlloc(data_, kPhysicalMemorySize, MEM_COMMIT,
-                         PAGE_READWRITE)) {
-          return;
-        }
-        // The range is still reserved but no longer accessible. Continuing
-        // into memset would access decommitted pages and hide the real host
-        // allocation failure behind an access violation.
-        throw std::bad_alloc{};
-      }
-      // Retain a valid backing even if a host refuses whole-region decommit.
+    if (!host_vm::discard(data_, kPhysicalMemorySize,
+                          host_vm::Protection::ReadWrite)) {
+      // The host VM abstraction is allowed to fall back internally, but a
+      // failed discard here must never leave guest RAM containing stale data.
       std::memset(data_, 0, kPhysicalMemorySize);
-      return;
     }
-#endif
-    std::memset(data_, 0, kPhysicalMemorySize);
+  }
+
+  void discard_page(std::uint32_t page) noexcept {
+    if (!data_ || page >= kPhysicalPageCount) return;
+    auto* address = data_ + std::size_t(page) * kBasePageSize;
+    if (!host_vm::discard(address, kBasePageSize,
+                          host_vm::Protection::ReadWrite)) {
+      std::memset(address, 0, kBasePageSize);
+    }
   }
 
   std::byte* data() noexcept { return data_; }
@@ -162,19 +122,42 @@ class AddressSpace::PhysicalBacking {
 
  private:
   std::byte* data_{};
-  bool mapped_{};
-  std::unique_ptr<std::byte[]> fallback_{};
 };
 
 AddressSpace::AddressSpace()
     : physical_(std::make_unique<PhysicalBacking>()),
       pages_(kPageCount),
+      hot_pages_(kPageCount),
       physical_page_used_(kPhysicalPageCount),
+      physical_mapping_refs_(kPhysicalPageCount),
       reservation_versions_(kReservationGranuleCount) {
+  for (auto& entry : hot_pages_) entry.store(0u, std::memory_order_relaxed);
   for (auto& version : reservation_versions_) version.store(1u, std::memory_order_relaxed);
 }
 
 AddressSpace::~AddressSpace() = default;
+
+xenon::cpu::MemoryAccessContext AddressSpace::access_context() noexcept {
+  xenon::cpu::FastMemoryView view{};
+  if (initialized_ && physical_ && physical_->data()) {
+    view.physical_base = physical_->data();
+    view.page_table = hot_pages_.data();
+    view.page_count = kPageCount;
+    view.page_shift = kPageShift;
+    view.physical_size = kPhysicalMemorySize;
+    view.reservation_versions = reservation_versions_.data();
+    view.reservation_granule_size = kReservationGranuleSize;
+    view.reservation_granule_count = kReservationGranuleCount;
+    view.physical_page_epochs = coherency_.page_epochs_data();
+    view.physical_page_count = kPhysicalPageCount;
+    view.global_write_epoch = coherency_.write_epoch_data();
+    view.active_coherency_writers = coherency_.active_writers_data();
+    view.observers_active = &physical_write_observers_active_;
+    view.observer_context = this;
+    view.notify_observers = &AddressSpace::fast_observer_thunk;
+  }
+  return xenon::cpu::MemoryAccessContext(*this, view);
+}
 
 bool AddressSpace::initialize() {
   std::lock_guard lock(mutex_);
@@ -190,13 +173,14 @@ void AddressSpace::reset() {
   if (!initialized_) return;
   physical_->reset();
   std::fill(pages_.begin(), pages_.end(), Page{});
-  std::fill(physical_page_used_.begin(), physical_page_used_.end(), std::uint8_t{0});
+  std::fill(physical_page_used_.begin(), physical_page_used_.end(), kPhysicalFree);
+  std::fill(physical_mapping_refs_.begin(), physical_mapping_refs_.end(), 0u);
   for (auto& version : reservation_versions_) version.store(1u, std::memory_order_relaxed);
 
   // The first 16 MiB are the GPU writeback/XPS physical window. Keep them out
   // of the anonymous physical-frame allocator while preserving direct aliases.
   std::fill_n(physical_page_used_.begin(), kHugePageSize / kBasePageSize,
-              std::uint8_t{1});
+              kPhysicalSystem);
 
   // Match the retail user virtual behavior: null/low-memory guard region.
   const auto guard_pages = 0x10000u / kBasePageSize;
@@ -209,6 +193,8 @@ void AddressSpace::reset() {
     page.current_protect = Protect::None;
     page.kind = RegionKind::Virtual;
   }
+  rebuild_hot_pages();
+  coherency_.mark_all_dirty();
   // A reset zeroes all physical RAM. Existing GPU/APU mirrors must invalidate
   // their complete copies even though there were no individual CPU writes.
   std::vector<PhysicalWriteCallback> callbacks;
@@ -229,6 +215,77 @@ const RegionDescriptor* AddressSpace::region_for(GuestAddress address) noexcept 
     if (address >= region.base && address <= region.end) return &region;
   }
   return nullptr;
+}
+
+bool AddressSpace::page_has_mmio(std::uint32_t page_index) const {
+  const auto page_base = page_index << kPageShift;
+  const auto page_end = std::uint64_t{page_base} + kBasePageSize;
+  for (const auto& range : mmio_ranges_) {
+    const auto range_end = std::uint64_t{range.base} + range.size;
+    if (std::uint64_t{page_base} < range_end &&
+        std::uint64_t{range.base} < page_end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::uint64_t AddressSpace::make_hot_entry(std::uint32_t page_index) const {
+  if (page_index >= kPageCount) return 0;
+  const auto address = page_index << kPageShift;
+  const bool slow = page_has_mmio(page_index);
+
+  const auto direct = physical_alias_address(address);
+  if (direct != 0xFFFFFFFFu && direct < kPhysicalMemorySize) {
+    return xenon::cpu::fast_memory::encode_page(
+        direct >> kPageShift, true, true, false, slow);
+  }
+
+  const auto* region = region_for(address);
+  if (!region || region->kind == RegionKind::Mmio) {
+    return slow || (region && region->kind == RegionKind::Mmio)
+               ? xenon::cpu::fast_memory::kSlow
+               : 0u;
+  }
+  if (region->kind != RegionKind::Virtual && region->kind != RegionKind::Xex) {
+    return slow ? xenon::cpu::fast_memory::kSlow : 0u;
+  }
+
+  const auto& page = pages_[page_index];
+  if (page.state != PageState::Committed ||
+      page.physical_page == kInvalidPhysicalPage) {
+    return slow ? xenon::cpu::fast_memory::kSlow : 0u;
+  }
+
+  return xenon::cpu::fast_memory::encode_page(
+      page.physical_page, has(page.current_protect, Protect::Read),
+      has(page.current_protect, Protect::Write),
+      has(page.current_protect, Protect::Execute), slow,
+      has(page.current_protect, Protect::NoCache),
+      has(page.current_protect, Protect::WriteCombine));
+}
+
+void AddressSpace::publish_hot_page(std::uint32_t page_index) {
+  if (page_index >= kPageCount) return;
+  hot_pages_[page_index].store(make_hot_entry(page_index),
+                               std::memory_order_release);
+}
+
+void AddressSpace::publish_hot_range(GuestAddress base, std::uint32_t size) {
+  if (!size) return;
+  const auto first = base >> kPageShift;
+  const auto last64 = (std::uint64_t{base} + size - 1u) >> kPageShift;
+  const auto last = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(last64, kPageCount - 1u));
+  for (std::uint32_t page = first; page <= last; ++page) {
+    publish_hot_page(page);
+  }
+}
+
+void AddressSpace::rebuild_hot_pages() {
+  for (std::uint32_t page = 0; page < kPageCount; ++page) {
+    publish_hot_page(page);
+  }
 }
 
 bool AddressSpace::range_is_allocatable(GuestAddress base, std::uint32_t size,
@@ -299,6 +356,12 @@ bool AddressSpace::reserve_pages(GuestAddress base, std::uint32_t size, Protect 
           (base < kXex4KBase ? base + 0x10000000u : base - 0x10000000u) >> kPageShift;
     }
   }
+  publish_hot_range(base, size);
+  if (region->kind == RegionKind::Xex) {
+    const auto alias_base = base < kXex4KBase ? base + 0x10000000u
+                                               : base - 0x10000000u;
+    publish_hot_range(alias_base, size);
+  }
   return !commit_now || commit_pages(base, size, protect);
 }
 
@@ -318,17 +381,39 @@ bool AddressSpace::commit_pages(GuestAddress base, std::uint32_t size, Protect p
     auto& page = pages_[first + i];
     if (page.state == PageState::Committed) {
       page.current_protect = protect;
+      if (region->kind == RegionKind::Xex) {
+        const GuestAddress addr = base + i * kBasePageSize;
+        const GuestAddress alias = addr < kXex4KBase
+                                       ? addr + 0x10000000u
+                                       : addr - 0x10000000u;
+        pages_[alias >> kPageShift].current_protect = protect;
+      }
       continue;
     }
     const auto physical_page = allocate_physical_page(false);
     if (physical_page == kInvalidPhysicalPage) {
-      for (auto p : newly_allocated) free_physical_page(p);
       for (std::uint32_t j = 0; j < i; ++j) {
         auto& rollback = pages_[first + j];
-        if (std::find(newly_allocated.begin(), newly_allocated.end(), rollback.physical_page) != newly_allocated.end()) {
-          rollback.physical_page = kInvalidPhysicalPage;
-          rollback.state = PageState::Reserved;
+        if (rollback.physical_page == kInvalidPhysicalPage ||
+            std::find(newly_allocated.begin(), newly_allocated.end(),
+                      rollback.physical_page) == newly_allocated.end()) {
+          continue;
         }
+        const auto rollback_physical = rollback.physical_page;
+        remove_physical_mapping_ref(rollback_physical);
+        if (region->kind == RegionKind::Xex) {
+          const GuestAddress addr = base + j * kBasePageSize;
+          const GuestAddress alias = addr < kXex4KBase
+                                         ? addr + 0x10000000u
+                                         : addr - 0x10000000u;
+          auto& alias_page = pages_[alias >> kPageShift];
+          remove_physical_mapping_ref(rollback_physical);
+          alias_page.physical_page = kInvalidPhysicalPage;
+          alias_page.state = PageState::Reserved;
+        }
+        rollback.physical_page = kInvalidPhysicalPage;
+        rollback.state = PageState::Reserved;
+        free_physical_page(rollback_physical);
       }
       return false;
     }
@@ -336,6 +421,7 @@ bool AddressSpace::commit_pages(GuestAddress base, std::uint32_t size, Protect p
     page.physical_page = physical_page;
     page.state = PageState::Committed;
     page.current_protect = protect;
+    add_physical_mapping_ref(physical_page);
     std::memset(physical_->data() + std::size_t(physical_page) * kBasePageSize, 0,
                 kBasePageSize);
 
@@ -346,7 +432,14 @@ bool AddressSpace::commit_pages(GuestAddress base, std::uint32_t size, Protect p
       alias_page.physical_page = physical_page;
       alias_page.state = PageState::Committed;
       alias_page.current_protect = protect;
+      add_physical_mapping_ref(physical_page);
     }
+  }
+  publish_hot_range(base, size);
+  if (region->kind == RegionKind::Xex) {
+    const auto alias_base = base < kXex4KBase ? base + 0x10000000u
+                                               : base - 0x10000000u;
+    publish_hot_range(alias_base, size);
   }
   return true;
 }
@@ -418,18 +511,32 @@ bool AddressSpace::decommit(GuestAddress base, std::uint32_t size) {
   }
   for (std::uint32_t i = 0; i < count; ++i) {
     auto& page = pages_[first + i];
-    if (page.state == PageState::Committed && page.physical_page != kInvalidPhysicalPage) {
-      free_physical_page(page.physical_page);
+    if (page.state == PageState::Committed &&
+        page.physical_page != kInvalidPhysicalPage) {
+      const auto physical_page = page.physical_page;
+      remove_physical_mapping_ref(physical_page);
+      if (region->kind == RegionKind::Xex) {
+        const GuestAddress addr = (first + i) << kPageShift;
+        const GuestAddress alias = addr < kXex4KBase
+                                       ? addr + 0x10000000u
+                                       : addr - 0x10000000u;
+        auto& alias_page = pages_[alias >> kPageShift];
+        remove_physical_mapping_ref(physical_page);
+        alias_page.physical_page = kInvalidPhysicalPage;
+        alias_page.state = PageState::Reserved;
+      }
+      if (!page.explicit_physical_mapping) {
+        free_physical_page(physical_page);
+      }
       page.physical_page = kInvalidPhysicalPage;
     }
     page.state = PageState::Reserved;
-    if (region->kind == RegionKind::Xex) {
-      const GuestAddress addr = (first + i) << kPageShift;
-      const GuestAddress alias = addr < kXex4KBase ? addr + 0x10000000u : addr - 0x10000000u;
-      auto& alias_page = pages_[alias >> kPageShift];
-      alias_page.physical_page = kInvalidPhysicalPage;
-      alias_page.state = PageState::Reserved;
-    }
+  }
+  publish_hot_range(base, size);
+  if (region->kind == RegionKind::Xex) {
+    const auto alias_base = base < kXex4KBase ? base + 0x10000000u
+                                               : base - 0x10000000u;
+    publish_hot_range(alias_base, size);
   }
   return true;
 }
@@ -441,15 +548,40 @@ bool AddressSpace::release(GuestAddress allocation_base) {
   if (page.state == PageState::Free || page.allocation_base_page != page_index || !page.allocation_page_count) return false;
   const auto* region = region_for(allocation_base);
   if (!region || (region->kind != RegionKind::Virtual && region->kind != RegionKind::Xex)) return false;
-  for (std::uint32_t i = 0; i < page.allocation_page_count; ++i) {
+  const auto allocation_page_count = page.allocation_page_count;
+  for (std::uint32_t i = 0; i < allocation_page_count; ++i) {
     auto& p = pages_[page_index + i];
-    if (p.state == PageState::Committed && p.physical_page != kInvalidPhysicalPage) free_physical_page(p.physical_page);
-    p = Page{};
-    if (region->kind == RegionKind::Xex) {
+    if (p.state == PageState::Committed &&
+        p.physical_page != kInvalidPhysicalPage) {
+      const auto physical_page = p.physical_page;
+      remove_physical_mapping_ref(physical_page);
+      if (region->kind == RegionKind::Xex) {
+        const GuestAddress addr = (page_index + i) << kPageShift;
+        const GuestAddress alias = addr < kXex4KBase
+                                       ? addr + 0x10000000u
+                                       : addr - 0x10000000u;
+        remove_physical_mapping_ref(physical_page);
+        pages_[alias >> kPageShift] = Page{};
+      }
+      if (!p.explicit_physical_mapping) {
+        free_physical_page(physical_page);
+      }
+    } else if (region->kind == RegionKind::Xex) {
       const GuestAddress addr = (page_index + i) << kPageShift;
-      const GuestAddress alias = addr < kXex4KBase ? addr + 0x10000000u : addr - 0x10000000u;
+      const GuestAddress alias = addr < kXex4KBase
+                                     ? addr + 0x10000000u
+                                     : addr - 0x10000000u;
       pages_[alias >> kPageShift] = Page{};
     }
+    p = Page{};
+  }
+  const auto allocation_size = allocation_page_count * kBasePageSize;
+  publish_hot_range(allocation_base, allocation_size);
+  if (region->kind == RegionKind::Xex) {
+    const auto alias_base = allocation_base < kXex4KBase
+                                ? allocation_base + 0x10000000u
+                                : allocation_base - 0x10000000u;
+    publish_hot_range(alias_base, allocation_size);
   }
   return true;
 }
@@ -469,6 +601,12 @@ bool AddressSpace::protect(GuestAddress base, std::uint32_t size, Protect protec
       GuestAddress addr = i << kPageShift;
       GuestAddress alias = addr < kXex4KBase ? addr + 0x10000000u : addr - 0x10000000u;
       pages_[alias >> kPageShift].current_protect = protect_value;
+    }
+    publish_hot_page(i);
+    if (pages_[i].kind == RegionKind::Xex) {
+      const GuestAddress addr = i << kPageShift;
+      const GuestAddress alias = addr < kXex4KBase ? addr + 0x10000000u : addr - 0x10000000u;
+      publish_hot_page(alias >> kPageShift);
     }
   }
   return true;
@@ -518,11 +656,17 @@ std::optional<MappingInfo> AddressSpace::query(GuestAddress address) const {
 std::uint32_t AddressSpace::allocate_physical_page(bool top_down) {
   if (!top_down) {
     for (std::uint32_t i = 0; i < kPhysicalPageCount; ++i) {
-      if (!physical_page_used_[i]) { physical_page_used_[i] = 2; return i; }
+      if (physical_page_used_[i] == kPhysicalFree) {
+        physical_page_used_[i] = kPhysicalAnonymous;
+        return i;
+      }
     }
   } else {
     for (std::uint32_t i = kPhysicalPageCount; i-- > 0;) {
-      if (!physical_page_used_[i]) { physical_page_used_[i] = 2; return i; }
+      if (physical_page_used_[i] == kPhysicalFree) {
+        physical_page_used_[i] = kPhysicalAnonymous;
+        return i;
+      }
     }
   }
   return kInvalidPhysicalPage;
@@ -530,20 +674,35 @@ std::uint32_t AddressSpace::allocate_physical_page(bool top_down) {
 
 void AddressSpace::free_physical_page(std::uint32_t page) {
   if (page >= kPhysicalPageCount) return;
-  // Dedicated GPU writeback pages stay reserved.
+  // Dedicated GPU writeback pages stay reserved. Explicit physical allocations
+  // are released only by free_physical().
   if (page < kHugePageSize / kBasePageSize) return;
-  if (physical_page_used_[page] != 2) return;
-  physical_page_used_[page] = 0;
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-#if defined(MADV_DONTNEED)
-  madvise(physical_->data() + std::size_t(page) * kBasePageSize, kBasePageSize, MADV_DONTNEED);
-#else
-  std::memset(physical_->data() + std::size_t(page) * kBasePageSize, 0, kBasePageSize);
-#endif
-#else
-  std::memset(physical_->data() + std::size_t(page) * kBasePageSize, 0, kBasePageSize);
-#endif
+  auto& ownership = physical_page_used_[page];
+  if (ownership != kPhysicalAnonymous &&
+      ownership != kPhysicalAnonymousPendingFree) {
+    return;
+  }
+  if (physical_mapping_refs_[page] != 0u) {
+    ownership = kPhysicalAnonymousPendingFree;
+    return;
+  }
+  ownership = kPhysicalFree;
+  physical_->discard_page(page);
   note_physical_write(page * kBasePageSize, kBasePageSize);
+}
+
+void AddressSpace::add_physical_mapping_ref(std::uint32_t page) {
+  if (page >= kPhysicalPageCount) return;
+  ++physical_mapping_refs_[page];
+}
+
+void AddressSpace::remove_physical_mapping_ref(std::uint32_t page) {
+  if (page >= kPhysicalPageCount || physical_mapping_refs_[page] == 0u) return;
+  --physical_mapping_refs_[page];
+  if (physical_mapping_refs_[page] == 0u &&
+      physical_page_used_[page] == kPhysicalAnonymousPendingFree) {
+    free_physical_page(page);
+  }
 }
 
 bool AddressSpace::reserve_physical_run(std::uint32_t count, std::uint32_t alignment_pages,
@@ -557,7 +716,7 @@ bool AddressSpace::reserve_physical_run(std::uint32_t count, std::uint32_t align
   if (!top_down) {
     for (std::uint32_t first = 0; first + count <= kPhysicalPageCount; first += alignment_pages) {
       if (!free_run(first)) continue;
-      std::fill_n(physical_page_used_.begin() + first, count, std::uint8_t{3});
+      std::fill_n(physical_page_used_.begin() + first, count, kPhysicalExplicit);
       out_first_page = first;
       return true;
     }
@@ -565,7 +724,7 @@ bool AddressSpace::reserve_physical_run(std::uint32_t count, std::uint32_t align
     std::uint32_t first = (kPhysicalPageCount - count) / alignment_pages * alignment_pages;
     while (true) {
       if (free_run(first)) {
-        std::fill_n(physical_page_used_.begin() + first, count, std::uint8_t{3});
+        std::fill_n(physical_page_used_.begin() + first, count, kPhysicalExplicit);
         out_first_page = first;
         return true;
       }
@@ -600,28 +759,14 @@ bool AddressSpace::free_physical(std::uint32_t physical_base, std::uint32_t size
   const auto count = page_count_for(size);
   if (first + count > kPhysicalPageCount) return false;
   for (std::uint32_t i = 0; i < count; ++i) {
-    if (physical_page_used_[first + i] != 3) return false;
-  }
-  // A physical allocation can't be released while a virtual mapping still
-  // references it. The owning GPU/APU/kernel layer must unmap first.
-  for (const auto& page : pages_) {
-    if (page.state != PageState::Committed || page.physical_page == kInvalidPhysicalPage) continue;
-    if (page.physical_page >= first && page.physical_page < first + count) return false;
+    if (physical_page_used_[first + i] != kPhysicalExplicit ||
+        physical_mapping_refs_[first + i] != 0u) {
+      return false;
+    }
   }
   for (std::uint32_t i = 0; i < count; ++i) {
-    physical_page_used_[first + i] = 0;
-#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
-#if defined(MADV_DONTNEED)
-    madvise(physical_->data() + std::size_t(first + i) * kBasePageSize,
-            kBasePageSize, MADV_DONTNEED);
-#else
-    std::memset(physical_->data() + std::size_t(first + i) * kBasePageSize, 0,
-                kBasePageSize);
-#endif
-#else
-    std::memset(physical_->data() + std::size_t(first + i) * kBasePageSize, 0,
-                kBasePageSize);
-#endif
+    physical_page_used_[first + i] = kPhysicalFree;
+    physical_->discard_page(first + i);
   }
   note_physical_write(physical_base, count * kBasePageSize);
   return true;
@@ -650,8 +795,12 @@ bool AddressSpace::map_virtual_to_physical(GuestAddress virtual_base,
     p.state = PageState::Committed;
     p.kind = RegionKind::Virtual;
     p.explicit_physical_mapping = true;
-    if (physical_page_used_[p.physical_page] == 0) physical_page_used_[p.physical_page] = 3;
+    if (physical_page_used_[p.physical_page] == kPhysicalFree) {
+      physical_page_used_[p.physical_page] = kPhysicalExplicit;
+    }
+    add_physical_mapping_ref(p.physical_page);
   }
+  publish_hot_range(virtual_base, size);
   return true;
 }
 
@@ -798,11 +947,13 @@ bool AddressSpace::add_mmio_range(GuestAddress base, std::uint32_t size, MmioRea
   if (!size) return false;
   for (const auto& range : mmio_ranges_) if (overlaps(base, size, range.base, range.size)) return false;
   mmio_ranges_.push_back({base, size, std::move(read), std::move(write), std::move(name)});
+  publish_hot_range(base, size);
   return true;
 }
 void AddressSpace::clear_mmio_ranges() {
   std::lock_guard lock(mutex_);
   mmio_ranges_.clear();
+  rebuild_hot_pages();
 }
 
 std::uint64_t AddressSpace::add_invalidation_callback(InvalidationCallback callback) {
@@ -830,6 +981,8 @@ std::uint64_t AddressSpace::add_physical_write_callback(PhysicalWriteCallback ca
   std::lock_guard lock(mutex_);
   const auto id = next_physical_write_callback_id_++;
   physical_write_callbacks_.push_back({id, std::move(callback)});
+  physical_write_observers_active_.store(!physical_write_callbacks_.empty(),
+                                         std::memory_order_release);
   return id;
 }
 
@@ -837,6 +990,8 @@ void AddressSpace::remove_physical_write_callback(std::uint64_t id) {
   std::lock_guard lock(mutex_);
   std::erase_if(physical_write_callbacks_,
                 [id](const auto& pair) { return pair.first == id; });
+  physical_write_observers_active_.store(!physical_write_callbacks_.empty(),
+                                         std::memory_order_release);
 }
 
 template <typename T>
@@ -949,22 +1104,42 @@ std::uint64_t AddressSpace::reservation_version(std::uint32_t physical_address) 
 void AddressSpace::note_physical_write(std::uint32_t physical_address, std::uint32_t width) {
   if (physical_address >= kPhysicalMemorySize || !width) return;
   const auto first = physical_address / kReservationGranuleSize;
-  const auto last = std::min<std::uint32_t>((physical_address + width - 1u) / kReservationGranuleSize,
-                                            kReservationGranuleCount - 1u);
+  const auto last = std::min<std::uint32_t>(
+      static_cast<std::uint32_t>((std::uint64_t{physical_address} + width - 1u) /
+                                 kReservationGranuleSize),
+      kReservationGranuleCount - 1u);
   for (std::uint32_t i = first; i <= last; ++i) {
     auto next = reservation_versions_[i].fetch_add(1u, std::memory_order_acq_rel) + 1u;
     if (next == 0u) reservation_versions_[i].store(1u, std::memory_order_release);
   }
-  // These observers are intended for lightweight cache-dirty notifications in
-  // GPU/APU subsystems. They run synchronously so visibility follows the write.
-  std::vector<PhysicalWriteCallback> callbacks;
-  callbacks.reserve(physical_write_callbacks_.size());
-  for (const auto& [id, callback] : physical_write_callbacks_) {
-    (void)id;
-    callbacks.push_back(callback);
+  coherency_.mark_write(physical_address, width);
+  if (physical_write_observers_active_.load(std::memory_order_relaxed)) {
+    notify_physical_write_observers(physical_address, width);
   }
-  for (auto& callback : callbacks)
+}
+
+void AddressSpace::notify_physical_write_observers(
+    std::uint32_t physical_address, std::uint32_t width) {
+  std::vector<PhysicalWriteCallback> callbacks;
+  {
+    std::lock_guard lock(mutex_);
+    callbacks.reserve(physical_write_callbacks_.size());
+    for (const auto& [id, callback] : physical_write_callbacks_) {
+      (void)id;
+      callbacks.push_back(callback);
+    }
+  }
+  for (auto& callback : callbacks) {
     if (callback) callback(physical_address, width);
+  }
+}
+
+void AddressSpace::fast_observer_thunk(void* context,
+                                       std::uint32_t physical_address,
+                                       std::uint32_t width) {
+  if (!context) return;
+  static_cast<AddressSpace*>(context)->notify_physical_write_observers(
+      physical_address, width);
 }
 
 void AddressSpace::note_physical_write_addresses(
@@ -1061,15 +1236,103 @@ void AddressSpace::instruction_cache_invalidate(GuestAddress address) {
   for (auto& callback : callbacks) if (callback) callback(address);
 }
 
-void AddressSpace::zero(GuestAddress address, std::uint32_t size) { fill(address, size, 0); }
-void AddressSpace::fill(GuestAddress address, std::uint32_t size, std::uint8_t value) {
-  for (std::uint32_t i = 0; i < size; ++i) write8(address + i, value);
+void AddressSpace::zero(GuestAddress address, std::uint32_t size) {
+  fill(address, size, 0);
 }
+
+void AddressSpace::fill(GuestAddress address, std::uint32_t size,
+                        std::uint8_t value) {
+  if (!size) return;
+  std::lock_guard lock(mutex_);
+  std::uint32_t remaining = size;
+  auto cursor = address;
+  while (remaining) {
+    const auto page_remaining =
+        kBasePageSize - (cursor & (kBasePageSize - 1u));
+    const auto chunk = std::min(remaining, page_remaining);
+    if (page_has_mmio(cursor >> kPageShift)) {
+      // Preserve the old byte-wise MMIO semantics on the exceptional path.
+      for (std::uint32_t i = 0; i < chunk; ++i) {
+        write8(cursor + i, value);
+      }
+    } else {
+      auto resolved = resolve_contiguous(cursor, chunk, AccessKind::Write);
+      if (!resolved) {
+        for (std::uint32_t i = 0; i < chunk; ++i) write8(cursor + i, value);
+      } else {
+        std::memset(resolved->ptr, value, chunk);
+        note_physical_write(resolved->physical_address, chunk);
+      }
+    }
+    cursor += chunk;
+    remaining -= chunk;
+  }
+}
+
 void AddressSpace::copy(GuestAddress dest, GuestAddress src, std::uint32_t size) {
   if (!size || dest == src) return;
-  std::vector<std::uint8_t> temporary(size);
-  for (std::uint32_t i = 0; i < size; ++i) temporary[i] = read8(src + i);
-  for (std::uint32_t i = 0; i < size; ++i) write8(dest + i, temporary[i]);
+  std::lock_guard lock(mutex_);
+
+  // Snapshot first so arbitrary physical aliases retain memmove-like semantics
+  // even when guest virtual ordering doesn't reveal the backing overlap. Common
+  // RAM pages are copied natively a page chunk at a time rather than as scalar
+  // MemoryPort operations.
+  std::vector<std::byte> temporary(size);
+  std::uint32_t remaining = size;
+  auto source = src;
+  std::size_t offset = 0;
+  while (remaining) {
+    const auto page_remaining =
+        kBasePageSize - (source & (kBasePageSize - 1u));
+    const auto chunk = std::min(remaining, page_remaining);
+    if (page_has_mmio(source >> kPageShift)) {
+      for (std::uint32_t i = 0; i < chunk; ++i) {
+        temporary[offset + i] = static_cast<std::byte>(read8(source + i));
+      }
+    } else {
+      auto resolved = resolve_contiguous(source, chunk, AccessKind::Read);
+      if (!resolved) {
+        for (std::uint32_t i = 0; i < chunk; ++i) {
+          temporary[offset + i] = static_cast<std::byte>(read8(source + i));
+        }
+      } else {
+        std::memcpy(temporary.data() + offset, resolved->ptr, chunk);
+      }
+    }
+    source += chunk;
+    offset += chunk;
+    remaining -= chunk;
+  }
+
+  remaining = size;
+  auto destination = dest;
+  offset = 0;
+  while (remaining) {
+    const auto page_remaining =
+        kBasePageSize - (destination & (kBasePageSize - 1u));
+    const auto chunk = std::min(remaining, page_remaining);
+    if (page_has_mmio(destination >> kPageShift)) {
+      for (std::uint32_t i = 0; i < chunk; ++i) {
+        write8(destination + i,
+               std::to_integer<std::uint8_t>(temporary[offset + i]));
+      }
+    } else {
+      auto resolved =
+          resolve_contiguous(destination, chunk, AccessKind::Write);
+      if (!resolved) {
+        for (std::uint32_t i = 0; i < chunk; ++i) {
+          write8(destination + i,
+                 std::to_integer<std::uint8_t>(temporary[offset + i]));
+        }
+      } else {
+        std::memcpy(resolved->ptr, temporary.data() + offset, chunk);
+        note_physical_write(resolved->physical_address, chunk);
+      }
+    }
+    destination += chunk;
+    offset += chunk;
+    remaining -= chunk;
+  }
 }
 
 [[noreturn]] void AddressSpace::fault(GuestAddress address, std::size_t width,

@@ -222,6 +222,23 @@ void test_sample_transfer_shaders() {
              "Texture2DMS<float4,2>") != std::string::npos);
   assert(make_color_sample_write_shader().hlsl.find("SV_SampleIndex") !=
          std::string::npos);
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    const auto read = make_depth_sample_read_shader(samples);
+    assert(read.complete);
+    assert(compiler.compile(read, {}).succeeded);
+    assert(compiler.compile(read, spirv).succeeded);
+  }
+  const auto write = make_depth_sample_write_shader();
+  assert(write.complete && write.hlsl.find("SV_StencilRef") != std::string::npos);
+  assert(compiler.compile(write, {}).succeeded);
+  spirv.spirv_stencil_export = true;
+  assert(compiler.compile(write, spirv).succeeded);
+  for (const auto& fallback : {make_depth_only_sample_write_shader(),
+                               make_stencil_mask_write_shader()}) {
+    assert(fallback.complete);
+    assert(compiler.compile(fallback, {}).succeeded);
+    assert(compiler.compile(fallback, spirv).succeeded);
+  }
 }
 
 }  // namespace

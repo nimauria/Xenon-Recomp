@@ -72,3 +72,19 @@ memory store.
 Kernel APIs such as `NtAllocateVirtualMemory`, `MmAllocatePhysicalMemory`, profiles, saves,
 content storage and filesystem policy are later runtime/kernel consumers of this memory
 module; they are not part of the physical RAM/address-space implementation itself.
+
+## Memory V2 validation — 2026-09-18
+
+The first Memory V2 implementation slice adds a compact hot translation table, generated `MemoryAccessContext` loads/stores, physical mapping refcounts/pending-free ownership, backend-neutral guest-memory coherency, range-oriented fill/copy behavior and a host-VM abstraction.
+
+New or expanded regression coverage includes:
+
+- direct fast RAM access and MMIO slow-path fallback;
+- six concurrent normal-RAM access threads;
+- physical alias lifetime and delayed anonymous-page reuse;
+- range operations across page boundaries;
+- range-level write notification across discontiguous physical mappings;
+- coherency epochs and texture dirty consumption;
+- generated PPC scalar/vector memory access through `MemoryAccessContext`.
+
+The complete generic Linux x86-64 Release CTest matrix is run after each foundational change. Native Vulkan backend compilation requires a Vulkan SDK and D3D12/Windows host-VM validation requires a Windows build, so those platform-specific checks remain separate required validation rather than being inferred from generic Linux tests. See [`../MEMORY_V2.md`](../MEMORY_V2.md) for the live completion status and remaining hardening work.
