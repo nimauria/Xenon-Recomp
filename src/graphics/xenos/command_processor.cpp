@@ -1,6 +1,7 @@
 #include "xenon/gpu/command_processor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstring>
@@ -20,14 +21,17 @@ namespace {
   return v;
 }
 
-void store_le32(std::byte* p, std::uint32_t value) noexcept {
+[[nodiscard]] std::array<std::byte, 4> encode_le32(
+    std::uint32_t value) noexcept {
   if constexpr (std::endian::native == std::endian::big) {
     value = ((value & 0x000000FFu) << 24) |
             ((value & 0x0000FF00u) << 8) |
             ((value & 0x00FF0000u) >> 8) |
             ((value & 0xFF000000u) >> 24);
   }
-  std::memcpy(p, &value, sizeof(value));
+  std::array<std::byte, 4> bytes{};
+  std::memcpy(bytes.data(), &value, sizeof(value));
+  return bytes;
 }
 
 [[nodiscard]] bool is_draw_opcode(Type3Opcode opcode) noexcept {
@@ -315,12 +319,12 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
     throw std::out_of_range("Xenos physical write outside RAM");
   }
   const std::uint32_t stored = gpu_swap(logical_value, endian);
-  auto* p = memory_.physical_data(address);
-  if (!p) throw std::runtime_error("Xenos physical write has no backing");
   // The Xenos memory path is little-endian before the packet-selected endian
   // transformation; CPU-visible big-endian access is supplied by MemoryPort.
-  store_le32(p, stored);
-  memory_.notify_external_write(address, 4);
+  const auto bytes = encode_le32(stored);
+  if (!memory_.write_physical(address, bytes)) {
+    throw std::runtime_error("Xenos physical write has no backing");
+  }
   stream_.emit(ir::PhysicalMemoryWrite{address, logical_value, endian});
   ++stats_.physical_writes;
 }

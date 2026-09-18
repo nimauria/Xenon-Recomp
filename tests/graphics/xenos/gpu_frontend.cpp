@@ -31,16 +31,13 @@ namespace {
 
 void store_be32(AddressSpace& memory, std::uint32_t physical_address,
                 std::uint32_t value) {
-  auto* p = memory.physical_data(physical_address);
-  assert(p);
-  const std::uint8_t bytes[4] = {
-      static_cast<std::uint8_t>(value >> 24),
-      static_cast<std::uint8_t>(value >> 16),
-      static_cast<std::uint8_t>(value >> 8),
-      static_cast<std::uint8_t>(value),
+  const std::array<std::byte, 4> bytes = {
+      static_cast<std::byte>(value >> 24),
+      static_cast<std::byte>(value >> 16),
+      static_cast<std::byte>(value >> 8),
+      static_cast<std::byte>(value),
   };
-  std::memcpy(p, bytes, sizeof(bytes));
-  memory.notify_external_write(physical_address, 4);
+  assert(memory.write_physical(physical_address, bytes));
 }
 
 void write_words(AddressSpace& memory, std::uint32_t base,

@@ -25,9 +25,12 @@ Popup {
     property bool offline: true
     property bool isolatedSettings: false
     property string baselineSnapshot: ""
+    property bool allowDirtyClose: false
+    property bool reopenForUnsavedPrompt: false
 
     readonly property bool nameIsValid: nameField.text.trim().length > 0
         && ProfileStore.nameAvailable(nameField.text.trim(), root.editingIndex)
+    readonly property int descriptionLimit: ProfileStore.descriptionLimit
     readonly property bool dirty: root.currentSnapshot() !== root.baselineSnapshot
 
     signal submitted(var data)
@@ -116,7 +119,7 @@ Popup {
             close()
             return
         }
-        discardDialog.open()
+        unsavedDialog.open()
     }
 
     function submit() {
@@ -170,18 +173,57 @@ Popup {
     modal: true
     focus: true
     padding: 0
-    closePolicy: Popup.NoAutoClose
+    // Let Qt detect clicks outside the modal reliably. If the form is dirty,
+    // the popup is restored immediately and Xenon's unsaved-changes prompt
+    // is shown over it. This avoids platform-specific overlay hit-test issues.
+    closePolicy: Popup.CloseOnPressOutside
 
-    Shortcut { sequence: "Escape"; enabled: root.opened; onActivated: root.requestClose() }
-
-    Overlay.modal: Rectangle {
-        color: Theme.overlay
-        MouseArea {
-            anchors.fill: parent
-            enabled: !discardDialog.opened
-            onClicked: root.requestClose()
-        }
+    onAboutToHide: {
+        if (root.dirty && !root.allowDirtyClose && !unsavedDialog.opened)
+            root.reopenForUnsavedPrompt = true
     }
+
+    onClosed: {
+        if (root.reopenForUnsavedPrompt) {
+            root.reopenForUnsavedPrompt = false
+            Qt.callLater(function() {
+                root.open()
+                Qt.callLater(function() { unsavedDialog.open() })
+            })
+        }
+        root.allowDirtyClose = false
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.opened && !unsavedDialog.opened
+        onActivated: root.requestClose()
+    }
+
+    // Enter is the default action while creating a profile, regardless of
+    // which normal form control currently has focus.
+    Shortcut {
+        sequence: "Return"
+        context: Qt.ApplicationShortcut
+        enabled: root.opened
+            && root.createMode
+            && root.nameIsValid
+            && !unsavedDialog.opened
+            && !avatarDialog.visible
+        onActivated: root.submit()
+    }
+    Shortcut {
+        sequence: "Enter"
+        context: Qt.ApplicationShortcut
+        enabled: root.opened
+            && root.createMode
+            && root.nameIsValid
+            && !unsavedDialog.opened
+            && !avatarDialog.visible
+        onActivated: root.submit()
+    }
+
+    Overlay.modal: Rectangle { color: Theme.overlay }
 
     background: Rectangle {
         color: Theme.surfaceRaised
@@ -321,6 +363,11 @@ Popup {
                             placeholderText: "Profile name"
                             accessibleName: "Profile name"
                             automationId: "profile-name"
+                            maximumLength: ProfileStore.profileNameLimit
+                            onAccepted: {
+                                if (root.createMode && root.nameIsValid && !unsavedDialog.opened)
+                                    root.submit()
+                            }
                             onTextEdited: {
                                 if (text.trim().length === 0) {
                                     validationText.text = "Enter a profile name."
@@ -336,7 +383,7 @@ Popup {
                         Text { id: validationText; visible: false; text: ""; color: Theme.danger; font.pixelSize: Theme.typeCaption }
                         Text {
                             visible: !validationText.visible
-                            text: "The internal profile ID is generated automatically and never changes when the display name changes."
+                            text: "Profile IDs are generated automatically and remain stable when the display name changes."
                             color: Theme.textMuted
                             font.pixelSize: Theme.typeCaption
                         }
@@ -346,8 +393,27 @@ Popup {
                         visible: root.editSection !== "paths"
                         Layout.fillWidth: true
                         spacing: Theme.spaceXs
-                        Text { text: "Description"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
-                        XTextField { id: descriptionField; Layout.fillWidth: true; placeholderText: "Optional description"; accessibleName: "Profile description" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text { text: "Description"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: descriptionField.text.length + " / " + root.descriptionLimit
+                                color: descriptionField.text.length >= root.descriptionLimit ? Theme.warning : Theme.textMuted
+                                font.pixelSize: Theme.typeCaption
+                            }
+                        }
+                        XTextField {
+                            id: descriptionField
+                            Layout.fillWidth: true
+                            placeholderText: "Optional description"
+                            accessibleName: "Profile description"
+                            maximumLength: root.descriptionLimit
+                            onAccepted: {
+                                if (root.createMode && root.nameIsValid && !unsavedDialog.opened)
+                                    root.submit()
+                            }
+                        }
                     }
 
                     GridLayout {
@@ -464,12 +530,20 @@ Popup {
     }
 
     XConfirmDialog {
-        id: discardDialog
-        title: root.createMode ? "Discard new profile?" : "Discard profile changes?"
-        message: "Your unsaved changes will be lost."
-        confirmText: "Discard changes"
-        cancelText: "Continue editing"
-        destructive: true
-        onConfirmed: root.close()
+        id: unsavedDialog
+        title: root.createMode ? "Save this profile?" : "Save profile changes?"
+        message: root.createMode
+            ? "This profile has unsaved details. Save it before closing?"
+            : "You have unsaved profile changes. Save them before closing?"
+        confirmText: root.createMode ? "Create profile" : (root.editSection === "paths" ? "Save paths" : "Save changes")
+        cancelText: "Cancel"
+        secondaryText: "Discard changes"
+        secondaryDestructive: true
+        destructive: false
+        onConfirmed: root.submit()
+        onSecondaryTriggered: {
+            root.allowDirtyClose = true
+            root.close()
+        }
     }
 }

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include "xenon/cpu/types.hpp"
 
@@ -64,12 +65,11 @@ struct FastMemoryView {
   std::atomic<std::uint64_t>* global_write_epoch{};
   std::atomic<std::uint32_t>* active_coherency_writers{};
 
-  // Compatibility/debug observers are deliberately excluded from normal
-  // production operation. When none are registered this is one predictable
-  // false branch; callbacks never sit on the mandatory scalar-store path.
-  const std::atomic<bool>* observers_active{};
-  void* observer_context{};
-  void (*notify_observers)(void*, std::uint32_t, std::uint32_t){};
+  // Read-side quiescence for mapping reclamation. A context holds one reader
+  // reference for its lifetime. Cold mapping code may unpublish a hot entry
+  // immediately, but physical pages retired by that change are not recycled
+  // until no context that could have observed the old entry remains alive.
+  std::atomic<std::uint32_t>* active_fast_readers{};
 };
 
 // Concrete, compiler-inlinable access facade used by generated PPC. Common RAM
@@ -79,7 +79,24 @@ class MemoryAccessContext {
  public:
   explicit MemoryAccessContext(MemoryPort& slow,
                                FastMemoryView fast = {}) noexcept
-      : slow_(&slow), fast_(fast) {}
+      : slow_(&slow), fast_(fast) {
+    acquire_read_guard();
+  }
+  ~MemoryAccessContext() noexcept { release_read_guard(); }
+  MemoryAccessContext(const MemoryAccessContext&) = delete;
+  MemoryAccessContext& operator=(const MemoryAccessContext&) = delete;
+  MemoryAccessContext(MemoryAccessContext&& other) noexcept
+      : slow_(std::exchange(other.slow_, nullptr)),
+        fast_(other.fast_),
+        read_guard_active_(std::exchange(other.read_guard_active_, false)) {}
+  MemoryAccessContext& operator=(MemoryAccessContext&& other) noexcept {
+    if (this == &other) return *this;
+    release_read_guard();
+    slow_ = std::exchange(other.slow_, nullptr);
+    fast_ = other.fast_;
+    read_guard_active_ = std::exchange(other.read_guard_active_, false);
+    return *this;
+  }
 
   [[nodiscard]] std::uint8_t read8(GuestAddress address);
   [[nodiscard]] std::uint16_t read16_be(GuestAddress address);
@@ -124,8 +141,20 @@ class MemoryAccessContext {
   template <typename T>
   [[nodiscard]] static T byteswap_if(T value, bool swap) noexcept;
 
+  void acquire_read_guard() noexcept {
+    if (!fast_.active_fast_readers || !has_fast_path()) return;
+    fast_.active_fast_readers->fetch_add(1u, std::memory_order_acq_rel);
+    read_guard_active_ = true;
+  }
+  void release_read_guard() noexcept {
+    if (!read_guard_active_ || !fast_.active_fast_readers) return;
+    fast_.active_fast_readers->fetch_sub(1u, std::memory_order_release);
+    read_guard_active_ = false;
+  }
+
   MemoryPort* slow_{};
   FastMemoryView fast_{};
+  bool read_guard_active_{};
 };
 
 // Deliberately tiny CPU-facing contract. This is NOT the RAM subsystem.
@@ -274,10 +303,6 @@ inline void MemoryAccessContext::note_write(
     fast_.active_coherency_writers->fetch_sub(1u, std::memory_order_release);
   }
 
-  if (fast_.observers_active && fast_.notify_observers &&
-      fast_.observers_active->load(std::memory_order_relaxed)) {
-    fast_.notify_observers(fast_.observer_context, physical_address, width);
-  }
 }
 
 template <typename T>

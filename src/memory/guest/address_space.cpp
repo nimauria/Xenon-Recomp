@@ -124,6 +124,34 @@ class AddressSpace::PhysicalBacking {
   std::byte* data_{};
 };
 
+PhysicalWriteSpan::~PhysicalWriteSpan() noexcept { complete(); }
+
+PhysicalWriteSpan::PhysicalWriteSpan(PhysicalWriteSpan&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)),
+      physical_address_(other.physical_address_),
+      bytes_(other.bytes_) {
+  other.bytes_ = {};
+}
+
+PhysicalWriteSpan& PhysicalWriteSpan::operator=(PhysicalWriteSpan&& other) noexcept {
+  if (this == &other) return *this;
+  complete();
+  owner_ = std::exchange(other.owner_, nullptr);
+  physical_address_ = other.physical_address_;
+  bytes_ = other.bytes_;
+  other.bytes_ = {};
+  return *this;
+}
+
+void PhysicalWriteSpan::complete() noexcept {
+  if (!owner_) return;
+  auto* owner = std::exchange(owner_, nullptr);
+  const auto address = physical_address_;
+  const auto size = static_cast<std::uint32_t>(bytes_.size());
+  bytes_ = {};
+  if (size) owner->note_physical_write(address, size);
+}
+
 AddressSpace::AddressSpace()
     : physical_(std::make_unique<PhysicalBacking>()),
       pages_(kPageCount),
@@ -152,9 +180,7 @@ xenon::cpu::MemoryAccessContext AddressSpace::access_context() noexcept {
     view.physical_page_count = kPhysicalPageCount;
     view.global_write_epoch = coherency_.write_epoch_data();
     view.active_coherency_writers = coherency_.active_writers_data();
-    view.observers_active = &physical_write_observers_active_;
-    view.observer_context = this;
-    view.notify_observers = &AddressSpace::fast_observer_thunk;
+    view.active_fast_readers = &active_fast_readers_;
   }
   return xenon::cpu::MemoryAccessContext(*this, view);
 }
@@ -195,17 +221,6 @@ void AddressSpace::reset() {
   }
   rebuild_hot_pages();
   coherency_.mark_all_dirty();
-  // A reset zeroes all physical RAM. Existing GPU/APU mirrors must invalidate
-  // their complete copies even though there were no individual CPU writes.
-  std::vector<PhysicalWriteCallback> callbacks;
-  callbacks.reserve(physical_write_callbacks_.size());
-  for (const auto& [id, callback] : physical_write_callbacks_) {
-    (void)id;
-    callbacks.push_back(callback);
-  }
-  for (auto& callback : callbacks) {
-    if (callback) callback(0, kPhysicalMemorySize);
-  }
 }
 
 std::span<const RegionDescriptor> AddressSpace::regions() noexcept { return kRegions; }
@@ -654,6 +669,7 @@ std::optional<MappingInfo> AddressSpace::query(GuestAddress address) const {
 }
 
 std::uint32_t AddressSpace::allocate_physical_page(bool top_down) {
+  reclaim_retired_physical_pages();
   if (!top_down) {
     for (std::uint32_t i = 0; i < kPhysicalPageCount; ++i) {
       if (physical_page_used_[i] == kPhysicalFree) {
@@ -686,9 +702,32 @@ void AddressSpace::free_physical_page(std::uint32_t page) {
     ownership = kPhysicalAnonymousPendingFree;
     return;
   }
-  ownership = kPhysicalFree;
-  physical_->discard_page(page);
-  note_physical_write(page * kBasePageSize, kBasePageSize);
+  // Do not immediately recycle the backing page. A generated fast access may
+  // have loaded the old hot translation immediately before it was unpublished.
+  // Retired pages become allocator-visible only after all pre-existing
+  // MemoryAccessContext read-side guards have drained.
+  ownership = kPhysicalRetired;
+}
+
+void AddressSpace::reclaim_retired_physical_pages() {
+  if (active_fast_readers_.load(std::memory_order_acquire) != 0u) return;
+
+  std::uint32_t page = kHugePageSize / kBasePageSize;
+  while (page < kPhysicalPageCount) {
+    if (physical_page_used_[page] != kPhysicalRetired) {
+      ++page;
+      continue;
+    }
+    const auto first = page;
+    while (page < kPhysicalPageCount &&
+           physical_page_used_[page] == kPhysicalRetired) {
+      physical_page_used_[page] = kPhysicalFree;
+      physical_->discard_page(page);
+      ++page;
+    }
+    note_physical_write(first * kBasePageSize,
+                        (page - first) * kBasePageSize);
+  }
 }
 
 void AddressSpace::add_physical_mapping_ref(std::uint32_t page) {
@@ -708,6 +747,7 @@ void AddressSpace::remove_physical_mapping_ref(std::uint32_t page) {
 bool AddressSpace::reserve_physical_run(std::uint32_t count, std::uint32_t alignment_pages,
                                         bool top_down, std::uint32_t& out_first_page) {
   if (!count || count > kPhysicalPageCount || !alignment_pages) return false;
+  reclaim_retired_physical_pages();
   auto free_run = [&](std::uint32_t first) {
     if (first + count > kPhysicalPageCount) return false;
     for (std::uint32_t i = 0; i < count; ++i) if (physical_page_used_[first + i]) return false;
@@ -765,10 +805,8 @@ bool AddressSpace::free_physical(std::uint32_t physical_base, std::uint32_t size
     }
   }
   for (std::uint32_t i = 0; i < count; ++i) {
-    physical_page_used_[first + i] = kPhysicalFree;
-    physical_->discard_page(first + i);
+    physical_page_used_[first + i] = kPhysicalRetired;
   }
-  note_physical_write(physical_base, count * kBasePageSize);
   return true;
 }
 
@@ -785,6 +823,13 @@ bool AddressSpace::map_virtual_to_physical(GuestAddress virtual_base,
   const auto first = virtual_base >> kPageShift;
   const auto count = size >> kPageShift;
   for (std::uint32_t i = 0; i < count; ++i) if (pages_[first + i].state != PageState::Free) return false;
+  reclaim_retired_physical_pages();
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if (physical_page_used_[physical_base / kBasePageSize + i] ==
+        kPhysicalRetired) {
+      return false;
+    }
+  }
   for (std::uint32_t i = 0; i < count; ++i) {
     auto& p = pages_[first + i];
     p.physical_page = physical_base / kBasePageSize + i;
@@ -840,10 +885,6 @@ std::uint32_t AddressSpace::fetch32_be(GuestAddress address) {
   return value;
 }
 
-std::byte* AddressSpace::physical_data(std::uint32_t physical_address) {
-  if (!initialized_ || physical_address >= kPhysicalMemorySize) return nullptr;
-  return physical_->data() + physical_address;
-}
 const std::byte* AddressSpace::physical_data(std::uint32_t physical_address) const {
   if (!initialized_ || physical_address >= kPhysicalMemorySize) return nullptr;
   return physical_->data() + physical_address;
@@ -859,6 +900,36 @@ bool AddressSpace::copy_physical_range(
   std::memcpy(destination.data(), physical_->data() + physical_address,
               destination.size());
   return true;
+}
+
+bool AddressSpace::write_physical(std::uint32_t physical_address,
+                                  std::span<const std::byte> source) {
+  if (source.empty()) return true;
+  auto write = physical_write_span(
+      physical_address, static_cast<std::uint32_t>(source.size()));
+  if (!write) return false;
+  std::memcpy(write.bytes().data(), source.data(), source.size());
+  return true;
+}
+
+bool AddressSpace::fill_physical(std::uint32_t physical_address,
+                                 std::uint32_t size, std::byte value) {
+  if (!size) return true;
+  auto write = physical_write_span(physical_address, size);
+  if (!write) return false;
+  std::memset(write.bytes().data(), std::to_integer<int>(value), size);
+  return true;
+}
+
+PhysicalWriteSpan AddressSpace::physical_write_span(
+    std::uint32_t physical_address, std::uint32_t size) noexcept {
+  if (!initialized_ || !size || physical_address >= kPhysicalMemorySize ||
+      std::uint64_t{physical_address} + size > kPhysicalMemorySize) {
+    return {};
+  }
+  return PhysicalWriteSpan(
+      this, physical_address,
+      std::span<std::byte>(physical_->data() + physical_address, size));
 }
 
 AddressSpace::ResolvedByte AddressSpace::resolve_byte(GuestAddress address, AccessKind access) {
@@ -965,33 +1036,6 @@ std::uint64_t AddressSpace::add_invalidation_callback(InvalidationCallback callb
 void AddressSpace::remove_invalidation_callback(std::uint64_t id) {
   std::lock_guard lock(mutex_);
   std::erase_if(invalidation_callbacks_, [id](const auto& pair) { return pair.first == id; });
-}
-
-void AddressSpace::notify_external_write(std::uint32_t physical_address,
-                                         std::uint32_t width) {
-  std::lock_guard lock(mutex_);
-  if (!width || std::uint64_t(physical_address) + width > kPhysicalMemorySize) {
-    fault(physical_address, width, AccessKind::Write, FaultReason::OutOfRange,
-          "external physical write outside RAM");
-  }
-  note_physical_write(physical_address, width);
-}
-
-std::uint64_t AddressSpace::add_physical_write_callback(PhysicalWriteCallback callback) {
-  std::lock_guard lock(mutex_);
-  const auto id = next_physical_write_callback_id_++;
-  physical_write_callbacks_.push_back({id, std::move(callback)});
-  physical_write_observers_active_.store(!physical_write_callbacks_.empty(),
-                                         std::memory_order_release);
-  return id;
-}
-
-void AddressSpace::remove_physical_write_callback(std::uint64_t id) {
-  std::lock_guard lock(mutex_);
-  std::erase_if(physical_write_callbacks_,
-                [id](const auto& pair) { return pair.first == id; });
-  physical_write_observers_active_.store(!physical_write_callbacks_.empty(),
-                                         std::memory_order_release);
 }
 
 template <typename T>
@@ -1101,7 +1145,8 @@ std::uint64_t AddressSpace::reservation_version(std::uint32_t physical_address) 
   if (physical_address >= kPhysicalMemorySize) return 0;
   return reservation_versions_[physical_address / kReservationGranuleSize].load(std::memory_order_acquire);
 }
-void AddressSpace::note_physical_write(std::uint32_t physical_address, std::uint32_t width) {
+void AddressSpace::note_physical_write(std::uint32_t physical_address,
+                                       std::uint32_t width) noexcept {
   if (physical_address >= kPhysicalMemorySize || !width) return;
   const auto first = physical_address / kReservationGranuleSize;
   const auto last = std::min<std::uint32_t>(
@@ -1113,33 +1158,6 @@ void AddressSpace::note_physical_write(std::uint32_t physical_address, std::uint
     if (next == 0u) reservation_versions_[i].store(1u, std::memory_order_release);
   }
   coherency_.mark_write(physical_address, width);
-  if (physical_write_observers_active_.load(std::memory_order_relaxed)) {
-    notify_physical_write_observers(physical_address, width);
-  }
-}
-
-void AddressSpace::notify_physical_write_observers(
-    std::uint32_t physical_address, std::uint32_t width) {
-  std::vector<PhysicalWriteCallback> callbacks;
-  {
-    std::lock_guard lock(mutex_);
-    callbacks.reserve(physical_write_callbacks_.size());
-    for (const auto& [id, callback] : physical_write_callbacks_) {
-      (void)id;
-      callbacks.push_back(callback);
-    }
-  }
-  for (auto& callback : callbacks) {
-    if (callback) callback(physical_address, width);
-  }
-}
-
-void AddressSpace::fast_observer_thunk(void* context,
-                                       std::uint32_t physical_address,
-                                       std::uint32_t width) {
-  if (!context) return;
-  static_cast<AddressSpace*>(context)->notify_physical_write_observers(
-      physical_address, width);
 }
 
 void AddressSpace::note_physical_write_addresses(

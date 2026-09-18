@@ -320,7 +320,8 @@ Item {
                             XPanel {
                                 Layout.fillWidth: true
                                 implicitHeight: moduleHeaderColumn.implicitHeight + Theme.spaceXl * 2
-                                color: Theme.surfaceAlt
+                                color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+                                decorated: true
 
                                 ColumnLayout {
                                     id: moduleHeaderColumn

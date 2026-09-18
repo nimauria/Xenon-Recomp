@@ -13,6 +13,10 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/memory/coherency.hpp"
 
+namespace xenon::memory {
+class AddressSpace;
+}
+
 namespace xenon::gpu {
 
 enum class TextureStorage : std::uint8_t { Uncompressed, BlockCompressed, Packed };
@@ -158,7 +162,7 @@ struct ResolveWriteResult {
 [[nodiscard]] ResolveWriteResult write_raw_resolve(
     const CopyResolveState& copy, const ResolveRectangle& rectangle,
     std::span<const std::byte> source, std::uint32_t source_row_pitch,
-    std::span<std::byte> physical_memory);
+    memory::AddressSpace& physical_memory);
 
 // Converts linear native render-target pixels through the common Xenos color
 // model, then writes the guest tiled destination with copy endian semantics.
@@ -166,7 +170,7 @@ struct ResolveWriteResult {
     const CopyResolveState& copy, ColorRenderTargetFormat source_format,
     const ResolveRectangle& rectangle, std::span<const std::byte> source,
     std::uint32_t source_row_pitch,
-    std::span<std::byte> physical_memory);
+    memory::AddressSpace& physical_memory);
 
 // Writes exact canonical Xenos D24S8 / D24FS8 words to the copy destination.
 // Depth never performs color conversion or sample averaging; the caller passes
@@ -175,7 +179,7 @@ struct ResolveWriteResult {
     const CopyResolveState& copy, DepthRenderTargetFormat source_format,
     const ResolveRectangle& rectangle, std::span<const std::uint32_t> source,
     std::uint32_t source_row_pitch,
-    std::span<std::byte> physical_memory);
+    memory::AddressSpace& physical_memory);
 
 class TextureDirtyTracker {
  public:

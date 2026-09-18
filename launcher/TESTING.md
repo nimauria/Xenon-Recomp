@@ -89,3 +89,26 @@ From the repository root in an x64 Visual Studio developer PowerShell/VS Code te
 - Top-bar and About branding use the scalable lockup without an unreadably small embedded tagline.
 - Appearance only offers background variants belonging to the active theme: Xenon Dark (Orbit/Tech/HUD), Carbon (Nebula/Tech), Industrial (Orbit/Tech), Light (Minimal).
 - Module information/capability cards align in two-column mode and capability badges wrap rather than clipping.
+
+## V7.2 regression checks
+
+- Profile list cards have consistent internal padding on all four sides; avatar and text never touch the selection border.
+- Profile header actions reserve stable slots: activating/deactivating a profile must not shift Edit Profile, Duplicate, or More horizontally.
+- Profile descriptions wrap to at most two lines in the profile header and are limited to 180 characters in Create/Edit.
+- All modal editors dismiss on an outside click when clean. If dirty, the editor stays open and an unsaved-changes confirmation is displayed above it.
+- Create/Edit footer actions stay right-aligned regardless of optional sections or text scale.
+- Compact sidebar uses centered 44x44 navigation targets with an 8px rail inset and no oversized selection rectangles.
+- The thin Windows-style chrome row contains only the window title/drag surface and window controls; branding/search/profile/help live on the second toolbar row.
+- Maximize/restore remains clickable and restores to the previous windowed geometry.
+- At 200% text size, body/caption text increases substantially while heading/control geometry scales more conservatively and pages remain usable without horizontal clipping.
+- Theme background graphics are visibly present behind translucent panels, while foreground text remains readable.
+- Theme-specific decorative rails/corners/dividers from the supplied side-asset pack are visible only as launcher chrome and never replace module/game artwork.
+
+## v7.2.1 profile dismissal regression test
+
+1. Open Create Profile and click outside without editing: the dialog should close.
+2. Open Create Profile, type a valid name, then click outside: the editor should remain visible behind an unsaved-changes prompt.
+3. Verify the prompt offers Create profile / Save changes, Discard changes, and Cancel.
+4. Cancel returns to the still-populated editor. Discard closes without saving. Save/Create commits and closes.
+5. Repeat with Edit Profile and Edit Content Locations.
+6. With Create Profile open and a valid unique name entered, press Enter/Return: the profile should be created.

@@ -123,11 +123,22 @@ struct ShaderReflection {
   std::vector<std::uint8_t> vertex_fetch_constants{};
   std::vector<std::uint8_t> texture_fetch_constants{};
   std::vector<std::uint8_t> exports{};
+  // Float-constant indices used by the conventional Xenos eA memexport
+  // address setup pattern (mad eA, r#, const0100, c#). Stage selection is
+  // applied later by ResourceStateTracker when reading the architectural
+  // constant banks.
+  std::vector<std::uint16_t> memexport_stream_constants{};
   std::uint32_t temporary_register_count{};
   std::uint32_t position_exports{};
   std::uint32_t interpolator_exports{};
   std::uint32_t color_exports{};
   std::uint32_t memory_exports{};
+  std::uint8_t memory_export_mask{};
+  bool writes_export_address{};
+  // At least one eA write did not match the statically recoverable SDK MAD
+  // pattern, so execution-time analysis may be needed even if other stream
+  // constants were recovered successfully.
+  bool requires_dynamic_memexport_address{};
   bool uses_predication{};
   bool uses_loops{};
   bool uses_dynamic_addressing{};

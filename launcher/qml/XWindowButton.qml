@@ -11,8 +11,8 @@ Button {
     property string kind: "minimize"
     property bool maximized: false
 
-    implicitWidth: kind === "close" ? 54 : 48
-    implicitHeight: 44
+    implicitWidth: kind === "close" ? 48 : 44
+    implicitHeight: 32
     padding: 0
     hoverEnabled: true
     focusPolicy: Qt.TabFocus
@@ -28,44 +28,44 @@ Button {
             visible: control.kind === "minimize"
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
-            anchors.verticalCenterOffset: 3
-            width: 15
-            height: 1.5
+            anchors.verticalCenterOffset: 2
+            width: 14
+            height: 1.4
             color: Theme.text
         }
 
         Rectangle {
             visible: control.kind === "maximize" && !control.maximized
             anchors.centerIn: parent
-            width: 12
-            height: 12
+            width: 11
+            height: 11
             color: "transparent"
-            border.width: 1.4
+            border.width: 1.25
             border.color: Theme.text
         }
 
         Item {
             visible: control.kind === "maximize" && control.maximized
             anchors.centerIn: parent
-            width: 17
-            height: 17
+            width: 15
+            height: 15
 
             Rectangle {
-                width: 10
-                height: 10
-                x: 6
+                width: 9
+                height: 9
+                x: 5
                 y: 1
                 color: Theme.header
-                border.width: 1.25
+                border.width: 1.15
                 border.color: Theme.text
             }
             Rectangle {
-                width: 10
-                height: 10
+                width: 9
+                height: 9
                 x: 1
-                y: 6
+                y: 5
                 color: control.hovered ? Theme.surfaceHover : Theme.header
-                border.width: 1.25
+                border.width: 1.15
                 border.color: Theme.text
             }
         }
@@ -73,19 +73,19 @@ Button {
         Item {
             visible: control.kind === "close"
             anchors.centerIn: parent
-            width: 18
-            height: 18
+            width: 15
+            height: 15
             Rectangle {
                 anchors.centerIn: parent
-                width: 17
-                height: 1.6
+                width: 15
+                height: 1.5
                 rotation: 45
                 color: control.hovered ? "white" : Theme.text
             }
             Rectangle {
                 anchors.centerIn: parent
-                width: 17
-                height: 1.6
+                width: 15
+                height: 1.5
                 rotation: -45
                 color: control.hovered ? "white" : Theme.text
             }

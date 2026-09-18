@@ -73,9 +73,11 @@ Render-target storage:
 
 The GPU does not have a second copy of system RAM. PM4, indirect buffers,
 shaders, vertex/index data, texture backing and resolve destinations use the
-same `memory::AddressSpace` physical backing as the CPU. GPU physical writes use
-`notify_external_write`, so CPU load-reserve/store-conditional reservations and
-future cache observers see DMA activity.
+same `memory::AddressSpace` physical backing as the CPU. Memory V2 makes raw
+physical backing read-only to GPU callers; PM4/resolve/DMA-style writes use
+`write_physical`, `fill_physical` or scoped `PhysicalWriteSpan` access so CPU
+load-reserve/store-conditional reservations and shared coherency state are
+updated automatically.
 
 ## EDRAM rule
 

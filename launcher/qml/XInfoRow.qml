@@ -8,12 +8,12 @@ GridLayout {
     property string value: ""
     property color valueColor: Theme.text
     property int labelWidth: 128
-    readonly property bool stacked: width > 0 && (width < 360 || Theme.textScale >= 1.6)
+    readonly property bool stacked: width > 0 && width < Math.round(360 * Math.min(Theme.bodyScale, 1.20))
 
     Layout.fillWidth: true
     columns: stacked ? 1 : 2
     columnSpacing: Theme.spaceSm
-    rowSpacing: stacked ? 1 : 0
+    rowSpacing: stacked ? 2 : 0
 
     Text {
         Layout.preferredWidth: root.stacked ? -1 : root.labelWidth
@@ -29,7 +29,8 @@ GridLayout {
         text: root.value
         color: root.valueColor
         font.pixelSize: Theme.typeCaption
-        wrapMode: root.stacked ? Text.Wrap : Text.NoWrap
-        elide: root.stacked ? Text.ElideNone : Text.ElideRight
+        wrapMode: Text.WordWrap
+        maximumLineCount: root.stacked ? 3 : 2
+        elide: Text.ElideRight
     }
 }

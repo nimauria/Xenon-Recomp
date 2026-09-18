@@ -17,6 +17,140 @@ void write_fetch(xenon::gpu::ResourceStateTracker& tracker, unsigned slot,
                  value});
 }
 
+
+void write_memexport_stream(xenon::gpu::ResourceStateTracker& tracker,
+                            xenon::gpu::ShaderStage stage,
+                            std::uint16_t constant_index,
+                            std::uint32_t base_address_dwords,
+                            std::uint8_t format,
+                            std::uint32_t index_count,
+                            xenon::gpu::Endian128 endian =
+                                xenon::gpu::Endian128::None,
+                            std::uint8_t number_format = 0,
+                            bool red_blue_swap = false) {
+  const std::uint32_t bank =
+      stage == xenon::gpu::ShaderStage::Pixel ? 0x4400u : 0x4000u;
+  const auto reg = bank + std::uint32_t(constant_index) * 4u;
+  tracker.apply({reg + 0u, (base_address_dwords & 0x3FFFFFFFu) | (1u << 30u)});
+  tracker.apply({reg + 1u, 0x4B000000u});
+  tracker.apply({reg + 2u,
+                 std::uint32_t(endian) | (std::uint32_t(format) << 8u) |
+                     (std::uint32_t(number_format) << 16u) |
+                     (std::uint32_t(red_blue_swap) << 19u) |
+                     (0x4B0u << 20u)});
+  tracker.apply({reg + 3u,
+                 (index_count & 0x7FFFFFu) | (0x96u << 23u)});
+}
+
+void test_memexport_stream_planning() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  write_memexport_stream(tracker, ShaderStage::Vertex, 7, 0x1000u, 37, 12,
+                         Endian128::Swap8In32, 2, true);
+  // Same base with a larger stream must merge to one maximum-sized range.
+  write_memexport_stream(tracker, ShaderStage::Vertex, 9, 0x1000u, 37, 20);
+
+  DecodedShader shader{};
+  shader.stage = ShaderStage::Vertex;
+  shader.reflection.writes_export_address = true;
+  shader.reflection.memory_export_mask = 0b00101;
+  shader.reflection.memory_exports = 2;
+  shader.reflection.memexport_stream_constants = {7, 9};
+  const auto plan = tracker.plan_memexport(shader);
+  assert(plan.valid && plan.has_writes());
+  assert(!plan.requires_dynamic_address_analysis);
+  assert(plan.export_mask == 0b00101);
+  assert(plan.streams.size() == 2);
+  assert(plan.streams[0].valid && plan.streams[1].valid);
+  assert(plan.streams[0].base_address_dwords == 0x1000u);
+  assert(plan.streams[0].base_address_bytes == 0x4000u);
+  assert(plan.streams[0].format == 37);
+  assert(plan.streams[0].element_size_bytes == 8);
+  assert(plan.streams[0].index_count == 12);
+  assert(plan.streams[0].size_bytes() == 96);
+  assert(plan.streams[0].endian == Endian128::Swap8In32);
+  assert(plan.streams[0].number_format == 2);
+  assert(plan.streams[0].red_blue_swap);
+  assert(plan.ranges.size() == 1);
+  assert(plan.ranges[0].base_address_dwords == 0x1000u);
+  assert(plan.ranges[0].size_bytes == 160);
+
+  // A shader with both a recoverable stream and another noncanonical eA path
+  // may use the static range, but must still advertise dynamic analysis.
+  shader.reflection.requires_dynamic_memexport_address = true;
+  const auto mixed_plan = tracker.plan_memexport(shader);
+  assert(mixed_plan.ranges.size() == 1);
+  assert(mixed_plan.requires_dynamic_address_analysis);
+  shader.reflection.requires_dynamic_memexport_address = false;
+
+  // Pixel shaders use the second architectural float-constant bank.
+  ResourceStateTracker pixel_tracker;
+  write_memexport_stream(pixel_tracker, ShaderStage::Pixel, 4, 0x2000u, 6, 32);
+  DecodedShader pixel{};
+  pixel.stage = ShaderStage::Pixel;
+  pixel.reflection.writes_export_address = true;
+  pixel.reflection.memory_export_mask = 1;
+  pixel.reflection.memory_exports = 1;
+  pixel.reflection.memexport_stream_constants = {4};
+  const auto pixel_plan = pixel_tracker.plan_memexport(pixel);
+  assert(pixel_plan.ranges.size() == 1);
+  assert(pixel_plan.streams[0].valid);
+  assert(pixel_plan.streams[0].base_address_bytes == 0x8000u);
+  assert(pixel_plan.streams[0].element_size_bytes == 4);
+  assert(pixel_plan.ranges[0].size_bytes == 128);
+}
+
+void test_memexport_dynamic_and_invalid_streams_stay_explicit() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  DecodedShader dynamic{};
+  dynamic.stage = ShaderStage::Vertex;
+  dynamic.reflection.writes_export_address = true;
+  dynamic.reflection.memory_export_mask = 1;
+  dynamic.reflection.memory_exports = 1;
+  auto plan = tracker.plan_memexport(dynamic);
+  assert(plan.valid && plan.has_writes());
+  assert(plan.requires_dynamic_address_analysis);
+  assert(plan.streams.empty() && plan.ranges.empty());
+
+  write_memexport_stream(tracker, ShaderStage::Vertex, 3, 0x1000u, 6, 8);
+  // Break the required normalized-float guard word. This can legitimately be
+  // encountered when a conditional export path isn't taken, so it is skipped
+  // rather than being turned into a guessed memory range.
+  tracker.apply({0x4000u + 3u * 4u + 1u, 0u});
+  dynamic.reflection.memexport_stream_constants = {3};
+  plan = tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(!plan.streams[0].error.empty());
+  assert(plan.ranges.empty());
+  assert(plan.requires_dynamic_address_analysis);
+
+  // Byte-addressability alone must not make an arbitrary texture format a
+  // legal memexport format. Format 33 is outside the Xenos color-export set.
+  ResourceStateTracker invalid_format_tracker;
+  write_memexport_stream(invalid_format_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 33, 8);
+  plan = invalid_format_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("non-exportable") != std::string::npos);
+  assert(plan.ranges.empty() && plan.requires_dynamic_address_analysis);
+
+  // Reserved endian and number-format encodings also remain explicit.
+  ResourceStateTracker invalid_encoding_tracker;
+  write_memexport_stream(invalid_encoding_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 6, 8, static_cast<Endian128>(6), 4);
+  plan = invalid_encoding_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("endian") != std::string::npos);
+
+  ResourceStateTracker invalid_number_tracker;
+  write_memexport_stream(invalid_number_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 6, 8, Endian128::None, 4);
+  plan = invalid_number_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("number format") != std::string::npos);
+}
+
 void test_texture_descriptor() {
   using namespace xenon::gpu;
   ResourceStateTracker tracker;
@@ -410,6 +544,8 @@ void test_preferred_polygon_offset() {
 }  // namespace
 
 int main() {
+  test_memexport_stream_planning();
+  test_memexport_dynamic_and_invalid_streams_stay_explicit();
   test_texture_descriptor();
   test_vertex_and_render_state();
   test_constant_buffer_abi();

@@ -14,7 +14,10 @@ Rectangle {
     signal maximizeRequested()
     signal closeRequested()
 
-    implicitHeight: Math.max(compact ? 60 : 68, Theme.controlHeight + Theme.spaceLg + Theme.spaceSm)
+    readonly property int chromeHeight: 36
+    readonly property int toolbarHeight: Math.max(60, Theme.controlHeight + 16)
+
+    implicitHeight: chromeHeight + toolbarHeight
     color: Theme.header
     border.width: Theme.borderWidth
     border.color: Theme.divider
@@ -25,17 +28,6 @@ Rectangle {
         "Search profiles…",
         "Find settings…"
     ]
-
-    MouseArea {
-        anchors.fill: parent
-        z: 0
-        acceptedButtons: Qt.LeftButton
-        onPressed: {
-            if (root.Window.window)
-                root.Window.window.startSystemMove()
-        }
-        onDoubleClicked: root.maximizeRequested()
-    }
 
     Shortcut {
         sequence: "Ctrl+K"
@@ -49,19 +41,91 @@ Rectangle {
         }
     }
 
+    Item {
+        id: chromeRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        height: root.chromeHeight
+
+        Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Theme.spaceLg
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Xenon Launcher"
+            color: Theme.textMuted
+            font.pixelSize: Math.max(11, Theme.typeCaption * 0.86)
+            font.weight: Font.Medium
+        }
+
+        RowLayout {
+            id: windowControls
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+            spacing: 0
+            z: 4
+
+            XWindowButton {
+                automationId: "window-minimize"
+                kind: "minimize"
+                Layout.fillHeight: true
+                onClicked: root.minimizeRequested()
+            }
+
+            XWindowButton {
+                automationId: "window-maximize"
+                kind: "maximize"
+                maximized: root.maximized
+                Layout.fillHeight: true
+                onClicked: root.maximizeRequested()
+            }
+
+            XWindowButton {
+                automationId: "window-close"
+                kind: "close"
+                Layout.fillHeight: true
+                onClicked: root.closeRequested()
+            }
+        }
+
+        MouseArea {
+            id: titleDragArea
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: windowControls.left
+            acceptedButtons: Qt.LeftButton
+            z: 1
+            onPressed: {
+                if (root.Window.window)
+                    root.Window.window.startSystemMove()
+            }
+            onDoubleClicked: root.maximizeRequested()
+        }
+    }
+
+    Rectangle {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: chromeRow.bottom
+        height: 1
+        color: Theme.divider
+    }
+
     RowLayout {
-        anchors.fill: parent
-        anchors.leftMargin: Theme.spaceLg
-        anchors.rightMargin: 0
-        spacing: Theme.spaceLg
-        z: 2
+        id: toolbarRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: chromeRow.bottom
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Theme.spaceXl
+        anchors.rightMargin: Theme.spaceXl
+        spacing: Theme.spaceMd
 
         XenonBrand {
-            // The full lockup contains intentionally tiny tagline text which is
-            // not suitable for launcher chrome. Render the clean mark+wordmark
-            // here and keep the tagline as accessible live text elsewhere.
-            Layout.preferredWidth: root.compact ? 142 : 188
-            Layout.preferredHeight: root.compact ? 34 : 40
+            Layout.preferredWidth: root.compact ? 132 : 168
+            Layout.preferredHeight: root.compact ? 30 : 34
             asset: "lockup"
             brandColor: Theme.accent
         }
@@ -70,7 +134,7 @@ Rectangle {
             id: searchField
             automationId: "global-search"
             Layout.fillWidth: true
-            Layout.maximumWidth: 680
+            Layout.maximumWidth: 660
             Layout.preferredHeight: Theme.controlHeight
             placeholderText: root.searchPlaceholders[Math.max(0, Math.min(root.currentPage, root.searchPlaceholders.length - 1))]
             accessibleName: "Search current page"
@@ -82,6 +146,8 @@ Rectangle {
 
         XIconButton {
             id: helpButton
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
             iconName: "help"
             tooltip: "Help and keyboard shortcuts"
             variant: "ghost"
@@ -95,36 +161,26 @@ Rectangle {
         }
 
         ProfileMenu {
-            Layout.preferredWidth: root.compact ? 176 : 210
+            Layout.preferredWidth: root.compact ? 166 : 196
             Layout.preferredHeight: Theme.controlHeight
         }
+    }
 
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.preferredHeight: 28
-            color: Theme.divider
-        }
-
-        XWindowButton {
-            automationId: "window-minimize"
-            kind: "minimize"
-            Layout.fillHeight: true
-            onClicked: root.minimizeRequested()
-        }
-
-        XWindowButton {
-            automationId: "window-maximize"
-            kind: "maximize"
-            maximized: root.maximized
-            Layout.fillHeight: true
-            onClicked: root.maximizeRequested()
-        }
-
-        XWindowButton {
-            automationId: "window-close"
-            kind: "close"
-            Layout.fillHeight: true
-            onClicked: root.closeRequested()
-        }
+    Image {
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Theme.spaceLg
+        width: Math.min(300, parent.width * 0.28)
+        height: 18
+        source: Theme.effectiveThemeId === "industrial"
+            ? "qrc:/theme-art/decor/amber/divider_notch_amber.svg"
+            : Theme.effectiveThemeId === "carbon"
+              ? "qrc:/theme-art/decor/green/divider_notch_green.svg"
+              : Theme.effectiveThemeId === "xenon-dark"
+                ? "qrc:/theme-art/decor/blue/divider_notch_blue.svg" : ""
+        visible: source.toString().length > 0
+        fillMode: Image.PreserveAspectFit
+        opacity: 0.36
+        smooth: true
     }
 }

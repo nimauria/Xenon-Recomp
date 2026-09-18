@@ -175,17 +175,17 @@ QtObject {
     // Accessibility text scaling is deliberately non-uniform. Windows applies
     // stronger scaling to smaller UI text than to large headings, and layouts
     // are expected to reflow rather than simply doubling every dimension.
-    readonly property real captionScale: 1.0 + Math.max(0, textScale - 1.0) * 1.00
-    readonly property real bodyScale: 1.0 + Math.max(0, textScale - 1.0) * 0.82
-    readonly property real headingScale: 1.0 + Math.max(0, textScale - 1.0) * 0.52
-    readonly property real displayScale: 1.0 + Math.max(0, textScale - 1.0) * 0.38
+    readonly property real captionScale: 1.0 + Math.max(0, textScale - 1.0) * 0.80
+    readonly property real bodyScale: 1.0 + Math.max(0, textScale - 1.0) * 0.66
+    readonly property real headingScale: 1.0 + Math.max(0, textScale - 1.0) * 0.38
+    readonly property real displayScale: 1.0 + Math.max(0, textScale - 1.0) * 0.28
 
-    readonly property int controlHeight: Math.round(40 + Math.max(0, bodyScale - 1.0) * 24)
-    readonly property int controlHeightLarge: Math.round(48 + Math.max(0, bodyScale - 1.0) * 28)
-    readonly property int pageMargin: textScale >= 1.75 ? 16 : 20
-    readonly property int contentMaxWidth: textScale >= 1.75 ? 920 : 1080
-    readonly property int sidebarWidth: Math.round(184 + Math.max(0, bodyScale - 1.0) * 30)
-    readonly property int sidebarCompactWidth: Math.round(88 + Math.max(0, bodyScale - 1.0) * 8)
+    readonly property int controlHeight: Math.round(40 + Math.max(0, bodyScale - 1.0) * 18)
+    readonly property int controlHeightLarge: Math.round(48 + Math.max(0, bodyScale - 1.0) * 22)
+    readonly property int pageMargin: textScale >= 1.75 ? 18 : 20
+    readonly property int contentMaxWidth: textScale >= 1.75 ? 1180 : 1080
+    readonly property int sidebarWidth: Math.round(184 + Math.max(0, bodyScale - 1.0) * 22)
+    readonly property int sidebarCompactWidth: Math.round(68 + Math.max(0, bodyScale - 1.0) * 4)
 
     // Base sizes follow the Windows desktop UI range, while the scale factors
     // above keep 175-200% usable without making headings consume the screen.

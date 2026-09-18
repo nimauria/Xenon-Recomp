@@ -43,9 +43,9 @@ constexpr std::uint32_t kDepthClear = 0x55667788u;
 void write_guest_bytes(xenon::memory::AddressSpace& memory,
                        std::uint32_t address, const void* source,
                        std::size_t size) {
-  auto* destination = memory.physical_data(address);
-  assert(destination);
-  std::memcpy(destination, source, size);
+  const auto bytes = std::span<const std::byte>(
+      static_cast<const std::byte*>(source), size);
+  assert(memory.write_physical(address, bytes));
 }
 
 std::uint32_t read_guest_word(const xenon::memory::AddressSpace& memory,

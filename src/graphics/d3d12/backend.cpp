@@ -433,17 +433,13 @@ void Backend::consume(const ir::Command& command) {
           impl_->error = source->error();
           return;
         }
-        const auto memory_span = std::span<std::byte>(
-            impl_->memory->physical_data(), memory::kPhysicalMemorySize);
         const auto written = write_depth_resolve(
             resolve_plan.copy, format, rectangle, readback, row_pitch,
-            memory_span);
+            *impl_->memory);
         if (!written.valid) {
           impl_->error = written.error;
           return;
         }
-        impl_->memory->notify_external_write(written.modified_address,
-                                             written.modified_size);
         if (!impl_->clear_depth_resolve_region(state, rectangle, samples))
           return;
         return;
@@ -539,20 +535,16 @@ void Backend::consume(const ir::Command& command) {
           return;
         }
       }
-      const auto memory_span = std::span<std::byte>(
-          impl_->memory->physical_data(), memory::kPhysicalMemorySize);
       const auto written = state.copy.command == CopyCommand::Convert ||
                                    color_host_requires_conversion(format)
           ? write_converted_resolve(state.copy, format, rectangle, readback,
-                                    row_pitch, memory_span)
+                                    row_pitch, *impl_->memory)
           : write_raw_resolve(state.copy, rectangle, readback, row_pitch,
-                              memory_span);
+                              *impl_->memory);
       if (!written.valid) {
         impl_->error = written.error;
         return;
       }
-      impl_->memory->notify_external_write(written.modified_address,
-                                           written.modified_size);
       if (state.copy.color_clear_enabled) {
         const auto owner = impl_->render_target_owners.find(source_key);
         if (owner == impl_->render_target_owners.end() ||

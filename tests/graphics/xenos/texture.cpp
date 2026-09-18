@@ -8,6 +8,7 @@
 
 #include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/memory/address_space.hpp"
 
 namespace {
 
@@ -170,14 +171,17 @@ void test_raw_resolve_write() {
   std::vector<std::byte> source(8u * 8u * 4u);
   for (std::size_t i = 0; i < source.size(); ++i)
     source[i] = static_cast<std::byte>(i & 0xFFu);
-  std::vector<std::byte> memory(0x20000, std::byte{0xCC});
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  assert(memory.fill_physical(0, 0x20000, std::byte{0xCC}));
   const auto written = write_raw_resolve(copy, rectangle, source, 8u * 4u,
                                          memory);
   assert(written.valid && written.modified_size != 0);
 
   // Decode the affected storage as logical bytes using the same Endian128
   // group rule, then verify every tiled pixel landed at its expected address.
-  std::vector<std::byte> logical = memory;
+  std::vector<std::byte> logical(0x20000);
+  assert(memory.copy_physical_range(0, logical));
   apply_endian128(std::span(logical).subspan(written.modified_address,
                                              written.modified_size),
                   copy.destination_endian);
@@ -197,38 +201,44 @@ void test_raw_resolve_write() {
   copy.destination_height = 192;
   copy.destination_endian = Endian128::None;
   rectangle = {640, 256, 648, 264, true};
-  memory.assign(0x400000, std::byte{});
+  assert(memory.fill_physical(0, 0x400000, std::byte{}));
   const auto offset_written = write_raw_resolve(
       copy, rectangle, source, 8u * 4u, memory);
   assert(offset_written.valid);
+  const auto* physical = memory.physical_data();
+  assert(physical != nullptr);
   for (std::uint32_t y = 0; y < 8; ++y) {
     for (std::uint32_t x = 0; x < 8; ++x) {
       const auto offset = copy.destination_base +
           tiled_offset_2d(640u + x, 256u + y, 320u, 4u);
-      assert(std::memcmp(memory.data() + offset,
+      assert(std::memcmp(physical + offset,
                          source.data() + (y * 8u + x) * 4u, 4) == 0);
     }
   }
 
-  const auto memory_before_empty = memory;
+  std::vector<std::byte> memory_before_empty(0x400000);
+  assert(memory.copy_physical_range(0, memory_before_empty));
   const auto empty_written = write_raw_resolve(
       copy, {640, 256, 640, 256, true}, {}, 0, memory);
   assert(empty_written.valid && empty_written.modified_size == 0);
-  assert(memory == memory_before_empty);
+  std::vector<std::byte> memory_after_empty(0x400000);
+  assert(memory.copy_physical_range(0, memory_after_empty));
+  assert(memory_after_empty == memory_before_empty);
 
   // Array destinations use 3D tiling and the three-bit destination slice.
   copy.destination_array = true;
   copy.destination_slice = 3;
   rectangle = {328, 200, 336, 208, true};
-  memory.assign(0x800000, std::byte{});
+  assert(memory.fill_physical(0, 0x800000, std::byte{}));
   const auto array_written = write_raw_resolve(
       copy, rectangle, source, 8u * 4u, memory);
   assert(array_written.valid);
+  physical = memory.physical_data();
   for (std::uint32_t y = 0; y < 8; ++y) {
     for (std::uint32_t x = 0; x < 8; ++x) {
       const auto offset = copy.destination_base + tiled_offset_3d(
           328u + x, 200u + y, 3u, 320u, 192u, 4u);
-      assert(std::memcmp(memory.data() + offset,
+      assert(std::memcmp(physical + offset,
                          source.data() + (y * 8u + x) * 4u, 4) == 0);
     }
   }
@@ -261,13 +271,16 @@ void test_depth_resolve_write() {
           static_cast<std::uint8_t>(0x80u | x));
     }
   }
-  std::vector<std::byte> memory(0x20000, std::byte{0xCC});
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  assert(memory.fill_physical(0, 0x20000, std::byte{0xCC}));
   const auto written = write_depth_resolve(
       copy, DepthRenderTargetFormat::D24S8, rectangle, source, 8u * 4u,
       memory);
   assert(written.valid && written.modified_size != 0);
 
-  auto logical = memory;
+  std::vector<std::byte> logical(0x20000);
+  assert(memory.copy_physical_range(0, logical));
   apply_endian128(std::span(logical).subspan(written.modified_address,
                                              written.modified_size),
                   copy.destination_endian);
@@ -288,13 +301,13 @@ void test_depth_resolve_write() {
   const ResolveRectangle float_rectangle{0, 0, 1, 1, true};
   const std::array<std::uint32_t, 1> float_source{
       pack_depth_stencil(DepthRenderTargetFormat::D24FS8, 1.5f, 0xA5)};
-  memory.assign(0x40000, std::byte{});
+  assert(memory.fill_physical(0, 0x40000, std::byte{}));
   const auto float_written = write_depth_resolve(
       copy, DepthRenderTargetFormat::D24FS8, float_rectangle, float_source, 4,
       memory);
   assert(float_written.valid);
   std::uint32_t packed_float{};
-  std::memcpy(&packed_float, memory.data() + copy.destination_base,
+  std::memcpy(&packed_float, memory.physical_data(copy.destination_base),
               sizeof(packed_float));
   assert(packed_float == float_source[0]);
   assert(unpack_depth_stencil(DepthRenderTargetFormat::D24FS8, packed_float)
@@ -315,14 +328,16 @@ void test_converted_resolve_write() {
   std::array<std::byte, 4> source{};
   assert(encode_host_color_sample(ColorRenderTargetFormat::R16G16Fixed,
                                   source_sample, source));
-  std::vector<std::byte> memory(0x20000);
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  assert(memory.fill_physical(0, 0x20000, std::byte{}));
   const auto written = write_converted_resolve(
       copy, ColorRenderTargetFormat::R16G16Fixed, rectangle, source, 4,
       memory);
   assert(written.valid);
   const auto offset = copy.destination_base + tiled_offset_2d(0, 0, 32, 16);
   std::array<float, 4> converted{};
-  std::memcpy(converted.data(), memory.data() + offset, sizeof(converted));
+  std::memcpy(converted.data(), memory.physical_data(offset), sizeof(converted));
   assert(converted[0] == 0.0f && converted[1] == -4.0f &&
          converted[2] == 3.0f && converted[3] == 2.0f);
 
@@ -334,13 +349,13 @@ void test_converted_resolve_write() {
   const ColorSample gamma_sample{{0.125f, 0.5f, 1.0f, 0.25f}};
   assert(encode_host_color_sample(ColorRenderTargetFormat::R8G8B8A8Gamma,
                                   gamma_sample, gamma_source));
-  memory.assign(0x20000, std::byte{});
+  assert(memory.fill_physical(0, 0x20000, std::byte{}));
   const auto gamma_written = write_converted_resolve(
       copy, ColorRenderTargetFormat::R8G8B8A8Gamma, rectangle,
       gamma_source, 8, memory);
   assert(gamma_written.valid);
   std::uint32_t gamma_bits{};
-  std::memcpy(&gamma_bits, memory.data() + copy.destination_base, 4);
+  std::memcpy(&gamma_bits, memory.physical_data(copy.destination_base), 4);
   assert(gamma_bits == pack_color_sample(
              ColorRenderTargetFormat::R8G8B8A8Gamma, gamma_sample)[0]);
 }

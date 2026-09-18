@@ -69,29 +69,55 @@ Item {
         asynchronous: true
         cache: true
         smooth: true
-        opacity: root.strength * (root.subtle ? 0.18 : 0.48)
+        opacity: root.strength * (root.subtle ? 0.28 : 0.72)
     }
 
-    // Keep text/panels readable even when a strong raster background is chosen.
+    // Keep the artwork clearly visible while retaining enough contrast for text.
     Rectangle {
         anchors.fill: parent
         visible: rasterBackdrop.visible
         color: Theme.window
-        opacity: root.subtle ? 0.72 : 0.52
+        opacity: root.subtle ? 0.58 : 0.30
     }
 
     Image {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(120, parent.width * 0.12)
+        width: Math.min(140, parent.width * 0.13)
         source: root.sideDecorationSource()
         visible: source.toString().length > 0 && parent.width >= 520
         fillMode: Image.Stretch
-        opacity: root.strength * (root.subtle ? 0.10 : 0.26)
+        opacity: root.strength * (root.subtle ? 0.16 : 0.42)
         smooth: true
     }
 
+    Image {
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Theme.spaceSm
+        width: 52
+        height: Math.min(240, parent.height * 0.46)
+        source: root.decorThemePath("rail_vertical")
+        visible: !root.subtle && source.toString().length > 0 && parent.width >= 780
+        fillMode: Image.Stretch
+        opacity: root.strength * 0.30
+        smooth: true
+    }
+
+    Image {
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Theme.spaceLg
+        anchors.bottomMargin: Theme.space2Xl
+        width: Math.min(190, parent.width * 0.18)
+        height: width
+        source: root.decorThemePath("hud_arc_left")
+        visible: !root.subtle && source.toString().length > 0 && parent.width >= 820
+        fillMode: Image.PreserveAspectFit
+        opacity: root.strength * 0.28
+        smooth: true
+    }
 
     Image {
         anchors.left: parent.left
@@ -101,7 +127,7 @@ Item {
         source: root.decorThemePath("corner_top_left")
         visible: !root.subtle && source.toString().length > 0 && parent.width >= 760
         fillMode: Image.PreserveAspectFit
-        opacity: root.strength * 0.30
+        opacity: root.strength * 0.36
         smooth: true
     }
 
@@ -113,7 +139,7 @@ Item {
         source: root.decorThemePath("corner_bottom_right")
         visible: !root.subtle && source.toString().length > 0 && parent.width >= 760
         fillMode: Image.PreserveAspectFit
-        opacity: root.strength * 0.24
+        opacity: root.strength * 0.30
         smooth: true
     }
 
@@ -127,7 +153,21 @@ Item {
         source: root.decorThemePath("slashes")
         visible: !root.subtle && source.toString().length > 0 && parent.width >= 900
         fillMode: Image.PreserveAspectFit
-        opacity: root.strength * 0.34
+        opacity: root.strength * 0.42
+        smooth: true
+    }
+
+    Image {
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.rightMargin: Theme.spaceXl
+        anchors.topMargin: Theme.spaceLg
+        width: Math.min(300, parent.width * 0.26)
+        height: 18
+        source: root.decorThemePath("divider_long")
+        visible: !root.subtle && source.toString().length > 0 && parent.width >= 900
+        fillMode: Image.PreserveAspectFit
+        opacity: root.strength * 0.26
         smooth: true
     }
 
@@ -137,7 +177,20 @@ Item {
             ? "qrc:/theme-art/decor/neutral/hex_overlay.svg"
             : "qrc:/theme-art/decor/neutral/diagonal_lines_overlay.svg"
         fillMode: Image.Tile
-        opacity: root.strength * (root.subtle ? 0.025 : 0.05)
+        opacity: root.strength * (root.subtle ? 0.03 : 0.07)
+        smooth: true
+    }
+
+    Image {
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.rightMargin: Theme.space2Xl
+        anchors.bottomMargin: Theme.space2Xl
+        width: 54
+        height: 54
+        source: "qrc:/theme-art/decor/neutral/glow_dot.svg"
+        visible: !root.subtle
+        opacity: root.strength * 0.34
         smooth: true
     }
 
@@ -156,8 +209,6 @@ Item {
             if (width <= 0 || height <= 0)
                 return
 
-            // A very light accent pass allows colour customisation to still be
-            // visible over theme-specific raster artwork without recolouring it.
             var glow = ctx.createRadialGradient(width * 0.06, height * 0.86, 0,
                                                 width * 0.06, height * 0.86,
                                                 Math.max(width, height) * 0.64)

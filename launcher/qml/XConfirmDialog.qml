@@ -9,9 +9,12 @@ Popup {
     property string message: ""
     property string confirmText: "Confirm"
     property string cancelText: "Cancel"
+    property string secondaryText: ""
     property bool destructive: false
+    property bool secondaryDestructive: false
 
     signal confirmed()
+    signal secondaryTriggered()
 
     parent: Overlay.overlay
     width: Math.min(560, parent ? parent.width - Theme.space2Xl * 2 : 560)
@@ -21,7 +24,7 @@ Popup {
     modal: true
     focus: true
     padding: 0
-    closePolicy: Popup.CloseOnEscape
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     onOpened: {
         if (root.destructive)
@@ -95,6 +98,17 @@ Popup {
             Layout.rightMargin: Theme.spaceXl
             Layout.bottomMargin: Theme.spaceLg
             spacing: Theme.spaceSm
+
+            XButton {
+                id: secondaryButton
+                visible: root.secondaryText.length > 0
+                text: root.secondaryText
+                variant: root.secondaryDestructive ? "danger" : "ghost"
+                onClicked: {
+                    root.close()
+                    root.secondaryTriggered()
+                }
+            }
 
             Item { Layout.fillWidth: true }
             XButton {

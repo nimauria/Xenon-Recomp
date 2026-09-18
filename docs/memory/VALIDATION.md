@@ -82,9 +82,21 @@ New or expanded regression coverage includes:
 - direct fast RAM access and MMIO slow-path fallback;
 - six concurrent normal-RAM access threads;
 - physical alias lifetime and delayed anonymous-page reuse;
+- read-side quiescence preventing a retired physical page from being recycled
+  while an older fast `MemoryAccessContext` remains alive;
 - range operations across page boundaries;
 - range-level write notification across discontiguous physical mappings;
 - coherency epochs and texture dirty consumption;
+- controlled physical/DMA writes automatically invalidating reservations and
+  publishing coherency state;
+- scoped physical write spans publishing their complete declared range on
+  destruction;
+- production raw physical backing being read-only outside the memory layer;
+- removal of the synchronous physical-write observer branch from generated
+  scalar stores;
 - generated PPC scalar/vector memory access through `MemoryAccessContext`.
+
+After the controlled-write/observer-removal slice, the complete generic Linux
+x86-64 Release matrix remains **24/24 passing**.
 
 The complete generic Linux x86-64 Release CTest matrix is run after each foundational change. Native Vulkan backend compilation requires a Vulkan SDK and D3D12/Windows host-VM validation requires a Windows build, so those platform-specific checks remain separate required validation rather than being inferred from generic Linux tests. See [`../MEMORY_V2.md`](../MEMORY_V2.md) for the live completion status and remaining hardening work.
