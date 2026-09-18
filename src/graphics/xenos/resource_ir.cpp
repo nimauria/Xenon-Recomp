@@ -1,10 +1,14 @@
 #include "xenon/gpu/resource_ir.hpp"
 
+#include "xenon/gpu/texture.hpp"
+#include "xenon/memory/types.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace xenon::gpu {
 namespace {
@@ -26,6 +30,48 @@ std::uint64_t hash_value(std::uint64_t hash, std::uint64_t value) noexcept {
     hash *= 1099511628211ull;
   }
   return hash;
+}
+
+// Memory export accepts the Xenos color/resolve format subset, not every
+// texture format encoding. Keep unknown/reserved encodings explicit rather
+// than silently treating a byte-addressable texture format as exportable.
+bool is_memexport_color_format(std::uint8_t format) noexcept {
+  switch (format) {
+    case 2:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 8:
+    case 9:
+    case 10:
+    case 14:
+    case 15:
+    case 16:
+    case 17:
+    case 24:
+    case 25:
+    case 26:
+    case 30:
+    case 31:
+    case 32:
+    case 36:
+    case 37:
+    case 38:
+    case 50:
+    case 54:
+    case 55:
+    case 56:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool is_memexport_number_format(std::uint8_t format) noexcept {
+  // unsigned/signed repeating fraction, unsigned/signed integer, float.
+  return format <= 3u || format == 7u;
 }
 
 }  // namespace
@@ -655,6 +701,132 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
     for (unsigned j = 0; j < 3; ++j) result.vertex_buffers[i][j] = vertex_buffer(i, j);
   }
   return result;
+}
+
+MemExportPlan ResourceStateTracker::plan_memexport(
+    const DecodedShader& shader) const {
+  MemExportPlan plan{};
+  plan.export_mask = shader.reflection.memory_export_mask;
+  if (!plan.has_writes()) return plan;
+  plan.requires_dynamic_address_analysis =
+      shader.reflection.requires_dynamic_memexport_address;
+
+  // The common SDK pattern makes the stream constant statically recoverable
+  // from the eA MAD. Other legal constructions need execution-time address
+  // analysis, so keep them explicit instead of guessing a range.
+  if (!shader.reflection.writes_export_address ||
+      shader.reflection.memexport_stream_constants.empty()) {
+    plan.requires_dynamic_address_analysis = true;
+    return plan;
+  }
+
+  constexpr std::uint32_t kVsFloatConstantBase = 0x4000u;
+  constexpr std::uint32_t kPsFloatConstantBase = 0x4400u;
+  const auto constant_base = shader.stage == ShaderStage::Pixel
+                                 ? kPsFloatConstantBase
+                                 : kVsFloatConstantBase;
+
+  for (const auto constant_index :
+       shader.reflection.memexport_stream_constants) {
+    MemExportStreamDescriptor stream{};
+    stream.constant_index = constant_index;
+    if (constant_index >= 256u) {
+      stream.error = "Xenos memexport stream constant index is outside the stage bank";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+
+    const auto register_index = constant_base + std::uint32_t(constant_index) * 4u;
+    const std::uint32_t d0 = registers_[register_index + 0u];
+    const std::uint32_t d1 = registers_[register_index + 1u];
+    const std::uint32_t d2 = registers_[register_index + 2u];
+    const std::uint32_t d3 = registers_[register_index + 3u];
+
+    // The Xenos pass-through-export stream constant deliberately embeds
+    // normalized-float guard bits. These checks are also important for shaders
+    // whose memexport path is not taken and whose constants were never set up.
+    if ((d0 >> 30u) != 0x1u || d1 != 0x4B000000u ||
+        (d2 >> 20u) != 0x4B0u || (d3 >> 23u) != 0x96u) {
+      stream.error = "Xenos memexport stream constant guard bits are invalid";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+
+    stream.base_address_dwords = d0 & 0x3FFFFFFFu;
+    const std::uint64_t base_bytes64 =
+        std::uint64_t(stream.base_address_dwords) * 4u;
+    if (base_bytes64 > UINT32_MAX) {
+      stream.error = "Xenos memexport base address overflows 32-bit guest addressing";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+    stream.base_address_bytes = static_cast<std::uint32_t>(base_bytes64);
+    const auto endian = static_cast<std::uint8_t>(d2 & 0x7u);
+    if (endian > static_cast<std::uint8_t>(Endian128::Swap8In128)) {
+      stream.error = "Xenos memexport stream uses a reserved 128-bit endian mode";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+    stream.endian = static_cast<Endian128>(endian);
+    stream.format = static_cast<std::uint8_t>((d2 >> 8u) & 0x3Fu);
+    stream.number_format = static_cast<std::uint8_t>((d2 >> 16u) & 0x7u);
+    stream.red_blue_swap = ((d2 >> 19u) & 1u) != 0;
+    stream.index_count = d3 & 0x7FFFFFu;
+    if (!stream.index_count) {
+      stream.error = "Xenos memexport stream has zero elements";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+    if (!is_memexport_number_format(stream.number_format)) {
+      stream.error = "Xenos memexport stream uses a reserved surface number format";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+    if (!is_memexport_color_format(stream.format)) {
+      stream.error = "Xenos memexport stream uses a non-exportable color format";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+
+    const auto& format = texture_format_info(stream.format);
+    if (format.storage != TextureStorage::Uncompressed ||
+        format.block_width != 1u || format.block_height != 1u ||
+        !format.bits_per_pixel || (format.bits_per_pixel & 7u)) {
+      stream.error = "Xenos memexport color format has no byte-addressable layout";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+    stream.element_size_bytes =
+        static_cast<std::uint8_t>(format.bits_per_pixel >> 3u);
+
+    const auto size64 = stream.size_bytes();
+    if (size64 > UINT32_MAX ||
+        base_bytes64 + size64 > memory::kPhysicalMemorySize) {
+      stream.error = "Xenos memexport stream range is outside physical guest memory";
+      plan.streams.push_back(std::move(stream));
+      continue;
+    }
+
+    stream.valid = true;
+    const auto range_size = static_cast<std::uint32_t>(size64);
+    auto existing = std::find_if(
+        plan.ranges.begin(), plan.ranges.end(),
+        [&](const MemExportRange& range) {
+          return range.base_address_dwords == stream.base_address_dwords;
+        });
+    if (existing == plan.ranges.end()) {
+      plan.ranges.push_back({stream.base_address_dwords, range_size});
+    } else {
+      existing->size_bytes = std::max(existing->size_bytes, range_size);
+    }
+    plan.streams.push_back(std::move(stream));
+  }
+
+  // A shader can legally synthesize eA dynamically. If no statically valid
+  // stream survived validation, the execution path must not assume that there
+  // is no memexport; it needs dynamic address analysis instead.
+  if (plan.ranges.empty()) plan.requires_dynamic_address_analysis = true;
+  return plan;
 }
 
 bool ResourceStateTracker::write_constant_buffer(

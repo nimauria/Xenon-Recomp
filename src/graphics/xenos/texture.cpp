@@ -1,4 +1,5 @@
 #include "xenon/gpu/texture.hpp"
+#include "xenon/memory/address_space.hpp"
 
 #include <algorithm>
 #include <array>
@@ -446,8 +447,15 @@ void apply_endian128(std::span<std::byte> data, Endian128 endian) noexcept {
 ResolveWriteResult write_raw_resolve(
     const CopyResolveState& copy, const ResolveRectangle& rectangle,
     std::span<const std::byte> source, std::uint32_t source_row_pitch,
-    std::span<std::byte> physical_memory) {
+    memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
+  const auto* physical_base = physical_memory.physical_data();
+  if (!physical_base) {
+    result.error = "raw resolve has no physical memory backing";
+    return result;
+  }
+  const auto physical_bytes = std::span<const std::byte>(
+      physical_base, memory::kPhysicalMemorySize);
   if (copy.command != CopyCommand::Raw) {
     result.error = "converted Xenos resolve requires format conversion";
     return result;
@@ -504,19 +512,19 @@ ResolveWriteResult write_raw_resolve(
           : tiled_offset_2d(destination_x, destination_y, pitch_aligned,
                             bytes_per_pixel);
       const auto destination = std::uint64_t(copy.destination_base) + tiled;
-      if (destination + bytes_per_pixel > physical_memory.size()) {
+      if (destination + bytes_per_pixel > physical_bytes.size()) {
         result.error = "raw resolve destination is outside physical memory";
         return result;
       }
       const auto block_address = static_cast<std::uint32_t>(destination & ~15ull);
       auto [block_it, inserted] = blocks.try_emplace(block_address);
       if (inserted) {
-        if (std::uint64_t(block_address) + 16u > physical_memory.size()) {
+        if (std::uint64_t(block_address) + 16u > physical_bytes.size()) {
           result.error = "raw resolve endian block is outside physical memory";
           return result;
         }
         std::memcpy(block_it->second.data(),
-                    physical_memory.data() + block_address, 16);
+                    physical_bytes.data() + block_address, 16);
         apply_endian128(block_it->second, copy.destination_endian);
       }
       const auto block_offset = static_cast<std::size_t>(destination & 15ull);
@@ -534,12 +542,19 @@ ResolveWriteResult write_raw_resolve(
     result.error = "raw resolve produced no destination blocks";
     return result;
   }
-  for (auto& [address, block] : blocks) {
-    apply_endian128(block, copy.destination_endian);
-    std::memcpy(physical_memory.data() + address, block.data(), block.size());
-  }
   const auto first = blocks.begin()->first;
   const auto last = blocks.rbegin()->first + 16u;
+  auto write = physical_memory.physical_write_span(first, last - first);
+  if (!write) {
+    result.error = "raw resolve could not acquire physical write span";
+    return result;
+  }
+  auto destination_bytes = write.bytes();
+  for (auto& [address, block] : blocks) {
+    apply_endian128(block, copy.destination_endian);
+    std::memcpy(destination_bytes.data() + (address - first), block.data(),
+                block.size());
+  }
   result.modified_address = first;
   result.modified_size = last - first;
   result.valid = true;
@@ -549,7 +564,7 @@ ResolveWriteResult write_raw_resolve(
 ResolveWriteResult write_converted_resolve(
     const CopyResolveState& copy, ColorRenderTargetFormat source_format,
     const ResolveRectangle& rectangle, std::span<const std::byte> source,
-    std::uint32_t source_row_pitch, std::span<std::byte> physical_memory) {
+    std::uint32_t source_row_pitch, memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
   if (copy.command != CopyCommand::Convert && copy.command != CopyCommand::Raw) {
     result.error = "Xenos resolve command cannot use color conversion";
@@ -680,7 +695,7 @@ ResolveWriteResult write_converted_resolve(
 ResolveWriteResult write_depth_resolve(
     const CopyResolveState& copy, DepthRenderTargetFormat source_format,
     const ResolveRectangle& rectangle, std::span<const std::uint32_t> source,
-    std::uint32_t source_row_pitch, std::span<std::byte> physical_memory) {
+    std::uint32_t source_row_pitch, memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
   if (copy.command != CopyCommand::Raw && copy.command != CopyCommand::Convert) {
     result.error = "Xenos depth resolve command is unsupported";

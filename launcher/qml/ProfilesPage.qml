@@ -98,7 +98,8 @@ Item {
                         Accessible.description: modelData.active ? "Active Xenon profile" : "Xenon profile"
 
                         contentItem: RowLayout {
-                            anchors.margins: Theme.spaceSm
+                            anchors.fill: parent
+                            anchors.margins: Theme.spaceMd
                             spacing: Theme.spaceSm
 
                             ProfileAvatar {
@@ -164,6 +165,7 @@ Item {
                 XPanel {
                     Layout.fillWidth: true
                     implicitHeight: profileHeader.implicitHeight + Theme.spaceLg * 2
+                    decorated: true
 
                     GridLayout {
                         id: profileHeader
@@ -171,7 +173,7 @@ Item {
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.margins: Theme.spaceLg
-                        columns: detailScroll.availableWidth >= 900 && Theme.textScale <= 1.35 ? 2 : 1
+                        columns: detailScroll.availableWidth >= 1040 && Theme.textScale <= 1.35 ? 2 : 1
                         columnSpacing: Theme.spaceLg
                         rowSpacing: Theme.spaceMd
 
@@ -197,7 +199,9 @@ Item {
                                         color: Theme.text
                                         font.pixelSize: Theme.typeTitle
                                         font.weight: Font.DemiBold
-                                        wrapMode: Text.WordWrap
+                                        wrapMode: Text.NoWrap
+                                        maximumLineCount: 1
+                                        elide: Text.ElideRight
                                     }
                                     StatusPill {
                                         label: root.selected.active ? "Active" : "Inactive"
@@ -206,10 +210,13 @@ Item {
                                 }
                                 Text {
                                     Layout.fillWidth: true
+                                    Layout.maximumWidth: 660
                                     text: root.selected.description || "No profile description."
                                     color: Theme.textMuted
                                     font.pixelSize: Theme.typeBody
                                     wrapMode: Text.WordWrap
+                                    maximumLineCount: 2
+                                    elide: Text.ElideRight
                                 }
                                 Text {
                                     Layout.fillWidth: true
@@ -221,27 +228,44 @@ Item {
                             }
                         }
 
-                        Flow {
+                        RowLayout {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 500
                             Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                             spacing: Theme.spaceSm
-                            XButton {
-                                visible: !root.selected.active
-                                text: "Set Active"
-                                variant: "primary"
-                                onClicked: {
-                                    ProfileStore.activate(ProfileStore.selectedIndex)
-                                    launcherBridge.notify("Profile activated", root.selected.profileName + " is now active.")
+
+                            // Reserve the first action slot even for the active profile so
+                            // Edit / Duplicate / More never shift when activation changes.
+                            Item {
+                                Layout.preferredWidth: 112
+                                Layout.preferredHeight: Theme.controlHeight
+                                XButton {
+                                    anchors.fill: parent
+                                    visible: !root.selected.active
+                                    text: "Set Active"
+                                    variant: "primary"
+                                    onClicked: {
+                                        ProfileStore.activate(ProfileStore.selectedIndex)
+                                        launcherBridge.notify("Profile activated", root.selected.profileName + " is now active.")
+                                    }
                                 }
                             }
+
                             XButton {
+                                Layout.preferredWidth: 126
                                 text: "Edit Profile"
                                 variant: root.selected.active ? "primary" : "default"
                                 onClicked: profileEditor.openForEdit(ProfileStore.selectedIndex, root.selected)
                             }
-                            XButton { text: "Duplicate"; onClicked: ProfileStore.duplicate(ProfileStore.selectedIndex) }
+                            XButton {
+                                Layout.preferredWidth: 116
+                                text: "Duplicate"
+                                onClicked: ProfileStore.duplicate(ProfileStore.selectedIndex)
+                            }
                             XIconButton {
                                 id: profileActionsButton
+                                Layout.preferredWidth: Theme.controlHeight
+                                Layout.preferredHeight: Theme.controlHeight
                                 iconName: "more"
                                 tooltip: "More profile actions"
                                 variant: "filled"

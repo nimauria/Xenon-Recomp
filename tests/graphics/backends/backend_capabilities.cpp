@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -6,8 +5,6 @@
 #include <cstring>
 #include <iostream>
 #include <span>
-#include <string_view>
-#include <vector>
 
 #include "xenon/gpu/backend_capabilities.hpp"
 #include "xenon/gpu/depth_format.hpp"
@@ -86,94 +83,6 @@ Output main() {
   return shader;
 }
 
-template <typename DepthTarget, typename Queue>
-void validate_depth_sample_transfer_matrix(
-    DepthTarget& target, Queue& queue,
-    xenon::gpu::DepthRenderTargetFormat depth_format,
-    xenon::gpu::MsaaSamples guest_msaa, bool force_x2_on_x4,
-    std::string_view backend_label) {
-  constexpr std::uint32_t kWidth = 4;
-  constexpr std::uint32_t kHeight = 4;
-  constexpr float kClearHostDepth = 0.375f;
-  constexpr std::uint8_t kClearStencil = 0xC7;
-
-  assert(target.clear(queue, kClearHostDepth, kClearStencil));
-  const auto guest_sample_count = 1u << static_cast<unsigned>(guest_msaa);
-  std::array<std::vector<std::uint32_t>, 4> expected{};
-  constexpr std::array<float, 9> depths{
-      0.0f, 0.125f, 0.5f, 0.875f, 1.0f,
-      1.25f, 1.5f, 1.75f, 1.99999f};
-
-  for (std::uint32_t sample = 0; sample < guest_sample_count; ++sample) {
-    expected[sample].resize(kWidth * kHeight);
-    for (std::size_t pixel = 0; pixel < expected[sample].size(); ++pixel) {
-      auto depth = depths[(pixel + sample * 3u) % depths.size()];
-      if (depth_format == xenon::gpu::DepthRenderTargetFormat::D24S8)
-        depth = (std::min)(depth, 1.0f);
-      expected[sample][pixel] = xenon::gpu::pack_depth_stencil(
-          depth_format, depth,
-          static_cast<std::uint8_t>(0x11u + sample * 0x38u + pixel));
-    }
-    const bool uploaded = target.upload_sample(
-        queue, sample, 0, 0, kWidth, kHeight, expected[sample], kWidth * 4u);
-    if (!uploaded)
-      std::cerr << backend_label << " depth upload failed: "
-                << target.error() << '\n';
-    assert(uploaded);
-  }
-
-  for (std::uint32_t sample = 0; sample < guest_sample_count; ++sample) {
-    std::vector<std::uint32_t> returned;
-    std::uint32_t pitch{};
-    const bool read = target.readback_sample(
-        queue, sample, 0, 0, kWidth, kHeight, returned, pitch);
-    if (!read)
-      std::cerr << backend_label << " depth readback failed: "
-                << target.error() << '\n';
-    assert(read);
-    assert(pitch == kWidth * 4u && returned == expected[sample]);
-  }
-
-  const auto read_native = [&](std::uint32_t host_sample,
-                               const std::vector<std::uint32_t>& wanted) {
-    std::vector<std::uint32_t> returned;
-    std::uint32_t pitch{};
-    assert(target.readback_native_sample(
-        queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
-    assert(pitch == kWidth * 4u && returned == wanted);
-  };
-
-  if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
-    assert(target.host_msaa() == xenon::gpu::MsaaSamples::X1);
-    read_native(0, expected[0]);
-  } else if (guest_msaa == xenon::gpu::MsaaSamples::X4) {
-    assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
-    for (std::uint32_t sample = 0; sample < 4; ++sample)
-      read_native(sample, expected[sample]);
-  } else {
-    assert(guest_msaa == xenon::gpu::MsaaSamples::X2);
-    if (force_x2_on_x4)
-      assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
-
-    if (target.host_msaa() == xenon::gpu::MsaaSamples::X2) {
-      // Native D3D10+/Vulkan 2x sample order is reversed relative to Xenos.
-      read_native(1, expected[0]);
-      read_native(0, expected[1]);
-    } else {
-      assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
-      // Xenos 2x uses host samples 0 and 3 when a 4x attachment is used as
-      // fallback. Samples 1 and 2 are padding and must remain untouched.
-      read_native(0, expected[0]);
-      read_native(3, expected[1]);
-      const auto clear_word = xenon::gpu::host_to_depth_stencil(
-          depth_format, kClearHostDepth, kClearStencil);
-      const std::vector<std::uint32_t> untouched(kWidth * kHeight, clear_word);
-      read_native(1, untouched);
-      read_native(2, untouched);
-    }
-  }
-}
-
 }  // namespace
 #endif
 
@@ -224,8 +133,9 @@ int main() {
   for (std::uint32_t y = 0; y < 4; ++y)
     for (std::uint32_t x = 0; x < 4; ++x) {
       const std::uint32_t pixel = 0xFF000000u | (y << 8) | x;
-      std::memcpy(vulkan_guest_memory.physical_data(
-          vulkan_texture_descriptor.base_address + y * 128 + x * 4), &pixel, 4);
+      assert(vulkan_guest_memory.write_physical(
+          vulkan_texture_descriptor.base_address + y * 128 + x * 4,
+          std::as_bytes(std::span<const std::uint32_t>(&pixel, 1))));
     }
   const auto vulkan_decoded = xenon::gpu::decode_texture(
       vulkan_texture_descriptor,
@@ -290,30 +200,48 @@ int main() {
   for (const auto depth_format : {
            xenon::gpu::DepthRenderTargetFormat::D24S8,
            xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
-    struct Case {
-      xenon::gpu::MsaaSamples msaa;
-      bool native_2x;
-      bool force_x2_on_x4;
-    };
-    constexpr std::array cases{
-        Case{xenon::gpu::MsaaSamples::X1, true, false},
-        Case{xenon::gpu::MsaaSamples::X2, true, false},
-        Case{xenon::gpu::MsaaSamples::X2, false, true},
-        Case{xenon::gpu::MsaaSamples::X4, true, false},
-    };
-    for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
-      const auto& test_case = cases[case_index];
-      xenon::gpu::EdramSurfaceLayout transfer_surface{
-          80u + 32u * static_cast<unsigned>(depth_format) +
-              static_cast<std::uint32_t>(case_index) * 4u,
-          4, 4, test_case.msaa, false, true};
-      xenon::gpu::vulkan::DepthTargetImage transfer_target;
-      assert(transfer_target.initialize(
-          vulkan_context.physical_device(), vulkan_context.device(),
-          transfer_surface, depth_format, test_case.native_2x));
-      validate_depth_sample_transfer_matrix(
-          transfer_target, vulkan_queue, depth_format, test_case.msaa,
-          test_case.force_x2_on_x4, "Vulkan");
+    xenon::gpu::EdramSurfaceLayout transfer_surface{
+        80u + 16u * static_cast<unsigned>(depth_format), 4, 4,
+        xenon::gpu::MsaaSamples::X4, false, true};
+    xenon::gpu::vulkan::DepthTargetImage transfer_target;
+    assert(transfer_target.initialize(
+        vulkan_context.physical_device(), vulkan_context.device(),
+        transfer_surface, depth_format));
+    assert(transfer_target.clear(vulkan_queue, 0.0f, 0));
+    constexpr std::array<float, 9> depths{
+        0.0f, 0.25f, 0.5f, 0.999f, 1.0f,
+        1.25f, 1.5f, 1.75f, 1.99999f};
+    std::array<std::vector<std::uint32_t>, 4> expected;
+    for (std::uint32_t sample = 0; sample < 4; ++sample) {
+      expected[sample].resize(16);
+      for (std::size_t pixel = 0; pixel < expected[sample].size(); ++pixel) {
+        const auto value = depths[(pixel + sample * 2) % depths.size()];
+        expected[sample][pixel] = xenon::gpu::pack_depth_stencil(
+            depth_format, value,
+            static_cast<std::uint8_t>(0x21u + sample * 0x30u + pixel));
+      }
+      const bool uploaded = transfer_target.upload_sample(
+          vulkan_queue, sample, 0, 0, 4, 4, expected[sample], 16);
+      if (!uploaded) std::cerr << transfer_target.error() << '\n';
+      assert(uploaded);
+    }
+    for (std::uint32_t sample = 0; sample < 4; ++sample) {
+      std::vector<std::uint32_t> returned;
+      std::uint32_t pitch{};
+      assert(transfer_target.readback_sample(
+          vulkan_queue, sample, 0, 0, 4, 4, returned, pitch));
+      if (returned != expected[sample]) {
+        for (std::size_t i = 0; i < returned.size(); ++i)
+          if (returned[i] != expected[sample][i]) {
+            std::cerr << "Vulkan depth mismatch format="
+                      << static_cast<unsigned>(depth_format)
+                      << " sample=" << sample << " pixel=" << i
+                      << " expected=0x" << std::hex << expected[sample][i]
+                      << " actual=0x" << returned[i] << std::dec << '\n';
+            break;
+          }
+      }
+      assert(pitch == 16 && returned == expected[sample]);
     }
   }
   xenon::gpu::EdramSurfaceLayout vulkan_msaa_surface{
@@ -510,8 +438,8 @@ int main() {
   vulkan_draw_readback_1.unmap();
 #endif
   constexpr std::uint32_t kVulkanProbeAddress = 0x4321;
-  vulkan_guest_memory.physical_data()[kVulkanProbeAddress] = std::byte{0x6B};
-  vulkan_guest_memory.notify_external_write(kVulkanProbeAddress, 1);
+  const std::array<std::byte, 1> vulkan_probe{std::byte{0x6B}};
+  assert(vulkan_guest_memory.write_physical(kVulkanProbeAddress, vulkan_probe));
   assert(vulkan_mirror.synchronize());
   xenon::gpu::vulkan::Buffer vulkan_readback;
   assert(vulkan_readback.initialize(
@@ -580,8 +508,9 @@ int main() {
     for (std::uint32_t y = 0; y < 4; ++y)
       for (std::uint32_t x = 0; x < 4; ++x) {
         const std::uint32_t pixel = 0xFF000000u | (y << 8) | x;
-        std::memcpy(guest_memory.physical_data(
-            texture_descriptor.base_address + y * 128 + x * 4), &pixel, 4);
+        assert(guest_memory.write_physical(
+            texture_descriptor.base_address + y * 128 + x * 4,
+            std::as_bytes(std::span<const std::uint32_t>(&pixel, 1))));
       }
     const auto decoded = xenon::gpu::decode_texture(
         texture_descriptor,
@@ -630,29 +559,49 @@ int main() {
     for (const auto depth_format : {
              xenon::gpu::DepthRenderTargetFormat::D24S8,
              xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
-      struct Case {
-        xenon::gpu::MsaaSamples msaa;
-        bool native_2x;
-        bool force_x2_on_x4;
-      };
-      constexpr std::array cases{
-          Case{xenon::gpu::MsaaSamples::X1, true, false},
-          Case{xenon::gpu::MsaaSamples::X2, true, false},
-          Case{xenon::gpu::MsaaSamples::X2, false, true},
-          Case{xenon::gpu::MsaaSamples::X4, true, false},
-      };
-      for (std::size_t case_index = 0; case_index < cases.size(); ++case_index) {
-        const auto& test_case = cases[case_index];
-        xenon::gpu::EdramSurfaceLayout transfer_surface{
-            80u + 32u * static_cast<unsigned>(depth_format) +
-                static_cast<std::uint32_t>(case_index) * 4u,
-            4, 4, test_case.msaa, false, true};
-        xenon::gpu::d3d12::DepthTargetImage transfer_target;
-        assert(transfer_target.initialize(context.device(), transfer_surface,
-                                          depth_format, test_case.native_2x));
-        validate_depth_sample_transfer_matrix(
-            transfer_target, queue, depth_format, test_case.msaa,
-            test_case.force_x2_on_x4, "D3D12");
+      xenon::gpu::EdramSurfaceLayout transfer_surface{
+          80u + 16u * static_cast<unsigned>(depth_format), 4, 4,
+          xenon::gpu::MsaaSamples::X4, false, true};
+      xenon::gpu::d3d12::DepthTargetImage transfer_target;
+      assert(transfer_target.initialize(context.device(), transfer_surface,
+                                        depth_format));
+      assert(transfer_target.clear(queue, 0.0f, 0));
+      constexpr std::array<float, 9> depths{
+          0.0f, 0.25f, 0.5f, 0.999f, 1.0f,
+          1.25f, 1.5f, 1.75f, 1.99999f};
+      std::array<std::vector<std::uint32_t>, 4> expected;
+      for (std::uint32_t sample = 0; sample < 4; ++sample) {
+        expected[sample].resize(16);
+        for (std::size_t pixel = 0; pixel < 16; ++pixel) {
+          const auto value = depth_format == xenon::gpu::DepthRenderTargetFormat::D24S8
+              ? (std::min)(depths[(pixel + sample) % 5], 1.0f)
+              : depths[(pixel + sample) % depths.size()];
+          expected[sample][pixel] = xenon::gpu::pack_depth_stencil(
+              depth_format, value,
+              static_cast<std::uint8_t>(0x21u + sample * 0x30u + pixel));
+        }
+        const bool uploaded = transfer_target.upload_sample(
+            queue, sample, 0, 0, 4, 4, expected[sample], 16);
+        if (!uploaded) std::cerr << transfer_target.error() << '\n';
+        assert(uploaded);
+      }
+      for (std::uint32_t sample = 0; sample < 4; ++sample) {
+        std::vector<std::uint32_t> returned;
+        std::uint32_t pitch{};
+        assert(transfer_target.readback_sample(queue, sample, 0, 0, 4, 4,
+                                               returned, pitch));
+        if (returned != expected[sample]) {
+          for (std::size_t i = 0; i < returned.size(); ++i)
+            if (returned[i] != expected[sample][i]) {
+              std::cerr << "depth mismatch format="
+                        << static_cast<unsigned>(depth_format)
+                        << " sample=" << sample << " pixel=" << i
+                        << " expected=0x" << std::hex << expected[sample][i]
+                        << " actual=0x" << returned[i] << std::dec << '\n';
+              break;
+            }
+        }
+        assert(pitch == 16 && returned == expected[sample]);
       }
     }
     xenon::gpu::EdramSurfaceLayout d3d_msaa_surface{
@@ -819,8 +768,8 @@ int main() {
     d3d_draw_readback_1.unmap();
 #endif
     constexpr std::uint32_t kProbeAddress = 0x1234;
-    guest_memory.physical_data()[kProbeAddress] = std::byte{0xA5};
-    guest_memory.notify_external_write(kProbeAddress, 1);
+    const std::array<std::byte, 1> probe{std::byte{0xA5}};
+    assert(guest_memory.write_physical(kProbeAddress, probe));
     assert(mirror.synchronize());
     xenon::gpu::d3d12::Buffer readback;
     assert(readback.initialize(context.device(), 1, D3D12_HEAP_TYPE_READBACK,

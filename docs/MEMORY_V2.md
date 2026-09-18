@@ -22,6 +22,35 @@ efficient native host representation
 
 Game modules do not own Xbox page tables, aliases, endian behaviour, reservations, allocation rules, protection semantics or CPU/GPU coherency.
 
+## Specification progress checkpoint
+
+This table tracks the original Memory V2 implementation brief against production
+code rather than treating "old tests pass" as completion.
+
+| Brief phase | Status | Current state |
+| --- | --- | --- |
+| 1. Audit and design | Substantially complete | V1 hot paths, metadata costs, ownership, generated access and GPU coherency boundaries are documented and representative generated AOT output was inspected. |
+| 2. Hot/cold architecture | Implemented foundation | `AddressSpace` owns management; generated PPC uses concrete `MemoryAccessContext` for ordinary RAM. |
+| 3. Compact page translation | Implemented foundation | Atomic 64-bit hot table covers the 32-bit guest page space; large management `Page` state remains cold. |
+| 4. Remove global access serialization | Partial / strong | Common generated RAM is lock-free with respect to the global management mutex; six-thread stress exists; read-side reclamation now prevents physical-page ABA. Final PPC ordering/atomic semantics remain. |
+| 5. Host VM backend | Implemented foundation | Windows, POSIX/Linux and fallback host-VM implementations are separated from Xbox policy. |
+| 6. Direct guest aperture | Not started | Compact translation remains the portable baseline. |
+| 7. Physical allocator | Not started | Allocation is still linear-scan; replacement and fragmentation tests are next. |
+| 8. Physical ownership/aliases | Partial / strong | Mapping refcounts, pending-free ownership and retired-page quiescence are implemented; broader reverse-mapping/model tests remain. |
+| 9. PPC reservation monitor | Not started final design | Correct existing 128-byte generation model retained pending exact six-thread LR/SC redesign. |
+| 10. PPC memory ordering | Not started | Dedicated `sync`/`lwsync`/`eieio`/`isync` host model and litmus tests remain. |
+| 11. Block/range access | Partial | `fill`, `zero`, `copy` and `dcbz` use range-oriented work; copy still uses a proportional temporary snapshot and string/vector-partial operations remain scalar. |
+| 12. Dirty tracking/observers | Implemented foundation | Xenon-owned page epochs drive consumers; synchronous physical-write observers have been removed from the scalar path entirely. |
+| 13. Safe external writes | Implemented foundation | Raw physical backing is read-only externally; `write_physical`, `fill_physical` and RAII `PhysicalWriteSpan` automatically publish reservation/coherency changes. |
+| 14. Shared CPU/GPU coherency | Partial / strong | `GuestMemoryCoherency` owns dirty state for Vulkan, D3D12 and texture tracking; backend/platform validation remains. |
+| 15. Lazy/range GPU sync | Partial / strong | Mirrors consume coalesced dirty ranges after initial synchronization; unrestricted-workload/future UMA policy remains. |
+| 16. Memory types | Early foundation | No-cache/write-combine bits exist in hot metadata; observable ordering/mapping/device semantics remain. |
+| 17. MMIO fast/slow split | Partial / strong | MMIO pages force slow dispatch and do not burden normal RAM; cold MMIO lookup/handler locking still needs refinement. |
+| 18. Fault/protection model | Partial | `MemoryFault` carries address/width/access/reason; richer mapping/protection/page-state records and kernel-exception translation remain. |
+| 19. Executable/SMC | Early foundation | Execute permission and `icbi` callback behavior exist; executable generations/native-code invalidation remain. |
+| 20. Benchmarking | Not started | Dedicated Memory V2 Release benchmark suite remains. |
+| 21. Fuzzing/hardening | Partial | Targeted ASan/UBSan passes and concurrency regressions exist; model fuzzing, TSan and wider compiler/platform matrix remain. |
+
 ## 1. V1 audit
 
 The Memory V2 work started by auditing `AddressSpace`, generated PPC memory access, reservations, MMIO, XEX mappings, physical allocation, the GPU guest-memory mirrors and the existing CPU/memory/graphics tests.
@@ -38,7 +67,7 @@ The main V1 hot-path costs were:
 - physical allocation used linear page scans;
 - `free_physical` scanned the entire 32-bit guest page table to discover live mappings;
 - host VM primitives (`mmap`/`VirtualAlloc` family) were embedded in the Xbox-facing address-space implementation;
-- writable raw physical backing is exposed to production callers, making it possible to bypass reservation/coherency bookkeeping.
+- writable raw physical backing was exposed to production callers, making it possible to bypass reservation/coherency bookkeeping; this was removed in the second V2 slice.
 
 The audit also confirmed that the existing Xbox address map, protection checks, XEX aliases, physical aliases and MMIO behaviour are valuable semantics and should be retained rather than replaced for architectural neatness.
 
@@ -150,9 +179,15 @@ Normal RAM no longer scans MMIO collections or `RegionDescriptor` structures. Pa
 
 Hot page entries are release-published after mapping/protection changes and acquire-read by fast accesses.
 
-### 4.1 Current concurrency boundary
+### 4.1 Mapping lifetime and read-side quiescence
 
-Atomic publication makes page-table state race-free as data, but publication alone is **not** a complete lifetime/quiescence solution for a thread that has already loaded an old mapping while another thread decommits and recycles its physical page. Mapping-management concurrency therefore remains an explicit V2 hardening item. Normal concurrent RAM access has been moved off the global mutex; concurrent destructive remapping still needs a defined quiescence/reclamation mechanism before it can be considered fully hardened.
+Atomic publication makes page-table state race-free as data, but publication alone is not enough: a CPU thread can load a hot entry immediately before another thread unpublishes the mapping. Reusing that physical page immediately would create an ABA hazard where the old access could reach a different allocation.
+
+`MemoryAccessContext` now carries a lightweight read-side lifetime guard. Creating a production fast context increments a shared active-reader counter and destruction decrements it. This happens once per generated context, not once per scalar load/store.
+
+Physical pages released from virtual/explicit ownership enter a **retired** state instead of immediately returning to the allocator. Retired pages are not recycled while any pre-existing fast context is alive. The cold allocator reclaims retired pages only after the active-reader count reaches zero, at which point it discards the backing and publishes the corresponding reservation/coherency change before reuse.
+
+Fast accesses still load the atomic hot page entry on every access, so the guard is a reclamation/lifetime mechanism rather than a cached-TLB mechanism. New contexts after an unpublish observe the new mapping state; the quarantine exists to protect the narrow load-entry-to-host-access race of older contexts.
 
 ## 5. Normal RAM fast path
 
@@ -277,26 +312,27 @@ This moves Xbox guest-memory coherency policy out of the Vulkan/D3D12 implementa
 
 ## 12. Write observers and dirty tracking
 
-The legacy physical-write observer API remains temporarily for compatibility, tests and non-migrated consumers. It is no longer required by the production GPU mirror or texture dirty paths.
+The legacy synchronous physical-write observer API has now been removed. There is no observer-active branch, callback thunk, callback-vector copy or arbitrary callback execution in the ordinary `MemoryAccessContext` store path.
 
-The fast context contains an atomic observer-active gate. When no compatibility observer exists, ordinary stores do not copy observer vectors or execute arbitrary callbacks. Coherency dirty state is recorded directly in fixed atomic metadata.
+CPU and controlled external writers publish dirty state directly into fixed Xenon-owned coherency metadata. Vulkan/D3D12 mirrors and texture tracking consume that state asynchronously/range-wise rather than being invoked by every scalar write.
 
-The compatibility observer system should be removed or narrowed further once all legitimate consumers have migrated to owned state/queues.
+Instruction-cache/native-code invalidation remains a separate semantic concern and is still pending the executable-page generation work described below; it must not reintroduce arbitrary per-store observer dispatch.
 
 ## 13. External/DMA writes
 
-This area is **not finished**.
+Production code no longer receives unrestricted mutable physical backing. `physical_data()` is read-only outside the memory implementation.
 
-Today, production code can still obtain mutable `physical_data()` and is responsible for pairing writes with `notify_external_write`. Existing GPU resolve/writeback code follows that convention, but the API permits accidental bookkeeping bypass.
+Memory V2 now provides controlled external-write operations:
 
-The V2 target is controlled write access, for example `write_physical`, `copy_to_physical`, `fill_physical` and/or an RAII `PhysicalWriteSpan`, whose completion automatically performs:
+- `write_physical` for copying a known byte range into physical RAM;
+- `fill_physical` for bounded physical fills;
+- move-only RAII `PhysicalWriteSpan` for native subsystems that genuinely need a direct bounded mutable span.
 
-- reservation invalidation;
-- dirty/coherency publication;
-- executable-page generation changes;
-- any required range notification.
+`PhysicalWriteSpan` publishes its complete declared range automatically when the scope ends. The current completion path invalidates LR/SC reservation generations and publishes CPU/GPU dirty/coherency state. The Xenos PM4 physical-write path and native Vulkan/D3D12 resolve writeback paths use these controlled APIs instead of mutating `physical_data()` and making a second notification call.
 
-Unrestricted mutable backing should ultimately be limited to the memory implementation itself.
+This closes the bookkeeping-bypass API for current production callers. Executable-page generation changes will be added to the same completion path when the executable/SMC subsystem lands, so external writers will not need a second contract later.
+
+The remaining concurrency caveat is broader than this API: exact C++ memory-model behavior for simultaneous differently-sized CPU/DMA accesses is part of the pending multi-threaded memory-order/quiescence hardening and must be validated on x86-64 and ARM64.
 
 ## 14. Host virtual-memory abstraction
 
@@ -373,7 +409,12 @@ The current tests include coverage for:
 - anonymous physical owner release while an alias remains live;
 - prevention of physical-page reuse until the final alias is released;
 - reuse after the final alias is released;
+- retirement of unpublished physical pages while an older fast access context
+  remains alive, followed by reuse only after read-side quiescence;
 - coherency-driven texture dirty detection;
+- controlled physical writes automatically invalidating reservations and publishing coherency state;
+- scoped physical write spans automatically publishing their declared range at scope completion;
+- rejection of out-of-range controlled physical writes;
 - existing CPU/memory/graphics regression behavior.
 
 The generated AOT output has also been inspected: representative `lwz`/`stw` paths acquire `memory.access_context()` and emit `memory_access.read32_be` / `memory_access.write32_be`, while reservations and other uncommon operations still use the slower `MemoryPort` operations.
@@ -390,18 +431,16 @@ Windows host-VM code likewise requires Windows compilation/runtime validation.
 
 The next Memory V2 work should proceed in this order unless a discovered correctness dependency changes it:
 
-1. define mapping-change quiescence/reclamation so fast readers cannot retain recycled mappings;
-2. replace unrestricted production mutable physical writes with controlled range APIs/RAII completion;
-3. replace the linear physical allocator with a range-oriented allocator and add fragmentation/model tests;
-4. complete reverse-mapping/ownership invariants where required by executable/coherency consumers;
-5. research and implement the final six-thread Xenon/PPC reservation monitor;
-6. implement/test the canonical PPC memory-order model for x86-64 and ARM64;
-7. complete memory-type semantics;
-8. add executable-page generations and self-modifying-code integration;
-9. research the optional direct guest aperture;
-10. add dedicated Release memory benchmarks;
-11. add randomized/model-based invariant tests plus ASan/UBSan/TSan validation;
-12. validate native Vulkan, D3D12, Windows VM and later Linux/ARM64 builds.
+1. replace the linear physical allocator with a range-oriented allocator and add fragmentation/model tests;
+2. complete reverse-mapping/ownership invariants where required by executable/coherency consumers;
+3. research and implement the final six-thread Xenon/PPC reservation monitor;
+4. implement/test the canonical PPC memory-order model for x86-64 and ARM64;
+5. complete memory-type semantics;
+6. add executable-page generations and self-modifying-code integration;
+7. research the optional direct guest aperture;
+8. add dedicated Release memory benchmarks;
+9. add randomized/model-based invariant tests plus ASan/UBSan/TSan validation;
+10. validate native Vulkan, D3D12, Windows VM and later Linux/ARM64 builds.
 
 ## 22. Definition-of-done status
 
@@ -413,10 +452,13 @@ The following V2 goals are already substantially represented in production code:
 - no RegionDescriptor/MMIO scan for common RAM accesses;
 - no heap allocation on scalar fast accesses;
 - backend-neutral CPU/GPU dirty tracking;
-- no required synchronous GPU/texture callback on every scalar store;
+- no synchronous physical-write observer/callback branch on scalar stores;
+- controlled external/DMA/GPU write APIs with automatic reservation/coherency completion;
+- read-only raw physical backing outside the memory implementation;
+- read-side quiescence preventing unpublished physical pages from being recycled into ABA/stale translations;
 - range-based common fill/copy operations;
 - physical alias lifetime/refcount protection;
 - host VM implementation separated from the canonical Xbox address-space model;
 - six-thread normal-RAM stress coverage.
 
-Memory V2 is **not complete**. In particular, the reservation monitor, PPC ordering, destructive-remap quiescence, controlled external writes, allocator replacement, executable generations, full memory-type behavior, benchmarking, fuzz/model testing, sanitizer matrix and native backend/platform validation remain required before this document can be marked complete.
+Memory V2 is **not complete**. In particular, the reservation monitor, PPC ordering, allocator replacement, executable generations, full memory-type behavior, benchmarking, fuzz/model testing, sanitizer matrix and native backend/platform validation remain required before this document can be marked complete.

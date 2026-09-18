@@ -17,12 +17,32 @@ Rectangle {
     border.width: Theme.borderWidth
     border.color: Theme.divider
 
+    readonly property string railSource: Theme.effectiveThemeId === "industrial"
+        ? "qrc:/theme-art/decor/amber/rail_vertical_amber.svg"
+        : Theme.effectiveThemeId === "carbon"
+          ? "qrc:/theme-art/decor/green/rail_vertical_green.svg"
+          : Theme.effectiveThemeId === "xenon-dark"
+            ? "qrc:/theme-art/decor/blue/rail_vertical_blue.svg" : ""
+
     ThemeBackdrop {
         anchors.fill: parent
         visible: root.backdropEnabled
         intensity: root.backdropIntensity
         variant: root.backdropVariant
         subtle: true
+    }
+
+    Image {
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.rightMargin: 1
+        width: 8
+        height: Math.min(240, parent.height * 0.48)
+        source: root.railSource
+        visible: source.toString().length > 0
+        fillMode: Image.Stretch
+        opacity: root.compact ? 0.42 : 0.22
+        smooth: true
     }
 
     readonly property var primaryEntries: [
@@ -35,13 +55,13 @@ Rectangle {
         anchors.fill: parent
         anchors.topMargin: Theme.spaceMd
         anchors.bottomMargin: Theme.spaceMd
-        anchors.leftMargin: root.compact ? Theme.spaceMd : Theme.spaceMd
-        anchors.rightMargin: root.compact ? Theme.spaceMd : Theme.spaceMd
+        anchors.leftMargin: root.compact ? Theme.spaceSm : Theme.spaceMd
+        anchors.rightMargin: root.compact ? Theme.spaceSm : Theme.spaceMd
         spacing: Theme.spaceSm
 
-        // Compact/expanded navigation is a first-class control and lives at
-        // the top rather than being stranded below the version text.
         XIconButton {
+            Layout.preferredWidth: root.compact ? 40 : Theme.controlHeight
+            Layout.preferredHeight: root.compact ? 40 : Theme.controlHeight
             Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignRight
             iconName: root.compact ? "chevron-right" : "chevron-left"
             tooltip: root.compact ? "Expand navigation" : "Collapse navigation"
@@ -53,7 +73,9 @@ Rectangle {
             model: root.primaryEntries
             delegate: XNavButton {
                 required property var modelData
-                Layout.fillWidth: true
+                Layout.fillWidth: !root.compact
+                Layout.preferredWidth: root.compact ? 44 : -1
+                Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
                 text: modelData.title
                 iconName: modelData.icon
                 compact: root.compact
@@ -66,7 +88,9 @@ Rectangle {
         Item { Layout.fillHeight: true }
 
         XNavButton {
-            Layout.fillWidth: true
+            Layout.fillWidth: !root.compact
+            Layout.preferredWidth: root.compact ? 44 : -1
+            Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
             text: "Settings"
             iconName: "settings"
             compact: root.compact
@@ -78,7 +102,8 @@ Rectangle {
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
 
         RowLayout {
-            Layout.fillWidth: true
+            Layout.fillWidth: !root.compact
+            Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
             spacing: Theme.spaceSm
             Rectangle { width: 10; height: 10; radius: 5; color: Theme.success }
             ColumnLayout {

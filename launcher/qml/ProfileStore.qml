@@ -9,6 +9,12 @@ QtObject {
     property int selectedIndex: 0
     property int nextProfileNumber: 2
     property var profiles: []
+    readonly property int profileNameLimit: 48
+    readonly property int descriptionLimit: 180
+
+    function limitedDescription(value) {
+        return String(value || "").slice(0, descriptionLimit)
+    }
 
     function newProfileId() {
         return "profile-" + Date.now().toString(36) + "-" + nextProfileNumber.toString(36)
@@ -64,7 +70,7 @@ QtObject {
                 var source = parsed[i] || {}
                 var item = makeProfile(
                     String(source.profileName || (i === 0 ? primaryName : "Profile " + (i + 1))),
-                    String(source.description || "Xenon launcher profile."),
+                    limitedDescription(source.description || "Xenon launcher profile."),
                     Boolean(source.active) && !foundActive,
                     String(source.profileId || ("profile-restored-" + i)))
 
@@ -111,7 +117,7 @@ QtObject {
         return {
             profileId: profileId || newProfileId(),
             profileName: name,
-            description: description,
+            description: limitedDescription(description),
             active: active,
             games: 0,
             avatarPath: "",
@@ -195,12 +201,12 @@ QtObject {
     }
 
     function createFromData(data) {
-        var requestedName = String(data.profileName || ("Profile " + nextProfileNumber)).trim()
+        var requestedName = String(data.profileName || ("Profile " + nextProfileNumber)).trim().slice(0, profileNameLimit)
         if (!nameAvailable(requestedName, -1))
             return -1
         var item = makeProfile(
             requestedName,
-            String(data.description || "Xenon launcher profile."),
+            limitedDescription(data.description || "Xenon launcher profile."),
             false,
             String(data.profileId || newProfileId()))
         item.avatarPath = String(data.avatarPath || "")
@@ -224,13 +230,13 @@ QtObject {
     function updateFromData(index, data) {
         if (index < 0 || index >= profiles.length)
             return false
-        var requestedName = String(data.profileName || "").trim()
+        var requestedName = String(data.profileName || "").trim().slice(0, profileNameLimit)
         if (!nameAvailable(requestedName, index))
             return false
         var current = profiles[index]
         var item = Object.assign({}, current)
         item.profileName = requestedName.length > 0 ? requestedName : current.profileName
-        item.description = String(data.description || "")
+        item.description = limitedDescription(data.description || "")
         item.avatarPath = data.avatarPath === undefined ? String(current.avatarPath || "") : String(data.avatarPath)
         item.gamePath = String(data.gamePath || "")
         item.savePath = String(data.savePath || "")

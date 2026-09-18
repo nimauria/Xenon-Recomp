@@ -13,8 +13,8 @@ Button {
     property bool active: false
     property bool compact: false
 
-    implicitHeight: Math.max(50, Theme.controlHeight + 8)
-    implicitWidth: compact ? implicitHeight : 164
+    implicitHeight: compact ? 44 : Math.max(50, Theme.controlHeight + 8)
+    implicitWidth: compact ? 44 : 164
     leftPadding: compact ? 0 : Theme.spaceMd
     rightPadding: compact ? 0 : Theme.spaceMd
     topPadding: 0
@@ -77,7 +77,7 @@ Button {
     }
 
     background: Rectangle {
-        radius: Theme.controlRadius
+        radius: control.compact ? 10 : Theme.controlRadius
         color: control.active ? Theme.accentSoft
              : control.hovered ? Theme.surfaceHover
              : "transparent"

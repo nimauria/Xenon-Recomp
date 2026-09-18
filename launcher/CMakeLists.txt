@@ -97,20 +97,46 @@ qt_add_resources(xenon_launcher xenon_theme_art
     resources/backgrounds/theme-carbon-tech.png
     resources/backgrounds/theme-industrial-orbit.png
     resources/backgrounds/theme-industrial-tech.png
-    resources/decor/neutral/hex_overlay.svg
-    resources/decor/neutral/diagonal_lines_overlay.svg
-    resources/decor/blue/side_strip_blue.svg
-    resources/decor/blue/corner_top_left_blue.svg
-    resources/decor/blue/corner_bottom_right_blue.svg
-    resources/decor/blue/slashes_blue.svg
-    resources/decor/green/side_strip_green.svg
-    resources/decor/green/corner_top_left_green.svg
-    resources/decor/green/corner_bottom_right_green.svg
-    resources/decor/green/slashes_green.svg
-    resources/decor/amber/side_strip_amber.svg
-    resources/decor/amber/corner_top_left_amber.svg
+    resources/decor/amber/badge_tag_amber.svg
     resources/decor/amber/corner_bottom_right_amber.svg
+    resources/decor/amber/corner_top_left_amber.svg
+    resources/decor/amber/divider_long_amber.svg
+    resources/decor/amber/divider_notch_amber.svg
+    resources/decor/amber/hud_arc_left_amber.svg
+    resources/decor/amber/loading_bar_amber.svg
+    resources/decor/amber/panel_frame_amber.svg
+    resources/decor/amber/rail_vertical_amber.svg
+    resources/decor/amber/side_strip_amber.svg
     resources/decor/amber/slashes_amber.svg
+    resources/decor/blue/badge_tag_blue.svg
+    resources/decor/blue/corner_bottom_right_blue.svg
+    resources/decor/blue/corner_top_left_blue.svg
+    resources/decor/blue/divider_long_blue.svg
+    resources/decor/blue/divider_notch_blue.svg
+    resources/decor/blue/hud_arc_left_blue.svg
+    resources/decor/blue/loading_bar_blue.svg
+    resources/decor/blue/panel_frame_blue.svg
+    resources/decor/blue/rail_vertical_blue.svg
+    resources/decor/blue/side_strip_blue.svg
+    resources/decor/blue/slashes_blue.svg
+    resources/decor/green/badge_tag_green.svg
+    resources/decor/green/corner_bottom_right_green.svg
+    resources/decor/green/corner_top_left_green.svg
+    resources/decor/green/divider_long_green.svg
+    resources/decor/green/divider_notch_green.svg
+    resources/decor/green/hud_arc_left_green.svg
+    resources/decor/green/loading_bar_green.svg
+    resources/decor/green/panel_frame_green.svg
+    resources/decor/green/rail_vertical_green.svg
+    resources/decor/green/side_strip_green.svg
+    resources/decor/green/slashes_green.svg
+    resources/decor/neutral/diagonal_lines_overlay.svg
+    resources/decor/neutral/glow_dot.svg
+    resources/decor/neutral/hex_overlay.svg
+    resources/decor/neutral/status_error.svg
+    resources/decor/neutral/status_offline.svg
+    resources/decor/neutral/status_processing.svg
+    resources/decor/neutral/status_ready.svg
 )
 
 if(WIN32)

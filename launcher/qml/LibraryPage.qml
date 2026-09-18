@@ -341,6 +341,7 @@ Item {
                             Layout.preferredWidth: detailScroll.wide ? Math.max(560, upperGrid.width - 384 - Theme.spaceMd) : -1
                             implicitHeight: gameSummary.implicitHeight + Theme.spaceLg * 2
                             Layout.alignment: Qt.AlignTop
+                            decorated: true
 
                             ColumnLayout {
                                 id: gameSummary

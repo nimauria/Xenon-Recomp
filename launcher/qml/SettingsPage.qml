@@ -108,7 +108,7 @@ Item {
             Layout.preferredHeight: Theme.textScale >= 1.5
                 ? Math.max(64, Theme.controlHeight + Theme.spaceLg * 2)
                 : Math.max(56, Theme.controlHeight + Theme.spaceLg)
-            color: Theme.surface
+            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, 0.94)
 
             StackLayout {
                 anchors.fill: parent
@@ -162,7 +162,7 @@ Item {
         XPanel {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: Theme.surface
+            color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, 0.94)
 
             StackLayout {
                 anchors.fill: parent
@@ -444,7 +444,7 @@ Item {
                     XPanel {
                         Layout.fillWidth: true
                         implicitHeight: developerColumn.implicitHeight + Theme.spaceLg * 2
-                        color: Theme.surfaceAlt
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
                         ColumnLayout {
                             id: developerColumn
                             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
@@ -480,18 +480,26 @@ Item {
                     XPanel {
                         Layout.fillWidth: true
                         implicitHeight: aboutColumn.implicitHeight + Theme.spaceXl * 2
-                        color: Theme.surfaceAlt
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+                        decorated: true
                         ColumnLayout {
                             id: aboutColumn
                             anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
                             anchors.margins: Theme.spaceXl
                             spacing: Theme.spaceSm
-                            XenonBrand { Layout.preferredWidth: 300; Layout.preferredHeight: 68; asset: "lockup"; brandColor: Theme.accent }
+                            XenonBrand {
+                                Layout.preferredWidth: Math.min(300, Math.max(210, aboutColumn.width * 0.42))
+                                Layout.preferredHeight: 62
+                                asset: "lockup"
+                                brandColor: Theme.accent
+                            }
                             Text {
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: 460
                                 text: "PLAY  •  PRESERVE  •  REIMAGINE"
                                 color: Theme.textMuted
                                 font.pixelSize: Theme.typeCaption
-                                font.letterSpacing: 2
+                                font.letterSpacing: Math.min(2, Theme.typeCaption * 0.10)
                                 wrapMode: Text.WordWrap
                             }
                             XInfoRow { label: "Launcher version"; value: launcherBridge.version }

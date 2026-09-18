@@ -8,12 +8,14 @@ XPanel {
     property string description: ""
     property int actionWidth: 270
     property bool compact: false
-    readonly property bool stacked: width > 0 && (width < 720 || Theme.textScale >= 1.35)
+    readonly property bool stacked: width > 0 && width < (Theme.textScale >= 1.75 ? 860 : 720)
     default property alias actionContent: actionLayout.data
 
     Layout.fillWidth: true
     implicitHeight: cardLayout.implicitHeight + (compact ? Theme.spaceSm * 2 : Theme.spaceMd * 2)
-    color: Theme.surfaceAlt
+    color: Theme.highContrast
+        ? Theme.surfaceAlt
+        : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
 
     GridLayout {
         id: cardLayout
@@ -54,6 +56,9 @@ XPanel {
 
         RowLayout {
             id: actionLayout
+            // Keep switches, pills and buttons aligned to the same trailing
+            // action edge. Full-width controls still consume actionWidth.
+            layoutDirection: Qt.RightToLeft
             Layout.fillWidth: root.stacked
             Layout.preferredWidth: root.stacked ? -1 : root.actionWidth
             Layout.minimumWidth: root.stacked ? 0 : Math.min(root.actionWidth, 180)

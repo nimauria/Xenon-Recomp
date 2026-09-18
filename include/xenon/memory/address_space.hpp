@@ -19,6 +19,40 @@
 
 namespace xenon::memory {
 
+class AddressSpace;
+
+// Scoped mutable physical-RAM access for DMA/GPU/APU style writers. The span
+// cannot outlive the scope, and destruction automatically publishes the write
+// to the reservation monitor and Xenon-owned coherency tracker. This replaces
+// the old "mutate physical_data() then remember notify_external_write()"
+// contract that allowed production callers to silently bypass bookkeeping.
+class PhysicalWriteSpan {
+ public:
+  PhysicalWriteSpan() = default;
+  ~PhysicalWriteSpan() noexcept;
+  PhysicalWriteSpan(PhysicalWriteSpan&& other) noexcept;
+  PhysicalWriteSpan& operator=(PhysicalWriteSpan&& other) noexcept;
+  PhysicalWriteSpan(const PhysicalWriteSpan&) = delete;
+  PhysicalWriteSpan& operator=(const PhysicalWriteSpan&) = delete;
+
+  [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
+  [[nodiscard]] std::span<std::byte> bytes() noexcept { return bytes_; }
+  [[nodiscard]] std::uint32_t physical_address() const noexcept {
+    return physical_address_;
+  }
+
+ private:
+  friend class AddressSpace;
+  PhysicalWriteSpan(AddressSpace* owner, std::uint32_t physical_address,
+                    std::span<std::byte> bytes) noexcept
+      : owner_(owner), physical_address_(physical_address), bytes_(bytes) {}
+  void complete() noexcept;
+
+  AddressSpace* owner_{};
+  std::uint32_t physical_address_{};
+  std::span<std::byte> bytes_{};
+};
+
 class AddressSpace final : public xenon::cpu::MemoryPort {
  public:
   using MmioRead =
@@ -26,9 +60,6 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   using MmioWrite = std::function<void(GuestAddress address, std::uint32_t width,
                                        std::uint64_t value)>;
   using InvalidationCallback = std::function<void(GuestAddress address)>;
-  using PhysicalWriteCallback =
-      std::function<void(std::uint32_t physical_address, std::uint32_t width)>;
-
   struct MmioRange {
     GuestAddress base{};
     std::uint32_t size{};
@@ -82,11 +113,19 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] std::uint32_t get_physical_address(GuestAddress address) const;
   [[nodiscard]] std::uint32_t fetch32_be(GuestAddress address);
 
-  [[nodiscard]] std::byte* physical_data(std::uint32_t physical_address = 0);
+  // Raw physical memory is read-only outside AddressSpace. Production writers
+  // must use write_physical/fill_physical/physical_write_span so reservation
+  // invalidation and CPU<->GPU coherency cannot be forgotten.
   [[nodiscard]] const std::byte* physical_data(
       std::uint32_t physical_address = 0) const;
   [[nodiscard]] bool copy_physical_range(std::uint32_t physical_address,
                                          std::span<std::byte> destination) const;
+  [[nodiscard]] bool write_physical(std::uint32_t physical_address,
+                                    std::span<const std::byte> source);
+  [[nodiscard]] bool fill_physical(std::uint32_t physical_address,
+                                   std::uint32_t size, std::byte value);
+  [[nodiscard]] PhysicalWriteSpan physical_write_span(
+      std::uint32_t physical_address, std::uint32_t size) noexcept;
 
   void zero(GuestAddress address, std::uint32_t size);
   void fill(GuestAddress address, std::uint32_t size, std::uint8_t value);
@@ -99,12 +138,6 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   std::uint64_t add_invalidation_callback(InvalidationCallback callback);
   void remove_invalidation_callback(std::uint64_t id);
-
-  // DMA/GPU/APU code that mutates physical_data() directly must call this so
-  // CPU reservations and shared-memory observers see the write.
-  void notify_external_write(std::uint32_t physical_address, std::uint32_t width);
-  std::uint64_t add_physical_write_callback(PhysicalWriteCallback callback);
-  void remove_physical_write_callback(std::uint64_t id);
 
   // MemoryPort - this is the CPU's production memory implementation.
   std::uint8_t read8(xenon::cpu::GuestAddress address) override;
@@ -154,6 +187,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   static constexpr std::uint8_t kPhysicalAnonymous = 2;
   static constexpr std::uint8_t kPhysicalExplicit = 3;
   static constexpr std::uint8_t kPhysicalAnonymousPendingFree = 4;
+  static constexpr std::uint8_t kPhysicalRetired = 5;
 
   struct Page {
     std::uint32_t physical_page{kInvalidPhysicalPage};
@@ -194,6 +228,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
 
   [[nodiscard]] std::uint32_t allocate_physical_page(bool top_down);
   void free_physical_page(std::uint32_t page);
+  void reclaim_retired_physical_pages();
   void add_physical_mapping_ref(std::uint32_t page);
   void remove_physical_mapping_ref(std::uint32_t page);
   [[nodiscard]] bool reserve_physical_run(std::uint32_t page_count,
@@ -221,11 +256,9 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   template <typename T>
   void write_integer(GuestAddress address, T value, bool little_endian);
 
-  void note_physical_write(std::uint32_t physical_address, std::uint32_t width);
-  void notify_physical_write_observers(std::uint32_t physical_address,
-                                       std::uint32_t width);
-  static void fast_observer_thunk(void* context, std::uint32_t physical_address,
-                                  std::uint32_t width);
+  void note_physical_write(std::uint32_t physical_address,
+                           std::uint32_t width) noexcept;
+  friend class PhysicalWriteSpan;
   [[nodiscard]] std::uint64_t make_hot_entry(std::uint32_t page_index) const;
   void publish_hot_page(std::uint32_t page_index);
   void publish_hot_range(GuestAddress base, std::uint32_t size);
@@ -251,16 +284,13 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   std::vector<std::uint32_t> physical_mapping_refs_{};
   std::vector<std::atomic<std::uint32_t>> reservation_versions_{};
   GuestMemoryCoherency coherency_{};
+  std::atomic<std::uint32_t> active_fast_readers_{0};
 
   mutable std::recursive_mutex mutex_{};
   std::vector<MmioRange> mmio_ranges_{};
   std::vector<std::pair<std::uint64_t, InvalidationCallback>>
       invalidation_callbacks_{};
   std::uint64_t next_invalidation_callback_id_{1};
-  std::vector<std::pair<std::uint64_t, PhysicalWriteCallback>>
-      physical_write_callbacks_{};
-  std::uint64_t next_physical_write_callback_id_{1};
-  std::atomic<bool> physical_write_observers_active_{false};
   bool initialized_{};
 };
 

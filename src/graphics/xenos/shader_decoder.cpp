@@ -29,6 +29,7 @@ struct Usage {
   std::set<std::uint8_t> vertices;
   std::set<std::uint8_t> textures;
   std::set<std::uint8_t> exports;
+  std::set<std::uint16_t> memexport_stream_constants;
 };
 
 Predicate decode_predicate(bool enabled, bool condition, bool clean = false) {
@@ -133,8 +134,35 @@ AluInstruction decode_alu(const ShaderInstruction96& raw, std::uint32_t address,
   reflection.uses_predication |= out.predicate.enabled;
   if (out.export_data) {
     // Xenos scalar and vector ALU results share vector_dest when exporting.
-    // Export register numbers are stage-specific (for example PS e61 is depth).
+    // eA is export 32, eM0..eM4 are 33..37 for both shader stages.
     usage.exports.insert(out.vector_destination);
+    if (out.vector_destination == 32u) {
+      reflection.writes_export_address = true;
+      // The retail SDK normally sets eA with:
+      //   mad eA, r#, const0100, c#
+      // where c# is the stream constant. Match only the part that identifies
+      // c# unambiguously: full unclamped MAD output, absolute constant source
+      // 2, standard .xyzw swizzle, with no abs/negate modifier. Source 0/1 are
+      // intentionally not constrained because equivalent index construction
+      // is legal. Anything else remains explicit for execution-time analysis.
+      const auto& stream_source = out.sources[2];
+      const bool conventional_stream_address =
+          out.vector_opcode == 11u && out.vector_write_mask == 0xFu &&
+          !out.vector_clamp && !out.absolute_constants &&
+          !stream_source.temporary && !stream_source.relative &&
+          stream_source.swizzle == 0xE4u && !stream_source.negate &&
+          !stream_source.absolute_value;
+      if (conventional_stream_address) {
+        usage.memexport_stream_constants.insert(
+            static_cast<std::uint16_t>(stream_source.index));
+      } else {
+        reflection.requires_dynamic_memexport_address = true;
+      }
+    } else if (out.vector_destination >= 33u &&
+               out.vector_destination <= 37u) {
+      reflection.memory_export_mask |= static_cast<std::uint8_t>(
+          1u << (out.vector_destination - 33u));
+    }
     if (stage == ShaderStage::Pixel && out.vector_destination == 61u) {
       reflection.writes_depth = true;
     }
@@ -268,8 +296,9 @@ DecodedShader ShaderDecoder::decode(const ShaderProgram& program) {
   assign_sorted(usage.vertices, result.reflection.vertex_fetch_constants);
   assign_sorted(usage.textures, result.reflection.texture_fetch_constants);
   assign_sorted(usage.exports, result.reflection.exports);
+  assign_sorted(usage.memexport_stream_constants,
+                result.reflection.memexport_stream_constants);
   for (auto export_index : result.reflection.exports) {
-    // eA is 32 and eM0..eM4 are 33..37 for both stages.
     if (export_index >= 33u && export_index <= 37u) {
       ++result.reflection.memory_exports;
     }

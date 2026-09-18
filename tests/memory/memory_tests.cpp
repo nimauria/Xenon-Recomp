@@ -174,6 +174,39 @@ int main() {
     assert(ownership_mem.free_physical(after_alias_release, kBasePageSize));
   }
 
+  // Memory V2 read-side quiescence: a page unpublished by release may not be
+  // recycled while a pre-existing fast access context is still alive. This
+  // prevents an old hot-page translation from becoming an ABA reference to a
+  // different allocation that reused the same physical frame.
+  {
+    AddressSpace quiescence_mem;
+    assert(quiescence_mem.initialize());
+    constexpr GuestAddress old_va = 0x00100000u;
+    assert(quiescence_mem.commit_fixed(old_va, kBasePageSize, kReadWrite));
+    quiescence_mem.write32_be(old_va, 0xCAFEBABEu);
+    const auto retired_phys = quiescence_mem.get_physical_address(old_va);
+    assert(retired_phys != 0xFFFFFFFFu);
+
+    {
+      auto old_context = quiescence_mem.access_context();
+      assert(old_context.has_fast_path());
+      assert(old_context.read32_be(old_va) == 0xCAFEBABEu);
+      assert(quiescence_mem.release(old_va));
+
+      std::uint32_t while_reader_alive{};
+      assert(quiescence_mem.allocate_physical(
+          kBasePageSize, kBasePageSize, false, while_reader_alive));
+      assert(while_reader_alive != retired_phys);
+      assert(quiescence_mem.free_physical(while_reader_alive, kBasePageSize));
+    }
+
+    std::uint32_t after_quiescence{};
+    assert(quiescence_mem.allocate_physical(
+        kBasePageSize, kBasePageSize, false, after_quiescence));
+    assert(after_quiescence == retired_phys);
+    assert(quiescence_mem.free_physical(after_quiescence, kBasePageSize));
+  }
+
   // 64 KiB virtual allocations use the second guest heap and preserve alignment.
   GuestAddress large_alloc{};
   assert(mem.allocate(0x18000u, 0x10000u, kReadWrite, true, large_alloc, kLargePageSize));
@@ -182,22 +215,39 @@ int main() {
   assert(large_q && large_q->page_size == kLargePageSize && large_q->allocation_size == 0x20000u);
   assert(mem.release(large_alloc));
 
-  // Shared-memory observers and reservation invalidation also see direct DMA writes.
-  std::uint32_t observed_phys = 0xFFFFFFFFu, observed_width = 0;
-  const auto write_observer = mem.add_physical_write_callback(
-      [&](std::uint32_t p, std::uint32_t w) { observed_phys = p; observed_width = w; });
+  // Controlled external/DMA writes automatically invalidate reservations and
+  // publish Xenon-owned coherency state; callers cannot forget a separate
+  // notify step after mutating raw physical backing.
   const auto token_dma = mem.reserve32(0x00100000u, reserved);
-  auto* raw = mem.physical_data(phys);
-  assert(raw != nullptr);
-  raw[0] = std::byte{0xAA};
-  mem.notify_external_write(phys, 1);
+  const auto before_dma = mem.coherency().current_epoch();
+  const std::array<std::byte, 1> dma_byte{std::byte{0xAA}};
+  assert(mem.write_physical(phys, dma_byte));
+  const auto after_dma = mem.coherency().current_epoch();
+  assert(after_dma > before_dma);
+  assert(mem.coherency().range_changed_since(phys, 1, before_dma, after_dma));
   std::array<std::byte, 4> snapshot{};
   assert(mem.copy_physical_range(phys, snapshot));
   assert(snapshot[0] == std::byte{0xAA});
   assert(!mem.copy_physical_range(kPhysicalMemorySize - 1u, snapshot));
-  assert(observed_phys == phys && observed_width == 1);
   assert(!mem.store_conditional32(0x00100000u, token_dma, 0xAAAAAAAAu));
-  mem.remove_physical_write_callback(write_observer);
+
+  // Scoped write spans publish their entire declared range automatically on
+  // destruction. This is the escape hatch for native subsystems that need a
+  // direct mutable span for a bounded operation such as a GPU resolve.
+  const auto scoped_token = mem.reserve32(0x00100000u, reserved);
+  const auto before_scoped_write = mem.coherency().current_epoch();
+  {
+    auto write = mem.physical_write_span(phys, 4);
+    assert(write);
+    write.bytes()[1] = std::byte{0xBB};
+  }
+  const auto after_scoped_write = mem.coherency().current_epoch();
+  assert(after_scoped_write > before_scoped_write);
+  assert(mem.coherency().range_changed_since(phys, 4, before_scoped_write,
+                                             after_scoped_write));
+  assert(!mem.store_conditional32(0x00100000u, scoped_token, 0xBBBBBBBBu));
+  assert(!mem.physical_write_span(kPhysicalMemorySize - 1u, 2u));
+  assert(!mem.write_physical(kPhysicalMemorySize - 1u, snapshot));
 
   // A CPU store crossing virtually adjacent but physically discontiguous
   // pages must dirty both physical ranges independently for GPU mirrors.
@@ -209,23 +259,24 @@ int main() {
   assert(mem.map_virtual_to_physical(split_virtual + kBasePageSize,
                                      split_physical_b, kBasePageSize,
                                      kReadWrite));
-  std::vector<std::pair<std::uint32_t, std::uint32_t>> split_notifications;
-  const auto split_observer = mem.add_physical_write_callback(
-      [&](std::uint32_t p, std::uint32_t w) {
-        split_notifications.emplace_back(p, w);
-      });
+  const auto split_epoch = mem.coherency().current_epoch();
   mem.write32_be(split_virtual + kBasePageSize - 2u, 0x12345678u);
-  assert((split_notifications ==
-          std::vector<std::pair<std::uint32_t, std::uint32_t>>{
-              {split_physical_a + kBasePageSize - 2u, 2u},
-              {split_physical_b, 2u}}));
-  split_notifications.clear();
+  const auto split_write_epoch = mem.coherency().current_epoch();
+  assert(mem.coherency().range_changed_since(
+      split_physical_a + kBasePageSize - 2u, 2u, split_epoch,
+      split_write_epoch));
+  assert(mem.coherency().range_changed_since(split_physical_b, 2u,
+                                             split_epoch,
+                                             split_write_epoch));
+  const auto split_fill_epoch = split_write_epoch;
   mem.fill(split_virtual + kBasePageSize - 2u, 4u, 0xA5u);
-  assert((split_notifications ==
-          std::vector<std::pair<std::uint32_t, std::uint32_t>>{
-              {split_physical_a + kBasePageSize - 2u, 2u},
-              {split_physical_b, 2u}}));
-  mem.remove_physical_write_callback(split_observer);
+  const auto after_split_fill = mem.coherency().current_epoch();
+  assert(mem.coherency().range_changed_since(
+      split_physical_a + kBasePageSize - 2u, 2u, split_fill_epoch,
+      after_split_fill));
+  assert(mem.coherency().range_changed_since(split_physical_b, 2u,
+                                             split_fill_epoch,
+                                             after_split_fill));
   assert(mem.release(split_virtual));
   assert(mem.release(split_virtual + kBasePageSize));
   assert(mem.free_physical(split_physical_a, kBasePageSize));
@@ -270,16 +321,14 @@ int main() {
   q = mem.query(allocated);
   assert(q && q->state == PageState::Free);
 
-  // Whole-address-space reset is observable by an attached native GPU mirror.
-  std::uint32_t reset_address = 0xFFFFFFFFu, reset_width = 0;
-  const auto reset_observer = mem.add_physical_write_callback(
-      [&](std::uint32_t p, std::uint32_t w) {
-        reset_address = p;
-        reset_width = w;
-      });
+  // Whole-address-space reset is observable by attached native GPU mirrors
+  // through the Xenon-owned coherency epoch, without synchronous callbacks.
+  const auto reset_epoch = mem.coherency().current_epoch();
   mem.reset();
-  assert(reset_address == 0 && reset_width == kPhysicalMemorySize);
-  mem.remove_physical_write_callback(reset_observer);
+  const auto after_reset = mem.coherency().current_epoch();
+  assert(after_reset > reset_epoch);
+  assert(mem.coherency().range_changed_since(0, kPhysicalMemorySize,
+                                             reset_epoch, after_reset));
 
   std::cout << "xenon_memory_tests: ok\n";
 }

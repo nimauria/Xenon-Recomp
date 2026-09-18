@@ -12,7 +12,7 @@ ApplicationWindow {
     minimumHeight: 700
     title: "Xenon Launcher"
     color: Theme.window
-    flags: Qt.Window | Qt.FramelessWindowHint | Qt.CustomizeWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint
+    flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint
 
     property int currentPage: 0
     property alias globalSearchText: topBar.searchText
@@ -42,10 +42,9 @@ ApplicationWindow {
     }
 
     function toggleMaximize() {
-        if (root.visibility === Window.Maximized)
-            root.showNormal()
-        else
-            root.showMaximized()
+        root.visibility = root.visibility === Window.Maximized
+            ? Window.Windowed
+            : Window.Maximized
         Qt.callLater(function() { root.requestActivate() })
     }
 

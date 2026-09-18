@@ -220,6 +220,45 @@ struct NativePipelineKey {
   friend bool operator==(const NativePipelineKey&, const NativePipelineKey&) = default;
 };
 
+
+struct MemExportStreamDescriptor {
+  std::uint16_t constant_index{};
+  std::uint32_t base_address_dwords{};
+  std::uint32_t base_address_bytes{};
+  std::uint32_t index_count{};
+  Endian128 endian{Endian128::None};
+  std::uint8_t format{};
+  std::uint8_t number_format{};
+  std::uint8_t element_size_bytes{};
+  bool red_blue_swap{};
+  bool valid{};
+  std::string error{};
+
+  [[nodiscard]] std::uint64_t size_bytes() const noexcept {
+    return std::uint64_t(index_count) * element_size_bytes;
+  }
+};
+
+struct MemExportRange {
+  std::uint32_t base_address_dwords{};
+  std::uint32_t size_bytes{};
+};
+
+// Backend-neutral CPU-side planning for Xenos shader memory export. This does
+// not perform a readback: it validates the conventional stream constants and
+// identifies the guest ranges that GPU writes may touch so native backends can
+// keep the data GPU-resident and synchronize CPU visibility only on demand.
+struct MemExportPlan {
+  std::vector<MemExportStreamDescriptor> streams{};
+  std::vector<MemExportRange> ranges{};
+  std::uint8_t export_mask{};
+  bool requires_dynamic_address_analysis{};
+  bool valid{true};
+  std::string error{};
+
+  [[nodiscard]] bool has_writes() const noexcept { return export_mask != 0; }
+};
+
 struct DrawResourceState {
   EdramMode edram_mode{EdramMode::NoOperation};
   std::array<RenderTargetDescriptor, 4> color_targets{};
@@ -344,6 +383,8 @@ class ResourceStateTracker {
   [[nodiscard]] std::optional<VertexBufferDescriptor> vertex_buffer(
       std::uint32_t fetch_constant, std::uint32_t select) const noexcept;
   [[nodiscard]] DrawResourceState snapshot() const noexcept;
+  [[nodiscard]] MemExportPlan plan_memexport(
+      const DecodedShader& shader) const;
   // Packs the architectural constant register banks into the stable GPU 08
   // HLSL resource ABI. Returns false if the destination is too small.
   [[nodiscard]] bool write_constant_buffer(std::span<std::byte> destination) const noexcept;
