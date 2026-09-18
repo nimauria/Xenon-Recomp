@@ -51,17 +51,21 @@ Button {
         border.color: root.activeFocus || menu.visible ? Theme.accent : Theme.border
     }
 
-    onClicked: menu.open()
+    onClicked: menu.visible ? menu.close() : menu.open()
 
     Popup {
         id: menu
+        parent: root
         y: root.height + Theme.spaceXs
         x: root.width - width
         width: 260
         padding: Theme.spaceXs
         modal: false
         focus: true
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        // Treat the profile button as the popup parent. Clicking it again is then
+        // handled by the button's toggle instead of auto-closing on press and
+        // immediately reopening on click.
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
 
         background: Rectangle {
             radius: Theme.controlRadius

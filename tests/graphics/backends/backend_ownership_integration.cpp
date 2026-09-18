@@ -35,7 +35,7 @@ constexpr std::uint32_t kSurfacePitch = 64;
 constexpr std::uint32_t kInitialHeight = 16;
 constexpr std::uint32_t kGrownHeight = 32;
 constexpr std::uint32_t kResolveExtent = 16;
-constexpr std::uint32_t kDestinationPitch = 32;
+constexpr std::uint32_t kDestinationPitch = 64;
 constexpr std::uint32_t kDestinationHeight = 32;
 constexpr std::uint32_t kColorClear = 0x11223344u;
 constexpr std::uint32_t kDepthClear = 0x55667788u;
@@ -255,20 +255,30 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
   issue_dummy_draw(backend);
   assert_backend_ok(backend, "color to depth alias transfer");
 
-  // Resolve from the real depth owner. The destination deliberately asks for a
-  // color conversion, but depth resolves must write exact packed D24S8 bits.
-  // Then clear depth in canonical EDRAM.
+  // Resolve from the real depth owner. Xenos depth tiles exchange their two
+  // 40-sample halves, so depth X=0 aliases color X=40 rather than color X=0.
+  // The destination deliberately asks for a color conversion, but depth
+  // resolves must still write the exact packed D24S8 bits. Then clear depth in
+  // canonical EDRAM.
   issue_depth_resolve(backend, kDepthResolveDestination, true);
   assert_backend_ok(backend, "depth resolve and clear");
-  assert(resolved_word_at(memory, kDepthResolveDestination, 0, 0) ==
-         kColorClear);
+  const auto depth_resolved =
+      resolved_word_at(memory, kDepthResolveDestination, 0, 0);
+  constexpr std::uint32_t kColorAtDepthZero = 0xA5000028u;
+  if (depth_resolved != kColorAtDepthZero) {
+    std::cerr << name << " depth alias resolved 0x" << std::hex
+              << depth_resolved << ", expected 0x" << kColorAtDepthZero
+              << std::dec << '\n';
+  }
+  assert(depth_resolved == kColorAtDepthZero);
 
   const EdramSurfaceLayout depth_surface{
       kSurfaceBaseTile, kSurfacePitch, kGrownHeight, MsaaSamples::X1, false,
       true};
   assert(read_edram_sample(edram, depth_surface, 0, 0)[0] == kDepthClear);
   assert(read_edram_sample(edram, depth_surface, 15, 15)[0] == kDepthClear);
-  assert(read_edram_sample(edram, depth_surface, 16, 0)[0] == 0xA5000010u);
+  assert(read_edram_sample(edram, depth_surface, 16, 0)[0] == 0xA5000038u);
+  assert(read_edram_sample(edram, color_surface, 40, 0)[0] == kDepthClear);
 
   // Transfer the modified depth alias back into the existing color target and
   // resolve it again. Seeing kDepthClear at the guest-memory boundary proves
@@ -277,12 +287,16 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
   issue_dummy_draw(backend);
   assert_backend_ok(backend, "depth to color alias transfer");
 
+  const std::array<float, 6> depth_alias_vertices{
+      39.5f, -0.5f, 55.5f, -0.5f, 39.5f, 15.5f};
+  write_guest_bytes(memory, kResolveVertices, depth_alias_vertices.data(),
+                    sizeof(depth_alias_vertices));
   issue_color_resolve(backend, kAliasResolveDestination, false);
   assert_backend_ok(backend, "color resolve after depth alias");
-  assert(resolved_word_at(memory, kAliasResolveDestination, 0, 0) ==
-         kDepthClear);
-  assert(resolved_word_at(memory, kAliasResolveDestination, 15, 15) ==
-         kDepthClear);
+  assert(resolved_word_at(memory, kAliasResolveDestination, 40, 0) ==
+          kDepthClear);
+  assert(resolved_word_at(memory, kAliasResolveDestination, 55, 15) ==
+          kDepthClear);
 
   backend.end_submission();
   std::cout << name

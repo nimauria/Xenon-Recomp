@@ -307,6 +307,10 @@ bool RenderTargetImage::readback(CommandQueue& queue, std::uint32_t left,
   Microsoft::WRL::ComPtr<ID3D12Resource> resolved;
   if (resource_desc.SampleDesc.Count > 1) {
     auto resolved_desc = resource_desc;
+    // The multisampled source may report the 4 MiB MSAA placement alignment.
+    // That alignment is invalid for the single-sample committed resolve image;
+    // let D3D12 select the appropriate alignment for the modified descriptor.
+    resolved_desc.Alignment = 0;
     resolved_desc.SampleDesc = {1, 0};
     resolved_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     D3D12_HEAP_PROPERTIES heap{};

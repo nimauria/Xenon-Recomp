@@ -21,11 +21,12 @@ namespace xenon::memory {
 
 class AddressSpace;
 
-// Scoped mutable physical-RAM access for DMA/GPU/APU style writers. The span
-// cannot outlive the scope, and destruction automatically publishes the write
-// to the reservation monitor and Xenon-owned coherency tracker. This replaces
-// the old "mutate physical_data() then remember notify_external_write()"
-// contract that allowed production callers to silently bypass bookkeeping.
+// Scoped controlled physical-RAM access for DMA/GPU/APU style writers. The
+// handle cannot outlive the scope, exposes only atomic bounded write/fill
+// operations, and destruction automatically publishes the declared range to
+// the reservation monitor and Xenon-owned coherency tracker. This replaces the
+// old "mutate physical_data() then remember notify_external_write()" contract
+// that allowed production callers to bypass bookkeeping or race CPU accesses.
 class PhysicalWriteSpan {
  public:
   PhysicalWriteSpan() = default;
@@ -36,21 +37,36 @@ class PhysicalWriteSpan {
   PhysicalWriteSpan& operator=(const PhysicalWriteSpan&) = delete;
 
   [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
-  [[nodiscard]] std::span<std::byte> bytes() noexcept { return bytes_; }
   [[nodiscard]] std::uint32_t physical_address() const noexcept {
     return physical_address_;
   }
+  [[nodiscard]] std::uint32_t size() const noexcept {
+    return static_cast<std::uint32_t>(bytes_.size());
+  }
+
+  // Controlled atomic byte transfers keep DMA/GPU writes data-race-free with
+  // concurrent CPU MemoryAccessContext accesses. The mutable backing pointer is
+  // intentionally not exposed to production callers.
+  [[nodiscard]] bool write(std::uint32_t offset,
+                           std::span<const std::byte> source) noexcept;
+  [[nodiscard]] bool fill(std::uint32_t offset, std::uint32_t size,
+                          std::byte value) noexcept;
 
  private:
   friend class AddressSpace;
   PhysicalWriteSpan(AddressSpace* owner, std::uint32_t physical_address,
-                    std::span<std::byte> bytes) noexcept
-      : owner_(owner), physical_address_(physical_address), bytes_(bytes) {}
+                    std::span<std::byte> bytes,
+                    bool reservation_participant) noexcept
+      : owner_(owner),
+        physical_address_(physical_address),
+        bytes_(bytes),
+        reservation_participant_(reservation_participant) {}
   void complete() noexcept;
 
   AddressSpace* owner_{};
   std::uint32_t physical_address_{};
   std::span<std::byte> bytes_{};
+  bool reservation_participant_{};
 };
 
 class AddressSpace final : public xenon::cpu::MemoryPort {
@@ -124,12 +140,19 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                                     std::span<const std::byte> source);
   [[nodiscard]] bool fill_physical(std::uint32_t physical_address,
                                    std::uint32_t size, std::byte value);
+  [[nodiscard]] std::vector<GuestAddress> dynamic_guest_aliases_for_physical(
+      std::uint32_t physical_address) const;
+  [[nodiscard]] bool validate_invariants(std::string* error = nullptr) const;
   [[nodiscard]] PhysicalWriteSpan physical_write_span(
       std::uint32_t physical_address, std::uint32_t size) noexcept;
+  [[nodiscard]] std::size_t reservation_monitor_storage_bytes() const noexcept;
+  [[nodiscard]] std::uint32_t executable_generation(
+      GuestAddress address) const noexcept;
 
   void zero(GuestAddress address, std::uint32_t size);
   void fill(GuestAddress address, std::uint32_t size, std::uint8_t value);
   void copy(GuestAddress dest, GuestAddress src, std::uint32_t size);
+  void move(GuestAddress dest, GuestAddress src, std::uint32_t size);
 
   [[nodiscard]] bool add_mmio_range(GuestAddress base, std::uint32_t size,
                                     MmioRead read, MmioWrite write,
@@ -160,6 +183,13 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void write32_le(xenon::cpu::GuestAddress address, std::uint32_t value) override;
   void write64_le(xenon::cpu::GuestAddress address, std::uint64_t value) override;
 
+  void read_bytes(xenon::cpu::GuestAddress address,
+                  std::span<std::byte> destination) override;
+  void write_bytes(xenon::cpu::GuestAddress address,
+                   std::span<const std::byte> source) override;
+  void fill_bytes(xenon::cpu::GuestAddress address, std::uint32_t size,
+                  std::uint8_t value) override;
+
   std::uint64_t reserve32(xenon::cpu::GuestAddress address,
                           std::uint32_t& value) override;
   std::uint64_t reserve64(xenon::cpu::GuestAddress address,
@@ -168,6 +198,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                            std::uint32_t value) override;
   bool store_conditional64(xenon::cpu::GuestAddress address, std::uint64_t token,
                            std::uint64_t value) override;
+  void cancel_reservation(std::uint64_t token) noexcept override;
 
   void barrier(xenon::cpu::BarrierKind kind) override;
   void zero_cache_block(xenon::cpu::GuestAddress address,
@@ -181,6 +212,9 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
       kPhysicalMemorySize / kBasePageSize;
   static constexpr std::uint32_t kReservationGranuleCount =
       kPhysicalMemorySize / kReservationGranuleSize;
+  static constexpr std::uint32_t kReservationSlotCount = 6u;
+  static constexpr std::uint32_t kReservationBitmapWordCount =
+      (kReservationGranuleCount + 63u) / 64u;
   static constexpr std::uint32_t kInvalidPhysicalPage = 0xFFFFFFFFu;
   static constexpr std::uint8_t kPhysicalFree = 0;
   static constexpr std::uint8_t kPhysicalSystem = 1;
@@ -212,6 +246,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   };
 
   class PhysicalBacking;
+  class PhysicalRangeAllocator;
+  class PhysicalReverseMappings;
 
   [[nodiscard]] bool range_is_allocatable(GuestAddress base, std::uint32_t size,
                                           std::uint32_t required_page_size) const;
@@ -229,8 +265,11 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] std::uint32_t allocate_physical_page(bool top_down);
   void free_physical_page(std::uint32_t page);
   void reclaim_retired_physical_pages();
-  void add_physical_mapping_ref(std::uint32_t page);
-  void remove_physical_mapping_ref(std::uint32_t page);
+  void add_physical_mapping_ref(std::uint32_t physical_page,
+                                std::uint32_t guest_page);
+  void remove_physical_mapping_ref(std::uint32_t physical_page,
+                                   std::uint32_t guest_page);
+  [[nodiscard]] bool validate_invariants_locked(std::string* error) const;
   [[nodiscard]] bool reserve_physical_run(std::uint32_t page_count,
                                           std::uint32_t alignment_pages,
                                           bool top_down,
@@ -256,18 +295,28 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   template <typename T>
   void write_integer(GuestAddress address, T value, bool little_endian);
 
-  void note_physical_write(std::uint32_t physical_address,
-                           std::uint32_t width) noexcept;
   friend class PhysicalWriteSpan;
   [[nodiscard]] std::uint64_t make_hot_entry(std::uint32_t page_index) const;
   void publish_hot_page(std::uint32_t page_index);
   void publish_hot_range(GuestAddress base, std::uint32_t size);
   void rebuild_hot_pages();
   [[nodiscard]] bool page_has_mmio(std::uint32_t page_index) const;
-  void note_physical_write_addresses(
-      std::span<const std::uint32_t> physical_addresses);
-  [[nodiscard]] std::uint64_t reservation_version(
-      std::uint32_t physical_address) const;
+  [[nodiscard]] xenon::cpu::FastMemoryView make_fast_memory_view() noexcept;
+  [[nodiscard]] bool begin_physical_write(std::uint32_t physical_address,
+                                          std::uint32_t width) noexcept;
+  void complete_physical_write(std::uint32_t physical_address,
+                               std::uint32_t width,
+                               bool reservation_participant) noexcept;
+  void begin_reservation_operation() noexcept;
+  void end_reservation_operation() noexcept;
+  [[nodiscard]] std::uint64_t claim_reservation(
+      std::uint32_t physical_address, std::uint32_t width) noexcept;
+  [[nodiscard]] bool claim_store_conditional(
+      std::uint32_t physical_address, std::uint32_t width,
+      std::uint64_t token, std::uint32_t& slot_index,
+      std::uint64_t& committing_descriptor) noexcept;
+  void invalidate_reservations(std::uint32_t physical_address,
+                               std::uint32_t width) noexcept;
   [[nodiscard]] std::uint32_t physical_alias_address(GuestAddress address) const;
 
   [[noreturn]] static void fault(GuestAddress address, std::size_t width,
@@ -275,6 +324,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                                  const char* message);
 
   std::unique_ptr<PhysicalBacking> physical_{};
+  std::unique_ptr<PhysicalRangeAllocator> physical_allocator_{};
+  std::unique_ptr<PhysicalReverseMappings> physical_reverse_mappings_{};
   std::vector<Page> pages_{};
   std::vector<std::atomic<std::uint64_t>> hot_pages_{};
   // Cold physical ownership state is independent of virtual mapping lifetime.
@@ -282,8 +333,17 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   // aliases still hold mapping references.
   std::vector<std::uint8_t> physical_page_used_{};
   std::vector<std::uint32_t> physical_mapping_refs_{};
-  std::vector<std::atomic<std::uint32_t>> reservation_versions_{};
+  // Six active reservation slots model Xenon's six hardware threads. The
+  // 512 KiB sticky bitmap is only a hot-path hint; exact reservation state
+  // remains in the slots and is always keyed by physical RAM.
+  std::array<std::atomic<std::uint64_t>, kReservationSlotCount>
+      reservation_slots_{};
+  std::vector<std::atomic<std::uint64_t>> reservation_seen_bitmap_{};
+  std::atomic<std::uint32_t> reservation_next_generation_{1u};
+  std::atomic<std::uint32_t> reservation_commit_gate_{0u};
+  std::atomic<std::uint32_t> active_reservation_ops_{0u};
   GuestMemoryCoherency coherency_{};
+  std::vector<std::atomic<std::uint32_t>> executable_page_generations_{};
   std::atomic<std::uint32_t> active_fast_readers_{0};
 
   mutable std::recursive_mutex mutex_{};

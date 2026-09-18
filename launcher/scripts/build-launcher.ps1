@@ -7,7 +7,9 @@ param(
     [switch]$Clean,
     [switch]$Deploy,
     [switch]$Run,
-    [switch]$FullRuntime
+    [switch]$FullRuntime,
+    [string]$DiscordSdkRoot = $env:DISCORD_SOCIAL_SDK_ROOT,
+    [switch]$RequireDiscordSdk
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +44,29 @@ function Find-QtRoot {
     throw "Qt 6 MSVC was not found. Pass -QtRoot C:\Qt\<version>\msvc2022_64 or set QTDIR."
 }
 
+function Find-DiscordSdkRoot {
+    param([string]$Requested)
+
+    $candidates = @()
+    if ($Requested) { $candidates += $Requested }
+    $candidates += @(
+        (Join-Path $repoRoot "launcher\third_party\discord_social_sdk"),
+        (Join-Path $repoRoot "third_party\discord_social_sdk")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) { continue }
+        $header = Join-Path $candidate "include\discordpp.h"
+        if (Test-Path $header) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return $null
+}
+
 $QtRoot = Find-QtRoot $QtRoot
+$DiscordSdkRoot = Find-DiscordSdkRoot $DiscordSdkRoot
 $qtBin = Join-Path $QtRoot "bin"
 $env:CMAKE_PREFIX_PATH = $QtRoot
 $env:Path = "$qtBin;$env:Path"
@@ -75,6 +99,19 @@ $configureArgs = @(
     "-DXENON_ENABLE_NETWORK=OFF"
 )
 
+if ($DiscordSdkRoot) {
+    Write-Host "Discord Social SDK: $DiscordSdkRoot" -ForegroundColor Cyan
+    $configureArgs += "-DXENON_DISCORD_SOCIAL_SDK_ROOT=$DiscordSdkRoot"
+} elseif ($RequireDiscordSdk) {
+    throw "Discord Social SDK was required but was not found. Run launcher\scripts\install-discord-sdk.ps1 -Archive <sdk.zip>, pass -DiscordSdkRoot <path>, or set DISCORD_SOCIAL_SDK_ROOT."
+} else {
+    Write-Host "Discord Social SDK not found; Rich Presence provider will remain unavailable." -ForegroundColor DarkYellow
+}
+
+if ($RequireDiscordSdk) {
+    $configureArgs += "-DXENON_LAUNCHER_REQUIRE_DISCORD_SOCIAL_SDK=ON"
+}
+
 if (-not $FullRuntime) {
     $configureArgs += @(
         "-DXENON_ENABLE_MEMORY=OFF",
@@ -96,6 +133,17 @@ if (-not (Test-Path $exe)) {
     throw "Build completed without producing $exe"
 }
 
+if ($DiscordSdkRoot) {
+    $discordRuntime = Join-Path (Split-Path $exe -Parent) "discord_partner_sdk.dll"
+    if (Test-Path $discordRuntime) {
+        Write-Host "Discord Rich Presence runtime deployed: $discordRuntime" -ForegroundColor Green
+    } elseif ($RequireDiscordSdk) {
+        throw "Discord Social SDK was configured, but discord_partner_sdk.dll was not deployed beside the launcher."
+    } else {
+        Write-Host "Discord SDK was detected, but discord_partner_sdk.dll was not deployed beside the launcher." -ForegroundColor Yellow
+    }
+}
+
 if ($Deploy) {
     $deployTool = Join-Path $qtBin "windeployqt.exe"
     if (-not (Test-Path $deployTool)) {
@@ -111,5 +159,13 @@ Write-Host "Launcher ready: $exe" -ForegroundColor Green
 
 if ($Run) {
     Write-Host "Starting Xenon Launcher" -ForegroundColor Cyan
-    & $exe
+    $process = Start-Process -FilePath $exe -PassThru
+    $process.WaitForExit()
+    Write-Host "Xenon Launcher exited with code $($process.ExitCode)" -ForegroundColor $(if ($process.ExitCode -eq 0) { "Green" } else { "Yellow" })
+
+    $startupLog = Join-Path $env:LOCALAPPDATA "Project Xenon\Xenon Launcher\xenon-launcher-startup.log"
+    if ($process.ExitCode -ne 0 -and (Test-Path $startupLog)) {
+        Write-Host "Startup log: $startupLog" -ForegroundColor Yellow
+        Get-Content $startupLog -Tail 80
+    }
 }

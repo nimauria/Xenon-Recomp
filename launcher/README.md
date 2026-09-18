@@ -24,11 +24,11 @@ Key v7 work includes:
 - Separate user-facing About information and developer diagnostics. Developer diagnostics now include OS/kernel, CPU thread count, physical memory, Windows graphics adapter, display/scale state, renderer configuration, fixture state, theme/accessibility state, and backend connection state without dumping local profile/configuration paths.
 - Feature gates for module catalog/settings and profile avatars in addition to existing launcher capability gates.
 
-Production behaviour is unchanged: a normal build starts with no fictional games or modules installed.
+Production behaviour remains clean: a normal build starts with no fictional games or modules installed. Local games and modules appear only after the user imports or installs them.
 
-## Front-end milestone
+## Launcher milestone
 
-The launcher is currently **front-end first**. Navigation and local UI state work even when the corresponding Xenon runtime service is not implemented yet. Backend-dependent controls remain visible where useful, but report that the required service is not connected rather than silently failing.
+The completed QML front end now sits on a generic **Launcher Core**. Navigation and presentation remain usable when a deeper Xenon runtime subsystem is unavailable, while production profiles, library metadata, module discovery/state, package staging, paths/settings, and launch-configuration assembly are backend-owned. Controls that depend on framework APIs Xenon does not expose yet fail explicitly rather than silently succeeding.
 
 Current front-end behaviour includes:
 
@@ -124,17 +124,17 @@ Game-specific data flows from a game module into Xenon. Xenon must not depend on
 
 ## Backend integration seam
 
-`LauncherBridge` currently provides launcher preferences, feature gates, host information, folder/URL helpers, diagnostics, and feedback for unavailable services. Future generic C++ models/services should replace fixture data for:
+The production launcher now has a concrete core behind the QML facade:
 
-- Module discovery and manifests.
-- Local game-content import and validation.
-- DLC catalogue/import state.
-- Save/profile persistence.
-- Launch/runtime lifecycle.
-- Module/runtime update checks.
-- Audio/input/network runtime capabilities.
+```text
+QML UI -> LauncherBridge -> FrontendBackend -> LauncherCore services -> RuntimeBridge -> Xenon::Core
+```
 
-Those services should remain generic and must not contain game-specific behaviour.
+Launcher behaviour is split into feature-owned C++ slices for application state, settings/paths, profiles, library/DLC, modules/catalog/settings, import/export, updates, filesystem integration, diagnostics, branding, runtime projection and launching. Production persistence is implemented by shared Launcher Core services, while test fixtures live in the same feature layer so QML does not maintain a second set of business rules.
+
+The runtime boundary is intentionally truthful: the current `xenon::Runtime` API supports initialization/shutdown but does not yet expose a generic game-session execution API or live subsystem registry. `RuntimeBridge` therefore validates and carries a launch contract to that boundary without reporting a fake successful launch. Xbox 360 content probing, module ABI loading, packaged-module installation, DLC/save services, and actual session execution remain framework work below the launcher API.
+
+See [`BACKEND.md`](BACKEND.md) and [`src/frontend_backend/README.md`](src/frontend_backend/README.md) for feature/service ownership, persistence, the launch contract, QML boundary rules, and the remaining Xenon framework seams.
 
 ## UI design system and engineering rules
 

@@ -77,7 +77,9 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
                                          kSrvCount, 0, 0, 0};
   const D3D12_DESCRIPTOR_RANGE sampler_range{
       D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSamplerCount, 0, 0, 0};
-  std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
+  const D3D12_DESCRIPTOR_RANGE uav_range{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+                                         kUavCount, 0, 0, 0};
+  std::array<D3D12_ROOT_PARAMETER, 4> parameters{};
   parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
   parameters[0].Descriptor.ShaderRegister = 0;
   parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -87,6 +89,9 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
   parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   parameters[2].DescriptorTable = {1, &sampler_range};
   parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  parameters[3].DescriptorTable = {1, &uav_range};
+  parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   D3D12_ROOT_SIGNATURE_DESC root_desc{};
   root_desc.NumParameters = static_cast<UINT>(parameters.size());
   root_desc.pParameters = parameters.data();
@@ -105,30 +110,50 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
     return false;
   }
 
-  D3D12_DESCRIPTOR_HEAP_DESC resource_heap_desc{};
-  resource_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  resource_heap_desc.NumDescriptors = kSrvCount;
-  resource_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  if (FAILED(device_->CreateDescriptorHeap(&resource_heap_desc,
-                                           IID_PPV_ARGS(&resource_heap_)))) {
-    error_ = "D3D12 shader-resource descriptor heap creation failed";
-    reset();
-    return false;
-  }
-  D3D12_DESCRIPTOR_HEAP_DESC sampler_heap_desc{};
-  sampler_heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
-  sampler_heap_desc.NumDescriptors = kSamplerCount;
-  sampler_heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  if (FAILED(device_->CreateDescriptorHeap(&sampler_heap_desc,
-                                           IID_PPV_ARGS(&sampler_heap_)))) {
-    error_ = "D3D12 sampler descriptor heap creation failed";
-    reset();
-    return false;
-  }
-
   resource_increment_ = device_->GetDescriptorHandleIncrementSize(
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  auto resource_handle = resource_heap_->GetCPUDescriptorHandleForHeapStart();
+  sampler_increment_ = device_->GetDescriptorHandleIncrementSize(
+      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+
+  auto create_heap = [&](D3D12_DESCRIPTOR_HEAP_TYPE type, UINT count,
+                         D3D12_DESCRIPTOR_HEAP_FLAGS flags,
+                         Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>& heap) {
+    D3D12_DESCRIPTOR_HEAP_DESC desc{};
+    desc.Type = type;
+    desc.NumDescriptors = count;
+    desc.Flags = flags;
+    return SUCCEEDED(device_->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&heap)));
+  };
+  if (!create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kResourceCount,
+                   D3D12_DESCRIPTOR_HEAP_FLAG_NONE, staging_resource_heap_) ||
+      !create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount,
+                   D3D12_DESCRIPTOR_HEAP_FLAG_NONE, staging_sampler_heap_)) {
+    error_ = "D3D12 staging descriptor heap creation failed";
+    reset();
+    return false;
+  }
+  for (auto& frame : frames_) {
+    for (auto& draw : frame.draws) {
+      if (!create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kResourceCount,
+                       D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                       draw.resource_heap) ||
+          !create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount,
+                       D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                       draw.sampler_heap) ||
+          !draw.constants.initialize(device_, kConstantBufferBytes,
+                                     D3D12_HEAP_TYPE_UPLOAD,
+                                     D3D12_RESOURCE_STATE_GENERIC_READ) ||
+          !draw.constants.map(draw.constants_mapping)) {
+        error_ = draw.constants.error().empty()
+                     ? "D3D12 draw resource snapshot creation failed"
+                     : draw.constants.error();
+        reset();
+        return false;
+      }
+    }
+  }
+
+  auto resource_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
   D3D12_SHADER_RESOURCE_VIEW_DESC null_buffer{};
   null_buffer.Format = DXGI_FORMAT_R32_TYPELESS;
   null_buffer.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -146,10 +171,15 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
       device_->CreateShaderResourceView(nullptr, &view, resource_handle);
     }
   }
+  resource_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
+  resource_handle.ptr += std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
+  D3D12_UNORDERED_ACCESS_VIEW_DESC null_uav{};
+  null_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+  null_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  null_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+  device_->CreateUnorderedAccessView(nullptr, nullptr, &null_uav, resource_handle);
 
-  sampler_increment_ = device_->GetDescriptorHandleIncrementSize(
-      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-  auto sampler_handle = sampler_heap_->GetCPUDescriptorHandleForHeapStart();
+  auto sampler_handle = staging_sampler_heap_->GetCPUDescriptorHandleForHeapStart();
   D3D12_SAMPLER_DESC sampler{};
   sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -160,20 +190,11 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
     device_->CreateSampler(&sampler, sampler_handle);
     sampler_handle.ptr += sampler_increment_;
   }
-  if (!constants_.initialize(device_, kConstantBufferBytes,
-                             D3D12_HEAP_TYPE_UPLOAD,
-                             D3D12_RESOURCE_STATE_GENERIC_READ)) {
-    error_ = constants_.error();
-    reset();
-    return false;
-  }
-  std::span<std::byte> constants;
-  if (!constants_.map(constants)) {
-    error_ = constants_.error();
-    reset();
-    return false;
-  }
-  std::fill(constants.begin(), constants.end(), std::byte{});
+
+  std::fill(constants_staging_.begin(), constants_staging_.end(), std::byte{});
+  for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
+    for (std::uint32_t draw = 0; draw < CommandQueue::kBatchCommandCount; ++draw)
+      prepare_draw(frame, draw);
   return true;
 }
 
@@ -181,7 +202,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
                                   ID3D12Resource* resource, DXGI_FORMAT format,
                                   std::uint32_t mip_levels,
                                   const TextureDescriptor& state) {
-  if (!device_ || !resource_heap_ || !sampler_heap_ || slot >= kTextureCount ||
+  if (!device_ || !staging_resource_heap_ || !staging_sampler_heap_ || slot >= kTextureCount ||
       !resource || format == DXGI_FORMAT_UNKNOWN || !mip_levels) {
     error_ = "D3D12 texture binding requires a valid slot and native image";
     return false;
@@ -219,7 +240,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
       view.TextureCube.MipLevels = mip_levels;
       break;
   }
-  auto resource_handle = resource_heap_->GetCPUDescriptorHandleForHeapStart();
+  auto resource_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
   resource_handle.ptr += std::uint64_t(descriptor_index) * resource_increment_;
   device_->CreateShaderResourceView(resource, &view, resource_handle);
 
@@ -242,7 +263,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   sampler.MaxAnisotropy = max_anisotropy(state.aniso_filter);
   sampler.MinLOD = float(state.mip_min_level);
   sampler.MaxLOD = float(state.mip_max_level);
-  auto sampler_handle = sampler_heap_->GetCPUDescriptorHandleForHeapStart();
+  auto sampler_handle = staging_sampler_heap_->GetCPUDescriptorHandleForHeapStart();
   sampler_handle.ptr += std::uint64_t(slot) * sampler_increment_;
   device_->CreateSampler(&sampler, sampler_handle);
   return true;
@@ -250,7 +271,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
 
 bool ResourceLayout::bind_guest_memory(ID3D12Resource* resource,
                                        std::uint64_t size) {
-  if (!device_ || !resource_heap_ || !resource || !size || (size & 3u)) {
+  if (!device_ || !staging_resource_heap_ || !resource || !size || (size & 3u)) {
     error_ = "D3D12 guest-memory SRV requires an initialized layout and aligned buffer";
     return false;
   }
@@ -261,15 +282,64 @@ bool ResourceLayout::bind_guest_memory(ID3D12Resource* resource,
   view.Buffer.NumElements = static_cast<UINT>(size / 4u);
   view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
   device_->CreateShaderResourceView(
-      resource, &view, resource_heap_->GetCPUDescriptorHandleForHeapStart());
+      resource, &view, staging_resource_heap_->GetCPUDescriptorHandleForHeapStart());
+
+  D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+  uav.Format = DXGI_FORMAT_R32_TYPELESS;
+  uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+  uav.Buffer.NumElements = static_cast<UINT>(size / 4u);
+  uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+  auto uav_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
+  uav_handle.ptr +=
+      std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
+  device_->CreateUnorderedAccessView(resource, nullptr, &uav, uav_handle);
   return true;
 }
 
+void ResourceLayout::prepare_draw(std::uint32_t frame_index,
+                                  std::uint32_t draw_slot) {
+  if (!device_ || frame_index >= frames_.size() ||
+      draw_slot >= CommandQueue::kBatchCommandCount)
+    return;
+  auto& draw = frames_[frame_index].draws[draw_slot];
+  device_->CopyDescriptorsSimple(
+      kResourceCount, draw.resource_heap->GetCPUDescriptorHandleForHeapStart(),
+      staging_resource_heap_->GetCPUDescriptorHandleForHeapStart(),
+      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  device_->CopyDescriptorsSimple(
+      kSamplerCount, draw.sampler_heap->GetCPUDescriptorHandleForHeapStart(),
+      staging_sampler_heap_->GetCPUDescriptorHandleForHeapStart(),
+      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  std::copy(constants_staging_.begin(), constants_staging_.end(),
+            draw.constants_mapping.begin());
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE ResourceLayout::memory_export_handle(
+    std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
+  if (frame_index >= frames_.size() ||
+      draw_slot >= CommandQueue::kBatchCommandCount ||
+      !frames_[frame_index].draws[draw_slot].resource_heap)
+    return {};
+  auto handle = frames_[frame_index]
+                    .draws[draw_slot]
+                    .resource_heap->GetGPUDescriptorHandleForHeapStart();
+  handle.ptr += std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
+  return handle;
+}
+
 void ResourceLayout::reset() noexcept {
-  constants_.reset();
-  sampler_heap_.Reset();
-  resource_heap_.Reset();
+  for (auto& frame : frames_) {
+    for (auto& draw : frame.draws) {
+      draw.constants_mapping = {};
+      draw.constants.reset();
+      draw.sampler_heap.Reset();
+      draw.resource_heap.Reset();
+    }
+  }
+  staging_sampler_heap_.Reset();
+  staging_resource_heap_.Reset();
   root_signature_.Reset();
+  constants_staging_.fill(std::byte{});
   resource_increment_ = 0;
   sampler_increment_ = 0;
   device_ = nullptr;

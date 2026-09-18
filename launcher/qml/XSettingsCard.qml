@@ -15,7 +15,7 @@ XPanel {
     implicitHeight: cardLayout.implicitHeight + (compact ? Theme.spaceSm * 2 : Theme.spaceMd * 2)
     color: Theme.highContrast
         ? Theme.surfaceAlt
-        : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, 0.95)
+        : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
 
     GridLayout {
         id: cardLayout

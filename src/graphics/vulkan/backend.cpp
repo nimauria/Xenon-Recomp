@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <deque>
 #include <variant>
 #include <span>
 #include <unordered_set>
@@ -13,6 +14,7 @@
 #include "xenon/gpu/vulkan/depth_target.hpp"
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
 #include "xenon/gpu/vulkan/pipeline.hpp"
+#include "xenon/gpu/vulkan/presentation.hpp"
 #include "xenon/gpu/vulkan/resource_layout.hpp"
 #include "xenon/gpu/vulkan/render_target.hpp"
 #include "xenon/gpu/vulkan/texture.hpp"
@@ -31,14 +33,21 @@ namespace xenon::gpu::vulkan {
 class Backend::Impl {
  public:
   static constexpr std::size_t kTransientUploadBytes = 16u * 1024u * 1024u;
-  ~Impl() = default;
+  ~Impl() {
+    // Native draws may still be using render targets, textures, descriptor
+    // snapshots and upload arenas owned by this Impl. Drain them before member
+    // destruction starts.
+    (void)queue.wait_idle();
+  }
   Context context{};
   CommandQueue queue{};
+  PresentationSwapchain presentation{};
   GuestMemoryMirror mirror{};
   ResourceLayout resources{};
-  Buffer transient_upload{};
-  std::span<std::byte> transient_upload_mapping{};
-  std::size_t transient_upload_offset{};
+  std::array<Buffer, CommandQueue::kFrameCount> transient_uploads{};
+  std::array<std::span<std::byte>, CommandQueue::kFrameCount>
+      transient_upload_mappings{};
+  std::array<std::size_t, CommandQueue::kFrameCount> transient_upload_offsets{};
   ResourceStateTracker resource_state{};
   std::unordered_set<std::uint64_t> pipeline_states{};
   std::unordered_map<std::uint64_t, std::unique_ptr<TextureImage>> textures{};
@@ -58,6 +67,25 @@ class Backend::Impl {
   std::size_t command_count{};
   std::size_t draw_count{};
   std::size_t compiled_shader_count{};
+  std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
+
+  void collect_retired_resources() {
+    const auto completed = queue.completed_value();
+    while (!retired_resources.empty() &&
+           retired_resources.front().first <= completed) {
+      retired_resources.pop_front();
+    }
+  }
+
+  template <typename T>
+  void retire_resource(std::unique_ptr<T> resource) {
+    if (!resource) return;
+    collect_retired_resources();
+    const auto fence_value = queue.retirement_value();
+    if (!fence_value || queue.completed_value() >= fence_value) return;
+    retired_resources.emplace_back(
+        fence_value, std::shared_ptr<void>(std::move(resource)));
+  }
 #ifdef XENON_HAS_DXC
   std::shared_ptr<DxcShaderCompiler> compiler{std::make_shared<DxcShaderCompiler>()};
   ShaderCache shader_cache{compiler};
@@ -65,6 +93,8 @@ class Backend::Impl {
   std::unordered_map<std::uint64_t, DecodedShader> decoded_shaders{};
   std::unordered_map<std::uint64_t, std::shared_ptr<const CompiledShader>>
       float20_depth_shaders{};
+  std::unordered_map<std::uint64_t, std::shared_ptr<const CompiledShader>>
+      writable_guest_memory_shaders{};
   std::shared_ptr<const CompiledShader> rectangle_list_shader{};
 #endif
   std::string error{};
@@ -137,6 +167,31 @@ class Backend::Impl {
     if (owner_depth_targets.contains(owner)) return flush_depth_owner(owner);
     error = "Vulkan EDRAM alias transfer has no native owner";
     return false;
+  }
+
+  bool make_edram_canonical() {
+    if (!edram) {
+      error = "Vulkan canonical EDRAM checkpoint has no bound EDRAM";
+      return false;
+    }
+
+    // Snapshot owner IDs before flushing because each flush releases all tiles
+    // held by that owner. Owner IDs are unique across color and depth images.
+    std::vector<EdramOwnerId> owners;
+    owners.reserve(owner_render_targets.size() + owner_depth_targets.size());
+    for (const auto& [owner, image] : owner_render_targets) {
+      if (image && edram_ownership.owned_tile_count(owner))
+        owners.push_back(owner);
+    }
+    for (const auto& [owner, image] : owner_depth_targets) {
+      if (image && edram_ownership.owned_tile_count(owner))
+        owners.push_back(owner);
+    }
+    for (const auto owner : owners) {
+      if (edram_ownership.owned_tile_count(owner) && !flush_owner(owner))
+        return false;
+    }
+    return true;
   }
 
   bool acquire_color_ownership(std::uint64_t key,
@@ -307,24 +362,49 @@ bool Backend::initialize(const ContextConfig& config) {
     impl_->error = impl_->resources.error();
     return false;
   }
-  if (!impl_->transient_upload.initialize(
-          impl_->context.physical_device(), impl_->context.device(),
-          Impl::kTransientUploadBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
-      !impl_->transient_upload.map(impl_->transient_upload_mapping)) {
-    impl_->error = impl_->transient_upload.error();
-    return false;
+  for (std::uint32_t i = 0; i < CommandQueue::kFrameCount; ++i) {
+    if (!impl_->transient_uploads[i].initialize(
+            impl_->context.physical_device(), impl_->context.device(),
+            Impl::kTransientUploadBytes, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+        !impl_->transient_uploads[i].map(impl_->transient_upload_mappings[i])) {
+      impl_->error = impl_->transient_uploads[i].error();
+      return false;
+    }
   }
   impl_->ready = true;
   return true;
 }
+VkInstance Backend::instance() const noexcept {
+  return impl_ ? impl_->context.instance() : VK_NULL_HANDLE;
+}
+
+bool Backend::configure_presentation(VkSurfaceKHR surface,
+                                     const PresentationConfig& config,
+                                     bool take_surface_ownership) {
+  if (!impl_->ready) return false;
+  if (!impl_->presentation.initialize(impl_->context, impl_->queue, surface,
+                                      config, take_surface_ownership)) {
+    impl_->error = impl_->presentation.error();
+    return false;
+  }
+  return true;
+}
+
 void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
   impl_->command_count = 0;
   impl_->draw_count = 0;
   impl_->compiled_shader_count = 0;
-  impl_->transient_upload_offset = 0;
   if (!impl_->ready) return;
+  if ((impl_->edram && impl_->edram != &edram) ||
+      (impl_->memory && impl_->memory != &memory)) {
+    if (!impl_->queue.wait_idle()) {
+      impl_->error = impl_->queue.error();
+      impl_->ready = false;
+      return;
+    }
+  }
   if (impl_->edram != &edram) {
     impl_->render_targets.clear();
     impl_->depth_targets.clear();
@@ -360,6 +440,7 @@ void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
   }
 }
 void Backend::consume(const ir::Command& command) {
+  impl_->collect_retired_resources();
   ++impl_->command_count;
   if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
     impl_->resource_state.apply(*write);
@@ -370,6 +451,17 @@ void Backend::consume(const ir::Command& command) {
     if (state.edram_mode == EdramMode::Copy) {
       if (!impl_->memory || !impl_->memory->physical_data()) {
         impl_->error = "Vulkan Xenos resolve has no bound guest memory";
+        return;
+      }
+      // Resolve rectangles are read by the CPU-side common planner from the
+      // conventional six-dword vertex stream. If that stream was produced by
+      // an earlier memexport, download only those bytes before decoding it.
+      if (const auto& resolve_vertices = state.vertex_buffers[0][0];
+          resolve_vertices && resolve_vertices->valid &&
+          resolve_vertices->size_dwords == 6u &&
+          !impl_->mirror.make_cpu_visible(resolve_vertices->physical_address,
+                                          6u * sizeof(std::uint32_t))) {
+        impl_->error = impl_->mirror.error();
         return;
       }
       const auto resolve_plan = plan_resolve(
@@ -596,9 +688,11 @@ void Backend::consume(const ir::Command& command) {
           const auto owner = impl_->render_target_owners.at(key);
           if (impl_->edram_ownership.owned_tile_count(owner) &&
               !impl_->flush_color_owner(owner)) return;
+          auto retired = std::move(existing->second);
           impl_->owner_render_targets.erase(owner);
           impl_->render_target_owners.erase(key);
           impl_->render_targets.erase(existing);
+          impl_->retire_resource(std::move(retired));
         }
         if (!impl_->render_targets.contains(key)) {
           auto image = std::make_unique<RenderTargetImage>();
@@ -638,9 +732,11 @@ void Backend::consume(const ir::Command& command) {
         const auto owner = impl_->depth_target_owners.at(key);
         if (impl_->edram_ownership.owned_tile_count(owner) &&
             !impl_->flush_depth_owner(owner)) return;
+        auto retired = std::move(existing->second);
         impl_->owner_depth_targets.erase(owner);
         impl_->depth_target_owners.erase(key);
         impl_->depth_targets.erase(existing);
+        impl_->retire_resource(std::move(retired));
       }
       if (!impl_->depth_targets.contains(key)) {
         auto image = std::make_unique<DepthTargetImage>();
@@ -664,9 +760,8 @@ void Backend::consume(const ir::Command& command) {
       if (active_depth &&
           !impl_->acquire_depth_ownership(key, *active_depth, surface)) return;
     }
-    std::span<std::byte> constants;
-    if (!impl_->resources.constants().map(constants) ||
-        !impl_->resource_state.write_constant_buffer(constants)) {
+    auto constants = impl_->resources.constants();
+    if (!impl_->resource_state.write_constant_buffer(constants)) {
       impl_->error = "Vulkan shader constant upload failed";
       impl_->ready = false;
       return;
@@ -680,16 +775,35 @@ void Backend::consume(const ir::Command& command) {
     mark_used(draw->vertex_shader);
     mark_used(draw->pixel_shader);
     if (impl_->memory) {
+      const auto dirty_epoch = impl_->memory->coherency().current_epoch();
       for (std::uint32_t slot = 0; slot < used.size(); ++slot) {
         if (!used[slot] || !state.textures[slot]) continue;
         const auto& descriptor = *state.textures[slot];
         const auto key = descriptor.hash();
         auto existing = impl_->textures.find(key);
-        const auto texture_epoch = impl_->memory->coherency().current_epoch();
         const bool refresh = existing == impl_->textures.end() ||
                              impl_->texture_dirty.consume_dirty(
-                                 key, impl_->memory->coherency(), texture_epoch);
+                                 key, impl_->memory->coherency(), dirty_epoch);
         if (refresh) {
+          // Texture decoding is still CPU-side. Preserve GPU-resident
+          // memexport normally, but if a later draw actually samples a
+          // GPU-authored texture, download only that texture's subresources.
+          const auto source_layout = build_texture_layout(descriptor);
+          if (!source_layout.valid) {
+            impl_->error = source_layout.error;
+            return;
+          }
+          for (const auto& subresource : source_layout.subresources) {
+            if (subresource.guest_size_bytes > UINT32_MAX ||
+                !impl_->mirror.make_cpu_visible(
+                    subresource.guest_address,
+                    static_cast<std::uint32_t>(subresource.guest_size_bytes))) {
+              impl_->error = impl_->mirror.error().empty()
+                                 ? "Vulkan GPU-authored texture range is invalid"
+                                 : impl_->mirror.error();
+              return;
+            }
+          }
           const auto decoded = decode_texture(
               descriptor, {impl_->memory->physical_data(), memory::kPhysicalMemorySize});
           if (!decoded.valid) {
@@ -704,8 +818,14 @@ void Backend::consume(const ir::Command& command) {
             impl_->error = image->error().empty() ? impl_->resources.error() : image->error();
             return;
           }
-          impl_->texture_dirty.track_clean(key, decoded.layout, texture_epoch);
-          impl_->textures[key] = std::move(image);
+          impl_->texture_dirty.track_clean(key, decoded.layout, dirty_epoch);
+          if (existing != impl_->textures.end()) {
+            auto retired = std::move(existing->second);
+            existing->second = std::move(image);
+            impl_->retire_resource(std::move(retired));
+          } else {
+            impl_->textures.emplace(key, std::move(image));
+          }
         } else if (!impl_->resources.bind_texture(slot, descriptor.dimension,
                                                   existing->second->view(),
                                                   existing->second->sampler())) {
@@ -715,16 +835,81 @@ void Backend::consume(const ir::Command& command) {
       }
     }
 #ifdef XENON_HAS_DXC
-    if ((color_count || active_depth) && impl_->memory &&
-        draw->vertex_shader.valid && draw->pixel_shader.valid) {
+    if (impl_->memory && draw->vertex_shader.valid &&
+        draw->pixel_shader.valid) {
       const auto vertex = impl_->shaders.find(draw->vertex_shader.hash);
       const auto pixel = impl_->shaders.find(draw->pixel_shader.hash);
       if (vertex == impl_->shaders.end() || pixel == impl_->shaders.end()) {
         impl_->error = "Vulkan draw references a shader that has not been compiled";
         return;
       }
+      const auto decoded_vertex =
+          impl_->decoded_shaders.find(draw->vertex_shader.hash);
+      const auto decoded_pixel =
+          impl_->decoded_shaders.find(draw->pixel_shader.hash);
+      if (decoded_vertex == impl_->decoded_shaders.end() ||
+          decoded_pixel == impl_->decoded_shaders.end()) {
+        impl_->error = "Vulkan draw lacks decoded shader reflection";
+        return;
+      }
+      const bool vertex_memexport =
+          decoded_vertex->second.reflection.memory_exports != 0;
+      const bool pixel_memexport =
+          decoded_pixel->second.reflection.memory_exports != 0;
+      const bool memexport_writable = vertex_memexport || pixel_memexport;
+      std::vector<MemExportRange> memexport_ranges;
+      bool dynamic_memexport_range = false;
+      auto gather_memexport_ranges = [&](const DecodedShader& decoded) {
+        if (!decoded.reflection.memory_exports) return;
+        const auto plan = impl_->resource_state.plan_memexport(decoded);
+        dynamic_memexport_range |= plan.requires_dynamic_address_analysis;
+        memexport_ranges.insert(memexport_ranges.end(), plan.ranges.begin(),
+                                plan.ranges.end());
+      };
+      gather_memexport_ranges(decoded_vertex->second);
+      gather_memexport_ranges(decoded_pixel->second);
+      if (!color_count && !active_depth && !memexport_writable) return;
 
+      auto vertex_shader = vertex->second;
       auto pixel_shader = pixel->second;
+      auto writable_variant = [&](std::uint64_t shader_hash,
+                                  const DecodedShader& decoded,
+                                  std::shared_ptr<const CompiledShader> base) {
+        if (!memexport_writable || decoded.reflection.memory_exports != 0)
+          return base;
+        const std::uint64_t variant_key =
+            shader_hash ^ 0x4D454D4558505257ull;
+        auto found = impl_->writable_guest_memory_shaders.find(variant_key);
+        if (found != impl_->writable_guest_memory_shaders.end())
+          return found->second;
+        ShaderLoweringOptions lowering_options{};
+        lowering_options.force_guest_memory_rw = true;
+        const auto lowered = HlslShaderLowerer::lower(decoded, lowering_options);
+        if (!lowered.complete) {
+          impl_->error = lowered.diagnostics.empty()
+                             ? "Vulkan writable guest-memory shader lowering failed"
+                             : lowered.diagnostics.front();
+          return std::shared_ptr<const CompiledShader>{};
+        }
+        ShaderCompileOptions compile_options{};
+        compile_options.format = ShaderBinaryFormat::Spirv;
+        const auto compiled =
+            impl_->shader_cache.get_or_compile(lowered, compile_options);
+        if (!compiled->succeeded) {
+          impl_->error = compiled->diagnostics.empty()
+                             ? "Vulkan writable guest-memory shader compilation failed"
+                             : compiled->diagnostics.front();
+          return std::shared_ptr<const CompiledShader>{};
+        }
+        ++impl_->compiled_shader_count;
+        impl_->writable_guest_memory_shaders.emplace(variant_key, compiled);
+        return compiled;
+      };
+      vertex_shader = writable_variant(draw->vertex_shader.hash,
+                                       decoded_vertex->second, vertex_shader);
+      pixel_shader = writable_variant(draw->pixel_shader.hash,
+                                      decoded_pixel->second, pixel_shader);
+      if (!vertex_shader || !pixel_shader) return;
       bool float20_depth_variant = false;
       const auto samples = static_cast<MsaaSamples>(state.raster.msaa_samples_log2);
       if (active_depth && active_depth->requires_float24_conversion() &&
@@ -732,20 +917,17 @@ void Backend::consume(const ir::Command& command) {
         const bool per_sample = samples != MsaaSamples::X1;
         const std::uint64_t variant_key =
             draw->pixel_shader.hash ^ 0xD24F20E4D24F20E4ull ^
-            (per_sample ? 0x8000000000000000ull : 0ull);
+            (per_sample ? 0x8000000000000000ull : 0ull) ^
+            (memexport_writable ? 0x0400000000000000ull : 0ull);
         auto variant = impl_->float20_depth_shaders.find(variant_key);
         if (variant == impl_->float20_depth_shaders.end()) {
-          const auto decoded = impl_->decoded_shaders.find(draw->pixel_shader.hash);
-          if (decoded == impl_->decoded_shaders.end()) {
-            impl_->error = "Vulkan D24FS8 draw lacks decoded pixel shader";
-            return;
-          }
           ShaderLoweringOptions lowering_options{};
           lowering_options.pixel_depth_output =
               PixelDepthOutputMode::Float20e4NearestEven;
           lowering_options.force_sample_frequency = per_sample;
+          lowering_options.force_guest_memory_rw = memexport_writable;
           const auto lowered =
-              HlslShaderLowerer::lower(decoded->second, lowering_options);
+              HlslShaderLowerer::lower(decoded_pixel->second, lowering_options);
           if (!lowered.complete) {
             impl_->error = lowered.diagnostics.empty()
                                ? "D24FS8 pixel shader lowering failed"
@@ -771,6 +953,12 @@ void Backend::consume(const ir::Command& command) {
         float20_depth_variant = true;
       }
 
+      if (draw->index_buffer.valid && draw->index_buffer.length_bytes &&
+          !impl_->mirror.make_cpu_visible(draw->index_buffer.physical_address,
+                                          draw->index_buffer.length_bytes)) {
+        impl_->error = impl_->mirror.error();
+        return;
+      }
       const PrimitiveProcessingOptions primitive_options{
           state.primitive_assembly.reset_enabled,
           state.primitive_assembly.reset_index};
@@ -800,7 +988,8 @@ void Backend::consume(const ir::Command& command) {
       // triangle can reach rasterization. Points and lines are unaffected by
       // polygon face culling.
       if (batch.topology == HostPrimitiveTopology::TriangleList &&
-          state.raster.cull_front && state.raster.cull_back) {
+          state.raster.cull_front && state.raster.cull_back &&
+          !vertex_memexport) {
         return;
       }
       auto pipeline_key = state.pipeline_hash(*draw);
@@ -817,6 +1006,7 @@ void Backend::consume(const ir::Command& command) {
         pipeline_key ^= 0xD3F7000000000000ull;
       }
       if (float20_depth_variant) pipeline_key ^= 0x20E4D24F5A17A11Cull;
+      if (memexport_writable) pipeline_key ^= 0x4D454D4558504F52ull;
       if (!impl_->pipelines.contains(pipeline_key)) {
         auto pipeline = std::make_unique<GraphicsPipeline>();
         std::array<VkFormat, 4> formats{};
@@ -838,7 +1028,7 @@ void Backend::consume(const ir::Command& command) {
             blend_states.data(), color_count);
         if (!pipeline->initialize(
                 impl_->context.device(), impl_->resources.pipeline_layout(),
-                *vertex->second, *pixel_shader,
+                *vertex_shader, *pixel_shader,
                 batch.requires_rectangle_expansion
                     ? impl_->rectangle_list_shader.get() : nullptr,
                 format_span, samples,
@@ -850,29 +1040,25 @@ void Backend::consume(const ir::Command& command) {
         }
         impl_->pipelines.emplace(pipeline_key, std::move(pipeline));
       }
-      VkDeviceSize index_buffer_offset = 0;
-      if (batch.indexed) {
-        const auto byte_size = batch.indices.size() * sizeof(std::uint32_t);
-        const auto aligned_offset = (impl_->transient_upload_offset + 3u) & ~std::size_t{3u};
-        if (byte_size > impl_->transient_upload_mapping.size() -
-                            std::min(aligned_offset,
-                                     impl_->transient_upload_mapping.size())) {
-          impl_->error = "Vulkan transient upload arena exhausted by one submission";
-          return;
-        }
-        std::memcpy(impl_->transient_upload_mapping.data() + aligned_offset,
-                    batch.indices.data(), byte_size);
-        impl_->transient_upload_offset = aligned_offset + byte_size;
-        index_buffer_offset = static_cast<VkDeviceSize>(aligned_offset);
+      const auto index_byte_size =
+          batch.indexed ? batch.indices.size() * sizeof(std::uint32_t) : 0u;
+      if (index_byte_size > Impl::kTransientUploadBytes) {
+        impl_->error = "Vulkan transient upload arena exhausted by one submission";
+        return;
       }
       const auto* pipeline = impl_->pipelines.at(pipeline_key).get();
-      const auto descriptor_set = impl_->resources.descriptor_set();
       const auto render_width = color_count
                                     ? std::uint32_t(state.raster.surface_pitch)
-                                    : active_depth->width();
+                                    : active_depth
+                                          ? active_depth->width()
+                                          : std::max(1u, std::uint32_t(
+                                                               state.raster.surface_pitch));
       const auto render_height = color_count
                                      ? std::uint32_t(state.raster.scissor_bottom)
-                                     : active_depth->height();
+                                     : active_depth
+                                           ? active_depth->height()
+                                           : std::max(1u, std::uint32_t(
+                                                                std::max(1, state.raster.scissor_bottom)));
       const auto scissor_left = std::max(0, state.raster.scissor_left);
       const auto scissor_top = std::max(0, state.raster.scissor_top);
       const auto scissor_right = std::clamp(
@@ -881,7 +1067,36 @@ void Backend::consume(const ir::Command& command) {
       const auto scissor_bottom = std::clamp(
           state.raster.scissor_bottom, scissor_top,
           static_cast<std::int32_t>(render_height));
-      if (!impl_->queue.execute([&](VkCommandBuffer command_buffer) {
+      bool draw_record_failed = false;
+      if (!impl_->queue.execute_async(
+              [&](VkCommandBuffer command_buffer, std::uint32_t frame_index,
+                  std::uint32_t draw_slot) {
+            impl_->resources.prepare_draw(frame_index, draw_slot);
+            const auto descriptor_set =
+                impl_->resources.descriptor_set(frame_index, draw_slot);
+            VkDeviceSize index_buffer_offset = 0;
+            if (draw_slot == 0) impl_->transient_upload_offsets[frame_index] = 0;
+            if (batch.indexed) {
+              const auto aligned_offset =
+                  (impl_->transient_upload_offsets[frame_index] + 3u) &
+                  ~std::size_t{3u};
+              if (index_byte_size >
+                  impl_->transient_upload_mappings[frame_index].size() -
+                      std::min(aligned_offset,
+                               impl_->transient_upload_mappings[frame_index].size())) {
+                impl_->error =
+                    "Vulkan transient upload arena exhausted by one draw batch";
+                draw_record_failed = true;
+                return;
+              }
+              std::memcpy(
+                  impl_->transient_upload_mappings[frame_index].data() + aligned_offset,
+                  batch.indices.data(), index_byte_size);
+              impl_->transient_upload_offsets[frame_index] =
+                  aligned_offset + index_byte_size;
+              index_buffer_offset = static_cast<VkDeviceSize>(aligned_offset);
+            }
+            impl_->mirror.prepare_shader_access(command_buffer, memexport_writable);
             for (std::size_t i = 0; i < color_count; ++i)
               if (active_targets[i])
                 active_targets[i]->transition_to_color_attachment(command_buffer);
@@ -975,9 +1190,9 @@ void Backend::consume(const ir::Command& command) {
                                        VK_STENCIL_FACE_BACK_BIT, back_reference);
             }
             if (batch.indexed) {
-              vkCmdBindIndexBuffer(command_buffer, impl_->transient_upload.buffer(),
-                                   index_buffer_offset,
-                                   VK_INDEX_TYPE_UINT32);
+              vkCmdBindIndexBuffer(
+                  command_buffer, impl_->transient_uploads[frame_index].buffer(),
+                  index_buffer_offset, VK_INDEX_TYPE_UINT32);
               vkCmdDrawIndexed(command_buffer,
                                static_cast<std::uint32_t>(batch.indices.size()),
                                1, 0, 0, 0);
@@ -987,6 +1202,24 @@ void Backend::consume(const ir::Command& command) {
             vkCmdEndRendering(command_buffer);
           })) {
         impl_->error = impl_->queue.error();
+        return;
+      } else if (draw_record_failed) {
+        return;
+      } else if (memexport_writable) {
+        if (dynamic_memexport_range) {
+          // Unusual shaders may synthesize eA dynamically. Until runtime
+          // address analysis is available, preserve correctness by treating
+          // the complete physical aperture as GPU-owned rather than risking a
+          // stale CPU upload over an unknown export.
+          impl_->mirror.mark_gpu_write(0, memory::kPhysicalMemorySize);
+          impl_->texture_dirty.mark_dirty(0, memory::kPhysicalMemorySize);
+        } else {
+          for (const auto& range : memexport_ranges) {
+            const auto address = range.base_address_dwords << 2u;
+            impl_->mirror.mark_gpu_write(address, range.size_bytes);
+            impl_->texture_dirty.mark_dirty(address, range.size_bytes);
+          }
+        }
       }
     }
 #endif
@@ -1010,7 +1243,77 @@ void Backend::consume(const ir::Command& command) {
 #endif
   }
 }
-void Backend::end_submission() {}
+void Backend::end_submission() {
+  if (!impl_->ready) return;
+  if (!impl_->queue.flush()) {
+    impl_->error = impl_->queue.error();
+    impl_->ready = false;
+  }
+}
+bool Backend::make_guest_memory_cpu_visible(std::uint32_t physical_address,
+                                            std::uint32_t size) {
+  if (!impl_->ready || !impl_->memory) return false;
+  if (!impl_->mirror.make_cpu_visible(physical_address, size)) {
+    impl_->error = impl_->mirror.error();
+    return false;
+  }
+  return true;
+}
+
+bool Backend::make_edram_canonical() {
+  if (!impl_->ready || !impl_->edram) return false;
+  if (!impl_->make_edram_canonical()) return false;
+  return true;
+}
+
+PresentStatus Backend::present(const PresentationFrame& frame) {
+  if (!impl_->presentation.ready()) return PresentStatus::NotConfigured;
+  if (!impl_->ready || !impl_->memory) return PresentStatus::Error;
+  TextureDescriptor descriptor = frame.texture;
+  descriptor.mip_min_level = 0;
+  descriptor.mip_max_level = 0;
+  descriptor.packed_mips = false;
+  const auto layout = build_texture_layout(descriptor);
+  if (!layout.valid) {
+    impl_->error = layout.error;
+    return PresentStatus::Error;
+  }
+  for (const auto& subresource : layout.subresources) {
+    if (subresource.guest_size_bytes > UINT32_MAX ||
+        !impl_->mirror.make_cpu_visible(
+            subresource.guest_address,
+            static_cast<std::uint32_t>(subresource.guest_size_bytes))) {
+      impl_->error = impl_->mirror.error().empty()
+                         ? "Vulkan scanout source range is invalid"
+                         : impl_->mirror.error();
+      return PresentStatus::Error;
+    }
+  }
+  const auto prepared = prepare_presentation_frame(
+      frame, {impl_->memory->physical_data(), memory::kPhysicalMemorySize},
+      impl_->presentation.width(), impl_->presentation.height(),
+      impl_->presentation.config().preserve_aspect_ratio);
+  if (!prepared.valid) {
+    impl_->error = prepared.error;
+    return PresentStatus::Unsupported;
+  }
+  const auto status = impl_->presentation.present(prepared);
+  if (status == PresentStatus::Error || status == PresentStatus::SurfaceLost)
+    impl_->error = impl_->presentation.error();
+  return status;
+}
+
+bool Backend::resize_presentation(std::uint32_t width, std::uint32_t height) {
+  if (!impl_->presentation.resize(width, height)) {
+    impl_->error = impl_->presentation.error();
+    return false;
+  }
+  return true;
+}
+
+bool Backend::presentation_ready() const noexcept {
+  return impl_->presentation.ready();
+}
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }
 std::size_t Backend::draw_count() const noexcept { return impl_->draw_count; }

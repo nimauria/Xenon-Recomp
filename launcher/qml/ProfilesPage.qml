@@ -1,18 +1,81 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 Item {
     id: root
 
     property string searchText: ""
+    property int contextIndex: -1
+    property int exportTargetIndex: -1
+    property int deleteTargetIndex: -1
     readonly property bool testMode: launcherBridge.testMode
     readonly property var selected: ProfileStore.profile(ProfileStore.selectedIndex)
 
-    function effectivePath(overridePath, key, fallback) {
-        if (overridePath && overridePath.length > 0)
-            return overridePath
-        return launcherBridge.stringSetting(key, fallback)
+    function runtimeSummary(profile) {
+        var effective = profile.effectiveRuntimeSettings || ({})
+        return {
+            renderer: String(effective["runtime/graphicsBackend"] || "Automatic"),
+            input: String(effective["input/preferredDevice"] || "Automatic"),
+            volume: Math.round(Number(effective["audio/masterVolume"] === undefined ? 1.0 : effective["audio/masterVolume"]) * 100) + "%",
+            cache: Boolean(effective["graphics/shaderCache"]) ? String(effective["graphics/shaderCacheMode"] || "Persistent") : "Disabled"
+        }
+    }
+
+    function runProfileAction(actionId, index) {
+        if (index < 0 || index >= ProfileStore.profiles.length)
+            return
+        ProfileStore.selectedIndex = index
+        var profile = ProfileStore.profile(index)
+        if (actionId === "activate") {
+            if (ProfileStore.activate(index))
+                launcherBridge.notify("Profile activated", profile.profileName + " is now active.")
+        } else if (actionId === "edit") {
+            profileEditor.openForEdit(index, profile, "profile")
+        } else if (actionId === "runtime") {
+            profileEditor.openForEdit(index, profile, "runtime")
+        } else if (actionId === "paths") {
+            profileEditor.openForEdit(index, profile, "paths")
+        } else if (actionId === "duplicate") {
+            ProfileStore.duplicate(index)
+        } else if (actionId === "export") {
+            exportTargetIndex = index
+            exportProfileDialog.open()
+        } else if (actionId === "copyId") {
+            launcherBridge.copyText(String(profile.profileId || ""))
+            launcherBridge.notify("Profile ID copied", String(profile.profileId || ""))
+        } else if (actionId === "openStorage") {
+            launcherBridge.openProfileStorage(index)
+        } else if (actionId === "removeAvatar") {
+            if (launcherBridge.removeProfileImage(index))
+                ProfileStore.reloadBackend(index)
+        } else if (actionId === "delete") {
+            deleteTargetIndex = index
+            deleteDialog.open()
+        }
+    }
+
+    function openProfileContext(index, item, localX, localY) {
+        if (index < 0 || index >= ProfileStore.profiles.length)
+            return
+        ProfileStore.selectedIndex = index
+        contextIndex = index
+        profileContextMenu.actions = launcherBridge.profileActions(index)
+        profileContextMenu.openAt(item, localX, localY)
+    }
+
+    function openBackgroundContext(item, localX, localY) {
+        contextIndex = -1
+        profileBackgroundMenu.actions = launcherBridge.profileBackgroundActions()
+        profileBackgroundMenu.openAt(item, localX, localY)
+    }
+
+    function runBackgroundAction(actionId) {
+        if (actionId === "create")
+            profileEditor.openForCreate()
+        else if (actionId === "import")
+            importProfileDialog.open()
     }
 
     function formatTimestamp(value, fallback) {
@@ -24,17 +87,13 @@ Item {
         return date.toLocaleString(Qt.locale(), Locale.ShortFormat)
     }
 
-    function isOpenablePath(path) {
-        return path && path.length > 0 && path.indexOf("TEST://") !== 0
-    }
-
     RowLayout {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
         XPanel {
-            Layout.preferredWidth: 300
-            Layout.minimumWidth: 270
+            Layout.preferredWidth: Math.round(Math.min(390, 300 + Math.max(0, Theme.bodyScale - 1.0) * 120))
+            Layout.minimumWidth: 280
             Layout.fillHeight: true
 
             ColumnLayout {
@@ -80,6 +139,27 @@ Item {
                     model: ProfileStore.profiles
                     boundsBehavior: Flickable.StopAtBounds
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    // This must live on the ListView viewport, not its scrolling contentItem.
+                    // That makes blank-space context menus work even when the list is shorter than
+                    // the visible viewport, and keeps hit testing correct after scrolling.
+                    MouseArea {
+                        parent: profileList
+                        anchors.fill: profileList
+                        z: 1000
+                        acceptedButtons: Qt.RightButton
+                        hoverEnabled: false
+                        preventStealing: true
+                        onClicked: function(mouse) {
+                            var index = profileList.indexAt(
+                                mouse.x + profileList.contentX,
+                                mouse.y + profileList.contentY)
+                            if (index >= 0)
+                                root.openProfileContext(index, profileList, mouse.x, mouse.y)
+                            else
+                                root.openBackgroundContext(profileList, mouse.x, mouse.y)
+                        }
+                    }
 
                     delegate: Button {
                         id: profileDelegate
@@ -138,13 +218,28 @@ Item {
                         background: Rectangle {
                             radius: Theme.controlRadius
                             color: ProfileStore.selectedIndex === profileDelegate.index ? Theme.accentSoft
-                                 : profileDelegate.hovered ? Theme.surfaceHover : Theme.surface
+                                 : profileMouse.containsMouse ? Theme.surfaceHover : Theme.surface
                             border.width: profileDelegate.activeFocus ? Theme.focusWidth : Theme.borderWidth
                             border.color: profileDelegate.activeFocus ? Theme.focusRing
                                         : ProfileStore.selectedIndex === profileDelegate.index ? Theme.accent : Theme.border
                         }
 
                         onClicked: ProfileStore.selectedIndex = index
+
+                        MouseArea {
+                            id: profileMouse
+                            anchors.fill: parent
+                            acceptedButtons: Qt.LeftButton
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                ProfileStore.selectedIndex = profileDelegate.index
+                                profileDelegate.forceActiveFocus()
+                            }
+                        }
+
+                        Keys.onReturnPressed: ProfileStore.selectedIndex = index
+                        Keys.onSpacePressed: ProfileStore.selectedIndex = index
                     }
                 }
             }
@@ -163,6 +258,7 @@ Item {
                 spacing: Theme.spaceMd
 
                 XPanel {
+                    id: profileHeaderPanel
                     Layout.fillWidth: true
                     implicitHeight: profileHeader.implicitHeight + Theme.spaceLg * 2
                     decorated: true
@@ -269,31 +365,29 @@ Item {
                                 iconName: "more"
                                 tooltip: "More profile actions"
                                 variant: "filled"
-                                onClicked: profileActionsMenu.open()
+                                onClicked: profileActionsMenu.visible ? profileActionsMenu.close() : profileActionsMenu.open()
                                 XActionMenu {
                                     id: profileActionsMenu
+                                    parent: profileActionsButton
                                     x: profileActionsButton.width - width
                                     y: profileActionsButton.height + 4
-                                    menuWidth: 220
-                                    actions: [
-                                        { id: "export", label: "Export profile", icon: "⇧" },
-                                        { id: "import", label: "Import profile", icon: "⇩" },
-                                        { id: "delete", label: "Delete profile", icon: "×", destructive: true, separatorBefore: true }
-                                    ]
+                                    menuWidth: 250
+                                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+                                    actions: launcherBridge.profileActions(ProfileStore.selectedIndex)
                                     onActionTriggered: function(actionId) {
-                                        if (actionId === "delete") {
-                                            if (!root.selected.active && ProfileStore.profiles.length > 1)
-                                                deleteDialog.open()
-                                            else
-                                                launcherBridge.notify("Profile protected", "The active profile cannot be deleted. Activate another profile first.")
-                                        } else if (actionId === "export") {
-                                            launcherBridge.notifyUnavailable("Export Profile")
-                                        } else if (actionId === "import") {
-                                            launcherBridge.notifyUnavailable("Import Profile")
-                                        }
+                                        root.runProfileAction(actionId, ProfileStore.selectedIndex)
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        z: 1000
+                        acceptedButtons: Qt.RightButton
+                        onClicked: function(mouse) {
+                            root.openProfileContext(ProfileStore.selectedIndex, profileHeaderPanel, mouse.x, mouse.y)
                         }
                     }
                 }
@@ -306,6 +400,7 @@ Item {
 
                     XPanel {
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
                         implicitHeight: profileDetailsColumn.implicitHeight + Theme.spaceLg * 2
                         ColumnLayout {
                             id: profileDetailsColumn
@@ -323,14 +418,19 @@ Item {
                             XInfoRow { label: "Created"; value: root.formatTimestamp(root.selected.createdAt, "Unknown") }
                             XInfoRow { label: "Last activated"; value: root.formatTimestamp(root.selected.lastUsedAt, root.selected.lastUsed || "Not used yet") }
                             XInfoRow { label: "Preferred region"; value: root.selected.region || "Auto (Global)" }
-                            XInfoRow { label: "Startup page"; value: root.selected.startupPage || "Library" }
+                            XInfoRow { label: "Startup page"; value: root.selected.startupPage || "Launcher default" }
                             XInfoRow { label: "Offline mode"; value: root.selected.offline ? "Enabled" : "Disabled" }
-                            XInfoRow { label: "Runtime settings"; value: root.selected.isolatedSettings ? "Profile-specific" : "Launcher defaults" }
+                            XInfoRow { label: "Runtime settings"; value: root.selected.isolatedSettings ? "Profile-specific (" + root.selected.runtimeOverrideCount + " overrides)" : "Launcher defaults" }
+                            XInfoRow { label: "Renderer"; value: root.runtimeSummary(root.selected).renderer }
+                            XInfoRow { label: "Shader cache"; value: root.runtimeSummary(root.selected).cache }
+                            XInfoRow { label: "Preferred input"; value: root.runtimeSummary(root.selected).input }
+                            XInfoRow { label: "Audio volume"; value: root.runtimeSummary(root.selected).volume }
                         }
                     }
 
                     XPanel {
                         Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
                         implicitHeight: profileSummaryColumn.implicitHeight + Theme.spaceLg * 2
                         ColumnLayout {
                             id: profileSummaryColumn
@@ -345,7 +445,8 @@ Item {
                             XInfoRow { label: "Modules available"; value: String(root.selected.modules || 0) }
                             XInfoRow { label: "Save sets"; value: String(root.selected.saveSets || 0) }
                             XInfoRow { label: "Status"; value: root.selected.active ? "Active profile" : "Inactive" }
-                            XInfoRow { label: "Profile storage"; value: launcherBridge.stringSetting("paths/profiles", launcherBridge.defaultProfilesPath) }
+                            XInfoRow { label: "Path overrides"; value: String(root.selected.pathOverrideCount || 0) }
+                            XInfoRow { label: "Profile storage"; value: root.selected.storagePath || launcherBridge.stringSetting("paths/profiles", launcherBridge.defaultProfilesPath) }
                             Text {
                                 Layout.fillWidth: true
                                 text: "Modules are installed globally. Profile-specific paths and runtime preferences can be edited independently."
@@ -383,10 +484,10 @@ Item {
 
                         Repeater {
                             model: [
-                                ["Games", root.effectivePath(root.selected.gamePath, "paths/games", launcherBridge.defaultGameLibraryPath), root.selected.gamePath && root.selected.gamePath.length > 0 ? "Profile override" : "Launcher default"],
-                                ["Saves", root.effectivePath(root.selected.savePath, "paths/saves", launcherBridge.defaultSaveDataPath), root.selected.savePath && root.selected.savePath.length > 0 ? "Profile override" : "Launcher default"],
-                                ["Screenshots", root.effectivePath(root.selected.screenshotPath, "paths/screenshots", launcherBridge.defaultScreenshotsPath), root.selected.screenshotPath && root.selected.screenshotPath.length > 0 ? "Profile override" : "Launcher default"],
-                                ["Profile storage", launcherBridge.stringSetting("paths/profiles", launcherBridge.defaultProfilesPath), "Launcher-wide"]
+                                ["Games", root.selected.effectiveGamePath || launcherBridge.defaultGameLibraryPath, root.selected.gamePath && root.selected.gamePath.length > 0 ? "Profile override" : "Launcher default"],
+                                ["Saves", root.selected.effectiveSavePath || launcherBridge.defaultSaveDataPath, root.selected.savePath && root.selected.savePath.length > 0 ? "Profile override" : "Launcher default"],
+                                ["Screenshots", root.selected.effectiveScreenshotPath || launcherBridge.defaultScreenshotsPath, root.selected.screenshotPath && root.selected.screenshotPath.length > 0 ? "Profile override" : "Launcher default"],
+                                ["Profile storage", root.selected.storagePath || launcherBridge.stringSetting("paths/profiles", launcherBridge.defaultProfilesPath), "Managed profile folder"]
                             ]
                             delegate: GridLayout {
                                 id: locationGrid
@@ -405,7 +506,7 @@ Item {
                                 XButton {
                                     Layout.fillWidth: locationGrid.columns === 1
                                     text: "Open"
-                                    enabled: root.isOpenablePath(modelData[1])
+                                    enabled: launcherBridge.canOpenPath(modelData[1])
                                     onClicked: launcherBridge.openFolder(modelData[1])
                                 }
                             }
@@ -416,6 +517,24 @@ Item {
                 Item { Layout.preferredHeight: Theme.spaceXs }
             }
         }
+    }
+
+    XActionMenu {
+        id: profileContextMenu
+        parent: root
+        menuWidth: 260
+        actions: []
+        onActionTriggered: function(actionId) {
+            root.runProfileAction(actionId, root.contextIndex)
+        }
+    }
+
+    XActionMenu {
+        id: profileBackgroundMenu
+        parent: root
+        menuWidth: 240
+        actions: []
+        onActionTriggered: function(actionId) { root.runBackgroundAction(actionId) }
     }
 
     ProfileEditorDialog {
@@ -436,20 +555,45 @@ Item {
         }
     }
 
+    FileDialog {
+        id: exportProfileDialog
+        title: "Export Xenon profile"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["Xenon profile (*.xenonprofile)"]
+        onAccepted: {
+            var target = root.exportTargetIndex >= 0 ? root.exportTargetIndex : ProfileStore.selectedIndex
+            launcherBridge.exportProfile(target, selectedFile)
+            root.exportTargetIndex = -1
+        }
+        onRejected: root.exportTargetIndex = -1
+    }
+
+    FileDialog {
+        id: importProfileDialog
+        title: "Import Xenon profile"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Xenon profile (*.xenonprofile)", "JSON files (*.json)"]
+        onAccepted: {
+            var importedIndex = launcherBridge.importProfile(selectedFile)
+            if (importedIndex >= 0)
+                ProfileStore.reloadBackend(importedIndex)
+        }
+    }
+
     XConfirmDialog {
         id: deleteDialog
-        title: "Delete “" + (root.selected.profileName || "profile") + "”?"
+        readonly property var targetProfile: ProfileStore.profile(root.deleteTargetIndex >= 0 ? root.deleteTargetIndex : ProfileStore.selectedIndex)
+        title: "Delete “" + (targetProfile.profileName || "profile") + "”?"
         message: "This removes the local launcher profile configuration for this profile. Game content and globally installed modules are not deleted. This action cannot currently be undone."
         confirmText: "Delete profile"
         destructive: true
         onConfirmed: {
-            var name = root.selected.profileName
-            var profileId = root.selected.profileId
-            if (ProfileStore.remove(ProfileStore.selectedIndex)) {
-                if (profileId && profileId.length > 0)
-                    launcherBridge.removeProfileAvatar(profileId)
+            var target = root.deleteTargetIndex >= 0 ? root.deleteTargetIndex : ProfileStore.selectedIndex
+            var name = ProfileStore.profile(target).profileName
+            if (ProfileStore.remove(target))
                 launcherBridge.notify("Profile deleted", name + " was removed from the launcher.")
-            }
+            root.deleteTargetIndex = -1
         }
+        onClosed: root.deleteTargetIndex = -1
     }
 }

@@ -32,6 +32,11 @@ bool Context::initialize(const ContextConfig& config) {
   const char* validation = "VK_LAYER_KHRONOS_validation";
   VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   instance_info.pApplicationInfo = &app;
+  instance_info.enabledExtensionCount =
+      static_cast<std::uint32_t>(config.instance_extensions.size());
+  instance_info.ppEnabledExtensionNames = config.instance_extensions.empty()
+                                              ? nullptr
+                                              : config.instance_extensions.data();
   if (config.enable_validation) {
     instance_info.enabledLayerCount = 1;
     instance_info.ppEnabledLayerNames = &validation;
@@ -129,11 +134,28 @@ bool Context::initialize(const ContextConfig& config) {
   queue_info.queueCount = 1;
   queue_info.pQueuePriorities = &priority;
   VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-  const char* device_extensions[]{VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME};
-  if (supports_device_extension(physical_device_, device_extensions[0])) {
-    device_info.enabledExtensionCount = 1;
-    device_info.ppEnabledExtensionNames = device_extensions;
+  std::vector<const char*> device_extensions;
+  if (supports_device_extension(physical_device_,
+                                VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME)) {
+    device_extensions.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
   }
+  const bool surface_enabled =
+      std::any_of(config.instance_extensions.begin(),
+                  config.instance_extensions.end(), [](const char* extension) {
+                    return extension &&
+                           std::strcmp(extension, VK_KHR_SURFACE_EXTENSION_NAME) ==
+                               0;
+                  });
+  swapchain_supported_ =
+      surface_enabled && supports_device_extension(
+                             physical_device_, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  if (swapchain_supported_) {
+    device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  }
+  device_info.enabledExtensionCount =
+      static_cast<std::uint32_t>(device_extensions.size());
+  device_info.ppEnabledExtensionNames =
+      device_extensions.empty() ? nullptr : device_extensions.data();
   device_info.pNext = &features12;
   device_info.pEnabledFeatures = &enabled_features;
   device_info.queueCreateInfoCount = 1;
@@ -156,6 +178,7 @@ void Context::reset() noexcept {
   graphics_queue_ = VK_NULL_HANDLE;
   graphics_queue_family_ = 0;
   properties_ = {};
+  swapchain_supported_ = false;
 }
 
 }  // namespace xenon::gpu::vulkan

@@ -59,7 +59,10 @@ bool discard(void* address, std::size_t size,
              Protection committed_protection) noexcept {
   if (!address || !size) return false;
 #if defined(MADV_DONTNEED)
-  if (::madvise(address, size, MADV_DONTNEED) == 0) return true;
+  if (::madvise(address, size, MADV_DONTNEED) == 0) {
+    return ::mprotect(address, size,
+                      native_protection(committed_protection)) == 0;
+  }
 #endif
   // Portable POSIX fallback that preserves the reservation and guarantees
   // zero-filled anonymous pages without exposing this policy to AddressSpace.

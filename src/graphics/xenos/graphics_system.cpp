@@ -30,4 +30,18 @@ void GraphicsSystem::execute_ir(Backend& backend) {
   stream_.clear();
 }
 
+bool GraphicsSystem::make_guest_memory_cpu_visible(
+    Backend& backend, std::uint32_t physical_address, std::uint32_t size) {
+  return backend.make_guest_memory_cpu_visible(physical_address, size);
+}
+
+bool GraphicsSystem::make_edram_canonical(Backend& backend) {
+  return backend.make_edram_canonical();
+}
+
+PresentStatus GraphicsSystem::present(Backend& backend,
+                                      const PresentationFrame& frame) {
+  return backend.present(frame);
+}
+
 }  // namespace xenon::gpu

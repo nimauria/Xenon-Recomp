@@ -12,11 +12,73 @@ Item {
     property bool showCompatibility: launcherBridge.boolSetting("library/showCompatibility", true)
     property string fixtureMode: launcherBridge.stringSetting(
         "developer/fixtureMode", launcherBridge.testMode ? "generic" : "none")
+    property string pendingDlcGameId: ""
+    property string pendingDlcId: ""
+    property string pendingDlcName: ""
+    property string pendingImportDlcId: ""
+    property string pendingRemoveGameId: ""
 
     signal requestPage(int index)
 
     readonly property bool hasGames: gamesModel.count > 0
     readonly property bool testMode: launcherBridge.testMode
+    readonly property var currentSession: launcherBridge.currentSession
+
+    function sessionMatchesSelected() {
+        return root.selectedGame().gameId.length > 0
+            && String(root.currentSession.gameId || "") === root.selectedGame().gameId
+    }
+
+    function selectedSessionState() {
+        return root.sessionMatchesSelected() ? String(root.currentSession.state || "idle") : "idle"
+    }
+
+    function sessionActiveForOtherGame() {
+        return Boolean(root.currentSession.active)
+            && String(root.currentSession.gameId || "") !== root.selectedGame().gameId
+    }
+
+    function launchButtonText() {
+        if (root.sessionActiveForOtherGame()) return "Session active"
+        switch (root.selectedSessionState()) {
+        case "preparing": return "×  Cancel Preparing"
+        case "validating": return "×  Cancel Validation"
+        case "starting": return "×  Cancel Starting"
+        case "running": return "■  Stop Game"
+        case "stopping": return "Stopping…"
+        case "failed": return "↻  Try Again"
+        default: return "▶  Play"
+        }
+    }
+
+    function launchButtonEnabled() {
+        if (!root.selectedGame().ready) return false
+        if (root.sessionActiveForOtherGame()) return false
+        return root.selectedSessionState() !== "stopping"
+    }
+
+    function launchButtonVariant() {
+        var state = root.selectedSessionState()
+        return state === "running" || state === "preparing" || state === "validating" || state === "starting"
+            ? "danger" : "primary"
+    }
+
+    function activateSelectedGameSession() {
+        var state = root.selectedSessionState()
+        if (state === "preparing" || state === "validating" || state === "starting" || state === "running")
+            launcherBridge.stopGame()
+        else
+            launcherBridge.launchGame(root.selectedGame().gameId)
+    }
+
+    function formatDuration(milliseconds) {
+        var seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000))
+        var hours = Math.floor(seconds / 3600)
+        var minutes = Math.floor((seconds % 3600) / 60)
+        if (hours > 0) return hours + "h " + minutes + "m"
+        if (minutes > 0) return minutes + "m"
+        return seconds + "s"
+    }
 
     ListModel { id: gamesModel }
     ListModel { id: dlcModel }
@@ -67,102 +129,35 @@ Item {
         selectedGameIndex = -1
     }
 
+    function populateBackendLibrary() {
+        clearLibrary()
+        var items = launcherBridge.libraryEntries()
+        for (var i = 0; i < items.length; ++i)
+            gamesModel.append(items[i])
+        selectedGameIndex = gamesModel.count > 0 ? 0 : -1
+        populateDlcForSelection()
+    }
+
     function moduleSettingsSchema() {
-        if (fixtureMode === "gracemeria") {
-            return [
-                { id: "region", label: "Game region", description: "Choose the supported game region to prefer.", type: "choice", defaultValue: "Automatic", options: ["Automatic", "NTSC-U", "PAL"] },
-                { id: "renderer", label: "Renderer override", description: "Override the launcher renderer for this module.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
-                { id: "offline", label: "Offline mode", description: "Use local service fallbacks while online services are unavailable.", type: "bool", defaultValue: true },
-                { id: "debugOverlay", label: "Module diagnostics", description: "Show module-provided developer information in test builds.", type: "bool", defaultValue: false }
-            ]
-        }
-        return [
-            { id: "renderer", label: "Renderer override", description: "Example module-defined renderer preference.", type: "choice", defaultValue: "Launcher default", options: ["Launcher default", "Vulkan", "Direct3D 12"] },
-            { id: "offline", label: "Offline mode", description: "Example boolean setting supplied by the module manifest.", type: "bool", defaultValue: true },
-            { id: "debug", label: "Debug overlay", description: "Example test-only developer option.", type: "bool", defaultValue: false }
-        ]
+        return launcherBridge.moduleSettingsSchema(root.selectedGame().moduleId || "")
     }
 
     function populateDlcForSelection() {
         dlcModel.clear()
-        if (!testMode || fixtureMode === "none" || selectedGameIndex < 0)
+        if (selectedGameIndex < 0)
             return
-
-        var items
-        if (fixtureMode === "gracemeria") {
-            items = [
-                ["CFA-44 Nosferatu", true],
-                ["Ace of Aces Mission Pack", true],
-                ["F-15E Garuda Skin", false],
-                ["Multiplayer Map Pack", true],
-                ["Extra Music Pack", false],
-                ["Special Aircraft Set", true],
-                ["Additional Mission Set", false],
-                ["Aircraft Skin Collection", true]
-            ]
-        } else if (selectedGameIndex === 0) {
-            items = [
-                ["Test Expansion Alpha", true], ["Test Mission Pack", true],
-                ["Test Vehicle Pack", false], ["Test Cosmetic Pack", false],
-                ["Test Challenge Pack", true], ["Test Aircraft Pack", true],
-                ["Test Music Pack", false], ["Test Mission Beta", true],
-                ["Test Livery Pack", false], ["Test Bonus Content", true]
-            ]
-        } else {
-            items = [["Test Arena Pack", false], ["Test Ruleset Pack", true]]
-        }
+        var items = launcherBridge.libraryDlcEntries(root.selectedGame().gameId || "")
         for (var i = 0; i < items.length; ++i)
-            dlcModel.append({ name: items[i][0], installed: items[i][1] })
+            dlcModel.append(items[i])
     }
 
-    function populateFixtures() {
-        clearLibrary()
-        if (!testMode || fixtureMode === "none")
-            return
 
-        if (fixtureMode === "gracemeria") {
-            gamesModel.append({
-                title: "Ace Combat 6: Fires of Liberation",
-                moduleName: "Project Gracemeria",
-                status: "UI Preview",
-                ready: true,
-                installed: true,
-                tileArt: "",
-                heroArt: "",
-                description: "Project Gracemeria UI preview for the Xenon launcher. The module supplies metadata, compatibility rules and add-on definitions; users provide their own legally obtained game content locally.",
-                gameId: "4E4D07D1",
-                renderer: "Vulkan",
-                mode: "Offline",
-                regions: "NTSC-U / PAL",
-                contentState: "Base content + title update + add-ons detected (preview)",
-                tags: "Aerial Combat|Cinematic Story|Project Gracemeria",
-                moduleVersion: "preview",
-                lastPlayed: "Not launched"
-            })
-        } else {
-            gamesModel.append({
-                title: "Xenon Test Flight", moduleName: "Test Flight Module",
-                status: "Ready to Play", ready: true, installed: true,
-                tileArt: "", heroArt: "",
-                description: "A fictional launcher-only entry used to exercise the Project Xenon library interface before runtime services are connected.",
-                gameId: "TEST0001", renderer: "Vulkan", mode: "Offline",
-                regions: "Test Region A / B", contentState: "Base content + update + add-ons detected",
-                tags: "Aerial Combat|Cinematic Story|Large Battles", moduleVersion: "0.1-test",
-                lastPlayed: "Not launched"
-            })
-            gamesModel.append({
-                title: "Xenon Test Arena", moduleName: "Test Arena Module",
-                status: "Content Missing", ready: false, installed: true,
-                tileArt: "", heroArt: "",
-                description: "A second fictional entry used to verify disabled launch states and incomplete-content indicators.",
-                gameId: "TEST0002", renderer: "Automatic", mode: "Offline",
-                regions: "Module Defined", contentState: "Required base content missing",
-                tags: "Test Fixture|Content Validation", moduleVersion: "0.2-test",
-                lastPlayed: "Not launched"
-            })
-        }
-        selectedGameIndex = gamesModel.count > 0 ? 0 : -1
-        populateDlcForSelection()
+    function openGameProperties(gameId) {
+        gamePropertiesLoader.active = true
+        Qt.callLater(function() {
+            if (gamePropertiesLoader.item)
+                gamePropertiesLoader.item.openFor(gameId)
+        })
     }
 
     function installedDlcCount() {
@@ -172,14 +167,6 @@ Item {
         return count
     }
 
-    function removeSelectedTestEntry() {
-        if (!testMode || selectedGameIndex < 0)
-            return
-        gamesModel.remove(selectedGameIndex)
-        selectedGameIndex = gamesModel.count > 0
-            ? Math.min(selectedGameIndex, gamesModel.count - 1) : -1
-        populateDlcForSelection()
-    }
 
     onSelectedGameIndexChanged: populateDlcForSelection()
 
@@ -191,13 +178,29 @@ Item {
             else if (key === "library/showCompatibility")
                 root.showCompatibility = launcherBridge.boolSetting(key, true)
             else if (key === "developer/fixtureMode") {
-                root.fixtureMode = String(value)
-                root.populateFixtures()
+                root.fixtureMode = launcherBridge.stringSetting(key, launcherBridge.testMode ? "generic" : "none")
+                root.populateBackendLibrary()
             }
+        }
+        function onLibraryChanged() {
+            var previousGameId = root.selectedGame().gameId || ""
+            root.populateBackendLibrary()
+            if (previousGameId.length > 0) {
+                for (var i = 0; i < gamesModel.count; ++i) {
+                    if (gamesModel.get(i).gameId === previousGameId) {
+                        root.selectedGameIndex = i
+                        break
+                    }
+                }
+            }
+        }
+        function onLibraryDlcChanged(gameId) {
+            if (gameId.length === 0 || gameId === (root.selectedGame().gameId || ""))
+                root.populateDlcForSelection()
         }
     }
 
-    Component.onCompleted: populateFixtures()
+    Component.onCompleted: populateBackendLibrary()
 
     RowLayout {
         anchors.fill: parent
@@ -231,7 +234,7 @@ Item {
                         description: "Add your own local game content. Xenon asks installed modules to identify and validate supported files; commercial game data is never distributed by Xenon."
                         primaryText: root.testMode && root.fixtureMode !== "none" ? "Reload Fixture" : "Add Game"
                         secondaryText: ""
-                        onPrimaryClicked: root.testMode && root.fixtureMode !== "none" ? root.populateFixtures() : gameContentDialog.open()
+                        onPrimaryClicked: root.testMode && root.fixtureMode !== "none" ? root.populateBackendLibrary() : gameContentDialog.open()
                     }
 
                     ListView {
@@ -371,16 +374,21 @@ Item {
                                             y: gameActionsButton.height + 4
                                             menuWidth: 290
                                             actions: [
-                                                { id: "properties", label: "Game properties", icon: "ⓘ" },
-                                                { id: "moduleSettings", label: "Module settings", icon: "◇" },
+                                                { id: "enableModule", label: "Enable “" + root.selectedGame().moduleName + "”", icon: "▶", enabled: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive), visible: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive) },
+                                                { id: "properties", label: "Game properties", icon: "ⓘ", separatorBefore: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive) },
+                                                { id: "moduleSettings", label: "Module settings", icon: "◇", enabled: Boolean(root.selectedGame().moduleInstalled) },
                                                 { id: "remove", label: "Remove “" + root.selectedGame().title + "” from Library", icon: "×", destructive: true, separatorBefore: true }
                                             ]
                                             onActionTriggered: function(actionId) {
-                                                if (actionId === "remove") {
-                                                    if (root.testMode) root.removeSelectedTestEntry()
-                                                    else launcherBridge.notifyUnavailable("Remove " + root.selectedGame().title + " from Library")
+                                                if (actionId === "enableModule") {
+                                                    launcherBridge.setModuleEnabled(root.selectedGame().moduleId, true)
+                                                } else if (actionId === "remove") {
+                                                    root.pendingRemoveGameId = root.selectedGame().gameId
+                                                    removeGameConfirm.title = "Remove “" + root.selectedGame().title + "” from Library?"
+                                                    removeGameConfirm.message = "This removes only the launcher library record. Registered game files and Xenon-managed DLC are not deleted."
+                                                    removeGameConfirm.open()
                                                 } else if (actionId === "properties") {
-                                                    launcherBridge.notifyUnavailable("Game Properties")
+                                                    root.openGameProperties(root.selectedGame().gameId)
                                                 } else if (actionId === "moduleSettings") {
                                                     moduleSettingsDialog.openFor(root.selectedGame().moduleName, root.moduleSettingsSchema())
                                                 }
@@ -398,6 +406,12 @@ Item {
                                         delegate: StatusPill { required property var modelData; label: String(modelData); tone: Theme.textMuted }
                                     }
                                     StatusPill { label: root.selectedGame().ready ? "Ready" : root.selectedGame().status; tone: root.selectedGame().ready ? Theme.success : Theme.warning }
+                                    StatusPill {
+                                        visible: root.sessionMatchesSelected() && root.selectedSessionState() !== "idle"
+                                        label: String(root.currentSession.stateLabel || "Session")
+                                        tone: root.selectedSessionState() === "failed" ? Theme.danger
+                                            : root.selectedSessionState() === "running" ? Theme.success : Theme.warning
+                                    }
                                 }
 
                                 Text {
@@ -413,10 +427,16 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: Theme.spaceSm
                                     XButton {
-                                        text: "▶  Play"
+                                        text: root.launchButtonText()
+                                        variant: root.launchButtonVariant()
+                                        enabled: root.launchButtonEnabled()
+                                        onClicked: root.activateSelectedGameSession()
+                                    }
+                                    XButton {
+                                        visible: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive)
+                                        text: "Enable " + root.selectedGame().moduleName
                                         variant: "primary"
-                                        enabled: root.selectedGame().ready
-                                        onClicked: launcherBridge.notifyUnavailable("Launch " + root.selectedGame().title)
+                                        onClicked: launcherBridge.setModuleEnabled(root.selectedGame().moduleId, true)
                                     }
                                     XButton {
                                         id: manageFilesButton
@@ -432,7 +452,102 @@ Item {
                                                 { id: "module", label: "Open module folder", icon: "◇" },
                                                 { id: "verify", label: "Verify imported content", icon: "✓", separatorBefore: true }
                                             ]
-                                            onActionTriggered: function(actionId) { launcherBridge.notifyUnavailable(actionId) }
+                                            onActionTriggered: function(actionId) {
+                                                if (actionId === "browse")
+                                                    launcherBridge.openFolder(launcherBridge.libraryContentFolder(root.selectedGame().gameId))
+                                                else if (actionId === "saves") {
+                                                    var props = launcherBridge.libraryGameProperties(root.selectedGame().gameId)
+                                                    launcherBridge.openFolder(String(props.savePath || ""))
+                                                }
+                                                else if (actionId === "module")
+                                                    launcherBridge.openFolder(launcherBridge.modulePath(root.selectedGame().moduleId || ""))
+                                                else if (actionId === "verify")
+                                                    launcherBridge.verifyLibraryEntry(root.selectedGame().gameId)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    visible: root.sessionMatchesSelected() && root.selectedSessionState() !== "idle"
+                                    implicitHeight: sessionStateColumn.implicitHeight + Theme.spaceMd * 2
+                                    radius: Theme.controlRadius
+                                    color: root.selectedSessionState() === "failed" ? Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.08)
+                                        : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.07)
+                                    border.width: Theme.borderWidth
+                                    border.color: root.selectedSessionState() === "failed" ? Theme.danger : Theme.border
+
+                                    ColumnLayout {
+                                        id: sessionStateColumn
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: Theme.spaceMd
+                                        spacing: Theme.spaceXs
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: root.selectedSessionState() === "failed"
+                                                    ? String((root.currentSession.error || {}).title || "Launch failed")
+                                                    : String(root.currentSession.stateLabel || "Session")
+                                                color: root.selectedSessionState() === "failed" ? Theme.danger : Theme.text
+                                                font.pixelSize: Theme.typeBody
+                                                font.weight: Font.DemiBold
+                                            }
+                                            Text {
+                                                visible: root.selectedSessionState() === "running"
+                                                text: root.formatDuration(root.currentSession.elapsedMs)
+                                                color: Theme.textMuted
+                                                font.pixelSize: Theme.typeCaption
+                                            }
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            visible: root.selectedSessionState() === "failed"
+                                            text: String((root.currentSession.error || {}).message || "The game session could not be started.")
+                                            color: Theme.textMuted
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: Theme.typeCaption
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            visible: root.selectedSessionState() === "failed"
+                                                && String((root.currentSession.error || {}).code || "").length > 0
+                                            text: "Stage: " + String((root.currentSession.error || {}).code || "")
+                                            color: Theme.textMuted
+                                            font.pixelSize: Theme.typeCaption
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            visible: root.selectedSessionState() !== "failed" && root.selectedSessionState() !== "running"
+                                            text: root.selectedSessionState() === "stopping"
+                                                ? "The launcher is waiting for the current session to stop cleanly."
+                                                : "Xenon is progressing through the launcher-side session pipeline. You can cancel before execution begins."
+                                            color: Theme.textMuted
+                                            wrapMode: Text.WordWrap
+                                            font.pixelSize: Theme.typeCaption
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            visible: root.selectedSessionState() === "failed"
+                                            Item { Layout.fillWidth: true }
+                                            XButton {
+                                                text: "Dismiss"
+                                                variant: "ghost"
+                                                onClicked: launcherBridge.dismissSessionFailure()
+                                            }
+                                            XButton {
+                                                text: "Try Again"
+                                                variant: "primary"
+                                                onClicked: launcherBridge.launchGame(root.selectedGame().gameId)
+                                            }
                                         }
                                     }
                                 }
@@ -466,7 +581,13 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: Theme.spaceSm
                                         Text { Layout.fillWidth: true; text: "Catalogue supplied by the selected game module"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WordWrap }
-                                        XButton { text: "+  Import DLC"; onClicked: importDlcDialog.open() }
+                                        XButton {
+                                            text: "+  Import DLC"
+                                            onClicked: {
+                                                root.pendingImportDlcId = ""
+                                                importDlcDialog.open()
+                                            }
+                                        }
                                     }
                                 }
 
@@ -491,8 +612,12 @@ Item {
                                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; interactive: true }
 
                                         delegate: Item {
+                                            required property string dlcId
                                             required property string name
+                                            required property string description
                                             required property bool installed
+                                            required property string state
+                                            required property string path
                                             width: dlcList.width
                                             height: Math.max(38, Theme.controlHeight)
 
@@ -511,11 +636,46 @@ Item {
                                                 }
                                                 Text { Layout.fillWidth: true; text: name; color: Theme.text; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
                                                 Text {
-                                                    Layout.maximumWidth: Math.max(92, parent.width * 0.34)
-                                                    text: installed ? "Installed" : "Not installed"
+                                                    Layout.maximumWidth: Math.max(92, parent.width * 0.30)
+                                                    text: state || (installed ? "Installed" : "Not installed")
                                                     color: installed ? Theme.success : Theme.textMuted
                                                     font.pixelSize: Theme.typeCaption
                                                     elide: Text.ElideRight
+                                                }
+                                                XIconButton {
+                                                    id: dlcActionsButton
+                                                    iconName: "more"
+                                                    tooltip: "DLC actions"
+                                                    variant: "ghost"
+                                                    onClicked: dlcActionsMenu.open()
+                                                    XActionMenu {
+                                                        id: dlcActionsMenu
+                                                        x: dlcActionsButton.width - width
+                                                        y: dlcActionsButton.height + 4
+                                                        menuWidth: 230
+                                                        actions: installed ? [
+                                                            { id: "open", label: "Open DLC folder", icon: "▣" },
+                                                            { id: "verify", label: "Verify DLC", icon: "✓" },
+                                                            { id: "remove", label: "Remove DLC", icon: "×", destructive: true, separatorBefore: true }
+                                                        ] : [
+                                                            { id: "import", label: "Import local DLC…", icon: "+" }
+                                                        ]
+                                                        onActionTriggered: function(actionId) {
+                                                            if (actionId === "open")
+                                                                launcherBridge.openFolder(launcherBridge.libraryDlcItemFolder(root.selectedGame().gameId, dlcId))
+                                                            else if (actionId === "verify")
+                                                                launcherBridge.verifyLibraryDlc(root.selectedGame().gameId, dlcId)
+                                                            else if (actionId === "remove") {
+                                                                root.pendingDlcGameId = root.selectedGame().gameId
+                                                                root.pendingDlcId = dlcId
+                                                                root.pendingDlcName = name
+                                                                removeDlcConfirm.open()
+                                                            } else if (actionId === "import") {
+                                                                root.pendingImportDlcId = dlcId
+                                                                importDlcDialog.open()
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -573,6 +733,9 @@ Item {
                                 XInfoRow { label: "Regions"; value: root.selectedGame().regions }
                                 XInfoRow { label: "Content state"; value: root.selectedGame().contentState }
                                 XInfoRow { label: "Last played"; value: root.selectedGame().lastPlayed || "Not recorded" }
+                                XInfoRow { label: "Play count"; value: String(root.selectedGame().playCount || 0) }
+                                XInfoRow { label: "Total play time"; value: root.formatDuration(root.selectedGame().totalPlayTimeMs || 0) }
+                                XInfoRow { label: "Last session"; value: root.selectedGame().lastSessionOutcome ? String(root.selectedGame().lastSessionOutcome) : "Not recorded" }
                                 XInfoRow { label: "Status"; value: root.selectedGame().ready ? "Early development" : root.selectedGame().status }
                             }
                         }
@@ -592,13 +755,18 @@ Item {
                                 XInfoRow { label: "Module"; value: root.selectedGame().installed ? "Active" : "Not installed" }
                                 XInfoRow { label: "Runtime"; value: launcherBridge.backendConnected ? "Connected" : "Front-end ready" }
                                 XInfoRow { label: "Renderer"; value: root.selectedGame().renderer.length > 0 ? "Configured" : "Unavailable" }
-                                XInfoRow { label: "Game launch"; value: root.selectedGame().ready ? "UI ready / backend pending" : "Unavailable" }
+                                XInfoRow {
+                                    label: "Game launch"
+                                    value: root.sessionMatchesSelected() && root.selectedSessionState() !== "idle"
+                                        ? String(root.currentSession.stateLabel || "Session")
+                                        : root.selectedGame().ready ? (launcherBridge.backendConnected ? "Launch contract ready" : "Runtime unavailable") : "Unavailable"
+                                }
                                 XInfoRow { label: "Audio"; value: "Backend pending" }
                                 XInfoRow { label: "Online features"; value: "Not implemented" }
                                 XInfoRow { label: "Achievements"; value: "Not implemented" }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: root.testMode ? "Fixture data is active. Commands exercise the front end only." : "Runtime-backed status updates when Xenon services become available."
+                                    text: root.testMode ? "Fixture data is active. Commands exercise the launcher core only." : "Library, module and DLC state is launcher-core backed. Session execution follows the Xenon runtime capability state."
                                     color: Theme.textMuted
                                     wrapMode: Text.WordWrap
                                     font.pixelSize: Theme.typeCaption
@@ -613,12 +781,53 @@ Item {
         }
     }
 
+    // Keep the properties surface out of the Library startup path. It is loaded
+    // only when requested, so a dialog-specific regression cannot prevent the
+    // launcher shell from opening.
+    Loader {
+        id: gamePropertiesLoader
+        active: false
+        asynchronous: true
+        sourceComponent: Component { GamePropertiesDialog {} }
+    }
+
+    XConfirmDialog {
+        id: removeGameConfirm
+        confirmText: "Remove from Library"
+        destructive: true
+        onConfirmed: {
+            launcherBridge.removeLibraryEntry(root.pendingRemoveGameId)
+            root.pendingRemoveGameId = ""
+        }
+    }
+
+    XConfirmDialog {
+        id: removeDlcConfirm
+        title: "Remove “" + root.pendingDlcName + "”?"
+        message: "This deletes the local copy inside Xenon's managed DLC folder. It does not touch the original package you imported from elsewhere."
+        confirmText: "Remove DLC"
+        destructive: true
+        onConfirmed: {
+            launcherBridge.removeLibraryDlc(root.pendingDlcGameId, root.pendingDlcId)
+            root.pendingDlcGameId = ""
+            root.pendingDlcId = ""
+            root.pendingDlcName = ""
+        }
+    }
+
     FileDialog {
         id: importDlcDialog
         title: "Import DLC from local files"
         fileMode: FileDialog.OpenFiles
         nameFilters: ["All files (*)"]
-        onAccepted: launcherBridge.notify("DLC selected", "Selected " + selectedFiles.length + " local item(s). Validation is delegated to the selected module when the backend is connected.")
+        onAccepted: {
+            if (root.pendingImportDlcId.length > 0)
+                launcherBridge.importDlcContentForEntry(root.selectedGame().gameId, root.pendingImportDlcId, selectedFiles)
+            else
+                launcherBridge.importDlcContent(root.selectedGame().gameId, selectedFiles)
+            root.pendingImportDlcId = ""
+        }
+        onRejected: root.pendingImportDlcId = ""
     }
 
     FileDialog {
@@ -626,13 +835,16 @@ Item {
         title: "Add game from local content"
         fileMode: FileDialog.OpenFiles
         nameFilters: ["All files (*)"]
-        onAccepted: launcherBridge.notify("Game content selected", "Selected " + selectedFiles.length + " local item(s). Xenon will ask installed modules to identify and validate supported content.")
+        onAccepted: {
+            if (launcherBridge.importGameContent(selectedFiles))
+                root.populateBackendLibrary()
+        }
     }
 
     ModuleSettingsDialog {
         id: moduleSettingsDialog
         onSettingEdited: function(settingId, value) {
-            launcherBridge.notify("Module setting changed", settingId + " = " + String(value) + " (front-end preview)")
+            launcherBridge.setModuleSetting(root.selectedGame().moduleId || "", settingId, value)
         }
     }
 }

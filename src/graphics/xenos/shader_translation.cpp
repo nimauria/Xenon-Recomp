@@ -84,7 +84,7 @@ std::string destination(const AluInstruction& alu, bool scalar) {
 }
 
 void emit_alu(std::ostringstream& out, const AluInstruction& alu,
-              ShaderStage stage) {
+              ShaderStage stage, bool memexport_enabled) {
   out << "        if (" << predicate(alu.predicate) << ") {\n"
       << "          float4 s0 = " << source(alu.sources[0], stage) << ";\n"
       << "          float4 s1 = " << source(alu.sources[1], stage) << ";\n"
@@ -98,8 +98,21 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
   write_masked(out, destination(alu, false), "pv", alu.vector_write_mask, 10);
   write_masked(out, destination(alu, true), "ps_new", alu.scalar_write_mask, 10);
+  if (memexport_enabled && alu.export_data && alu.vector_destination >= 33u &&
+      alu.vector_destination <= 37u &&
+      (alu.vector_write_mask || alu.scalar_write_mask)) {
+    out << "          memexport_written_mask |= "
+        << (1u << (alu.vector_destination - 33u)) << "u;\n";
+  }
   out << "          ps = ps_new;\n";
-  if (stage == ShaderStage::Pixel) out << "          if (killed) discard;\n";
+  if (stage == ShaderStage::Pixel) {
+    if (memexport_enabled) {
+      out << "          if (killed) { xenon_memexport_flush(e[32], e[33], e[34], "
+             "e[35], e[36], e[37], memexport_written_mask); discard; }\n";
+    } else {
+      out << "          if (killed) discard;\n";
+    }
+  }
   out << "        }\n";
 }
 
@@ -149,7 +162,9 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
   }
 }
 
-void emit_prelude(std::ostringstream& out) {
+void emit_prelude(std::ostringstream& out, bool guest_memory_rw,
+                  bool memexport_enabled) {
+  if (guest_memory_rw) out << "#define XENON_MEMORY_RW 1\n";
   out << R"hlsl(
 cbuffer XenonShaderConstants : register(b0) {
   // Xenos has independent 256-vector banks for VS and PS. Pixel shader
@@ -160,7 +175,11 @@ cbuffer XenonShaderConstants : register(b0) {
   uint4 XenonVertexFetchConstants[32];
   uint4 XenonDrawState[8];
 };
+#ifdef XENON_MEMORY_RW
+RWByteAddressBuffer XenonGuestMemory : register(u0);
+#else
 ByteAddressBuffer XenonGuestMemory : register(t0);
+#endif
 Texture1D<float4> XenonTextures1D[32] : register(t1);
 Texture2D<float4> XenonTextures2D[32] : register(t33);
 Texture3D<float4> XenonTextures3D[32] : register(t65);
@@ -394,7 +413,232 @@ void xenon_write_fetch(inout float4 dest, float4 value, uint swizzle) {
     if (s<4) dest[i]=value[s]; else if (s==4) dest[i]=0.0; else if (s==5) dest[i]=1.0;
   }
 }
+
 )hlsl";
+  if (memexport_enabled) {
+    out << R"hlsl(
+
+uint xenon_memexport_convert_component(float value, uint width,
+                                       uint number_format) {
+  if (isnan(value)) value = 0.0;
+  uint mask = (1u << width) - 1u;
+  bool signed_format = (number_format & 1u) != 0u;
+  bool integer_format = (number_format & 2u) != 0u;
+  if (signed_format) {
+    float converted = value;
+    if (integer_format) {
+      float maximum = float((1u << (width - 1u)) - 1u);
+      converted = clamp(converted, -1.0 - maximum, maximum);
+    } else {
+      converted = clamp(converted, -1.0, 1.0);
+      if (width > 2u) converted *= float((1u << (width - 1u)) - 1u);
+    }
+    converted += converted < 0.0 ? -0.5 : 0.5;
+    return asuint((int)converted) & mask;
+  }
+  float converted = value;
+  if (integer_format) {
+    converted = clamp(converted, 0.0, float(mask));
+  } else {
+    converted = saturate(converted);
+    if (width > 1u) converted *= float(mask);
+  }
+  converted += 0.5;
+  return (uint)converted & mask;
+}
+
+uint4 xenon_memexport_pack_32(float4 value, uint4 widths,
+                              uint number_format) {
+  uint4 converted = asuint(value);
+  uint packed = 0u;
+  uint offset = 0u;
+  [unroll] for (uint i = 0u; i < 4u; ++i) {
+    uint width = widths[i];
+    if (width != 0u) {
+      converted[i] = xenon_memexport_convert_component(value[i], width,
+                                                        number_format);
+      uint mask = (1u << width) - 1u;
+      packed |= (converted[i] & mask) << offset;
+      offset += width;
+    }
+  }
+  converted.x = packed;
+  return converted;
+}
+
+bool xenon_memexport_pack(float4 value, uint format, uint number_format,
+                          out uint4 packed, out uint size_log2) {
+  packed = asuint(value);
+  size_log2 = 0xFFFFFFFFu;
+  if (format == 2u || format == 8u || format == 9u) {
+    packed = xenon_memexport_pack_32(value, uint4(8u, 0u, 0u, 0u), number_format);
+    size_log2 = 0u;
+  } else if (format == 3u) {
+    packed = xenon_memexport_pack_32(value, uint4(5u, 5u, 5u, 1u), number_format);
+    size_log2 = 1u;
+  } else if (format == 4u) {
+    packed = xenon_memexport_pack_32(value, uint4(5u, 6u, 5u, 0u), number_format);
+    size_log2 = 1u;
+  } else if (format == 5u) {
+    packed = xenon_memexport_pack_32(value, uint4(5u, 5u, 6u, 0u), number_format);
+    size_log2 = 1u;
+  } else if (format == 6u || format == 14u || format == 50u) {
+    packed = xenon_memexport_pack_32(value, uint4(8u, 8u, 8u, 8u), number_format);
+    size_log2 = 2u;
+  } else if (format == 7u || format == 54u) {
+    packed = xenon_memexport_pack_32(value, uint4(10u, 10u, 10u, 2u), number_format);
+    size_log2 = 2u;
+  } else if (format == 10u) {
+    packed = xenon_memexport_pack_32(value, uint4(8u, 8u, 0u, 0u), number_format);
+    size_log2 = 1u;
+  } else if (format == 15u) {
+    packed = xenon_memexport_pack_32(value, uint4(4u, 4u, 4u, 4u), number_format);
+    size_log2 = 1u;
+  } else if (format == 16u || format == 55u) {
+    packed = xenon_memexport_pack_32(value, uint4(11u, 11u, 10u, 0u), number_format);
+    size_log2 = 2u;
+  } else if (format == 17u || format == 56u) {
+    packed = xenon_memexport_pack_32(value, uint4(10u, 11u, 11u, 0u), number_format);
+    size_log2 = 2u;
+  } else if (format == 24u) {
+    packed = xenon_memexport_pack_32(value, uint4(16u, 0u, 0u, 0u), number_format);
+    size_log2 = 1u;
+  } else if (format == 25u) {
+    packed = xenon_memexport_pack_32(value, uint4(16u, 16u, 0u, 0u), number_format);
+    size_log2 = 2u;
+  } else if (format == 26u) {
+    uint4 converted = asuint(value);
+    [unroll] for (uint i = 0u; i < 4u; ++i)
+      converted[i] = xenon_memexport_convert_component(value[i], 16u, number_format);
+    converted.xy = uint2((converted.x & 0xFFFFu) | (converted.y << 16u),
+                         (converted.z & 0xFFFFu) | (converted.w << 16u));
+    packed = converted;
+    size_log2 = 3u;
+  } else if (format == 30u) {
+    packed.x = f32tof16(value.x);
+    size_log2 = 1u;
+  } else if (format == 31u) {
+    packed.x = f32tof16(value.x) | (f32tof16(value.y) << 16u);
+    packed.y = f32tof16(value.y);
+    size_log2 = 2u;
+  } else if (format == 32u) {
+    uint4 half_values = uint4(f32tof16(value.x), f32tof16(value.y),
+                              f32tof16(value.z), f32tof16(value.w));
+    packed = half_values;
+    packed.xy = uint2(half_values.x | (half_values.y << 16u),
+                      half_values.z | (half_values.w << 16u));
+    size_log2 = 3u;
+  } else if (format == 36u) {
+    size_log2 = 2u;
+  } else if (format == 37u) {
+    size_log2 = 3u;
+  } else if (format == 38u) {
+    size_log2 = 4u;
+  }
+  return size_log2 != 0xFFFFFFFFu;
+}
+
+uint xenon_memexport_swap8in16(uint value) {
+  return ((value & 0x00FF00FFu) << 8u) | ((value >> 8u) & 0x00FF00FFu);
+}
+uint xenon_memexport_swap8in32(uint value) {
+  value = xenon_memexport_swap8in16(value);
+  return (value << 16u) | (value >> 16u);
+}
+uint xenon_memexport_swap16in32(uint value) {
+  return (value << 16u) | (value >> 16u);
+}
+uint4 xenon_memexport_apply_endian(uint4 value, uint endian) {
+  if (endian == 4u) {
+    value = value.yxwz;
+    endian = 2u;
+  } else if (endian == 5u) {
+    value = value.wzyx;
+    endian = 2u;
+  }
+  if (endian == 1u) {
+    value = uint4(xenon_memexport_swap8in16(value.x),
+                  xenon_memexport_swap8in16(value.y),
+                  xenon_memexport_swap8in16(value.z),
+                  xenon_memexport_swap8in16(value.w));
+  } else if (endian == 2u) {
+    value = uint4(xenon_memexport_swap8in32(value.x),
+                  xenon_memexport_swap8in32(value.y),
+                  xenon_memexport_swap8in32(value.z),
+                  xenon_memexport_swap8in32(value.w));
+  } else if (endian == 3u) {
+    value = uint4(xenon_memexport_swap16in32(value.x),
+                  xenon_memexport_swap16in32(value.y),
+                  xenon_memexport_swap16in32(value.z),
+                  xenon_memexport_swap16in32(value.w));
+  }
+  return value;
+}
+
+void xenon_memexport_store(uint byte_address, uint size_log2, uint4 value) {
+  if (size_log2 <= 1u) {
+    uint width = 8u << size_log2;
+    uint aligned_address = byte_address & ~3u;
+    uint shift = (byte_address & 3u) * 8u;
+    uint field_mask = ((1u << width) - 1u) << shift;
+    uint ignored;
+    XenonGuestMemory.InterlockedAnd(aligned_address, ~field_mask, ignored);
+    XenonGuestMemory.InterlockedOr(aligned_address,
+                                   (value.x << shift) & field_mask, ignored);
+  } else if (size_log2 == 2u) {
+    XenonGuestMemory.Store(byte_address, value.x);
+  } else if (size_log2 == 3u) {
+    XenonGuestMemory.Store2(byte_address, value.xy);
+  } else if (size_log2 == 4u) {
+    XenonGuestMemory.Store4(byte_address, value);
+  }
+}
+
+void xenon_memexport_flush(float4 address_value, float4 m0, float4 m1,
+                           float4 m2, float4 m3, float4 m4,
+                           uint written_mask) {
+  if (written_mask == 0u) return;
+  uint4 address = asuint(address_value);
+  if ((address.x >> 30u) != 1u || (address.y >> 23u) != 0x96u ||
+      (address.z >> 23u) != 0x96u || (address.w >> 23u) != 0x96u) return;
+  uint endian = address.z & 7u;
+  uint number_format = (address.z >> 16u) & 7u;
+  if (endian > 5u || (number_format > 3u && number_format != 7u)) return;
+
+  uint memory_size = 0u;
+  XenonGuestMemory.GetDimensions(memory_size);
+  uint base_dwords = address.x & 0x3FFFFFFFu;
+  if (base_dwords >= memory_size / 4u) return;
+  uint base_address = base_dwords * 4u;
+  uint base_index = address.y & 0x7FFFFFu;
+  uint index_count = address.w & 0x7FFFFFu;
+  uint format = (address.z >> 8u) & 0x3Fu;
+  bool red_blue_swap = ((address.z >> 19u) & 1u) != 0u;
+  float4 data[5];
+  data[0] = m0; data[1] = m1; data[2] = m2; data[3] = m3; data[4] = m4;
+
+  [unroll] for (uint i = 0u; i < 5u; ++i) {
+    if ((written_mask & (1u << i)) == 0u) continue;
+    uint index = base_index + i;
+    if (index < base_index || index >= index_count) continue;
+    float4 value = data[i];
+    if (red_blue_swap) value.xz = value.zx;
+    uint4 packed;
+    uint size_log2;
+    if (!xenon_memexport_pack(value, format, number_format, packed, size_log2))
+      continue;
+    packed = xenon_memexport_apply_endian(packed, endian);
+    uint element_size = 1u << size_log2;
+    if (base_address > memory_size || element_size > memory_size - base_address)
+      continue;
+    uint available_elements = (memory_size - base_address) >> size_log2;
+    if (index >= available_elements) continue;
+    xenon_memexport_store(base_address + (index << size_log2), size_log2,
+                          packed);
+  }
+}
+)hlsl";
+  }
 }
 
 }  // namespace
@@ -448,9 +692,6 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       }
     }
   }
-  if (shader.reflection.memory_exports) {
-    result.diagnostics.emplace_back("Xenos memory-export lowering is not implemented");
-  }
   if (!result.diagnostics.empty()) return result;
 
   std::unordered_map<std::uint32_t, const DecodedInstruction*> instructions;
@@ -475,7 +716,10 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   std::ostringstream out;
   out << "// Project Xenon generated HLSL; source hash 0x" << std::hex
       << shader.source_hash << std::dec << "\n";
-  emit_prelude(out);
+  const bool memexport_enabled = shader.reflection.memory_exports != 0;
+  const bool guest_memory_rw =
+      memexport_enabled || options.force_guest_memory_rw;
+  emit_prelude(out, guest_memory_rw, memexport_enabled);
   if (shader.stage == ShaderStage::Vertex) {
     out << "struct XenonOutput { float4 position : SV_Position;";
     for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
@@ -496,6 +740,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       << "  bool p0=false; int a0=0; int aL=0; float4 ps=0.0.xxxx;\n"
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
+  if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
   if (shader.stage == ShaderStage::Vertex) out << "  r[0].x = (float)vertex_id;\n";
   else for (unsigned i=0;i<16;++i) out << "  r[" << i << "] = input.i" << i << ";\n";
 
@@ -532,8 +777,14 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
               "control flow references an instruction absent from the decoded IR");
           continue;
         }
+        if (memexport_enabled && found->second->serialize) {
+          out << "          xenon_memexport_flush(e[32], e[33], e[34], e[35], e[36], "
+                 "e[37], memexport_written_mask);\n"
+              << "          memexport_written_mask=0u; e[32]=0.0.xxxx;\n"
+              << "          [unroll] for (uint mi=33u; mi<=37u; ++mi) e[mi]=0.0.xxxx;\n";
+        }
         if (found->second->kind == ShaderInstructionKind::Alu) {
-          emit_alu(out, found->second->alu, shader.stage);
+          emit_alu(out, found->second->alu, shader.stage, memexport_enabled);
         } else {
           emit_fetch(out, *found->second);
         }
@@ -585,6 +836,14 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       } else {
         out << "        pc=take ? " << cf.target << " : " << next << ";\n";
       }
+    } else if (opcode == ControlFlowOpcode::Alloc) {
+      if (memexport_enabled) {
+        out << "        xenon_memexport_flush(e[32], e[33], e[34], e[35], e[36], "
+               "e[37], memexport_written_mask);\n"
+            << "        memexport_written_mask=0u; e[32]=0.0.xxxx;\n"
+            << "        [unroll] for (uint mi=33u; mi<=37u; ++mi) e[mi]=0.0.xxxx;\n";
+      }
+      out << "        pc=" << next << ";\n";
     } else if (opcode == ControlFlowOpcode::Return) {
       out << "        if (call_depth) pc=call_stack[--call_depth]; else running=false;\n";
     } else {
@@ -595,6 +854,10 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   out << "      default: running=false; break;\n"
       << "    }\n"
       << "  }\n";
+  if (memexport_enabled) {
+    out << "  xenon_memexport_flush(e[32], e[33], e[34], e[35], e[36], e[37], "
+           "memexport_written_mask);\n";
+  }
   out << "  XenonOutput output;\n";
   if (shader.stage == ShaderStage::Vertex) {
     out << "  output.position=e[62];\n";

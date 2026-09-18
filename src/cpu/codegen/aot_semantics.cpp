@@ -1,5 +1,6 @@
 #include "xenon/cpu/aot_semantics.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cfenv>
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 
 namespace xenon::cpu::aot {
 namespace {
@@ -452,12 +454,81 @@ Vector128 vector_load_shift_right(std::uint64_t ea) noexcept { Vector128 r{};uns
 
 Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, GuestAddress ea,unsigned width){Vector128 r=old;unsigned p=unsigned(ea&15u);if(width==1)r.bytes[p]=m.read8(ea);else if(width==2){ea&=~GuestAddress{1};unsigned lane=(p&14u)/2;r.set_u16_be(lane,m.read16_be(ea));}else{ea&=~GuestAddress{3};unsigned lane=(p&12u)/4;r.set_u32_be(lane,m.read32_be(ea));}return r;}
 void vector_store_element(const Vector128& v,MemoryAccessContext&m,GuestAddress ea,unsigned width){unsigned p=unsigned(ea&15u);if(width==1)m.write8(ea,v.bytes[p]);else if(width==2){ea&=~GuestAddress{1};m.write16_be(ea,v.u16_be((p&14u)/2));}else{ea&=~GuestAddress{3};m.write32_be(ea,v.u32_be((p&12u)/4));}}
-Vector128 vector_load_left(const Vector128& old,MemoryAccessContext&m,GuestAddress ea){(void)old;Vector128 r{};auto base=GuestAddress(ea&~15u);unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16-n;++i)r.bytes[i]=m.read8(base+n+i);return r;}
-Vector128 vector_load_right(const Vector128& old,MemoryAccessContext&m,GuestAddress ea){(void)old;Vector128 r{};auto base=GuestAddress(ea&~15u);unsigned n=unsigned(ea&15u);for(unsigned i=0;i<n;++i)r.bytes[16-n+i]=m.read8(base+i);return r;}
-void vector_store_left(const Vector128&v,MemoryAccessContext&m,GuestAddress ea){auto base=GuestAddress(ea&~15u);unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16-n;++i)m.write8(base+n+i,v.bytes[i]);}
-void vector_store_right(const Vector128&v,MemoryAccessContext&m,GuestAddress ea){auto base=GuestAddress(ea&~15u);unsigned n=unsigned(ea&15u);for(unsigned i=0;i<n;++i)m.write8(base+i,v.bytes[16-n+i]);}
+Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& m,
+                           GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto n = static_cast<unsigned>(ea & 15u);
+  auto bytes = std::as_writable_bytes(std::span(result.bytes));
+  m.read_bytes(ea, bytes.first(16u - n));
+  return result;
+}
 
-void string_load(CpuState&s,MemoryAccessContext&m,GuestAddress ea,std::uint32_t count,unsigned first){for(unsigned n=0;n<count;++n){unsigned reg=(first+n/4)&31u;unsigned pos=n%4;if(pos==0)s.gpr[reg]=0;std::uint64_t val=std::uint64_t(m.read8(ea+n))<<(24-8*pos);s.gpr[reg]|=val;}}
-void string_store(CpuState&s,MemoryAccessContext&m,GuestAddress ea,std::uint32_t count,unsigned first){for(unsigned n=0;n<count;++n){unsigned reg=(first+n/4)&31u;unsigned pos=n%4;m.write8(ea+n,std::uint8_t(s.gpr[reg]>>(24-8*pos)));}}
+Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& m,
+                            GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto base = GuestAddress(ea & ~15u);
+  const auto n = static_cast<unsigned>(ea & 15u);
+  auto bytes = std::as_writable_bytes(std::span(result.bytes));
+  if (n) m.read_bytes(base, bytes.subspan(16u - n, n));
+  return result;
+}
+
+void vector_store_left(const Vector128& value, MemoryAccessContext& m,
+                       GuestAddress ea) {
+  const auto n = static_cast<unsigned>(ea & 15u);
+  const auto bytes = std::as_bytes(std::span(value.bytes));
+  m.write_bytes(ea, bytes.first(16u - n));
+}
+
+void vector_store_right(const Vector128& value, MemoryAccessContext& m,
+                        GuestAddress ea) {
+  const auto base = GuestAddress(ea & ~15u);
+  const auto n = static_cast<unsigned>(ea & 15u);
+  const auto bytes = std::as_bytes(std::span(value.bytes));
+  if (n) m.write_bytes(base, bytes.subspan(16u - n, n));
+}
+
+void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
+                 std::uint32_t count, unsigned first) {
+  std::array<std::byte, 128> buffer{};
+  std::uint32_t offset = 0;
+  while (offset < count) {
+    const auto chunk = std::min<std::uint32_t>(
+        count - offset, static_cast<std::uint32_t>(buffer.size()));
+    auto bytes = std::span<std::byte>(buffer).first(chunk);
+    memory.read_bytes(ea + offset, bytes);
+    for (std::uint32_t i = 0; i < chunk; ++i) {
+      const auto n = offset + i;
+      const auto reg = (first + n / 4u) & 31u;
+      const auto pos = n & 3u;
+      if (pos == 0u) state.gpr[reg] = 0;
+      state.gpr[reg] |= std::uint64_t(std::to_integer<std::uint8_t>(bytes[i]))
+                        << (24u - 8u * pos);
+    }
+    offset += chunk;
+  }
+}
+
+void string_store(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
+                  std::uint32_t count, unsigned first) {
+  std::array<std::byte, 128> buffer{};
+  std::uint32_t offset = 0;
+  while (offset < count) {
+    const auto chunk = std::min<std::uint32_t>(
+        count - offset, static_cast<std::uint32_t>(buffer.size()));
+    auto bytes = std::span<std::byte>(buffer).first(chunk);
+    for (std::uint32_t i = 0; i < chunk; ++i) {
+      const auto n = offset + i;
+      const auto reg = (first + n / 4u) & 31u;
+      const auto pos = n & 3u;
+      bytes[i] = static_cast<std::byte>(
+          static_cast<std::uint8_t>(state.gpr[reg] >> (24u - 8u * pos)));
+    }
+    memory.write_bytes(ea + offset, bytes);
+    offset += chunk;
+  }
+}
 
 } // namespace xenon::cpu::aot

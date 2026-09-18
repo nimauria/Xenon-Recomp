@@ -27,6 +27,7 @@ struct UiFeatures {
   bool settings_audio = true;
   bool settings_network = false;
   bool settings_updates = true;
+  bool settings_community = true;
   bool settings_accessibility = true;
   bool settings_developer = kTestMode;
   bool settings_about = true;

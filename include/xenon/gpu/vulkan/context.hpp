@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 
@@ -9,6 +10,10 @@ namespace xenon::gpu::vulkan {
 
 struct ContextConfig {
   bool enable_validation{};
+  // Window-system extensions (for example VK_KHR_surface + Win32/Wayland/XCB)
+  // are supplied by the runtime. The renderer stays independent of the UI
+  // toolkit and native-window library.
+  std::vector<const char*> instance_extensions{};
 };
 
 struct DeviceProperties {
@@ -36,6 +41,9 @@ class Context {
   [[nodiscard]] std::uint32_t graphics_queue_family() const noexcept {
     return graphics_queue_family_;
   }
+  [[nodiscard]] bool swapchain_supported() const noexcept {
+    return swapchain_supported_;
+  }
   [[nodiscard]] const DeviceProperties& properties() const noexcept {
     return properties_;
   }
@@ -48,6 +56,7 @@ class Context {
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   std::uint32_t graphics_queue_family_{};
   DeviceProperties properties_{};
+  bool swapchain_supported_{};
   std::string error_{};
 };
 

@@ -24,6 +24,10 @@ struct ShaderLoweringOptions {
   bool emit_debug_comments{};
   PixelDepthOutputMode pixel_depth_output{PixelDepthOutputMode::Native};
   bool force_sample_frequency{};
+  // Use the guest-memory UAV/storage-buffer ABI even when this shader does not
+  // itself memexport. Required when another stage in the same draw writes the
+  // shared mirror while this stage may read it.
+  bool force_guest_memory_rw{};
 };
 
 struct LoweredShader {

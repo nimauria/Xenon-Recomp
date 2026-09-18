@@ -185,7 +185,12 @@ void test_mem_write(AddressSpace& memory, CommandProcessor& cp) {
               {make_packet_type3(Type3Opcode::MemWrite, 3),
                target | static_cast<std::uint32_t>(Endian::Swap8In32),
                0x11223344, 0xA1B2C3D4});
+  const auto before_write = memory.coherency().current_epoch();
   cp.execute_buffer(commands, 4);
+  const auto after_write = memory.coherency().current_epoch();
+  // A multi-dword MEM_WRITE is one physical range transaction, not one
+  // reservation/coherency publication per dword.
+  assert(after_write == before_write + 1u);
   // k8in32 produces CPU-big-endian bytes for normal CPU-visible dwords.
   assert(memory.read32_be(xenon::memory::kPhysical64KBase + target) == 0x11223344);
   assert(memory.read32_be(xenon::memory::kPhysical64KBase + target + 4) == 0xA1B2C3D4);

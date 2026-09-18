@@ -1,0 +1,253 @@
+#include "session_controller.hpp"
+
+#include "../launch_feature.hpp"
+#include "../../../services/library_service.hpp"
+#include "../../../services/settings_service.hpp"
+
+#include <QDateTime>
+#include <QUuid>
+#include <QtGlobal>
+
+namespace xenon::launcher::frontend_backend {
+namespace {
+constexpr auto kHistoryKey = "session/history";
+constexpr auto kTestHistoryKey = "session/history-test";
+}
+
+SessionController::SessionController(LaunchFeature& launch, LibraryService& library,
+                                     SettingsService& storage, bool test_mode, QObject* parent)
+    : QObject(parent), launch_(launch), library_(library), storage_(storage), test_mode_(test_mode) {
+  tick_timer_.setInterval(1000);
+  tick_timer_.setSingleShot(false);
+  connect(&tick_timer_, &QTimer::timeout, this, [this]() {
+    if (current_.state != SessionState::Running) return;
+    current_.elapsed_ms = runningElapsedMs();
+    emit changed();
+  });
+  restoreHistory();
+}
+
+QVariantMap SessionController::currentSession() const {
+  auto snapshot = current_;
+  if (snapshot.state == SessionState::Running) snapshot.elapsed_ms = runningElapsedMs();
+  return snapshot.toVariantMap(true);
+}
+
+QVariantList SessionController::history() const { return history_; }
+QString SessionController::state() const { return sessionStateId(current_.state); }
+bool SessionController::active() const noexcept { return current_.active(); }
+bool SessionController::running() const noexcept { return current_.state == SessionState::Running; }
+
+ServiceResult SessionController::start(const QString& game_id) {
+  const auto requested_game = game_id.trimmed();
+  if (requested_game.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Launch session"),
+                                  QStringLiteral("No game was selected."));
+  }
+  if (current_.active()) {
+    return ServiceResult::failure(
+        QStringLiteral("Session already active"),
+        current_.game_id == requested_game
+            ? QStringLiteral("This game already has an active launcher session.")
+            : QStringLiteral("Stop the current game session before launching another game."),
+        currentSession());
+  }
+
+  if (current_.state == SessionState::Failed) {
+    current_ = {};
+    emit changed();
+  }
+
+  ++generation_;
+  current_ = {};
+  current_.session_id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  current_.game_id = requested_game;
+  current_.requested_at = QDateTime::currentDateTimeUtc();
+  current_.state = SessionState::Preparing;
+  emit changed();
+  schedulePrepare(generation_);
+
+  return ServiceResult::success(QStringLiteral("Launch requested"),
+                                QStringLiteral("Xenon is preparing the game session."),
+                                currentSession());
+}
+
+ServiceResult SessionController::stop() {
+  if (current_.state == SessionState::Idle) {
+    return ServiceResult::failure(QStringLiteral("Stop session"),
+                                  QStringLiteral("There is no active game session."));
+  }
+  if (current_.state == SessionState::Failed) {
+    dismissFailure();
+    return ServiceResult::success(QStringLiteral("Launch failure dismissed"));
+  }
+  if (current_.state == SessionState::Stopping) {
+    return ServiceResult::failure(QStringLiteral("Stop session"),
+                                  QStringLiteral("The current session is already stopping."));
+  }
+
+  const auto previous = current_.state;
+  ++generation_;
+  setState(SessionState::Stopping);
+  const auto generation = generation_;
+
+  if (previous == SessionState::Preparing || previous == SessionState::Validating ||
+      previous == SessionState::Starting) {
+    QTimer::singleShot(0, this, [this, generation]() { finishCancellation(generation); });
+    return ServiceResult::success(QStringLiteral("Launch cancelled"),
+                                  QStringLiteral("The pending game launch is being cancelled."));
+  }
+
+  QTimer::singleShot(0, this, [this, generation]() { finishStop(generation); });
+  return ServiceResult::success(QStringLiteral("Stopping game"),
+                                QStringLiteral("Xenon asked the runtime to stop the current session."));
+}
+
+void SessionController::dismissFailure() {
+  if (current_.state != SessionState::Failed) return;
+  ++generation_;
+  current_ = {};
+  emit changed();
+}
+
+void SessionController::clearHistory() {
+  history_.clear();
+  persistHistory();
+  emit historyChanged();
+}
+
+void SessionController::setState(SessionState state) {
+  if (current_.state == state) return;
+  current_.state = state;
+  emit changed();
+}
+
+void SessionController::schedulePrepare(quint64 generation) {
+  QTimer::singleShot(0, this, [this, generation]() { preparePhase(generation); });
+}
+
+void SessionController::scheduleValidate(quint64 generation) {
+  QTimer::singleShot(0, this, [this, generation]() { validatePhase(generation); });
+}
+
+void SessionController::scheduleStart(quint64 generation) {
+  QTimer::singleShot(0, this, [this, generation]() { startPhase(generation); });
+}
+
+void SessionController::preparePhase(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Preparing) return;
+  const auto configuration = launch_.configurationFor(current_.game_id);
+  if (configuration.isEmpty()) {
+    failCurrent(QStringLiteral("configuration"),
+                ServiceResult::failure(QStringLiteral("Launch configuration failed"),
+                                       QStringLiteral("Xenon could not assemble a launch configuration for this game.")));
+    return;
+  }
+
+  current_.configuration = configuration;
+  current_.title = configuration.value(QStringLiteral("title")).toString();
+  current_.profile_id = configuration.value(QStringLiteral("profileId")).toString();
+  current_.profile_name = configuration.value(QStringLiteral("profileName")).toString();
+  current_.module_id = configuration.value(QStringLiteral("moduleId")).toString();
+  current_.module_name = configuration.value(QStringLiteral("moduleName")).toString();
+  setState(SessionState::Validating);
+  scheduleValidate(generation);
+}
+
+void SessionController::validatePhase(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Validating) return;
+  const auto validation = launch_.validate(current_.game_id);
+  if (!validation.ok) {
+    failCurrent(QStringLiteral("validation"), validation);
+    return;
+  }
+  setState(SessionState::Starting);
+  scheduleStart(generation);
+}
+
+void SessionController::startPhase(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Starting) return;
+  const auto result = launch_.startValidated(current_.game_id);
+  if (!result.ok) {
+    failCurrent(QStringLiteral("runtime-start"), result);
+    return;
+  }
+
+  current_.started_at = QDateTime::currentDateTimeUtc();
+  current_.elapsed_ms = 0;
+  current_.error = {};
+  elapsed_.restart();
+  tick_timer_.start();
+  setState(SessionState::Running);
+}
+
+void SessionController::finishCancellation(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Stopping) return;
+  current_.ended_at = QDateTime::currentDateTimeUtc();
+  current_.elapsed_ms = 0;
+  archiveCurrent(QStringLiteral("cancelled"));
+  current_ = {};
+  emit changed();
+}
+
+void SessionController::finishStop(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Stopping) return;
+  const auto result = launch_.stop();
+  if (!result.ok) {
+    failCurrent(QStringLiteral("runtime-stop"), result);
+    return;
+  }
+
+  tick_timer_.stop();
+  current_.elapsed_ms = runningElapsedMs();
+  current_.ended_at = QDateTime::currentDateTimeUtc();
+  if (!test_mode_ && !current_.game_id.isEmpty()) {
+    (void)library_.recordSessionEnded(current_.game_id, current_.elapsed_ms, QStringLiteral("stopped"));
+  }
+  archiveCurrent(QStringLiteral("stopped"));
+  current_ = {};
+  emit changed();
+}
+
+void SessionController::failCurrent(const QString& code, const ServiceResult& result) {
+  tick_timer_.stop();
+  if (current_.started_at.isValid()) current_.elapsed_ms = runningElapsedMs();
+  current_.ended_at = QDateTime::currentDateTimeUtc();
+  current_.error.code = code;
+  current_.error.title = result.title.isEmpty() ? QStringLiteral("Session failed") : result.title;
+  current_.error.message = result.message;
+  current_.error.details = result.data.toMap();
+  if (current_.started_at.isValid() && !test_mode_ && !current_.game_id.isEmpty()) {
+    (void)library_.recordSessionEnded(current_.game_id, current_.elapsed_ms, QStringLiteral("failed"));
+  }
+  current_.state = SessionState::Failed;
+  archiveCurrent(QStringLiteral("failed"));
+  emit changed();
+  emit notificationRequested(current_.error.title, current_.error.message);
+}
+
+void SessionController::archiveCurrent(const QString& outcome) {
+  current_.outcome = outcome;
+  auto archived = current_.toVariantMap(false);
+  history_.prepend(archived);
+  while (history_.size() > kHistoryLimit) history_.removeLast();
+  persistHistory();
+  emit historyChanged();
+}
+
+void SessionController::restoreHistory() {
+  const auto key = QString::fromLatin1(test_mode_ ? kTestHistoryKey : kHistoryKey);
+  history_ = storage_.value(key, QVariantList{}).toList();
+  while (history_.size() > kHistoryLimit) history_.removeLast();
+}
+
+void SessionController::persistHistory() {
+  const auto key = QString::fromLatin1(test_mode_ ? kTestHistoryKey : kHistoryKey);
+  storage_.setValue(key, history_);
+}
+
+qint64 SessionController::runningElapsedMs() const {
+  return elapsed_.isValid() ? qMax<qint64>(0, elapsed_.elapsed()) : current_.elapsed_ms;
+}
+
+}  // namespace xenon::launcher::frontend_backend
