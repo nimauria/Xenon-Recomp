@@ -8,7 +8,8 @@
 
 namespace xenon::launcher::frontend_backend {
 
-FilesystemFeature::FilesystemFeature(PathService& paths) : paths_(paths) {}
+FilesystemFeature::FilesystemFeature(PathService& paths, FilesystemService& filesystem)
+    : paths_(paths), filesystem_(filesystem) {}
 
 QString FilesystemFeature::toLocalPath(const QUrl& url) const {
   return url.isLocalFile() ? url.toLocalFile() : url.toString();
@@ -59,6 +60,59 @@ ServiceResult FilesystemFeature::copyText(const QString& text) const {
   }
   clipboard->setText(text);
   return ServiceResult::success();
+}
+
+QVariantList FilesystemFeature::getMounts() const {
+  return filesystem_.getMounts();
+}
+
+QVariantList FilesystemFeature::getSymbolicLinks() const {
+  return filesystem_.getSymbolicLinks();
+}
+
+QString FilesystemFeature::getWorkingDirectory() const {
+  return filesystem_.getWorkingDirectory();
+}
+
+QVariantMap FilesystemFeature::getFilesystemStatus() const {
+  return filesystem_.getFilesystemStatus();
+}
+
+ServiceResult FilesystemFeature::mountHostPath(const QString& mount_point,
+                                               const QString& host_path,
+                                               bool read_only) const {
+  return filesystem_.mountHostPath(mount_point, host_path, read_only);
+}
+
+ServiceResult FilesystemFeature::mountGdfxImage(const QString& mount_point,
+                                                const QString& image_path) const {
+  return filesystem_.mountGdfxImage(mount_point, image_path);
+}
+
+ServiceResult FilesystemFeature::mountStfsPackage(const QString& mount_point,
+                                                  const QString& package_path) const {
+  return filesystem_.mountStfsPackage(mount_point, package_path);
+}
+
+ServiceResult FilesystemFeature::unmount(const QString& mount_point) const {
+  return filesystem_.unmount(mount_point);
+}
+
+ServiceResult FilesystemFeature::registerSymbolicLink(const QString& alias,
+                                                     const QString& target) const {
+  return filesystem_.registerSymbolicLink(alias, target);
+}
+
+ServiceResult FilesystemFeature::unregisterSymbolicLink(const QString& alias) const {
+  return filesystem_.unregisterSymbolicLink(alias);
+}
+
+ServiceResult FilesystemFeature::setWorkingDirectory(const QString& guest_path) const {
+  return filesystem_.setWorkingDirectory(guest_path);
+}
+
+ServiceResult FilesystemFeature::testPath(const QString& guest_path) const {
+  return filesystem_.testPath(guest_path);
 }
 
 }  // namespace xenon::launcher::frontend_backend

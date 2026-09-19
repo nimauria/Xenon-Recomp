@@ -21,6 +21,10 @@ int main() {
   auto batch = process_primitives(draw, memory);
   assert(batch.valid && batch.indexed);
   assert((batch.indices == std::vector<std::uint32_t>{1, 2, 3, 3, 2, 4}));
+  const auto snapshot_batch = process_primitives(
+      draw, std::span<const std::byte>(memory).subspan(8, 8), {}, 8);
+  assert(snapshot_batch.valid && snapshot_batch.indexed);
+  assert(snapshot_batch.indices == batch.indices);
 
   draw = {};
   draw.source = DrawSource::Immediate;

@@ -1,6 +1,12 @@
 #pragma once
 
+#include <memory>
+
 namespace xenon {
+
+namespace filesystem {
+class VirtualFileSystem;
+}
 
 struct RuntimeConfig {
   bool enable_logging = true;
@@ -22,9 +28,14 @@ class Runtime {
   void shutdown();
   bool is_initialized() const noexcept;
 
+  // VFS integration for guest file I/O
+  void set_filesystem(std::shared_ptr<filesystem::VirtualFileSystem> vfs);
+  std::shared_ptr<filesystem::VirtualFileSystem> filesystem() const;
+
  private:
   bool initialized_ = false;
   RuntimeConfig config_{};
+  std::shared_ptr<filesystem::VirtualFileSystem> vfs_;
 };
 
 }  // namespace xenon

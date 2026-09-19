@@ -4,13 +4,22 @@
 
 #include "../library_feature.hpp"
 #include "../../settings/settings_feature.hpp"
+#include "../../modules/modules_feature.hpp"
+
+#include <QHash>
 
 namespace xenon::launcher::frontend_backend {
 
-DlcFeature::DlcFeature(DlcService& dlc, LibraryFeature& library, SettingsFeature& settings,
-                       bool test_mode, QObject* parent)
-    : QObject(parent), dlc_(dlc), library_(library), settings_(settings), test_mode_(test_mode) {
+DlcFeature::DlcFeature(DlcService& dlc, LibraryFeature& library, ModulesFeature& modules,
+                       SettingsFeature& settings, bool test_mode, QObject* parent)
+    : QObject(parent),
+      dlc_(dlc),
+      library_(library),
+      modules_(modules),
+      settings_(settings),
+      test_mode_(test_mode) {
   connect(&dlc_, &DlcService::changed, this, &DlcFeature::changed);
+  connect(&modules_, &ModulesFeature::changed, this, [this]() { emit changed({}); });
   connect(&settings_, &SettingsFeature::changed, this,
           [this](const QString& key, const QVariant&) {
             if (test_mode_ && key == QStringLiteral("developer/fixtureMode")) {
@@ -22,19 +31,64 @@ DlcFeature::DlcFeature(DlcService& dlc, LibraryFeature& library, SettingsFeature
           });
 }
 
-QVariantList DlcFeature::entries(const QString& game_id) const {
-  if (!test_mode_) return dlc_.entries(game_id);
-  auto values = fixtureEntries(game_id);
+QVariantList DlcFeature::applyMissingContentPolicy(QVariantList values) const {
   if (settings_.stringValue(QStringLiteral("library/missingContent"),
-                            QStringLiteral("Show in catalogue")) ==
+                            QStringLiteral("Show in catalogue")) !=
       QStringLiteral("Hide missing content")) {
-    QVariantList installed;
-    for (const auto& value : values) {
-      if (value.toMap().value(QStringLiteral("installed")).toBool()) installed.append(value);
-    }
-    return installed;
+    return values;
   }
-  return values;
+  QVariantList installed;
+  for (const auto& value : values) {
+    if (value.toMap().value(QStringLiteral("installed")).toBool()) installed.append(value);
+  }
+  return installed;
+}
+
+QVariantList DlcFeature::catalogEntries(const QString& game_id) const {
+  const auto game = library_.entry(game_id);
+  if (game.isEmpty()) return {};
+  const auto module_id = game.value(QStringLiteral("moduleId")).toString();
+  const auto definitions = modules_.catalogDlc(module_id);
+  if (definitions.isEmpty()) return {};
+
+  QHash<QString, QVariantMap> local_by_id;
+  if (!test_mode_) {
+    for (const auto& value : dlc_.entries(game_id)) {
+      const auto local = value.toMap();
+      local_by_id.insert(local.value(QStringLiteral("dlcId")).toString(), local);
+    }
+  }
+
+  QVariantList result;
+  for (const auto& value : definitions) {
+    auto item = value.toMap();
+    const auto dlc_id = item.value(QStringLiteral("dlcId")).toString();
+    const auto local = local_by_id.value(dlc_id);
+    const auto installed = !local.isEmpty() && local.value(QStringLiteral("installed")).toBool();
+    item.insert(QStringLiteral("gameId"), game_id);
+    item.insert(QStringLiteral("moduleId"), module_id);
+    item.insert(QStringLiteral("installed"), installed);
+    item.insert(QStringLiteral("state"), installed ? QStringLiteral("Installed")
+                                                    : QStringLiteral("Not installed"));
+    item.insert(QStringLiteral("path"), local.value(QStringLiteral("path")));
+    item.insert(QStringLiteral("folderName"), local.value(QStringLiteral("folderName"),
+                                                            item.value(QStringLiteral("name"))));
+    item.insert(QStringLiteral("receipt"), local.value(QStringLiteral("receipt")));
+    item.insert(QStringLiteral("managed"), true);
+    item.insert(QStringLiteral("canVerify"), installed);
+    item.insert(QStringLiteral("canRemove"), installed);
+    item.insert(QStringLiteral("canOpen"), installed && !local.value(QStringLiteral("path")).toString().isEmpty());
+    item.insert(QStringLiteral("catalogSource"), QStringLiteral("Official Xenon Modules registry"));
+    result.append(item);
+  }
+  return result;
+}
+
+QVariantList DlcFeature::entries(const QString& game_id) const {
+  const auto catalog = catalogEntries(game_id);
+  if (!catalog.isEmpty()) return applyMissingContentPolicy(catalog);
+  if (!test_mode_) return applyMissingContentPolicy(dlc_.entries(game_id));
+  return applyMissingContentPolicy(fixtureEntries(game_id));
 }
 
 QVariantMap DlcFeature::entry(const QString& game_id, const QString& dlc_id) const {

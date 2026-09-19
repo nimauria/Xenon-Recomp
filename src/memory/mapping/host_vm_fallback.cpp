@@ -91,6 +91,14 @@ bool unmap(void* address, std::size_t) noexcept {
 
 bool supports_fixed_shared_mapping() noexcept { return false; }
 
+void* reserve_fixed_shared_mapping_region(std::size_t) noexcept {
+  return nullptr;
+}
+
+void release_fixed_shared_mapping_region(void*, std::size_t) noexcept {}
+
+bool fixed_shared_mapping_requires_page_views() noexcept { return true; }
+
 bool map_shared_fixed(const SharedMemory&, void*, std::size_t, std::size_t,
                       Protection) noexcept {
   return false;

@@ -427,10 +427,6 @@ void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
       return;
     }
   }
-  if (!impl_->mirror.synchronize()) {
-    impl_->error = impl_->mirror.error();
-    impl_->ready = false;
-  }
 }
 
 void Backend::consume(const ir::Command& command) {
@@ -443,7 +439,7 @@ void Backend::consume(const ir::Command& command) {
     ++impl_->draw_count;
     const auto state = impl_->resource_state.snapshot();
     if (state.edram_mode == EdramMode::Copy) {
-      if (!impl_->memory || !impl_->memory->physical_data()) {
+      if (!impl_->memory) {
         impl_->error = "D3D12 Xenos resolve has no bound guest memory";
         return;
       }
@@ -453,13 +449,23 @@ void Backend::consume(const ir::Command& command) {
       if (const auto& resolve_vertices = state.vertex_buffers[0][0];
           resolve_vertices && resolve_vertices->valid &&
           resolve_vertices->size_dwords == 6u &&
-          !impl_->mirror.make_cpu_visible(resolve_vertices->physical_address,
-                                          6u * sizeof(std::uint32_t))) {
+          !impl_->mirror.make_cpu_visible(
+              resolve_vertices->physical_address, 6u * sizeof(std::uint32_t),
+              memory::GpuRangeUsage::CommandData)) {
         impl_->error = impl_->mirror.error();
         return;
       }
-      const auto resolve_plan = plan_resolve(
-          state, {impl_->memory->physical_data(), memory::kPhysicalMemorySize});
+      std::array<std::byte, 6u * sizeof(std::uint32_t)>
+          resolve_vertex_snapshot{};
+      const auto resolve_vertex_base =
+          state.vertex_buffers[0][0]->physical_address;
+      if (!impl_->memory->copy_physical_range(resolve_vertex_base,
+                                               resolve_vertex_snapshot)) {
+        impl_->error = "D3D12 resolve vertex snapshot is outside physical memory";
+        return;
+      }
+      const auto resolve_plan =
+          plan_resolve(state, resolve_vertex_snapshot, resolve_vertex_base);
       if (!resolve_plan.valid) {
         impl_->error = "D3D12 " + resolve_plan.error;
         return;
@@ -776,6 +782,26 @@ void Backend::consume(const ir::Command& command) {
       if (active_depth &&
           !impl_->acquire_depth_ownership(key, *active_depth, surface)) return;
     }
+    // Phase 15: the guest-memory mirror is populated lazily. Vertex fetches
+    // request only the physical ranges described by the active Xenos fetch
+    // constants instead of synchronizing the entire 512 MiB aperture.
+    if (impl_->memory) {
+      for (const auto& fetch_group : state.vertex_buffers) {
+        for (const auto& fetch : fetch_group) {
+          if (!fetch || !fetch->valid || !fetch->size_dwords) continue;
+          const auto bytes64 = std::uint64_t{fetch->size_dwords} * 4u;
+          if (bytes64 > UINT32_MAX ||
+              !impl_->mirror.synchronize_range(
+                  fetch->physical_address, static_cast<std::uint32_t>(bytes64),
+                  memory::GpuRangeUsage::VertexBuffer)) {
+            impl_->error = impl_->mirror.error().empty()
+                               ? "D3D12 vertex fetch range is invalid"
+                               : impl_->mirror.error();
+            return;
+          }
+        }
+      }
+    }
     auto constants = impl_->resources.constants();
     if (!impl_->resource_state.write_constant_buffer(constants)) {
       impl_->error = "D3D12 shader constant upload failed";
@@ -813,15 +839,40 @@ void Backend::consume(const ir::Command& command) {
             if (subresource.guest_size_bytes > UINT32_MAX ||
                 !impl_->mirror.make_cpu_visible(
                     subresource.guest_address,
-                    static_cast<std::uint32_t>(subresource.guest_size_bytes))) {
+                    static_cast<std::uint32_t>(subresource.guest_size_bytes),
+                    memory::GpuRangeUsage::Texture)) {
               impl_->error = impl_->mirror.error().empty()
                                  ? "D3D12 GPU-authored texture range is invalid"
                                  : impl_->mirror.error();
               return;
             }
           }
-          const auto decoded = decode_texture(
-              descriptor, {impl_->memory->physical_data(), memory::kPhysicalMemorySize});
+          std::uint32_t texture_snapshot_base = memory::kPhysicalMemorySize;
+          std::uint64_t texture_snapshot_end = 0u;
+          for (const auto& subresource : source_layout.subresources) {
+            texture_snapshot_base =
+                std::min(texture_snapshot_base, subresource.guest_address);
+            texture_snapshot_end = std::max(
+                texture_snapshot_end,
+                std::uint64_t{subresource.guest_address} +
+                    subresource.guest_size_bytes);
+          }
+          if (texture_snapshot_base >= memory::kPhysicalMemorySize ||
+              texture_snapshot_end > memory::kPhysicalMemorySize ||
+              texture_snapshot_end <= texture_snapshot_base) {
+            impl_->error = "D3D12 texture snapshot range is invalid";
+            return;
+          }
+          std::vector<std::byte> texture_snapshot(
+              static_cast<std::size_t>(texture_snapshot_end -
+                                       texture_snapshot_base));
+          if (!impl_->memory->copy_physical_range(texture_snapshot_base,
+                                                   texture_snapshot)) {
+            impl_->error = "D3D12 texture snapshot failed";
+            return;
+          }
+          const auto decoded =
+              decode_texture(descriptor, texture_snapshot, texture_snapshot_base);
           if (!decoded.valid) {
             impl_->error = decoded.error;
             return;
@@ -886,6 +937,31 @@ void Backend::consume(const ir::Command& command) {
       gather_memexport_ranges(decoded_vertex->second);
       gather_memexport_ranges(decoded_pixel->second);
       if (!color_count && !active_depth && !memexport_writable) return;
+
+      // Known memexport targets stay range-driven. Only shaders whose export
+      // address cannot be resolved statically request the deliberate full-range
+      // fallback required for genuinely unrestricted guest-memory access.
+      if (memexport_writable) {
+        if (dynamic_memexport_range) {
+          if (!impl_->mirror.synchronize()) {
+            impl_->error = impl_->mirror.error();
+            return;
+          }
+        } else {
+          for (const auto& range : memexport_ranges) {
+            const auto address = range.base_address_dwords << 2u;
+            if (range.size_bytes &&
+                !impl_->mirror.synchronize_range(
+                    address, range.size_bytes,
+                    memory::GpuRangeUsage::MemoryExport)) {
+              impl_->error = impl_->mirror.error().empty()
+                                 ? "D3D12 memexport range is invalid"
+                                 : impl_->mirror.error();
+              return;
+            }
+          }
+        }
+      }
 
       auto vertex_shader = vertex->second;
       auto pixel_shader = pixel->second;
@@ -971,17 +1047,41 @@ void Backend::consume(const ir::Command& command) {
       }
 
       if (draw->index_buffer.valid && draw->index_buffer.length_bytes &&
-          !impl_->mirror.make_cpu_visible(draw->index_buffer.physical_address,
-                                          draw->index_buffer.length_bytes)) {
+          !impl_->mirror.make_cpu_visible(
+              draw->index_buffer.physical_address,
+              draw->index_buffer.length_bytes,
+              memory::GpuRangeUsage::IndexBuffer)) {
         impl_->error = impl_->mirror.error();
         return;
       }
       const PrimitiveProcessingOptions primitive_options{
           state.primitive_assembly.reset_enabled,
           state.primitive_assembly.reset_index};
+      std::vector<std::byte> index_snapshot;
+      std::uint32_t index_snapshot_base = 0u;
+      if (draw->source == DrawSource::Dma) {
+        const auto bytes_per_index =
+            draw->index_buffer.format == IndexFormat::UInt32 ? 4u : 2u;
+        const auto index_bytes = std::uint64_t{std::min(
+            draw->index_count,
+            draw->index_buffer.length_bytes / bytes_per_index)} *
+                                 bytes_per_index;
+        if (index_bytes > UINT32_MAX ||
+            std::uint64_t{draw->index_buffer.physical_address} + index_bytes >
+                memory::kPhysicalMemorySize) {
+          impl_->error = "D3D12 index snapshot range is invalid";
+          return;
+        }
+        index_snapshot.resize(static_cast<std::size_t>(index_bytes));
+        index_snapshot_base = draw->index_buffer.physical_address;
+        if (!impl_->memory->copy_physical_range(index_snapshot_base,
+                                                 index_snapshot)) {
+          impl_->error = "D3D12 index snapshot failed";
+          return;
+        }
+      }
       const auto batch = process_primitives(
-          *draw, {impl_->memory->physical_data(), memory::kPhysicalMemorySize},
-          primitive_options);
+          *draw, index_snapshot, primitive_options, index_snapshot_base);
       if (!batch.valid) {
         impl_->error = batch.error;
         return;
@@ -1249,6 +1349,22 @@ bool Backend::make_edram_canonical() {
   return true;
 }
 
+bool Backend::invalidate_edram_native_state() {
+  if (!impl_->ready || !impl_->edram) return false;
+  if (!impl_->queue.wait_idle()) {
+    impl_->error = impl_->queue.error();
+    impl_->ready = false;
+    return false;
+  }
+  // A portable capture has replaced the canonical byte store externally.
+  // Forget only ownership: cached native images may be retained, but no tile
+  // may remain authoritative until it is explicitly reacquired from canonical
+  // EDRAM on the next draw/resolve.
+  impl_->edram_ownership.reset();
+  return true;
+}
+
+
 PresentStatus Backend::present(const PresentationFrame& frame) {
   if (!impl_->presentation.ready()) return PresentStatus::NotConfigured;
   if (!impl_->ready || !impl_->memory) return PresentStatus::Error;
@@ -1265,17 +1381,43 @@ PresentStatus Backend::present(const PresentationFrame& frame) {
     if (subresource.guest_size_bytes > UINT32_MAX ||
         !impl_->mirror.make_cpu_visible(
             subresource.guest_address,
-            static_cast<std::uint32_t>(subresource.guest_size_bytes))) {
+            static_cast<std::uint32_t>(subresource.guest_size_bytes),
+            memory::GpuRangeUsage::RenderReadback)) {
       impl_->error = impl_->mirror.error().empty()
                          ? "D3D12 scanout source range is invalid"
                          : impl_->mirror.error();
       return PresentStatus::Error;
     }
   }
+  std::uint32_t presentation_snapshot_base = memory::kPhysicalMemorySize;
+  std::uint64_t presentation_snapshot_end = 0u;
+  for (const auto& subresource : layout.subresources) {
+    presentation_snapshot_base =
+        std::min(presentation_snapshot_base, subresource.guest_address);
+    presentation_snapshot_end = std::max(
+        presentation_snapshot_end,
+        std::uint64_t{subresource.guest_address} +
+            subresource.guest_size_bytes);
+  }
+  if (presentation_snapshot_base >= memory::kPhysicalMemorySize ||
+      presentation_snapshot_end > memory::kPhysicalMemorySize ||
+      presentation_snapshot_end <= presentation_snapshot_base) {
+    impl_->error = "D3D12 presentation snapshot range is invalid";
+    return PresentStatus::Error;
+  }
+  std::vector<std::byte> presentation_snapshot(
+      static_cast<std::size_t>(presentation_snapshot_end -
+                               presentation_snapshot_base));
+  if (!impl_->memory->copy_physical_range(presentation_snapshot_base,
+                                           presentation_snapshot)) {
+    impl_->error = "D3D12 presentation snapshot failed";
+    return PresentStatus::Error;
+  }
   const auto prepared = prepare_presentation_frame(
-      frame, {impl_->memory->physical_data(), memory::kPhysicalMemorySize},
-      impl_->presentation.width(), impl_->presentation.height(),
-      impl_->presentation.config().preserve_aspect_ratio);
+      frame, presentation_snapshot, impl_->presentation.width(),
+      impl_->presentation.height(),
+      impl_->presentation.config().preserve_aspect_ratio,
+      presentation_snapshot_base);
   if (!prepared.valid) {
     impl_->error = prepared.error;
     return PresentStatus::Unsupported;

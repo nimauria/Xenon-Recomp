@@ -71,7 +71,8 @@ int main() {
   // fixed shared alias must preserve identity and restoring that slice must
   // keep the enclosing address range reserved.
   if (vm::supports_fixed_shared_mapping()) {
-    auto* aperture = static_cast<std::byte*>(vm::reserve(page * 2u));
+    auto* aperture = static_cast<std::byte*>(
+        vm::reserve_fixed_shared_mapping_region(page * 2u));
     assert(aperture != nullptr);
     assert(vm::map_shared_fixed(moved, aperture, 0u, page,
                                 vm::Protection::ReadWrite));
@@ -83,7 +84,7 @@ int main() {
     assert(vm::map_shared_fixed(moved, aperture + page, 0u, page,
                                 vm::Protection::ReadWrite));
     assert(aperture[page + 9] == std::byte{0x6D});
-    vm::release(aperture, page * 2u);
+    vm::release_fixed_shared_mapping_region(aperture, page * 2u);
   }
 
   return 0;

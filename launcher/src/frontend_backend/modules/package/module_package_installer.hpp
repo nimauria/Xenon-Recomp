@@ -11,7 +11,9 @@ class ModulePackageInstaller final {
  public:
   explicit ModulePackageInstaller(ModuleService& modules) : modules_(modules) {}
 
-  [[nodiscard]] ServiceResult install(const QString& module_id, const QString& archive_path) const;
+  [[nodiscard]] ServiceResult install(const QString& module_id, const QString& archive_path,
+                                      const QString& expected_version = {},
+                                      bool retain_rollback = true) const;
   [[nodiscard]] ServiceResult installDiscovered(const QString& archive_path) const;
   [[nodiscard]] static bool platformSupported();
 

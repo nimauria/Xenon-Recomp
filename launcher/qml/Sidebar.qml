@@ -44,6 +44,7 @@ Rectangle {
     }
 
     readonly property var primaryEntries: [
+        { title: "Home", icon: "home", page: 4 },
         { title: "Library", icon: "library", page: 0 },
         { title: "Modules", icon: "modules", page: 1 },
         { title: "Profiles", icon: "profiles", page: 2 }

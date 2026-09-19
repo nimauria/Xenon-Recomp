@@ -5,6 +5,7 @@
 #include "../../../services/service_result.hpp"
 #include "../../updates/model/update_release.hpp"
 #include "../package/module_package_installer.hpp"
+#include "history/module_update_history_store.hpp"
 
 #include <QCryptographicHash>
 #include <QHash>
@@ -12,6 +13,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QSaveFile>
+#include <QVariantList>
 #include <QVariantMap>
 
 #include <memory>
@@ -29,15 +31,19 @@ class ModuleUpdateService final : public QObject {
 
   [[nodiscard]] QVariantMap state(const QString& module_id) const;
   [[nodiscard]] QVariantMap states() const;
+  [[nodiscard]] QVariantList history(const QString& module_id = {}) const;
 
   void check(const QString& module_id, const QVariantMap& catalog_entry,
              const QString& installed_version, bool include_prerelease);
   [[nodiscard]] ServiceResult download(const QString& module_id);
   [[nodiscard]] ServiceResult cancelDownload(const QString& module_id);
   [[nodiscard]] ServiceResult install(const QString& module_id);
+  [[nodiscard]] ServiceResult rollback(const QString& module_id);
+  [[nodiscard]] ServiceResult clearHistory(const QString& module_id = {});
 
  signals:
   void changed(const QString& module_id);
+  void historyChanged(const QString& module_id);
   void moduleInstalled(const QString& module_id);
   void notificationRequested(const QString& title, const QString& message);
 
@@ -51,12 +57,18 @@ class ModuleUpdateService final : public QObject {
   [[nodiscard]] static QString digestHex(const QString& digest);
   void setState(const QString& module_id, const QString& status,
                 const QString& message = {});
+  void refreshRollbackState(const QString& module_id);
   void handleCheckSucceeded(const QString& module_id, const UpdateRelease& release,
                             const QString& installed_version);
+  void recordHistory(const QString& module_id, const QString& action,
+                     const QString& outcome, const QString& from_version,
+                     const QString& to_version, const QString& message,
+                     const QVariantMap& metadata = {});
 
   PackageService& packages_;
   ModuleService& modules_;
   ModulePackageInstaller installer_;
+  ModuleUpdateHistoryStore history_;
   QNetworkAccessManager network_;
   QHash<QString, QVariantMap> states_;
   QHash<QString, UpdateRelease> releases_;

@@ -40,6 +40,11 @@ class HostPathDevice final : public Device {
   [[nodiscard]] FsError rename(std::string_view old_relative_path,
                                std::string_view new_relative_path,
                                bool replace_existing) override;
+  [[nodiscard]] FsError set_attributes(
+      std::string_view relative_path, const FileAttributeUpdate& update) override;
+  [[nodiscard]] FsError set_last_write_time(
+      std::string_view relative_path,
+      std::filesystem::file_time_type last_write_time) override;
   [[nodiscard]] FsError disk_space(DiskSpace& out_space) const override;
 
   [[nodiscard]] const std::filesystem::path& host_root() const noexcept {

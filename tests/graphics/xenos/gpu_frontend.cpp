@@ -1,10 +1,15 @@
+#include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 #include <variant>
+#include <vector>
 
 #include "xenon/gpu/command_processor.hpp"
 #include "xenon/gpu/graphics_system.hpp"
@@ -38,6 +43,45 @@ void store_be32(AddressSpace& memory, std::uint32_t physical_address,
       static_cast<std::byte>(value),
   };
   assert(memory.write_physical(physical_address, bytes));
+}
+
+void store_le32(AddressSpace& memory, std::uint32_t physical_address,
+                std::uint32_t value) {
+  const std::array<std::byte, 4> bytes = {
+      static_cast<std::byte>(value),
+      static_cast<std::byte>(value >> 8),
+      static_cast<std::byte>(value >> 16),
+      static_cast<std::byte>(value >> 24),
+  };
+  assert(memory.write_physical(physical_address, bytes));
+}
+std::uint32_t load_le32_physical(AddressSpace& memory, std::uint32_t physical_address) {
+  std::array<std::byte, 4> bytes{};
+  assert(memory.copy_physical_range(physical_address, bytes));
+  return std::to_integer<std::uint32_t>(bytes[0]) |
+         (std::to_integer<std::uint32_t>(bytes[1]) << 8u) |
+         (std::to_integer<std::uint32_t>(bytes[2]) << 16u) |
+         (std::to_integer<std::uint32_t>(bytes[3]) << 24u);
+}
+
+
+std::uint32_t load_physical_be32(AddressSpace& memory,
+                                 std::uint32_t physical_address) {
+  std::array<std::byte, 4> bytes{};
+  assert(memory.copy_physical_range(physical_address, bytes));
+  return (std::uint32_t(std::to_integer<std::uint8_t>(bytes[0])) << 24u) |
+         (std::uint32_t(std::to_integer<std::uint8_t>(bytes[1])) << 16u) |
+         (std::uint32_t(std::to_integer<std::uint8_t>(bytes[2])) << 8u) |
+         std::uint32_t(std::to_integer<std::uint8_t>(bytes[3]));
+}
+
+std::uint16_t load_physical_be16(AddressSpace& memory,
+                                 std::uint32_t physical_address) {
+  std::array<std::byte, 2> bytes{};
+  assert(memory.copy_physical_range(physical_address, bytes));
+  return static_cast<std::uint16_t>(
+      (std::uint16_t(std::to_integer<std::uint8_t>(bytes[0])) << 8u) |
+      std::uint16_t(std::to_integer<std::uint8_t>(bytes[1])));
 }
 
 void write_words(AddressSpace& memory, std::uint32_t base,
@@ -88,6 +132,15 @@ void test_headers() {
     assert(h.opcode == Type3Opcode::MemWrite);
     assert(h.predicate);
   }
+
+  assert(!xenon::gpu::is_explicit_major_mode(
+      MajorMode::Implicit, PrimitiveType::TriangleList));
+  assert(xenon::gpu::is_explicit_major_mode(
+      MajorMode::Explicit, PrimitiveType::TriangleList));
+  assert(xenon::gpu::is_explicit_major_mode(
+      MajorMode::Reserved2, PrimitiveType::TriangleList));
+  assert(xenon::gpu::is_explicit_major_mode(
+      MajorMode::Implicit, PrimitiveType::CopyRectList0));
 }
 
 void test_register_packets(AddressSpace& memory, CommandProcessor& cp,
@@ -176,6 +229,294 @@ void test_load_constant_context(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x2020) == 0xDEADBEEF);
   assert(regs.read(0x2021) == 0x13579BDF);
   assert(regs.read(0x2022) == 0xCAFEBABE);
+}
+
+void test_pm4_reg_rmw(AddressSpace& memory, CommandProcessor& cp,
+                      RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002400;
+  constexpr std::uint32_t target_immediate = 0x300u;
+  constexpr std::uint32_t target_register = 0x301u;
+  constexpr std::uint32_t and_register = 0x302u;
+  constexpr std::uint32_t or_register = 0x303u;
+  write_words(
+      memory, commands,
+      {make_packet_type0(target_immediate, 1), 0xF0F0FF00u,
+       make_packet_type0(target_register, 1), 0xFFFF0000u,
+       make_packet_type0(and_register, 1), 0x0F0FF0F0u,
+       make_packet_type0(or_register, 1), 0x000000AAu,
+       make_packet_type3(Type3Opcode::RegRmw, 3), target_immediate,
+       0xFF00FFFFu, 0x00120034u,
+       make_packet_type3(Type3Opcode::RegRmw, 3),
+       0xC0000000u | target_register, and_register, or_register});
+  const auto before = cp.statistics().register_rmw_packets;
+  cp.execute_buffer(commands, 16);
+  assert(regs.read(target_immediate) == 0xF012FF34u);
+  assert(regs.read(target_register) == 0x0F0F00AAu);
+  assert(cp.statistics().register_rmw_packets == before + 2u);
+}
+
+void test_pm4_reg_to_mem(AddressSpace& memory, CommandProcessor& cp,
+                         RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002600;
+  constexpr std::uint32_t target = 0x01210000;
+  constexpr std::uint32_t source_register = 0x310u;
+  write_words(memory, commands,
+              {make_packet_type0(source_register, 1), 0x11223344u,
+               make_packet_type3(Type3Opcode::RegToMem, 2), source_register,
+               target | static_cast<std::uint32_t>(Endian::Swap8In32)});
+  const auto before_packets = cp.statistics().register_to_memory_packets;
+  const auto before_writes = cp.statistics().physical_writes;
+  cp.execute_buffer(commands, 5);
+  assert(regs.read(source_register) == 0x11223344u);
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + target) ==
+         0x11223344u);
+  assert(cp.statistics().register_to_memory_packets == before_packets + 1u);
+  assert(cp.statistics().physical_writes == before_writes + 1u);
+}
+
+void test_pm4_reg_to_mem_loop(AddressSpace& memory, CommandProcessor& cp,
+                              RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002700;
+  constexpr std::uint32_t target = 0x01210800;
+  constexpr std::uint32_t first_register = 0x314u;
+  write_words(memory, commands,
+              {make_packet_type0(first_register, 3),
+               0x11112222u, 0x33334444u, 0x55556666u,
+               make_packet_type3(Type3Opcode::RegToMem, 2),
+               first_register | (3u << 18u), target});
+  const auto before_dwords = cp.statistics().register_to_memory_dwords;
+  cp.execute_buffer(commands, 7);
+  assert(regs.read(first_register + 0u) == 0x11112222u);
+  assert(regs.read(first_register + 1u) == 0x33334444u);
+  assert(regs.read(first_register + 2u) == 0x55556666u);
+  assert(memory.read32_le(xenon::memory::kPhysical64KBase + target + 0u) ==
+         0x11112222u);
+  assert(memory.read32_le(xenon::memory::kPhysical64KBase + target + 4u) ==
+         0x33334444u);
+  assert(memory.read32_le(xenon::memory::kPhysical64KBase + target + 8u) ==
+         0x55556666u);
+  assert(cp.statistics().register_to_memory_dwords == before_dwords + 3u);
+}
+
+void test_pm4_cond_exec(AddressSpace& memory, CommandProcessor& cp,
+                        RegisterFile& regs) {
+  constexpr std::uint32_t condition0 = 0x01218000;
+  constexpr std::uint32_t condition1 = 0x01218004;
+  constexpr std::uint32_t false_commands = 0x01002D00;
+  constexpr std::uint32_t true_commands = 0x01002E00;
+  constexpr std::uint32_t skipped_register = 0x338u;
+  constexpr std::uint32_t continued_register = 0x339u;
+  constexpr std::uint32_t taken_register = 0x33Au;
+
+  store_le32(memory, condition0, 0u);
+  store_le32(memory, condition1, 5u);
+  write_words(memory, false_commands,
+              {make_packet_type3(Type3Opcode::CondExec, 4),
+               condition0 >> 2u, condition1 >> 2u, 10u, 2u,
+               make_packet_type0(skipped_register, 1), 0xAAAAAAAAu,
+               make_packet_type0(continued_register, 1), 0xBBBBBBBBu});
+  const auto before_packets = cp.statistics().conditional_exec_packets;
+  const auto before_skipped = cp.statistics().conditional_exec_dwords_skipped;
+  cp.execute_buffer(false_commands, 9);
+  assert(regs.read(skipped_register) == 0u);
+  assert(regs.read(continued_register) == 0xBBBBBBBBu);
+  assert(cp.statistics().conditional_exec_packets == before_packets + 1u);
+  assert(cp.statistics().conditional_exec_dwords_skipped == before_skipped + 2u);
+
+  store_le32(memory, condition0, 1u);
+  store_le32(memory, condition1, 5u);
+  write_words(memory, true_commands,
+              {make_packet_type3(Type3Opcode::CondExec, 4),
+               condition0 >> 2u, condition1 >> 2u, 10u, 2u,
+               make_packet_type0(taken_register, 1), 0xCCCCCCCCu});
+  const auto before_taken = cp.statistics().conditional_exec_taken;
+  cp.execute_buffer(true_commands, 7);
+  assert(regs.read(taken_register) == 0xCCCCCCCCu);
+  assert(cp.statistics().conditional_exec_taken == before_taken + 1u);
+}
+
+void test_pm4_cond_write(AddressSpace& memory, CommandProcessor& cp,
+                         RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002800;
+  constexpr std::uint32_t poll_memory = 0x01211000;
+  constexpr std::uint32_t write_memory = 0x01212000;
+  constexpr std::uint32_t poll_register = 0x320u;
+  constexpr std::uint32_t pass_register = 0x321u;
+  constexpr std::uint32_t fail_register = 0x322u;
+  store_be32(memory, poll_memory, 0xABCD1234u);
+  write_words(
+      memory, commands,
+      {make_packet_type0(poll_register, 1), 5u,
+       make_packet_type3(Type3Opcode::CondWrite, 6), 0x3u, poll_register, 5u,
+       0xFFFFFFFFu, pass_register, 0xCAFEBABEu,
+       make_packet_type3(Type3Opcode::CondWrite, 6), 0x3u, poll_register, 6u,
+       0xFFFFFFFFu, fail_register, 0xDEADBEEFu,
+       make_packet_type3(Type3Opcode::CondWrite, 6), 0x113u,
+       poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32),
+       0xABCD1234u, 0xFFFFFFFFu,
+       write_memory | static_cast<std::uint32_t>(Endian::Swap8In32),
+       0x55667788u});
+  const auto before_packets = cp.statistics().conditional_write_packets;
+  const auto before_taken = cp.statistics().conditional_writes_taken;
+  cp.execute_buffer(commands, 23);
+  assert(regs.read(pass_register) == 0xCAFEBABEu);
+  assert(regs.read(fail_register) == 0u);
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + write_memory) ==
+         0x55667788u);
+  assert(cp.statistics().conditional_write_packets == before_packets + 3u);
+  assert(cp.statistics().conditional_writes_taken == before_taken + 2u);
+}
+
+void test_pm4_wait_reg_mem(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t commands = 0x01002A00;
+  constexpr std::uint32_t poll_memory = 0x01213000;
+  store_be32(memory, poll_memory, 0u);
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u,
+               poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32),
+               0x12345678u, 0xFFFFFFFFu, 0u});
+
+  std::atomic<bool> release_writer{false};
+  std::thread writer([&] {
+    while (!release_writer.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    store_be32(memory, poll_memory, 0x12345678u);
+  });
+  const auto before_packets = cp.statistics().wait_reg_mem_packets;
+  const auto before_polls = cp.statistics().wait_reg_mem_polls;
+  release_writer.store(true, std::memory_order_release);
+  cp.execute_buffer(commands, 6);
+  writer.join();
+  assert(cp.statistics().wait_reg_mem_packets == before_packets + 1u);
+  assert(cp.statistics().wait_reg_mem_polls > before_polls);
+}
+
+void test_pm4_compact_register_waits(AddressSpace& memory,
+                                     CommandProcessor& cp,
+                                     RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002B00;
+  constexpr std::uint32_t poll_register = 0x330u;
+  write_words(
+      memory, commands,
+      {make_packet_type0(poll_register, 1), 0x00001234u,
+       make_packet_type3(Type3Opcode::WaitRegEq, 4), poll_register, 0x1234u,
+       0x0000FFFFu, 0u,
+       make_packet_type3(Type3Opcode::WaitRegGte, 4), poll_register, 0x1200u,
+       0x0000FFFFu, 0u});
+  const auto before_packets = cp.statistics().wait_register_packets;
+  const auto before_polls = cp.statistics().wait_register_polls;
+  cp.execute_buffer(commands, 12);
+  assert(regs.read(poll_register) == 0x00001234u);
+  assert(cp.statistics().wait_register_packets == before_packets + 2u);
+  assert(cp.statistics().wait_register_polls == before_polls + 2u);
+}
+
+void test_load_alu_constant(AddressSpace& memory, CommandProcessor& cp,
+                            RegisterFile& regs) {
+  constexpr std::uint32_t constants = 0x01214000;
+  constexpr std::uint32_t commands = 0x01002C00;
+  write_words(memory, constants, {0x10203040u, 0x50607080u});
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::LoadAluConstant, 3), constants,
+               (1u << 16) | 0x10u, 2u});
+  const auto before = cp.statistics().memory_constant_load_packets;
+  cp.execute_buffer(commands, 4);
+  assert(regs.read(0x4810u) == 0x10203040u);
+  assert(regs.read(0x4811u) == 0x50607080u);
+  assert(cp.statistics().memory_constant_load_packets == before + 1u);
+}
+
+void test_event_write_and_fences(AddressSpace& memory, CommandProcessor& cp,
+                                 RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002D00;
+  constexpr std::uint32_t literal_target = 0x01215000;
+  constexpr std::uint32_t counter_target = 0x01215010;
+  write_words(
+      memory, commands,
+      {make_packet_type3(Type3Opcode::EventWrite, 1), 0x0000002Au,
+       make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x00000006u,
+       literal_target | static_cast<std::uint32_t>(Endian::Swap8In32),
+       0x11223344u,
+       make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x80000005u,
+       counter_target | static_cast<std::uint32_t>(Endian::Swap8In32),
+       0xDEADBEEFu});
+
+  cp.notify_present();
+  cp.notify_present();
+  const auto before_events = cp.statistics().event_packets;
+  const auto before_writes = cp.statistics().event_memory_writes;
+  const auto before_counter = cp.statistics().event_counter_writes;
+  cp.execute_buffer(commands, 10);
+
+  assert(regs.read(0x21F9u) == 5u);
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + literal_target) ==
+         0x11223344u);
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + counter_target) ==
+         2u);
+  assert(cp.swap_counter() == 2u);
+  assert(cp.statistics().event_packets == before_events + 3u);
+  assert(cp.statistics().event_memory_writes == before_writes + 2u);
+  assert(cp.statistics().event_counter_writes == before_counter + 1u);
+}
+
+void test_event_extent(AddressSpace& memory, CommandProcessor& cp,
+                       RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002E00;
+  constexpr std::uint32_t target = 0x01215100;
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::EventWriteExtent, 2), 0x09u,
+               target | static_cast<std::uint32_t>(Endian::Swap8In16)});
+  const auto before = cp.statistics().extent_event_writes;
+  cp.execute_buffer(commands, 3);
+  assert(regs.read(0x21F9u) == 9u);
+  assert(load_physical_be16(memory, target + 0u) == 0u);
+  assert(load_physical_be16(memory, target + 2u) == 1024u);
+  assert(load_physical_be16(memory, target + 4u) == 0u);
+  assert(load_physical_be16(memory, target + 6u) == 1024u);
+  assert(load_physical_be16(memory, target + 8u) == 0u);
+  assert(load_physical_be16(memory, target + 10u) == 1u);
+  assert(cp.statistics().extent_event_writes == before + 1u);
+}
+
+void test_visibility_queries(AddressSpace& memory, CommandProcessor& cp,
+                             RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01002F00;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::VizQuery, 1), 3u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+               make_packet_type3(Type3Opcode::VizQuery, 1), 0x103u,
+               make_packet_type3(Type3Opcode::VizQuery, 1), 4u,
+               make_packet_type3(Type3Opcode::VizQuery, 1), 0x104u});
+  const auto begin_before = cp.statistics().viz_query_begins;
+  const auto end_before = cp.statistics().viz_query_ends;
+  const auto visible_before = cp.statistics().viz_query_visible_results;
+  cp.execute_buffer(commands, 10);
+  assert((regs.read(0x0C44u) & (1u << 3u)) != 0u);
+  assert((regs.read(0x0C44u) & (1u << 4u)) == 0u);
+  assert(regs.read(0x21F9u) == 8u);
+  assert(cp.statistics().viz_query_begins == begin_before + 2u);
+  assert(cp.statistics().viz_query_ends == end_before + 2u);
+  assert(cp.statistics().viz_query_visible_results == visible_before + 1u);
+}
+
+void test_interrupt_dispatch(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t commands = 0x01002F80;
+  std::vector<std::uint32_t> dispatched;
+  cp.set_interrupt_callback(
+      [&](std::uint32_t cpu) { dispatched.push_back(cpu); });
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::Interrupt, 1),
+               (1u << 1u) | (1u << 4u)});
+  const auto packets_before = cp.statistics().interrupt_packets;
+  const auto dispatch_before = cp.statistics().interrupt_dispatches;
+  cp.execute_buffer(commands, 2);
+  assert((dispatched == std::vector<std::uint32_t>{1u, 4u}));
+  assert(cp.statistics().interrupt_packets == packets_before + 1u);
+  assert(cp.statistics().interrupt_dispatches == dispatch_before + 2u);
+  cp.set_interrupt_callback({});
 }
 
 void test_mem_write(AddressSpace& memory, CommandProcessor& cp) {
@@ -399,6 +740,86 @@ void test_shader_loads(AddressSpace& memory, CommandProcessor& cp,
 }
 
 
+void test_shader_partition_state(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t commands = 0x0100A800;
+  constexpr std::uint32_t raw = (5u << 29u) | (0x345u << 16u) | 0x123u;
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::SetShaderBases, 1), raw});
+  const auto before = cp.statistics().shader_base_packets;
+  cp.execute_buffer(commands, 2);
+  const auto& state = cp.shader_partition();
+  assert(state.raw == raw);
+  assert(state.instruction_store_size_code == 5u);
+  assert(state.vertex_start == 0x345u);
+  assert(state.pixel_start == 0x123u);
+  assert(cp.statistics().shader_base_packets == before + 1u);
+}
+
+void test_im_store_round_trip(AddressSpace& memory, CommandProcessor& cp,
+                              xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t commands = 0x0100AA00;
+  constexpr std::uint32_t restore_commands = 0x0100AB00;
+  constexpr std::uint32_t shader_shadow = 0x01310000;
+  constexpr std::uint32_t metadata = 0x01311000;
+  constexpr std::uint32_t start_slot = 7u;
+  const std::array<std::uint32_t, 6> code = {
+      0x01020304u, 0x11121314u, 0x21222324u,
+      0x31323334u, 0x41424344u, 0x51525354u,
+  };
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::ImLoadImmediate, 8),
+               0u, (start_slot << 16u) | 6u,
+               code[0], code[1], code[2], code[3], code[4], code[5],
+               make_packet_type3(Type3Opcode::ImStore, 2),
+               shader_shadow | 0u, metadata});
+  const auto before_packets = cp.statistics().shader_store_packets;
+  const auto before_dwords = cp.statistics().shader_store_dwords;
+  cp.execute_buffer(commands, 12);
+  for (std::uint32_t i = 0; i < code.size(); ++i) {
+    assert(load_physical_be32(memory, shader_shadow + i * 4u) == code[i]);
+  }
+  assert(load_physical_be32(memory, metadata) ==
+         ((start_slot << 16u) | 6u));
+  assert(cp.statistics().shader_store_packets == before_packets + 1u);
+  assert(cp.statistics().shader_store_dwords == before_dwords + 6u);
+
+  write_words(memory, restore_commands,
+              {make_packet_type3(Type3Opcode::ImLoad, 2),
+               shader_shadow | 0u, (start_slot << 16u) | 6u});
+  const auto before_restore = stream.size();
+  cp.execute_buffer(restore_commands, 3);
+  assert(stream.size() == before_restore + 1u);
+  const auto& restore =
+      std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+  assert(restore.program.stage() == xenon::gpu::ShaderStage::Vertex);
+  assert(restore.program.start_slot() == start_slot);
+  assert(restore.program.dwords().size() == code.size());
+  for (std::uint32_t i = 0; i < code.size(); ++i) {
+    assert(restore.program.dwords()[i] == code[i]);
+  }
+}
+
+void test_shader_invalidation(AddressSpace& memory, CommandProcessor& cp,
+                              xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t commands = 0x0100AC00;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::ImLoadImmediate, 5),
+               0u, 3u, 0x01020304u, 0x11121314u, 0x21222324u,
+               make_packet_type3(Type3Opcode::ImLoadImmediate, 5),
+               1u, 3u, 0x31323334u, 0x41424344u, 0x51525354u,
+               make_packet_type3(Type3Opcode::InvalidateState, 1), 0x100u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  const auto before_invalidations = cp.statistics().shader_invalidations;
+  cp.execute_buffer(commands, 16);
+  const auto& draw =
+      std::get<xenon::gpu::ir::DrawPacket>(stream.commands().back());
+  assert(!draw.vertex_shader.valid);
+  assert(draw.pixel_shader.valid);
+  assert(cp.statistics().shader_invalidations == before_invalidations + 1u);
+}
+
 void test_draw_shader_bindings(AddressSpace& memory, CommandProcessor& cp,
                                xenon::gpu::ir::Stream& stream) {
   constexpr std::uint32_t base = 0x0100C000;
@@ -521,6 +942,142 @@ void test_graphics_system_backend(AddressSpace& memory) {
   assert(graphics.registers().read(0x44) == 0x12345678);
 }
 
+void test_frontend_capture_replay(AddressSpace& memory) {
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t base = 0x0100B800;
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  write_words(memory, base,
+              {make_packet_type0(0x50, 1), 0xCAFED00Du,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+
+  const auto stream_before = graphics.stream().size();
+  const auto capture = graphics.capture_buffer(base, 4);
+  assert(capture.source ==
+         xenon::gpu::FrontendSubmissionCapture::Source::Buffer);
+  assert(capture.physical_address == base);
+  assert(capture.dword_count == 4u);
+  assert(capture.initial_registers.values[0x50] == 0u);
+  assert(capture.final_registers.values[0x50] == 0xCAFED00Du);
+  assert(capture.commands.size() == 3u);
+  assert(graphics.stream().size() == stream_before + capture.commands.size());
+
+  xenon::gpu::NullBackend replay_backend;
+  graphics.replay_capture(replay_backend, capture);
+  assert(replay_backend.command_count() ==
+         RegisterFile::kRegisterCount + capture.commands.size());
+  // Replay is a backend/debug operation and must not consume the live pending
+  // stream that will still be executed normally by the runtime.
+  assert(graphics.stream().size() == stream_before + capture.commands.size());
+}
+
+
+void test_portable_capture_round_trip(AddressSpace& memory) {
+  xenon::gpu::GraphicsSystem graphics(memory);
+  xenon::gpu::NullBackend backend;
+  constexpr std::uint32_t shader_cmd = 0x0100C000;
+  constexpr std::uint32_t capture_cmd = 0x0100C100;
+  constexpr std::uint32_t side_effect = 0x01420000;
+  constexpr std::uint32_t vertex_data = 0x01421000;
+  constexpr std::uint32_t fetch_register =
+      xenon::gpu::ResourceStateTracker::kFetchConstantBase + 3u * 6u + 2u * 2u;
+  const std::uint32_t shader_code[3] = {0x01020304u, 0x11121314u, 0x21222324u};
+
+  write_words(memory, shader_cmd,
+              {make_packet_type3(Type3Opcode::ImLoadImmediate, 5),
+               0u, 3u, shader_code[0], shader_code[1], shader_code[2]});
+  graphics.submit_buffer(shader_cmd, 6u);
+
+  constexpr std::uint32_t initiator = make_draw_initiator(
+      PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  std::array<std::byte, 64u * 4u> vertex_bytes{};
+  for (std::size_t i = 0; i < vertex_bytes.size(); ++i)
+    vertex_bytes[i] = static_cast<std::byte>(i & 0xFFu);
+  assert(memory.write_physical(vertex_data, vertex_bytes));
+  write_words(memory, capture_cmd,
+              {make_packet_type3(Type3Opcode::MemWrite, 2),
+               side_effect, 0xA1B2C3D4u,
+               make_packet_type0(fetch_register, 2),
+               3u | vertex_data, 64u << 2u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  graphics.edram().write8(0x1234u, 0x5Au);
+
+  xenon::gpu::PortableSubmissionCapture capture;
+  std::string error;
+  assert(graphics.capture_portable_buffer(backend, capture_cmd, 8u, capture, &error));
+  assert(error.empty());
+  assert(capture.complete);
+  assert(capture.frontend.initial_vertex_program.has_value());
+  assert(capture.frontend.initial_vertex_program->hash() != 0u);
+  assert(capture.edram.size() == xenon::gpu::Edram::kSize);
+  assert(capture.edram[0x1234u] == std::byte{0x5A});
+  assert(load_le32_physical(memory, side_effect) == 0xA1B2C3D4u);
+
+  bool found_side_effect = false;
+  bool found_command_stream = false;
+  bool found_vertex_data = false;
+  for (const auto& range : capture.physical_ranges) {
+    const auto begin = range.physical_address;
+    const auto end = std::uint64_t(begin) + range.bytes.size();
+    if (side_effect >= begin && std::uint64_t(side_effect) + 4u <= end)
+      found_side_effect = true;
+    if (capture_cmd >= begin && std::uint64_t(capture_cmd) + 32u <= end)
+      found_command_stream = true;
+    if (vertex_data >= begin &&
+        std::uint64_t(vertex_data) + vertex_bytes.size() <= end)
+      found_vertex_data = true;
+  }
+  assert(found_side_effect);
+  assert(found_command_stream);
+  assert(found_vertex_data);
+
+  const auto path = std::filesystem::temp_directory_path() /
+                    "xenon_gpu_portable_capture_test.xgcap";
+  std::filesystem::remove(path);
+  assert(xenon::gpu::save_portable_capture(capture, path, &error));
+  assert(error.empty());
+  const auto loaded = xenon::gpu::load_portable_capture(path, &error);
+  assert(loaded.has_value());
+  assert(error.empty());
+  assert(loaded->frontend.initial_vertex_program.has_value());
+  assert(loaded->frontend.initial_vertex_program->hash() ==
+         capture.frontend.initial_vertex_program->hash());
+  assert(loaded->physical_byte_count() == capture.physical_byte_count());
+  assert(loaded->edram == capture.edram);
+
+  store_le32(memory, side_effect, 0u);
+  graphics.edram().write8(0x1234u, 0u);
+  xenon::gpu::NullBackend replay_backend;
+  assert(graphics.replay_portable_capture(replay_backend, *loaded, &error));
+  assert(error.empty());
+  assert(load_le32_physical(memory, side_effect) == 0xA1B2C3D4u);
+  assert(graphics.edram().read8(0x1234u) == 0x5Au);
+  assert(replay_backend.command_count() ==
+         RegisterFile::kRegisterCount + loaded->frontend.commands.size() + 1u);
+  std::filesystem::remove(path);
+}
+
+void test_frontend_ring_capture(AddressSpace& memory) {
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100BC00;
+  constexpr std::uint32_t capacity = 8;
+  store_be32(memory, ring + 6u * 4u, make_packet_type1(0x60, 0x61));
+  store_be32(memory, ring + 7u * 4u, 0x11112222u);
+  store_be32(memory, ring + 0u * 4u, 0x33334444u);
+  store_be32(memory, ring + 1u * 4u, make_packet_type2());
+
+  const auto capture = graphics.capture_ring(ring, capacity, 6u, 2u);
+  assert(capture.source ==
+         xenon::gpu::FrontendSubmissionCapture::Source::Ring);
+  assert(capture.capacity_dwords == capacity);
+  assert(capture.read_index == 6u);
+  assert(capture.write_index == 2u);
+  assert(capture.resulting_read_index == 2u);
+  assert(capture.final_registers.values[0x60] == 0x11112222u);
+  assert(capture.final_registers.values[0x61] == 0x33334444u);
+  assert(capture.commands.size() == 2u);
+}
+
 void test_truncation_fault(AddressSpace& memory, CommandProcessor& cp) {
   constexpr std::uint32_t base = 0x01008000;
   store_be32(memory, base, make_packet_type0(0x100, 2));
@@ -548,6 +1105,18 @@ int main() {
   test_constants(memory, cp, regs);
   test_type3_predication(memory, cp, regs, stream);
   test_load_constant_context(memory, cp, regs);
+  test_pm4_reg_rmw(memory, cp, regs);
+  test_pm4_reg_to_mem(memory, cp, regs);
+  test_pm4_reg_to_mem_loop(memory, cp, regs);
+  test_pm4_cond_exec(memory, cp, regs);
+  test_pm4_cond_write(memory, cp, regs);
+  test_pm4_wait_reg_mem(memory, cp);
+  test_pm4_compact_register_waits(memory, cp, regs);
+  test_load_alu_constant(memory, cp, regs);
+  test_event_write_and_fences(memory, cp, regs);
+  test_event_extent(memory, cp, regs);
+  test_visibility_queries(memory, cp, regs);
+  test_interrupt_dispatch(memory, cp);
   test_mem_write(memory, cp);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
@@ -555,11 +1124,17 @@ int main() {
   test_dma_draw_ir(memory, cp, regs, stream);
   test_binned_draw_ir(memory, cp, regs, stream);
   test_shader_loads(memory, cp, stream);
+  test_shader_partition_state(memory, cp);
+  test_im_store_round_trip(memory, cp, stream);
+  test_shader_invalidation(memory, cp, stream);
   test_draw_shader_bindings(memory, cp, stream);
   test_immediate_draw_ir(memory, cp, stream);
   test_shader_control_flow_unpack();
   test_edram();
   test_graphics_system_backend(memory);
+  test_frontend_capture_replay(memory);
+  test_portable_capture_round_trip(memory);
+  test_frontend_ring_capture(memory);
   test_truncation_fault(memory, cp);
 
   std::cout << "xenon_gpu_frontend_tests: ok (PM4 + shared memory + graphics IR)\n";

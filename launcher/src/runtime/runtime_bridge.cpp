@@ -73,19 +73,21 @@ QVariantMap RuntimeBridge::capabilities() const {
   QVariantMap result;
   result.insert(QStringLiteral("core"), true);
   result.insert(QStringLiteral("connected"), connected());
-  // These report what is present in this Xenon build. They intentionally do
-  // not imply that Runtime already exposes a live subsystem/service registry.
+  // These report what is present in this Xenon build. Input additionally has
+  // a live launcher feature and a versioned module API; other subsystem service
+  // registries remain future runtime work.
   result.insert(QStringLiteral("memoryCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_MEMORY));
   result.insert(QStringLiteral("graphicsCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_GRAPHICS));
   result.insert(QStringLiteral("audioCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_AUDIO));
-  result.insert(QStringLiteral("inputCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_INPUT));
   result.insert(QStringLiteral("networkCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_NETWORK));
   result.insert(QStringLiteral("vulkanCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_VULKAN));
   result.insert(QStringLiteral("d3d12Compiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_D3D12));
   result.insert(QStringLiteral("memory"), false);
   result.insert(QStringLiteral("graphics"), false);
   result.insert(QStringLiteral("audio"), false);
-  result.insert(QStringLiteral("input"), false);
+  result.insert(QStringLiteral("inputCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_INPUT));
+  result.insert(QStringLiteral("input"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_INPUT));
+  result.insert(QStringLiteral("inputModuleApiVersion"), XENON_LAUNCHER_RUNTIME_INPUT ? 1 : 0);
   result.insert(QStringLiteral("network"), false);
   result.insert(QStringLiteral("sessionLaunch"), false);
   return result;
@@ -104,6 +106,26 @@ ServiceResult RuntimeBridge::prepareLaunch(const LaunchConfiguration& configurat
   if (configuration.module_id.trimmed().isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Game module required"),
                                   QStringLiteral("A compatible Xenon game module must identify the content before it can launch."));
+  }
+
+  const auto input_requirement =
+      configuration.runtime_api_requirements.value(QStringLiteral("input")).toMap();
+  if (!input_requirement.isEmpty() &&
+      input_requirement.value(QStringLiteral("required"), true).toBool()) {
+    const auto requested = input_requirement.value(QStringLiteral("version"), 1).toInt();
+    const auto caps = capabilities();
+    const auto provided = caps.value(QStringLiteral("inputModuleApiVersion"), 0).toInt();
+    if (!caps.value(QStringLiteral("inputCompiled"), false).toBool() || provided <= 0) {
+      return ServiceResult::failure(
+          QStringLiteral("Input API unavailable"),
+          QStringLiteral("This game module requires Xenon Input API v%1, but Input is not compiled into this runtime.").arg(requested));
+    }
+    if (requested <= 0 || requested > provided) {
+      return ServiceResult::failure(
+          QStringLiteral("Input API incompatible"),
+          QStringLiteral("This game module requires Xenon Input API v%1, but this runtime provides v%2.")
+              .arg(requested).arg(provided));
+    }
   }
   return ServiceResult::success(QStringLiteral("Launch configuration ready"),
                                 QStringLiteral("The launcher configuration passed the runtime-bridge validation boundary."),

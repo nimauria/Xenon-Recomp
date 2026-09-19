@@ -8,6 +8,7 @@ Item {
     property string searchText: ""
     property int categoryIndex: 0
     property int settingsRevision: 0
+    property int inputRevision: 0
     property var launcherUpdateState: launcherBridge.launcherUpdateState()
 
     readonly property var categories: launcherBridge.settingsCategories()
@@ -19,6 +20,20 @@ Item {
             || String(category.name).toLowerCase().indexOf(needle) !== -1
             || String(category.keywords).toLowerCase().indexOf(needle) !== -1
     })
+
+    // Keep the primary Settings navigation compact. Individual settings pages
+    // remain backend-owned; this is only a presentation grouping layer.
+    readonly property var categoryGroups: [
+        { id: "general", name: "General", categories: ["general", "system"] },
+        { id: "interface", name: "Interface", categories: ["appearance", "accessibility"] },
+        { id: "library", name: "Library", categories: ["library", "paths"] },
+        { id: "runtime", name: "Runtime", categories: ["runtime", "graphics", "input", "audio", "network", "filesystem"] },
+        { id: "services", name: "Services", categories: ["updates", "community"] },
+        { id: "advanced", name: "Advanced", categories: ["developer", "about"] }
+    ]
+    readonly property var visibleGroups: root.filteredGroups()
+    readonly property string activeGroupId: root.groupIdForPage(root.categoryIndex)
+    readonly property var activeGroupCategories: root.categoriesForGroup(root.activeGroupId)
 
     readonly property var themeEntries: launcherBridge.themeCatalog()
     readonly property var accentEntries: launcherBridge.accentCatalog()
@@ -81,10 +96,115 @@ Item {
         return 0
     }
 
+    function categoryIdForPage(page) {
+        for (var i = 0; i < root.categories.length; ++i)
+            if (Number(root.categories[i].page) === Number(page))
+                return String(root.categories[i].id)
+        return "general"
+    }
+
+    function selectCategoryById(categoryId) {
+        var target = String(categoryId || "")
+        if (target.length === 0) return true
+        for (var i = 0; i < root.categories.length; ++i) {
+            if (String(root.categories[i].id || "") === target) {
+                root.categoryIndex = Number(root.categories[i].page)
+                return true
+            }
+        }
+        return false
+    }
+
+    function groupIdForPage(page) {
+        var categoryId = root.categoryIdForPage(page)
+        for (var i = 0; i < root.categoryGroups.length; ++i) {
+            if (root.categoryGroups[i].categories.indexOf(categoryId) !== -1)
+                return root.categoryGroups[i].id
+        }
+        return root.visibleGroups.length > 0 ? root.visibleGroups[0].id : "general"
+    }
+
+    function filteredGroups() {
+        var result = []
+        for (var g = 0; g < root.categoryGroups.length; ++g) {
+            var group = root.categoryGroups[g]
+            var groupCategories = []
+            for (var c = 0; c < root.visibleCategories.length; ++c) {
+                var category = root.visibleCategories[c]
+                if (group.categories.indexOf(String(category.id)) !== -1)
+                    groupCategories.push(category)
+            }
+            if (groupCategories.length > 0)
+                result.push({ id: group.id, name: group.name, categories: groupCategories })
+        }
+        return result
+    }
+
+    function categoriesForGroup(groupId) {
+        for (var i = 0; i < root.visibleGroups.length; ++i)
+            if (root.visibleGroups[i].id === groupId)
+                return root.visibleGroups[i].categories
+        return []
+    }
+
+    function selectGroup(groupId) {
+        var groupCategories = root.categoriesForGroup(groupId)
+        if (groupCategories.length > 0)
+            root.categoryIndex = groupCategories[0].page
+    }
+
     function getBool(key, fallback) { var r = settingsRevision; return launcherBridge.boolSetting(key, fallback) }
     function getString(key, fallback) { var r = settingsRevision; return launcherBridge.stringSetting(key, fallback) }
     function getNumber(key, fallback) { var r = settingsRevision; return launcherBridge.numberSetting(key, fallback) }
     function save(key, value) { launcherBridge.setSettingValue(key, value) }
+
+    function inputDevices() { var r = inputRevision; return launcherBridge.inputDevices() }
+    function inputUsers() { var r = inputRevision; return launcherBridge.inputUsers() }
+    function inputProfiles() { var r = inputRevision; return launcherBridge.inputProfiles() }
+    function inputDeviceLabels() {
+        var devices = root.inputDevices()
+        var result = ["Unassigned"]
+        for (var i = 0; i < devices.length; ++i)
+            if (devices[i].connected) result.push(String(devices[i].name) + "  •  " + String(devices[i].subtype))
+        return result
+    }
+    function inputDeviceIdentities() {
+        var devices = root.inputDevices()
+        var result = [""]
+        for (var i = 0; i < devices.length; ++i)
+            if (devices[i].connected) result.push(String(devices[i].identityKey))
+        return result
+    }
+    function inputUser(index) {
+        var users = root.inputUsers()
+        return index >= 0 && index < users.length ? users[index] : ({ userIndex: index, sources: [] })
+    }
+    function inputUserDeviceIndex(index) {
+        var identity = String(root.inputUser(index).identityKey || "")
+        var values = root.inputDeviceIdentities()
+        for (var i = 0; i < values.length; ++i) if (values[i] === identity) return i
+        return 0
+    }
+    function inputProfileLabels() {
+        var entries = root.inputProfiles()
+        var result = ["Default"]
+        for (var i = 0; i < entries.length; ++i)
+            if (String(entries[i].id) !== "default") result.push(String(entries[i].name))
+        return result
+    }
+    function inputProfileIds() {
+        var entries = root.inputProfiles()
+        var result = [""]
+        for (var i = 0; i < entries.length; ++i)
+            if (String(entries[i].id) !== "default") result.push(String(entries[i].id))
+        return result
+    }
+    function inputUserProfileIndex(index) {
+        var id = String(root.inputUser(index).profileId || "")
+        var ids = root.inputProfileIds()
+        for (var i = 0; i < ids.length; ++i) if (ids[i] === id) return i
+        return 0
+    }
 
 
     function updateStatusLabel() {
@@ -156,6 +276,7 @@ Item {
         function onCustomAccentColorChanged() { root.settingsRevision += 1 }
         function onCornerStyleChanged() { root.settingsRevision += 1 }
         function onUpdateStateChanged() { root.launcherUpdateState = launcherBridge.launcherUpdateState() }
+        function onInputChanged() { root.inputRevision += 1 }
     }
 
     ColumnLayout {
@@ -171,40 +292,41 @@ Item {
 
         XPanel {
             Layout.fillWidth: true
-            Layout.preferredHeight: Theme.textScale >= 1.5
-                ? Math.max(64, Theme.controlHeight + Theme.spaceLg * 2)
-                : Math.max(56, Theme.controlHeight + Theme.spaceLg)
+            Layout.preferredHeight: Theme.spaceSm * 2 + Theme.controlHeight
+                + (root.activeGroupCategories.length > 1 ? Theme.spaceXs + Theme.controlHeight : 0)
             color: Theme.highContrast ? Theme.surface : Qt.rgba(Theme.surface.r, Theme.surface.g, Theme.surface.b, Theme.panelOpacity)
 
-            StackLayout {
+            ColumnLayout {
                 anchors.fill: parent
                 anchors.margins: Theme.spaceSm
-                currentIndex: Theme.textScale >= 1.5 ? 1 : 0
+                spacing: Theme.spaceXs
 
                 Flickable {
-                    id: categoryStrip
-                    contentWidth: categoryRow.implicitWidth
+                    id: groupStrip
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Theme.controlHeight
+                    contentWidth: groupRow.implicitWidth
                     contentHeight: height
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
 
                     RowLayout {
-                        id: categoryRow
+                        id: groupRow
                         height: parent.height
                         spacing: Theme.spaceXs
 
                         Repeater {
-                            model: root.visibleCategories
+                            model: root.visibleGroups
                             delegate: XButton {
                                 required property var modelData
                                 text: modelData.name
-                                variant: root.categoryIndex === modelData.page ? "primary" : "ghost"
-                                onClicked: root.categoryIndex = modelData.page
+                                variant: root.activeGroupId === modelData.id ? "primary" : "ghost"
+                                onClicked: root.selectGroup(modelData.id)
                             }
                         }
 
                         Text {
-                            visible: root.visibleCategories.length === 0
+                            visible: root.visibleGroups.length === 0
                             text: "No settings categories match this search."
                             color: Theme.textMuted
                             font.pixelSize: Theme.typeCaption
@@ -213,13 +335,30 @@ Item {
                     }
                 }
 
-                XComboBox {
+                Flickable {
+                    id: subcategoryStrip
+                    visible: root.activeGroupCategories.length > 1
                     Layout.fillWidth: true
-                    model: root.visibleCategories.map(function(category) { return category.name })
-                    currentIndex: root.categoryVisibleIndex(root.categoryIndex)
-                    onActivated: function(index) {
-                        if (index >= 0 && index < root.visibleCategories.length)
-                            root.categoryIndex = root.visibleCategories[index].page
+                    Layout.preferredHeight: visible ? Theme.controlHeight : 0
+                    contentWidth: subcategoryRow.implicitWidth
+                    contentHeight: height
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+
+                    RowLayout {
+                        id: subcategoryRow
+                        height: parent.height
+                        spacing: Theme.spaceXs
+
+                        Repeater {
+                            model: root.activeGroupCategories
+                            delegate: XButton {
+                                required property var modelData
+                                text: modelData.name
+                                variant: root.categoryIndex === modelData.page ? "primary" : "ghost"
+                                onClicked: root.categoryIndex = modelData.page
+                            }
+                        }
                     }
                 }
             }
@@ -553,31 +692,137 @@ Item {
 
                 XSettingsPage {
                     title: "Input"
-                    description: "Launcher-side input preferences are ready now; live device enumeration and mappings remain owned by Xenon Input."
+                    description: "Xenon Input is connected directly to the launcher. Configure live controllers, Xbox user routing, profiles, HOTAS/multi-source input and module API defaults here."
                     XSettingsCard {
                         title: "Input service"
-                        description: "Shows whether this build contains and exposes the live input subsystem."
-                        StatusPill { label: root.runtimeServiceLabel("input"); tone: root.runtimeServiceTone("input") }
+                        description: launcherBridge.inputStatus()
+                        RowLayout {
+                            Layout.fillWidth: true
+                            StatusPill { label: launcherBridge.inputAvailable() ? "Connected" : "Unavailable"; tone: launcherBridge.inputAvailable() ? Theme.success : Theme.warning }
+                            Item { Layout.fillWidth: true }
+                            Text { text: "Module API v" + String(launcherBridge.inputModuleApiInfo().version || 0); color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                            XButton { text: "Refresh Devices"; onClicked: launcherBridge.refreshInputDevices() }
+                        }
                     }
                     XSettingsCard {
-                        title: "Preferred device"
-                        description: "Default device family requested when a game profile does not override input selection."
+                        title: "Host input backend"
+                        description: "Automatic prefers native XInput on Windows and falls back to SDL. SDL remains the portable path for PlayStation, Nintendo, generic controllers and Linux."
                         XComboBox {
                             Layout.fillWidth: true
-                            model: root.optionLabels("input/preferredDevice")
-                            currentIndex: root.optionIndex("input/preferredDevice")
-                            onActivated: function(index) { root.saveOption("input/preferredDevice", index) }
+                            model: root.optionLabels("input/backend")
+                            currentIndex: root.optionIndex("input/backend")
+                            onActivated: function(index) { root.saveOption("input/backend", index) }
                         }
+                    }
+                    XSettingsCard {
+                        title: "Connected devices"
+                        description: "Stable Xenon identities survive normal reconnects; native SDL/XInput instance IDs are not persisted."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Repeater {
+                                model: root.inputDevices()
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    spacing: Theme.spaceSm
+                                    StatusPill { label: modelData.connected ? "Connected" : "Offline"; tone: modelData.connected ? Theme.success : Theme.textMuted }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 1
+                                        Text { Layout.fillWidth: true; text: String(modelData.name); color: Theme.textPrimary; font.pixelSize: Theme.typeBody; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; text: String(modelData.subtype) + " • " + String(modelData.connection) + " • " + String(modelData.driver); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
+                                    }
+                                    Text { visible: Number(modelData.batteryPercent) >= 0; text: String(modelData.batteryPercent) + "%"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                }
+                            }
+                            Text { visible: root.inputDevices().length === 0; text: "No controller backend currently reports a connected device."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Xbox user routing"
+                        description: "Assign a primary device and optional extra input sources to each Xbox user. Multiple sources merge buttons/triggers/sticks through Xenon Input."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceMd
+                            Repeater {
+                                model: 4
+                                delegate: ColumnLayout {
+                                    required property int index
+                                    property int xboxUserIndex: index
+                                    Layout.fillWidth: true
+                                    spacing: Theme.spaceXs
+                                    property var userInfo: root.inputUser(index)
+                                    Text { text: "Xbox User " + String(index + 1); color: Theme.textPrimary; font.pixelSize: Theme.typeBody; font.bold: true }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        XComboBox {
+                                            Layout.fillWidth: true
+                                            model: root.inputDeviceLabels()
+                                            currentIndex: root.inputUserDeviceIndex(index)
+                                            onActivated: function(deviceIndex) {
+                                                var ids = root.inputDeviceIdentities()
+                                                if (deviceIndex <= 0) launcherBridge.clearInputDevice(index)
+                                                else launcherBridge.assignInputDevice(index, ids[deviceIndex])
+                                            }
+                                        }
+                                        XButton { text: "Rumble"; enabled: String(userInfo.identityKey || "").length > 0; onClicked: launcherBridge.testInputVibration(index) }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text { text: "Profile"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                        XComboBox {
+                                            Layout.fillWidth: true
+                                            model: root.inputProfileLabels()
+                                            currentIndex: root.inputUserProfileIndex(index)
+                                            onActivated: function(profileIndex) {
+                                                var ids = root.inputProfileIds()
+                                                if (profileIndex <= 0) launcherBridge.clearInputProfile(index)
+                                                else launcherBridge.bindInputProfile(index, ids[profileIndex])
+                                            }
+                                        }
+                                    }
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        visible: root.inputDevices().length > 1
+                                        Text { text: "Add source"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                                        XComboBox { id: extraSource; Layout.fillWidth: true; model: root.inputDeviceLabels(); currentIndex: 0 }
+                                        XButton {
+                                            text: "Add"
+                                            enabled: extraSource.currentIndex > 0
+                                            onClicked: { var ids = root.inputDeviceIdentities(); launcherBridge.addInputSource(index, ids[extraSource.currentIndex]); extraSource.currentIndex = 0 }
+                                        }
+                                    }
+                                    Flow {
+                                        Layout.fillWidth: true
+                                        spacing: Theme.spaceXs
+                                        Repeater {
+                                            model: userInfo.sources || []
+                                            delegate: XButton {
+                                                required property var modelData
+                                                text: String(modelData.name) + (index === 0 ? " (Primary)" : " ×")
+                                                variant: "ghost"
+                                                onClicked: { if (index > 0) launcherBridge.removeInputSource(xboxUserIndex, String(modelData.identityKey)) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Preferred device family"
+                        description: "Default device family requested when a game profile does not override input selection."
+                        XComboBox { Layout.fillWidth: true; model: root.optionLabels("input/preferredDevice"); currentIndex: root.optionIndex("input/preferredDevice"); onActivated: function(index) { root.saveOption("input/preferredDevice", index) } }
+                    }
+                    XSettingsCard {
+                        title: "Background input"
+                        description: "Allow active game input while the Xenon window is not focused. Vibration is stopped automatically when effective input becomes inactive."
+                        XSwitch { checked: root.getBool("input/backgroundInput", false); onUserToggled: function(value) { root.save("input/backgroundInput", value) } }
                     }
                     XSettingsCard {
                         title: "Controller deadzone"
-                        description: "Default stick deadzone passed to Xenon Input once live device profiles are available."
-                        XComboBox {
-                            Layout.fillWidth: true
-                            model: root.optionLabels("input/deadzone")
-                            currentIndex: root.optionIndex("input/deadzone")
-                            onActivated: function(index) { root.saveOption("input/deadzone", index) }
-                        }
+                        description: "Default stick inner deadzone for the shared Xenon Input profile."
+                        XComboBox { Layout.fillWidth: true; model: root.optionLabels("input/deadzone"); currentIndex: root.optionIndex("input/deadzone"); onActivated: function(index) { root.saveOption("input/deadzone", index) } }
                     }
                     XSettingsCard {
                         title: "Controller rumble"
@@ -585,8 +830,18 @@ Item {
                         XSwitch { checked: root.getBool("input/rumble", true); onUserToggled: function(value) { root.save("input/rumble", value) } }
                     }
                     XSettingsCard {
+                        title: "Game-module Input API"
+                        description: "Future game modules such as Project Gracemeria can declare runtimeApis.input version 1 and consume the stable Xenon Input function table without depending on launcher or private InputSystem classes."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Text { text: "Header: " + String(launcherBridge.inputModuleApiInfo().header || ""); color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption }
+                            Text { text: "CMake target: " + String(launcherBridge.inputModuleApiInfo().cmakeTarget || ""); color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption }
+                            Text { text: "Profiles: " + launcherBridge.inputProfileStorePath(); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
+                        }
+                    }
+                    XSettingsCard {
                         title: "Reset input preferences"
-                        description: "Restore launcher-side input defaults without deleting future per-device mappings."
+                        description: "Restore Input defaults. Stable device/profile data remains in the Input profile store unless explicitly replaced."
                         XButton { Layout.fillWidth: true; text: "Reset Input"; onClicked: launcherBridge.resetSettingsCategory("input") }
                     }
                 }
@@ -639,6 +894,9 @@ Item {
                         description: "Online identity, matchmaking and service-replacement controls remain runtime-owned."
                         StatusPill { label: root.runtimeServiceLabel("network"); tone: root.runtimeServiceTone("network") }
                     }
+                }
+
+                FilesystemPage {
                 }
 
                 XSettingsPage {
@@ -765,10 +1023,10 @@ Item {
                         XSwitch { checked: root.getBool("updates/modulePrerelease", false); onUserToggled: function(value) { root.save("updates/modulePrerelease", value) } }
                     }
                     XSettingsCard {
-                        title: "Official module catalog"
-                        description: "Xenon discovers public module repositories and releases through the built-in catalog service. Commercial game files, updates and DLC are never distributed by the catalog."
+                        title: "Xenon Modules registry"
+                        description: "Xenon discovers public module repositories through the official Xenon-Modules registry, then resolves packages from each module’s own GitHub Releases. Commercial game files, updates and DLC are never distributed by the registry."
                         actionWidth: 250
-                        XButton { Layout.fillWidth: true; text: "Refresh catalog"; onClicked: launcherBridge.requestModuleCatalogRefresh() }
+                        XButton { Layout.fillWidth: true; text: "Refresh registry"; onClicked: launcherBridge.requestModuleCatalogRefresh() }
                     }
                     XSettingsCard {
                         title: "Reset update preferences"
@@ -971,6 +1229,10 @@ Item {
                                         launcherBridge.notify("Diagnostics copied", "Developer diagnostics were copied to the clipboard.")
                                     }
                                 }
+                                XButton {
+                                    text: "Open logs"
+                                    onClicked: launcherBridge.openFolder(launcherBridge.diagnosticsDirectory())
+                                }
                             }
                         }
                     }
@@ -1026,9 +1288,171 @@ Item {
                         }
                     }
                     XSettingsCard {
+                        title: "Startup & recovery"
+                        description: launcherBridge.safeMode
+                            ? "Safe Mode is active. Production launcher state, runtime services and automatic update checks are not loaded in this session."
+                            : (Boolean(launcherBridge.recoveryState.previousUncleanShutdown)
+                               ? "Xenon preserved recovery information from a previous unclean shutdown."
+                               : "Xenon records clean shutdowns and preserves the previous startup log if a launcher process ends unexpectedly.")
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            StatusPill {
+                                label: launcherBridge.safeMode ? "Safe Mode" : "Normal mode"
+                                tone: launcherBridge.safeMode ? Theme.warning : Theme.success
+                            }
+                            Item { Layout.fillWidth: true }
+                            XButton {
+                                text: "Open Recovery Folder"
+                                onClicked: launcherBridge.openFolder(launcherBridge.recoveryDirectory())
+                            }
+                            XButton {
+                                visible: !launcherBridge.safeMode
+                                text: "Restart in Safe Mode"
+                                onClicked: launcherBridge.restartInSafeMode()
+                            }
+                            XButton {
+                                visible: launcherBridge.safeMode
+                                text: "Restart Normally"
+                                variant: "primary"
+                                onClicked: launcherBridge.restartNormally()
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            visible: String(launcherBridge.recoveryState.lastIncidentAt || "").length > 0
+                            text: "Last incident: " + String(launcherBridge.recoveryState.lastIncidentAt || "Unknown")
+                                + " • phase: " + String(launcherBridge.recoveryState.previousPhase || "Unknown")
+                            color: Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: Theme.typeCaption
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Support & diagnostics"
+                        description: "Create a privacy-sanitized ZIP for a GitHub issue or Discord support post. Local game/save/module/profile paths and profile names are omitted; known private paths are redacted from included log excerpts."
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            XButton {
+                                Layout.fillWidth: true
+                                text: "Create Support Bundle"
+                                variant: "primary"
+                                onClicked: {
+                                    var path = launcherBridge.createSupportBundle()
+                                    if (String(path).length > 0) launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
+                                }
+                            }
+                            XButton {
+                                Layout.fillWidth: true
+                                text: "Open Support Folder"
+                                onClicked: launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
+                            }
+                            XButton {
+                                Layout.fillWidth: true
+                                text: "Open Logs"
+                                onClicked: launcherBridge.openFolder(launcherBridge.diagnosticsDirectory())
+                            }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: "Review a support bundle before posting it publicly. Third-party modules can write arbitrary diagnostic text to shared logs."
+                            color: Theme.textMuted
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: Theme.typeCaption
+                        }
+                    }
+                    XSettingsCard {
                         title: "Reset all launcher settings"
                         description: "Restore all registered preferences and launcher-wide paths. Game library entries, profiles and installed modules are not deleted."
                         XButton { Layout.fillWidth: true; text: "Reset All Settings"; variant: "danger"; onClicked: resetAllConfirm.open() }
+                    }
+                }
+
+                XSettingsPage {
+                    title: "Window & System"
+                    description: "Desktop integration, launch behaviour and window persistence. These controls are launcher-only and do not depend on the Xenon runtime."
+
+                    XSettingsCard {
+                        title: "Single launcher instance"
+                        description: "Opening Xenon again forwards navigation or xenon:// links to the existing process instead of creating a second launcher and competing for the same state."
+                        StatusPill { label: "Enabled"; tone: Theme.success }
+                    }
+
+                    XSettingsCard {
+                        title: "Remember window size and position"
+                        description: "Restore the last normal window geometry when Xenon starts. Off-screen saved positions are automatically recovered onto an available display."
+                        XSwitch { checked: root.getBool("system/rememberWindowGeometry", true); onUserToggled: function(value) { root.save("system/rememberWindowGeometry", value) } }
+                    }
+
+                    XSettingsCard {
+                        visible: root.getBool("system/rememberWindowGeometry", true)
+                        title: "Restore maximized state"
+                        description: "Reopen maximized when the previous normal launcher session ended maximized."
+                        XSwitch { checked: root.getBool("system/restoreMaximized", true); onUserToggled: function(value) { root.save("system/restoreMaximized", value) } }
+                    }
+
+                    XSettingsCard {
+                        title: "Start minimized"
+                        description: "Open Xenon on the taskbar without taking foreground focus. Safe Mode always opens visibly so recovery controls cannot be hidden."
+                        XSwitch { checked: root.getBool("system/startMinimized", false); onUserToggled: function(value) { root.save("system/startMinimized", value) } }
+                    }
+
+                    XSettingsCard {
+                        title: "Xenon links"
+                        description: Boolean(launcherBridge.systemIntegrationState.urlProtocolSupported)
+                            ? (Boolean(launcherBridge.systemIntegrationState.urlProtocolRegistered)
+                               ? "Windows currently opens xenon:// links with this Xenon Launcher executable."
+                               : "Register Xenon as the current-user handler for xenon:// links. This does not require administrator access.")
+                            : "Automatic xenon:// protocol registration is not available on this platform yet."
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            StatusPill {
+                                label: !Boolean(launcherBridge.systemIntegrationState.urlProtocolSupported) ? "Unavailable"
+                                     : (Boolean(launcherBridge.systemIntegrationState.urlProtocolRegistered) ? "Registered" : "Not registered")
+                                tone: Boolean(launcherBridge.systemIntegrationState.urlProtocolRegistered) ? Theme.success : Theme.textMuted
+                            }
+                            Item { Layout.fillWidth: true }
+                            XButton {
+                                visible: Boolean(launcherBridge.systemIntegrationState.urlProtocolSupported) && !Boolean(launcherBridge.systemIntegrationState.urlProtocolRegistered)
+                                text: "Register xenon://"
+                                variant: "primary"
+                                onClicked: launcherBridge.setUrlProtocolRegistered(true)
+                            }
+                            XButton {
+                                visible: Boolean(launcherBridge.systemIntegrationState.urlProtocolRegistered)
+                                text: "Remove Handler"
+                                onClicked: launcherBridge.setUrlProtocolRegistered(false)
+                            }
+                        }
+                    }
+
+                    XPanel {
+                        Layout.fillWidth: true
+                        implicitHeight: systemLinksColumn.implicitHeight + Theme.spaceLg * 2
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+                        ColumnLayout {
+                            id: systemLinksColumn
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: Theme.spaceLg
+                            spacing: Theme.spaceXs
+                            Text { text: "Supported launcher routes"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
+                            Text { Layout.fillWidth: true; text: "xenon://home  •  xenon://library  •  xenon://modules/catalog  •  xenon://settings/updates"; color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption; wrapMode: Text.WrapAnywhere }
+                            Text { Layout.fillWidth: true; text: "Game, module and profile routes can also carry their stable ID. A link launched while Xenon is already running is forwarded to that process and brings its window to the foreground."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WordWrap }
+                        }
+                    }
+
+                    XSettingsCard {
+                        title: "Reset window layout"
+                        description: "Forget the stored position, size and maximized state without resetting other launcher settings."
+                        XButton { Layout.fillWidth: true; text: "Reset Window Layout"; onClicked: launcherBridge.resetWindowState() }
+                    }
+
+                    XSettingsCard {
+                        title: "Reset system settings"
+                        description: "Restore launcher desktop-integration preferences and forget saved window geometry. The xenon:// Windows registration is left alone unless you remove it explicitly."
+                        XButton { Layout.fillWidth: true; text: "Reset System"; onClicked: launcherBridge.resetSettingsCategory("system") }
                     }
                 }
             }

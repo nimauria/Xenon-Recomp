@@ -15,6 +15,10 @@ Item {
     property string pendingDisableModuleId: ""
     property string pendingDisableModuleName: ""
     property int pendingDisableLinkedGames: 0
+    property string pendingRollbackModuleId: ""
+    property string pendingRollbackModuleName: ""
+    property string pendingRollbackVersion: ""
+    property var selectedUpdateHistory: []
     property string fixtureMode: launcherBridge.stringSetting(
         "developer/fixtureMode", launcherBridge.testMode ? "generic" : "none")
 
@@ -35,7 +39,9 @@ Item {
             availableVersion: "", impactMessage: "", downloadProgress: 0.0,
             canDownloadUpdate: false, canInstallUpdate: false, path: "",
             releaseUrl: "", releaseName: "", releaseNotes: "", publishedAt: "",
-            assetName: "", assetSize: 0
+            assetName: "", assetSize: 0, registryEntryUrl: "",
+            downloadedBytes: 0, downloadTotalBytes: 0, stagedAt: "", verifiedDigest: "",
+            rollbackAvailable: false, rollbackVersion: "", rollbackCreatedAt: ""
         }
     }
 
@@ -43,6 +49,31 @@ Item {
         if (!hasModules || selectedModuleIndex < 0 || selectedModuleIndex >= modulesModel.count)
             return emptyModule()
         return modulesModel.get(selectedModuleIndex)
+    }
+
+    function reloadUpdateHistory() {
+        if (selectedModuleId.length === 0) {
+            selectedUpdateHistory = []
+            return
+        }
+        selectedUpdateHistory = launcherBridge.moduleUpdateHistory(selectedModuleId)
+    }
+
+    function formatBytes(value) {
+        var bytes = Number(value || 0)
+        if (bytes <= 0) return "0 B"
+        if (bytes < 1024) return Math.round(bytes) + " B"
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB"
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MiB"
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB"
+    }
+
+    function historyVersion(entry) {
+        var fromVersion = String(entry.fromVersion || "")
+        var toVersion = String(entry.toVersion || "")
+        if (fromVersion.length > 0 && toVersion.length > 0 && fromVersion !== toVersion)
+            return fromVersion + " → " + toVersion
+        return toVersion.length > 0 ? toVersion : (fromVersion.length > 0 ? fromVersion : "")
     }
 
     function indexForModuleId(moduleId) {
@@ -81,6 +112,18 @@ Item {
     }
 
     onSearchTextChanged: selectFirstMatchingModule()
+    onSelectedModuleIdChanged: reloadUpdateHistory()
+
+    function updateActionLabel(module) {
+        var status = String(module.updateStatus || "idle")
+        if (status === "checking") return "Checking…"
+        if (status === "downloading") return "Downloading…"
+        if (status === "installing") return "Installing…"
+        if (status === "rolling-back") return "Rolling Back…"
+        if (module.canInstallUpdate) return "Install Update"
+        if (module.canDownloadUpdate) return "Download Update"
+        return "Check for Updates"
+    }
 
     function settingsForModule(moduleId) {
         return launcherBridge.moduleSettingsSchema(moduleId)
@@ -109,6 +152,22 @@ Item {
             return
         selectedModuleIndex = index
         selectedModuleId = String(modulesModel.get(index).moduleId)
+    }
+
+    function selectModuleById(moduleId) {
+        var target = String(moduleId || "")
+        if (target.length === 0) return false
+        for (var i = 0; i < modulesModel.count; ++i) {
+            if (String(modulesModel.get(i).moduleId || "") === target) {
+                selectIndex(i)
+                return true
+            }
+        }
+        return false
+    }
+
+    function openCatalog() {
+        catalogDialog.open()
     }
 
     function openSettingsFor(moduleId) {
@@ -151,7 +210,12 @@ Item {
             launcherBridge.requestModuleUpdateDownload(moduleId)
         else if (actionId === "installUpdate")
             launcherBridge.requestModuleUpdateInstall(moduleId)
-        else if (actionId === "verify")
+        else if (actionId === "rollbackUpdate") {
+            pendingRollbackModuleId = moduleId
+            pendingRollbackModuleName = String(module.moduleName || moduleId)
+            pendingRollbackVersion = String(module.rollbackVersion || "previous version")
+            rollbackModuleConfirm.open()
+        } else if (actionId === "verify")
             launcherBridge.verifyModule(moduleId)
         else if (actionId === "openFolder")
             launcherBridge.openFolder(launcherBridge.modulePath(moduleId))
@@ -219,6 +283,10 @@ Item {
         }
         function onModulesChanged() { root.populateBackendModules() }
         function onModuleUpdateStateChanged(moduleId) { root.populateBackendModules() }
+        function onModuleUpdateHistoryChanged(moduleId) {
+            if (String(moduleId || "") === root.selectedModuleId || String(moduleId || "").length === 0)
+                root.reloadUpdateHistory()
+        }
         function onModuleCatalogChanged() { root.populateBackendModules() }
     }
 
@@ -226,32 +294,10 @@ Item {
         anchors.fill: parent
         spacing: Theme.spaceMd
 
-        RowLayout {
+        XSectionHeader {
             Layout.fillWidth: true
-            spacing: Theme.spaceMd
-
-            XSectionHeader {
-                Layout.fillWidth: true
-                title: "Modules"
-                description: "Install, configure and update game-specific Xenon modules without coupling games to the runtime."
-            }
-
-            XIconButton {
-                id: pageActionsButton
-                iconName: "more"
-                tooltip: "Module page actions"
-                variant: "filled"
-                onClicked: pageActionsMenu.open()
-
-                XActionMenu {
-                    id: pageActionsMenu
-                    x: pageActionsButton.width - width
-                    y: pageActionsButton.height + Theme.spaceXs
-                    menuWidth: 280
-                    actions: launcherBridge.modulePageActions()
-                    onActionTriggered: function(actionId) { root.performPageAction(actionId) }
-                }
-            }
+            title: "Modules"
+            description: "Install, configure and update game-specific Xenon modules without coupling games to the runtime."
         }
 
         RowLayout {
@@ -278,6 +324,24 @@ Item {
                 text: "Browse Catalog"
                 variant: "primary"
                 onClicked: catalogDialog.open()
+            }
+            XIconButton {
+                id: pageActionsButton
+                iconName: "more"
+                tooltip: "More module actions"
+                variant: "filled"
+                onClicked: pageActionsMenu.visible ? pageActionsMenu.close() : pageActionsMenu.open()
+
+                XActionMenu {
+                    id: pageActionsMenu
+                    parent: pageActionsButton
+                    x: pageActionsButton.width - width
+                    y: pageActionsButton.height + Theme.spaceXs
+                    menuWidth: 280
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+                    actions: launcherBridge.modulePageActions()
+                    onActionTriggered: function(actionId) { root.performPageAction(actionId) }
+                }
             }
         }
 
@@ -324,7 +388,7 @@ Item {
                         EmptyState {
                             glyph: "◇"
                             title: "No modules installed"
-                            description: "Browse the GitHub-backed Xenon module catalog or import a local module package."
+                            description: "Browse the official Xenon Modules registry or import a local module package."
                             primaryText: "Browse Modules"
                             secondaryText: "Import Local Module"
                             onPrimaryClicked: catalogDialog.open()
@@ -576,11 +640,12 @@ Item {
                                             onClicked: root.openSettingsFor(root.selectedModule().moduleId)
                                         }
                                         XButton {
-                                            text: root.selectedModule().canInstallUpdate ? "Install Update"
-                                                : root.selectedModule().canDownloadUpdate ? "Download Update"
-                                                : "Check for Updates"
+                                            text: root.updateActionLabel(root.selectedModule())
                                             variant: root.selectedModule().canInstallUpdate || root.selectedModule().canDownloadUpdate ? "primary" : "default"
-                                            enabled: root.selectedModule().updateStatus !== "checking" && root.selectedModule().updateStatus !== "downloading"
+                                            enabled: root.selectedModule().updateStatus !== "checking"
+                                                && root.selectedModule().updateStatus !== "downloading"
+                                                && root.selectedModule().updateStatus !== "installing"
+                                                && root.selectedModule().updateStatus !== "rolling-back"
                                             onClicked: {
                                                 if (root.selectedModule().canInstallUpdate)
                                                     launcherBridge.requestModuleUpdateInstall(root.selectedModule().moduleId)
@@ -588,6 +653,22 @@ Item {
                                                     launcherBridge.requestModuleUpdateDownload(root.selectedModule().moduleId)
                                                 else
                                                     launcherBridge.requestModuleUpdateCheck(root.selectedModule().moduleId)
+                                            }
+                                        }
+                                        XButton {
+                                            visible: Boolean(root.selectedModule().rollbackAvailable)
+                                            text: String(root.selectedModule().rollbackVersion || "").length > 0
+                                                ? "Roll Back to " + root.selectedModule().rollbackVersion
+                                                : "Roll Back"
+                                            enabled: root.selectedModule().updateStatus !== "checking"
+                                                && root.selectedModule().updateStatus !== "downloading"
+                                                && root.selectedModule().updateStatus !== "installing"
+                                                && root.selectedModule().updateStatus !== "rolling-back"
+                                            onClicked: {
+                                                root.pendingRollbackModuleId = root.selectedModule().moduleId
+                                                root.pendingRollbackModuleName = root.selectedModule().moduleName
+                                                root.pendingRollbackVersion = String(root.selectedModule().rollbackVersion || "previous version")
+                                                rollbackModuleConfirm.open()
                                             }
                                         }
                                         XButton {
@@ -661,16 +742,21 @@ Item {
                                         }
                                         StatusPill {
                                             label: root.selectedModule().updateStatus === "update-available" ? "UPDATE AVAILABLE"
-                                                 : root.selectedModule().updateStatus === "ready-to-install" ? "READY"
+                                                 : root.selectedModule().updateStatus === "ready-to-install" ? "VERIFIED / READY"
                                                  : root.selectedModule().updateStatus === "up-to-date" ? "CURRENT"
+                                                 : root.selectedModule().updateStatus === "rolling-back" ? "ROLLING BACK"
+                                                 : root.selectedModule().updateStatus === "rolled-back" ? "ROLLED BACK"
+                                                 : root.selectedModule().updateStatus === "installing" ? "INSTALLING"
                                                  : String(root.selectedModule().updateStatus || "IDLE").toUpperCase()
                                             tone: root.selectedModule().updateAvailable ? Theme.warning
-                                                : root.selectedModule().updateStatus === "up-to-date" ? Theme.success : Theme.textMuted
+                                                : root.selectedModule().updateStatus === "up-to-date"
+                                                   || root.selectedModule().updateStatus === "rolled-back" ? Theme.success
+                                                : root.selectedModule().updateStatus === "error" ? Theme.danger : Theme.textMuted
                                         }
                                     }
                                     Text {
                                         Layout.fillWidth: true
-                                        text: root.selectedModule().updateMessage || "Use the official catalog entry to check this module's GitHub Releases."
+                                        text: root.selectedModule().updateMessage || "Use the official Xenon Modules registry entry to check this module's GitHub Releases."
                                         color: Theme.textMuted
                                         wrapMode: Text.WordWrap
                                         font.pixelSize: Theme.typeCaption
@@ -684,11 +770,111 @@ Item {
                                         label: "Available"
                                         value: root.selectedModule().availableVersion
                                     }
+                                    XInfoRow {
+                                        visible: Boolean(root.selectedModule().rollbackAvailable)
+                                        label: "Rollback retained"
+                                        value: String(root.selectedModule().rollbackVersion || "Previous version")
+                                    }
+                                    XInfoRow {
+                                        visible: root.selectedModule().updateStatus === "ready-to-install"
+                                        label: "Package verification"
+                                        value: "SHA-256 verified"
+                                    }
                                     ProgressBar {
                                         visible: root.selectedModule().updateStatus === "downloading"
                                         Layout.fillWidth: true
                                         from: 0; to: 1
                                         value: Number(root.selectedModule().downloadProgress || 0)
+                                    }
+                                    Text {
+                                        visible: root.selectedModule().updateStatus === "downloading"
+                                        Layout.fillWidth: true
+                                        text: root.formatBytes(root.selectedModule().downloadedBytes)
+                                            + (Number(root.selectedModule().downloadTotalBytes || 0) > 0
+                                               ? " / " + root.formatBytes(root.selectedModule().downloadTotalBytes)
+                                                 + " • " + Math.round(Number(root.selectedModule().downloadProgress || 0) * 100) + "%"
+                                               : "")
+                                        color: Theme.textMuted
+                                        font.pixelSize: Theme.typeCaption
+                                    }
+                                }
+                            }
+
+                            XPanel {
+                                Layout.fillWidth: true
+                                implicitHeight: updateHistoryColumn.implicitHeight + Theme.spaceLg * 2
+
+                                ColumnLayout {
+                                    id: updateHistoryColumn
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.top: parent.top
+                                    anchors.margins: Theme.spaceLg
+                                    spacing: Theme.spaceSm
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: "Update history"
+                                            color: Theme.text
+                                            font.pixelSize: Theme.typeBodyLarge
+                                            font.weight: Font.DemiBold
+                                        }
+                                        XButton {
+                                            visible: root.selectedUpdateHistory.length > 0
+                                            text: "Clear History"
+                                            variant: "ghost"
+                                            onClicked: launcherBridge.clearModuleUpdateHistory(root.selectedModule().moduleId)
+                                        }
+                                    }
+                                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+                                    Text {
+                                        visible: root.selectedUpdateHistory.length === 0
+                                        Layout.fillWidth: true
+                                        text: "No persistent update events have been recorded for this module yet."
+                                        color: Theme.textMuted
+                                        font.pixelSize: Theme.typeCaption
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    Repeater {
+                                        model: root.selectedUpdateHistory.slice(0, 5)
+                                        delegate: RowLayout {
+                                            required property var modelData
+                                            Layout.fillWidth: true
+                                            spacing: Theme.spaceSm
+                                            StatusPill {
+                                                label: String(modelData.outcome || "unknown").toUpperCase()
+                                                tone: String(modelData.outcome || "") === "success" ? Theme.success
+                                                    : String(modelData.outcome || "") === "failure" ? Theme.danger
+                                                    : Theme.warning
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: String(modelData.action || "update")
+                                                        + (root.historyVersion(modelData).length > 0 ? " • " + root.historyVersion(modelData) : "")
+                                                    color: Theme.text
+                                                    font.pixelSize: Theme.typeCaption
+                                                    font.weight: Font.DemiBold
+                                                    elide: Text.ElideRight
+                                                }
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: String(modelData.message || "")
+                                                    color: Theme.textMuted
+                                                    font.pixelSize: Theme.typeCaption
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                            Text {
+                                                text: String(modelData.timestamp || "").replace("T", " ").replace("Z", "")
+                                                color: Theme.textMuted
+                                                font.pixelSize: Theme.typeCaption
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -733,15 +919,20 @@ Item {
                                         spacing: Theme.spaceSm
                                         Text { text: "Catalog & source"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
                                         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
-                                        XInfoRow { label: "Official catalog"; value: root.selectedModule().catalogKnown ? "Listed" : "Not listed" }
+                                        XInfoRow { label: "Xenon Modules registry"; value: root.selectedModule().catalogKnown ? "Listed" : "Not listed" }
                                         XInfoRow { label: "Publisher"; value: root.selectedModule().publisher || "Module-defined" }
                                         XInfoRow { label: "License"; value: root.selectedModule().license || "Module-defined" }
-                                        XInfoRow { label: "Package trust"; value: root.selectedModule().catalogVerified ? "Official catalog + GitHub SHA-256" : "Local / unmanaged" }
+                                        XInfoRow { label: "Package trust"; value: root.selectedModule().catalogVerified ? "Verified publisher + GitHub SHA-256" : root.selectedModule().catalogKnown ? "Registry listed" : "Local / unmanaged" }
                                         XInfoRow { label: "Repository"; value: root.selectedModule().repositoryUrl || "Not declared" }
                                         XButton {
                                             visible: String(root.selectedModule().repositoryUrl || "").length > 0
                                             text: "Open Repository"
                                             onClicked: launcherBridge.openExternalUrl(root.selectedModule().repositoryUrl)
+                                        }
+                                        XButton {
+                                            visible: String(root.selectedModule().registryEntryUrl || "").length > 0
+                                            text: "View Registry Entry"
+                                            onClicked: launcherBridge.openExternalUrl(root.selectedModule().registryEntryUrl)
                                         }
                                     }
                                 }
@@ -835,6 +1026,20 @@ Item {
             root.pendingDisableModuleId = ""
             root.pendingDisableModuleName = ""
             root.pendingDisableLinkedGames = 0
+        }
+    }
+
+    XConfirmDialog {
+        id: rollbackModuleConfirm
+        title: "Roll back “" + root.pendingRollbackModuleName + "”?"
+        message: "Restore the retained module snapshot for version " + root.pendingRollbackVersion
+               + "? Xenon will keep the currently installed version as a rollback snapshot where possible."
+        confirmText: "Roll Back"
+        onConfirmed: {
+            launcherBridge.requestModuleRollback(root.pendingRollbackModuleId)
+            root.pendingRollbackModuleId = ""
+            root.pendingRollbackModuleName = ""
+            root.pendingRollbackVersion = ""
         }
     }
 

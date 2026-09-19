@@ -149,36 +149,96 @@ bool guest_path_is_absolute(std::string_view path) noexcept {
 
 bool guest_wildcard_match(std::string_view pattern,
                           std::string_view value) noexcept {
-  std::size_t pattern_index = 0;
-  std::size_t value_index = 0;
-  std::size_t star_index = std::string_view::npos;
-  std::size_t star_value = 0;
+  // Xbox directory queries ultimately inherit NT/DOS wildcard behavior. In
+  // addition to '*' and '?', NT may pass DOS_STAR ('<'), DOS_QM ('>') and
+  // DOS_DOT ('"') tokens after expression translation. Keep the matcher
+  // host-neutral so Linux and Windows enumerate the same guest names.
+  if (pattern.empty()) pattern = "*";
+  if (pattern == "*" || pattern == "*.*") return true;
 
-  while (value_index < value.size()) {
-    if (pattern_index < pattern.size() &&
-        (pattern[pattern_index] == '?' ||
-         ascii_lower(pattern[pattern_index]) == ascii_lower(value[value_index]))) {
-      ++pattern_index;
-      ++value_index;
-      continue;
-    }
-    if (pattern_index < pattern.size() && pattern[pattern_index] == '*') {
-      star_index = pattern_index++;
-      star_value = value_index;
-      continue;
-    }
-    if (star_index != std::string_view::npos) {
-      pattern_index = star_index + 1;
-      value_index = ++star_value;
-      continue;
-    }
-    return false;
-  }
+  const auto match_core = [&](std::string_view expression) noexcept {
+    const std::size_t rows = expression.size() + 1;
+    const std::size_t cols = value.size() + 1;
+    std::vector<std::int8_t> memo(rows * cols, -1);
 
-  while (pattern_index < pattern.size() && pattern[pattern_index] == '*') {
-    ++pattern_index;
+    const auto recurse = [&](auto&& self, std::size_t p,
+                             std::size_t v) noexcept -> bool {
+      auto& cached = memo[p * cols + v];
+      if (cached != -1) return cached != 0;
+
+      bool matched = false;
+      if (p == expression.size()) {
+        matched = v == value.size();
+      } else {
+        const char token = expression[p];
+        if (token == '*') {
+          std::size_t next = p;
+          while (next < expression.size() && expression[next] == '*') ++next;
+          if (next == expression.size()) {
+            matched = true;
+          } else {
+            for (std::size_t candidate = v; candidate <= value.size(); ++candidate) {
+              if (self(self, next, candidate)) {
+                matched = true;
+                break;
+              }
+            }
+          }
+        } else if (token == '?') {
+          matched = v < value.size() && self(self, p + 1, v + 1);
+        } else if (token == '<') {  // DOS_STAR
+          // DOS_STAR may consume characters up to (but not beyond) the final
+          // period in the remaining name. Without a period it behaves as '*'.
+          auto final_dot = value.find_last_of('.');
+          const std::size_t limit =
+              final_dot != std::string_view::npos && final_dot >= v
+                  ? final_dot
+                  : value.size();
+          for (std::size_t candidate = v; candidate <= limit; ++candidate) {
+            if (self(self, p + 1, candidate)) {
+              matched = true;
+              break;
+            }
+          }
+        } else if (token == '>') {  // DOS_QM
+          if (v < value.size() && value[v] != '.') {
+            matched = self(self, p + 1, v + 1);
+          } else {
+            // At a dot/end, a run of DOS_QM tokens is allowed to match zero
+            // characters (the behavior needed by NT filename expressions).
+            std::size_t next = p;
+            while (next < expression.size() && expression[next] == '>') ++next;
+            matched = self(self, next, v);
+          }
+        } else if (token == '"') {  // DOS_DOT
+          if (v < value.size() && value[v] == '.') {
+            matched = self(self, p + 1, v + 1);
+          } else if (v == value.size()) {
+            matched = self(self, p + 1, v);
+          }
+        } else {
+          matched = v < value.size() &&
+                    ascii_lower(token) == ascii_lower(value[v]) &&
+                    self(self, p + 1, v + 1);
+        }
+      }
+
+      cached = matched ? 1 : 0;
+      return matched;
+    };
+
+    return recurse(recurse, 0, 0);
+  };
+
+  if (match_core(pattern)) return true;
+
+  // Win32/DOS-style "name.*" also matches a name with no extension. This is
+  // commonly observed in game directory enumeration and is intentionally
+  // handled in the generic guest matcher rather than by a host filesystem.
+  if (pattern.size() >= 2 && pattern.substr(pattern.size() - 2) == ".*") {
+    return match_core(pattern.substr(0, pattern.size() - 2));
   }
-  return pattern_index == pattern.size();
+  return false;
 }
 
 std::string guest_path_key(std::string_view path) {

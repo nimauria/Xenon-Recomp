@@ -2,20 +2,26 @@
 
 #include "../core/launcher_core.hpp"
 #include "application/application_feature.hpp"
+#include "application/recovery/recovery_feature.hpp"
+#include "application/system/system_integration_feature.hpp"
 #include "branding/branding_feature.hpp"
 #include "community/community_feature.hpp"
 #include "diagnostics/diagnostics_feature.hpp"
 #include "filesystem/filesystem_feature.hpp"
+#include "home/home_feature.hpp"
 #include "import_export/import_export_feature.hpp"
+#include "input/input_feature.hpp"
 #include "launch/launch_feature.hpp"
 #include "launch/session/session_controller.hpp"
 #include "library/library_feature.hpp"
 #include "library/dlc/dlc_feature.hpp"
 #include "library/properties/game_properties_feature.hpp"
 #include "modules/modules_feature.hpp"
+#include "notifications/notification_center_feature.hpp"
 #include "paths/paths_feature.hpp"
 #include "profiles/profiles_feature.hpp"
 #include "runtime/runtime_feature.hpp"
+#include "search/command_palette_feature.hpp"
 #include "settings/settings_feature.hpp"
 #include "settings/appearance/appearance_feature.hpp"
 #include "updates/update_feature.hpp"
@@ -41,6 +47,10 @@ class FrontendBackend final : public QObject {
   [[nodiscard]] const LauncherCore& core() const noexcept { return core_; }
   [[nodiscard]] ApplicationFeature& application() noexcept { return application_; }
   [[nodiscard]] const ApplicationFeature& application() const noexcept { return application_; }
+  [[nodiscard]] SystemIntegrationFeature& systemIntegration() noexcept { return system_integration_; }
+  [[nodiscard]] const SystemIntegrationFeature& systemIntegration() const noexcept { return system_integration_; }
+  [[nodiscard]] RecoveryFeature& recovery() noexcept { return recovery_; }
+  [[nodiscard]] const RecoveryFeature& recovery() const noexcept { return recovery_; }
   [[nodiscard]] SettingsFeature& settings() noexcept { return settings_; }
   [[nodiscard]] const SettingsFeature& settings() const noexcept { return settings_; }
   [[nodiscard]] AppearanceFeature& appearance() noexcept { return appearance_; }
@@ -61,6 +71,8 @@ class FrontendBackend final : public QObject {
   [[nodiscard]] UpdateFeature& updates() noexcept { return updates_; }
   [[nodiscard]] RuntimeFeature& runtime() noexcept { return runtime_; }
   [[nodiscard]] const RuntimeFeature& runtime() const noexcept { return runtime_; }
+  [[nodiscard]] InputFeature& input() noexcept { return input_; }
+  [[nodiscard]] const InputFeature& input() const noexcept { return input_; }
   [[nodiscard]] LaunchFeature& launch() noexcept { return launch_; }
   [[nodiscard]] SessionController& session() noexcept { return session_; }
   [[nodiscard]] const SessionController& session() const noexcept { return session_; }
@@ -72,6 +84,12 @@ class FrontendBackend final : public QObject {
   [[nodiscard]] const BrandingFeature& branding() const noexcept { return branding_; }
   [[nodiscard]] DiagnosticsFeature& diagnostics() noexcept { return diagnostics_; }
   [[nodiscard]] const DiagnosticsFeature& diagnostics() const noexcept { return diagnostics_; }
+  [[nodiscard]] NotificationCenterFeature& notifications() noexcept { return notifications_; }
+  [[nodiscard]] const NotificationCenterFeature& notifications() const noexcept { return notifications_; }
+  [[nodiscard]] HomeFeature& home() noexcept { return home_; }
+  [[nodiscard]] const HomeFeature& home() const noexcept { return home_; }
+  [[nodiscard]] CommandPaletteFeature& commandPalette() noexcept { return command_palette_; }
+  [[nodiscard]] const CommandPaletteFeature& commandPalette() const noexcept { return command_palette_; }
 
  private:
   [[nodiscard]] ServiceResult setPathSetting(const QString& key, const QVariant& value);
@@ -81,7 +99,10 @@ class FrontendBackend final : public QObject {
   AppearanceFeature appearance_;
   PathsFeature paths_;
   ApplicationFeature application_;
+  SystemIntegrationFeature system_integration_;
+  RecoveryFeature recovery_;
   RuntimeFeature runtime_;
+  InputFeature input_;
   ProfilesFeature profiles_;
   ModulesFeature modules_;
   LibraryFeature library_;
@@ -94,7 +115,10 @@ class FrontendBackend final : public QObject {
   CommunityFeature community_;
   BrandingFeature branding_;
   DiagnosticsFeature diagnostics_;
+  NotificationCenterFeature notifications_;
+  HomeFeature home_;
   UpdateFeature updates_;
+  CommandPaletteFeature command_palette_;
 };
 
 }  // namespace xenon::launcher::frontend_backend

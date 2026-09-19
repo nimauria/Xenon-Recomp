@@ -14,7 +14,7 @@ class CommunityFeature final : public QObject {
  public:
   CommunityFeature(SettingsFeature& settings, SessionController& session,
                    FilesystemFeature& filesystem, QString discord_application_id,
-                   QObject* parent = nullptr);
+                   bool suppress_presence = false, QObject* parent = nullptr);
 
   [[nodiscard]] QVariantMap info() const;
   [[nodiscard]] QVariantMap discordPresenceState() const;

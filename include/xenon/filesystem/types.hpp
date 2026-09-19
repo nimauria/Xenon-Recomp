@@ -136,6 +136,14 @@ struct FileInfo {
   std::filesystem::file_time_type last_write_time{};
 };
 
+// Attribute writes are mask-based so the Xbox/kernel layer can preserve bits
+// that a host backend cannot or should not alter. HostPathDevice currently
+// supports the portable read-only bit and reports Unsupported for other masks.
+struct FileAttributeUpdate {
+  std::uint32_t value{FileAttributeNone};
+  std::uint32_t mask{FileAttributeNone};
+};
+
 struct DirectoryEntry {
   std::string name{};
   FileInfo info{};

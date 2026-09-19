@@ -27,7 +27,18 @@ enum class InstructionType : std::uint8_t {
   Synchronizing,
 };
 
+struct OpcodeId {
+  std::uint32_t value{};
+
+  [[nodiscard]] constexpr bool valid() const noexcept { return value != 0; }
+  explicit constexpr operator bool() const noexcept { return valid(); }
+  friend constexpr bool operator==(OpcodeId, OpcodeId) = default;
+};
+
+inline constexpr OpcodeId kInvalidOpcodeId{};
+
 struct OpcodeInfo {
+  OpcodeId id{};
   std::uint32_t pattern{};
   std::uint32_t mask{};
   std::string_view mnemonic{};
@@ -42,6 +53,9 @@ struct DecodedInstruction {
   const OpcodeInfo* info{};
 
   [[nodiscard]] bool valid() const noexcept { return info != nullptr; }
+  [[nodiscard]] OpcodeId opcode_id() const noexcept {
+    return info ? info->id : kInvalidOpcodeId;
+  }
   [[nodiscard]] std::string_view mnemonic() const noexcept {
     return info ? info->mnemonic : std::string_view{"invalid"};
   }

@@ -56,4 +56,19 @@ bool Runtime::is_initialized() const noexcept
     return initialized_;
 }
 
+void Runtime::set_filesystem(std::shared_ptr<filesystem::VirtualFileSystem> vfs)
+{
+    vfs_ = vfs;
+    
+    if (config_.enable_logging && vfs)
+    {
+        std::cout << "[Xenon] VFS connected to runtime.\n";
+    }
+}
+
+std::shared_ptr<filesystem::VirtualFileSystem> Runtime::filesystem() const
+{
+    return vfs_;
+}
+
 } // namespace xenon

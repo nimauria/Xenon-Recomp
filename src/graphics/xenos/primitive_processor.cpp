@@ -131,7 +131,7 @@ bool convert_with_primitive_reset(
 
 ProcessedPrimitiveBatch process_primitives(
     const ir::DrawPacket& draw, std::span<const std::byte> physical_memory,
-    const PrimitiveProcessingOptions& options) {
+    const PrimitiveProcessingOptions& options, std::uint32_t physical_base) {
   ProcessedPrimitiveBatch result{};
   std::vector<std::uint32_t> source;
   source.reserve(draw.index_count);
@@ -142,12 +142,15 @@ ProcessedPrimitiveBatch process_primitives(
     const auto bytes_per_index = buffer.format == IndexFormat::UInt32 ? 4u : 2u;
     const auto count = std::min(draw.index_count,
                                 buffer.length_bytes / bytes_per_index);
-    if (!buffer.valid || std::uint64_t(buffer.physical_address) +
-            std::uint64_t(count) * bytes_per_index > physical_memory.size()) {
+    if (!buffer.valid || buffer.physical_address < physical_base ||
+        std::uint64_t(buffer.physical_address) +
+                std::uint64_t(count) * bytes_per_index >
+            std::uint64_t{physical_base} + physical_memory.size()) {
       result.error = "Xenos DMA index buffer is outside physical memory";
       return result;
     }
-    const auto* data = physical_memory.data() + buffer.physical_address;
+    const auto* data =
+        physical_memory.data() + (buffer.physical_address - physical_base);
     for (std::uint32_t i = 0; i < count; ++i) {
       if (buffer.format == IndexFormat::UInt32) {
         std::uint32_t value{};

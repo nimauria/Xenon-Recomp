@@ -19,8 +19,12 @@ class LibraryFeature final : public QObject {
 
   [[nodiscard]] QVariantList entries() const;
   [[nodiscard]] QVariantMap entry(const QString& game_id) const;
+  [[nodiscard]] QVariantList actions(const QString& game_id) const;
+  [[nodiscard]] QVariantList manageActions(const QString& game_id) const;
+  [[nodiscard]] QVariantList backgroundActions() const;
   [[nodiscard]] ServiceResult remove(const QString& game_id);
   [[nodiscard]] ServiceResult verify(const QString& game_id) const;
+  [[nodiscard]] ServiceResult refreshMetadata(const QString& game_id);
   [[nodiscard]] QString contentPath(const QString& game_id) const;
   [[nodiscard]] QString contentFolder(const QString& game_id) const;
   [[nodiscard]] QString managedPath(const QString& game_id) const;
@@ -33,6 +37,7 @@ class LibraryFeature final : public QObject {
   [[nodiscard]] QString fixtureMode() const;
   void rebuildFixtures();
   [[nodiscard]] QVariantMap projected(QVariantMap item) const;
+  [[nodiscard]] QVariantMap withCatalogPresentation(QVariantMap item) const;
   [[nodiscard]] static QVariantMap gameFixture(QString title, QString module_name, QString status,
                                                bool ready, QString description, QString game_id,
                                                QString module_id, QString renderer, QString regions,

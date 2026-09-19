@@ -24,22 +24,49 @@ Popup {
             || String(entry.repository || "").toLowerCase().indexOf(needle) >= 0
     }
 
+    function formatBytes(value) {
+        var bytes = Number(value || 0)
+        if (bytes <= 0) return "0 B"
+        if (bytes < 1024) return Math.round(bytes) + " B"
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB"
+        if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MiB"
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GiB"
+    }
+
     function primaryLabel(entry) {
+        var status = String(entry.updateStatus || "")
+        if (!Boolean(entry.installed)) {
+            if (status === "checking")
+                return "Checking Release…"
+            if (status === "downloading")
+                return "Downloading Module…"
+            if (status === "installing")
+                return "Installing Module…"
+            return "Install Module"
+        }
         if (entry.canInstall)
-            return entry.installed ? "Install Update" : "Install Module"
+            return "Install Update"
         if (entry.canDownload)
-            return entry.installed ? "Download Update" : "Download Module"
-        if (entry.updateStatus === "checking")
+            return "Download Update"
+        if (status === "checking")
             return "Checking…"
-        if (entry.updateStatus === "downloading")
+        if (status === "downloading")
             return "Downloading…"
-        if (entry.installed && entry.updateStatus === "up-to-date")
+        if (status === "installing")
+            return "Installing…"
+        if (status === "rolling-back")
+            return "Rolling Back…"
+        if (status === "up-to-date")
             return "Check Again"
-        return entry.installed ? "Check for Updates" : "Check Release"
+        return "Check for Updates"
     }
 
     function runPrimary(entry) {
         var id = String(entry.moduleId || "")
+        if (!Boolean(entry.installed)) {
+            launcherBridge.requestModuleInstall(id)
+            return
+        }
         if (entry.canInstall)
             launcherBridge.requestModuleUpdateInstall(id)
         else if (entry.canDownload)
@@ -93,7 +120,7 @@ Popup {
 
                 Text {
                     Layout.fillWidth: true
-                    text: "Official Xenon module catalog"
+                    text: "Official Xenon Modules registry"
                     color: Theme.text
                     font.pixelSize: Theme.typeSubtitle
                     font.weight: Font.DemiBold
@@ -101,7 +128,7 @@ Popup {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: "Catalog metadata comes from Xenon-Recomp on GitHub. Each module is downloaded and updated from its own GitHub Releases."
+                    text: "Discovery metadata comes from Xenon-Modules on GitHub. Packages remain in each module’s own GitHub Releases."
                     color: Theme.textMuted
                     font.pixelSize: Theme.typeCaption
                     wrapMode: Text.WordWrap
@@ -140,9 +167,14 @@ Popup {
                     onTextChanged: root.searchText = text
                 }
                 XButton {
-                    text: root.catalogState.status === "loading" ? "Refreshing…" : "Refresh Catalog"
-                    enabled: root.catalogState.status !== "loading"
+                    text: String(root.catalogState.status || "").indexOf("loading") === 0 ? "Refreshing…" : "Refresh Registry"
+                    enabled: String(root.catalogState.status || "").indexOf("loading") !== 0
                     onClicked: launcherBridge.requestModuleCatalogRefresh()
+                }
+                XButton {
+                    text: "Open Registry"
+                    enabled: String(root.catalogState.registryUrl || "").length > 0
+                    onClicked: launcherBridge.openExternalUrl(String(root.catalogState.registryUrl || ""))
                 }
                 XButton {
                     text: "Check Installed Updates"
@@ -153,7 +185,7 @@ Popup {
             XPanel {
                 Layout.fillWidth: true
                 implicitHeight: catalogStatusRow.implicitHeight + Theme.spaceMd * 2
-                color: root.catalogState.status === "fallback"
+                color: root.catalogState.status === "fallback" || root.catalogState.status === "partial"
                        ? Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.08)
                        : Theme.surface
                 RowLayout {
@@ -164,7 +196,7 @@ Popup {
                     StatusPill {
                         label: String(root.catalogState.status || "unknown").toUpperCase()
                         tone: root.catalogState.status === "ready" ? Theme.success
-                            : root.catalogState.status === "loading" ? Theme.accent : Theme.warning
+                            : String(root.catalogState.status || "").indexOf("loading") === 0 ? Theme.accent : Theme.warning
                     }
                     Text {
                         Layout.fillWidth: true
@@ -208,8 +240,8 @@ Popup {
                         visible: root.catalogEntries.length === 0
                         Layout.fillWidth: true
                         title: "No catalog entries"
-                        description: "The catalog provider did not return any module metadata."
-                        primaryText: "Refresh Catalog"
+                        description: "The Xenon Modules registry did not return any module metadata for this refresh."
+                        primaryText: "Refresh Registry"
                         onPrimaryClicked: launcherBridge.requestModuleCatalogRefresh()
                     }
 
@@ -247,7 +279,7 @@ Popup {
                                         Text {
                                             text: String(modelData.moduleType || "Module")
                                                 + " • " + String(modelData.publisher || "Unknown publisher")
-                                                + " • " + String(modelData.license || "License not listed")
+                                                + (Boolean(modelData.verified) ? " • Verified publisher" : "")
                                             color: Theme.textMuted
                                             font.pixelSize: Theme.typeCaption
                                             wrapMode: Text.WordWrap
@@ -255,7 +287,7 @@ Popup {
                                     }
                                     StatusPill {
                                         visible: Boolean(modelData.verified)
-                                        label: "OFFICIAL"
+                                        label: "VERIFIED"
                                         tone: Theme.accent
                                     }
                                     StatusPill {
@@ -280,6 +312,7 @@ Popup {
                                     rowSpacing: Theme.spaceXs
                                     XInfoRow { label: "Module ID"; value: String(modelData.moduleId || "") }
                                     XInfoRow { label: "Repository"; value: String(modelData.repository || "") }
+                                    XInfoRow { label: "Registry entry"; value: String(modelData.entryPath || "") }
                                     XInfoRow { label: "Installed"; value: Boolean(modelData.installed) ? String(modelData.installedVersion || "Unknown") : "Not installed" }
                                     XInfoRow { label: "Latest release"; value: String(modelData.availableVersion || "Not checked") }
                                     XInfoRow { label: "Host package"; value: String(modelData.assetName || "Not defined") }
@@ -300,6 +333,17 @@ Popup {
                                     from: 0; to: 1
                                     value: Number(modelData.downloadProgress || 0)
                                 }
+                                Text {
+                                    visible: String(modelData.updateStatus || "") === "downloading"
+                                    Layout.fillWidth: true
+                                    text: root.formatBytes(modelData.downloadedBytes)
+                                        + (Number(modelData.downloadTotalBytes || 0) > 0
+                                           ? " / " + root.formatBytes(modelData.downloadTotalBytes)
+                                             + " • " + Math.round(Number(modelData.downloadProgress || 0) * 100) + "%"
+                                           : "")
+                                    color: Theme.textMuted
+                                    font.pixelSize: Theme.typeCaption
+                                }
 
                                 Flow {
                                     Layout.fillWidth: true
@@ -310,11 +354,23 @@ Popup {
                                         onClicked: launcherBridge.openExternalUrl(String(modelData.repositoryUrl || ""))
                                     }
                                     XButton {
+                                        visible: String(modelData.registryEntryUrl || "").length > 0
+                                        text: "Registry Entry"
+                                        onClicked: launcherBridge.openExternalUrl(String(modelData.registryEntryUrl || ""))
+                                    }
+                                    XButton {
                                         text: root.primaryLabel(modelData)
-                                        variant: Boolean(modelData.canInstall) || Boolean(modelData.canDownload) ? "primary" : "default"
+                                        variant: !Boolean(modelData.installed)
+                                            || Boolean(modelData.canInstall)
+                                            || Boolean(modelData.canDownload) ? "primary" : "default"
+                                        accessibleDescription: !Boolean(modelData.installed)
+                                            ? "Checks GitHub Releases, downloads and verifies the module package, then installs it."
+                                            : "Checks for or installs a module update."
                                         enabled: Boolean(modelData.packageSupported)
                                             && String(modelData.updateStatus || "") !== "checking"
                                             && String(modelData.updateStatus || "") !== "downloading"
+                                            && String(modelData.updateStatus || "") !== "installing"
+                                            && String(modelData.updateStatus || "") !== "rolling-back"
                                         onClicked: root.runPrimary(modelData)
                                     }
                                     XButton {
@@ -343,7 +399,7 @@ Popup {
                             anchors.right: parent.right
                             anchors.top: parent.top
                             anchors.margins: Theme.spaceLg
-                            text: "The catalog contains open-source module metadata only. Module packages are downloaded from the module's own GitHub Releases, SHA-256 verified, checked for the expected module ID, and installed with rollback. Commercial game executables, title updates and DLC are never distributed by the catalog."
+                            text: "The Xenon Modules registry contains discovery metadata only. Module packages are downloaded from each module’s own GitHub Releases, SHA-256 verified, checked for the expected module ID and release version, staged, and installed with retained rollback metadata. Commercial game executables, title updates and DLC are never distributed by the registry."
                             color: Theme.textMuted
                             wrapMode: Text.WordWrap
                             font.pixelSize: Theme.typeCaption

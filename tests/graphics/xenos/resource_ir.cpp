@@ -114,19 +114,33 @@ void test_guest_memory_coherency_ranges() {
          plan.ranges[0].size == 1u);
   assert(!planned.device_range_valid(0x300u, 4u));
 
+  // CPU ownership is reconciled before a readback plan is emitted. A CPU write
+  // that is newer than the GPU ownership removes only the overlapping bytes
+  // from the requested GPU range instead of allowing stale device data to win.
+  GuestMemoryGpuCoherency preplan_tracker;
+  preplan_tracker.reset(0x10000u, false);
+  preplan_tracker.mark_gpu_write(0x480u, 8u);
+  memory_writes.mark_write(0x482u, 2u);
+  const auto preplan = preplan_tracker.plan_readback(
+      memory_writes, 0x480u, 8u);
+  assert(preplan.ranges.size() == 2u);
+  assert(preplan.ranges[0].address == 0x480u && preplan.ranges[0].size == 2u);
+  assert(preplan.ranges[1].address == 0x484u && preplan.ranges[1].size == 4u);
+
   // GPU->CPU readback publication is source-aware. The mirror's own physical
   // write must not immediately appear as CPU dirt that needs uploading back to
   // the same device mirror.
   GuestMemoryGpuCoherency readback_tracker;
   readback_tracker.reset(0x10000u, false);
   readback_tracker.mark_gpu_write(0x500u, 8u);
-  const auto readback_plan = readback_tracker.plan_readback(0x500u, 8u);
+  const auto readback_plan = readback_tracker.plan_readback(
+      memory_writes, 0x500u, 8u);
   assert(readback_plan.action ==
          xenon::memory::GpuSynchronizationAction::Copy);
   assert(readback_plan.ranges.size() == 1u);
   const auto self_epoch = memory_writes.mark_write(0x500u, 8u);
   assert(readback_tracker.commit_gpu_download(
-      memory_writes, readback_plan, 0x500u, 8u, self_epoch));
+      memory_writes, readback_plan.ranges[0], 0x500u, 8u, self_epoch));
   assert(!readback_tracker.has_gpu_dirty(0x500u, 8u));
   assert(readback_tracker.cpu_dirty_ranges(0x500u, 8u).empty());
   assert(readback_tracker.device_range_valid(0x500u, 8u));
@@ -136,25 +150,56 @@ void test_guest_memory_coherency_ranges() {
   // An unrelated CPU publication before the mirror's own readback epoch must
   // survive acknowledgement and remain uploadable byte-precisely.
   readback_tracker.mark_gpu_write(0x600u, 8u);
-  const auto conflict_plan = readback_tracker.plan_readback(0x600u, 8u);
+  const auto conflict_plan = readback_tracker.plan_readback(
+      memory_writes, 0x600u, 8u);
   memory_writes.mark_write(0x603u, 1u);
-  const auto conflict_self_epoch = memory_writes.mark_write(0x600u, 8u);
-  assert(readback_tracker.commit_gpu_download(
-      memory_writes, conflict_plan, 0x600u, 8u, conflict_self_epoch));
+  const auto conflict_safe = readback_tracker.prepare_gpu_download(
+      memory_writes, conflict_plan.ranges[0]);
+  assert(conflict_safe.size() == 2u);
+  assert(conflict_safe[0].address == 0x600u && conflict_safe[0].size == 3u);
+  assert(conflict_safe[1].address == 0x604u && conflict_safe[1].size == 4u);
+  for (const auto& safe : conflict_safe) {
+    const auto conflict_self_epoch =
+        memory_writes.mark_write(safe.address, safe.size);
+    assert(readback_tracker.commit_gpu_download(
+        memory_writes, safe, safe.address, safe.size, conflict_self_epoch));
+  }
   const auto conflict_cpu = readback_tracker.cpu_dirty_ranges(0x600u, 8u);
   assert(conflict_cpu.size() == 1u);
   assert(conflict_cpu[0].address == 0x603u && conflict_cpu[0].size == 1u);
   assert(!readback_tracker.device_range_valid(0x603u, 1u));
 
-  // A GPU generation published after planning prevents an older readback plan
-  // from clearing newer ownership. Conservatively retaining dirt is correct.
+  // GPU generations are range-local. An unrelated later GPU write must not
+  // invalidate the planned ownership of 0x700, while a newer overlapping write
+  // must survive the older readback commit.
   readback_tracker.mark_gpu_write(0x700u, 4u);
-  const auto stale_plan = readback_tracker.plan_readback(0x700u, 4u);
+  const auto independent_plan = readback_tracker.plan_readback(
+      memory_writes, 0x700u, 4u);
   readback_tracker.mark_gpu_write(0x800u, 4u);
-  const auto stale_self_epoch = memory_writes.mark_write(0x700u, 4u);
-  assert(!readback_tracker.commit_gpu_download(
-      memory_writes, stale_plan, 0x700u, 4u, stale_self_epoch));
-  assert(readback_tracker.has_gpu_dirty(0x700u, 4u));
+  const auto independent_self_epoch = memory_writes.mark_write(0x700u, 4u);
+  assert(readback_tracker.commit_gpu_download(
+      memory_writes, independent_plan.ranges[0], 0x700u, 4u,
+      independent_self_epoch));
+  assert(!readback_tracker.has_gpu_dirty(0x700u, 4u));
+  assert(readback_tracker.has_gpu_dirty(0x800u, 4u));
+
+  readback_tracker.mark_gpu_write(0x900u, 8u);
+  const auto stale_plan = readback_tracker.plan_readback(
+      memory_writes, 0x900u, 8u);
+  readback_tracker.mark_gpu_write(0x902u, 2u);
+  const auto stale_safe = readback_tracker.prepare_gpu_download(
+      memory_writes, stale_plan.ranges[0]);
+  assert(stale_safe.size() == 2u);
+  assert(stale_safe[0].address == 0x900u && stale_safe[0].size == 2u);
+  assert(stale_safe[1].address == 0x904u && stale_safe[1].size == 4u);
+  for (const auto& safe : stale_safe) {
+    const auto epoch = memory_writes.mark_write(safe.address, safe.size);
+    assert(readback_tracker.commit_gpu_download(
+        memory_writes, safe, safe.address, safe.size, epoch));
+  }
+  assert(!readback_tracker.has_gpu_dirty(0x900u, 2u));
+  assert(readback_tracker.has_gpu_dirty(0x902u, 2u));
+  assert(!readback_tracker.has_gpu_dirty(0x904u, 4u));
 
   // UMA/mobile-capable policy is represented without changing Xbox semantics.
   // A shared-host-visible implementation receives the same requested ranges,
@@ -162,13 +207,14 @@ void test_guest_memory_coherency_ranges() {
   GuestMemoryGpuCoherency uma_tracker;
   uma_tracker.reset(0x10000u, false,
                     xenon::memory::GpuMemoryTopology::SharedHostVisible);
-  memory_writes.mark_write(0x900u, 4u);
-  const auto uma_upload = uma_tracker.plan_upload(memory_writes, 0x900u, 4u);
+  memory_writes.mark_write(0xA00u, 4u);
+  const auto uma_upload = uma_tracker.plan_upload(memory_writes, 0xA00u, 4u);
   assert(uma_upload.action ==
          xenon::memory::GpuSynchronizationAction::VisibilityOnly);
   assert(uma_upload.ranges.size() == 1u);
-  uma_tracker.mark_gpu_write(0xA00u, 4u);
-  const auto uma_readback = uma_tracker.plan_readback(0xA00u, 4u);
+  uma_tracker.mark_gpu_write(0xB00u, 4u);
+  const auto uma_readback = uma_tracker.plan_readback(
+      memory_writes, 0xB00u, 4u);
   assert(uma_readback.action ==
          xenon::memory::GpuSynchronizationAction::VisibilityOnly);
   assert(uma_readback.ranges.size() == 1u);
@@ -516,6 +562,15 @@ void test_copy_resolve_state() {
   assert(rectangle.valid);
   assert(rectangle.left == 0 && rectangle.top == 0);
   assert(rectangle.right == 16 && rectangle.bottom == 16);
+  const auto snapshot_rectangle = decode_resolve_rectangle(
+      tracker.snapshot(),
+      std::span<const std::byte>(memory).subspan(0x1000, sizeof(vertices)),
+      0x1000u);
+  assert(snapshot_rectangle.valid);
+  assert(snapshot_rectangle.left == rectangle.left &&
+         snapshot_rectangle.top == rectangle.top &&
+         snapshot_rectangle.right == rectangle.right &&
+         snapshot_rectangle.bottom == rectangle.bottom);
 
   auto plan_state = tracker.snapshot();
   plan_state.raster.msaa_samples_log2 = 2;

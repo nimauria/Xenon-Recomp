@@ -16,8 +16,25 @@ ValueId emit_binary(ir::Builder& b, Op op, ValueId a, ValueId c, Type t = Type::
 }
 
 void emit_cr0(ir::Builder& b, ValueId v) {
-  const ValueId args[] = {v};
-  b.emit(Op::UpdateCR0Signed, Type::Void, args);
+  auto zero = b.constant_i64(0);
+  const ValueId compare[] = {v, zero};
+  auto lt = b.emit(Op::CompareSlt, Type::I1, compare);
+  auto gt = b.emit(Op::CompareSgt, Type::I1, compare);
+  auto eq = b.emit(Op::CompareEq, Type::I1, compare);
+  auto so = b.emit(Op::ReadXerSO, Type::I1);
+  const ValueId fields[] = {lt, gt, eq, so};
+  b.emit(Op::WriteCRCompare, Type::Void, fields, 0);
+}
+
+void set_xer_overflow(ir::Builder& b, ValueId overflow) {
+  // XER.OV reflects the current operation while XER.SO is sticky.
+  auto old_so = b.emit(Op::ReadXerSO, Type::I1);
+  const ValueId sticky_args[] = {old_so, overflow};
+  auto new_so = b.emit(Op::Or, Type::I1, sticky_args);
+  const ValueId ov_args[] = {overflow};
+  const ValueId so_args[] = {new_so};
+  b.emit(Op::SetXerOV, Type::Void, ov_args);
+  b.emit(Op::SetXerSO, Type::Void, so_args);
 }
 
 void emit_ca_from_add(ir::Builder& b, ValueId a, ValueId /*c*/, ValueId sum) {
@@ -37,8 +54,7 @@ void emit_overflow_add(ir::Builder& b, ValueId a, ValueId c, ValueId sum) {
   auto zero = b.constant_i64(0);
   const ValueId cmp_args[] = {masked, zero};
   auto ov = b.emit(Op::CompareNe, Type::I1, cmp_args);
-  const ValueId ov_args[] = {ov};
-  b.emit(Op::SetXerOverflowSticky, Type::Void, ov_args);
+  set_xer_overflow(b, ov);
 }
 
 void emit_overflow_sub(ir::Builder& b, ValueId a, ValueId c, ValueId result) {
@@ -51,14 +67,11 @@ void emit_overflow_sub(ir::Builder& b, ValueId a, ValueId c, ValueId result) {
   auto zero = b.constant_i64(0);
   const ValueId cmp_args[] = {masked, zero};
   auto ov = b.emit(Op::CompareNe, Type::I1, cmp_args);
-  const ValueId ov_args[] = {ov};
-  b.emit(Op::SetXerOverflowSticky, Type::Void, ov_args);
+  set_xer_overflow(b, ov);
 }
 
 ValueId read_xer_ca(ir::Builder& b) {
-  auto xer=b.emit(Op::ReadXER,Type::I32); auto mask=b.constant_i32(0x20000000u);
-  const ValueId a[]={xer,mask}; auto v=b.emit(Op::And,Type::I32,a); auto zero=b.constant_i32(0);
-  const ValueId c[]={v,zero}; return b.emit(Op::CompareNe,Type::I1,c);
+  return b.emit(Op::ReadXerCA, Type::I1);
 }
 
 void set_ca3(ir::Builder& b, ValueId a, ValueId c, ValueId carry) {
@@ -68,7 +81,7 @@ void set_ca3(ir::Builder& b, ValueId a, ValueId c, ValueId carry) {
 
 void set_ov3(ir::Builder& b, ValueId a, ValueId c, ValueId carry, unsigned variant=0) {
   const ValueId args[]={a,c,carry}; auto out=b.emit(Op::SignedOverflow,Type::I1,args,64,variant);
-  const ValueId x[]={out}; b.emit(Op::SetXerOverflowSticky,Type::Void,x);
+  set_xer_overflow(b, out);
 }
 
 std::uint64_t mask64(unsigned mb, unsigned me) {
@@ -200,7 +213,7 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     const ValueId args[]={a,c}; auto r=b.emit(Op::Mul,width==32?Type::I32:Type::I64,args,0,0,&i);
     if(width==32){ const ValueId rr[]={r}; r=b.emit(Op::SignExtend,Type::I64,rr); }
     write_rt(r);
-    if(i.oe()){ const ValueId ovargs[]={a,c}; auto ov=b.emit(Op::MulOverflowSigned,Type::I1,ovargs,width,0,&i); const ValueId z[]={ov}; b.emit(Op::SetXerOverflowSticky,Type::Void,z); }
+    if(i.oe()){ const ValueId ovargs[]={a,c}; auto ov=b.emit(Op::MulOverflowSigned,Type::I1,ovargs,width,0,&i); set_xer_overflow(b,ov); }
     if(i.rc()) emit_cr0(b,r);
     return true;
   }
@@ -219,7 +232,7 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     const ValueId args[]={a,c}; auto r=b.emit(uns?Op::DivUnsigned:Op::DivSigned,t,args,word?32u:64u,i.oe()?1u:0u,&i);
     if(word){ const ValueId rr[]={r}; r=b.emit(uns?Op::ZeroExtend:Op::SignExtend,Type::I64,rr); }
     write_rt(r);
-    if(i.oe()){ auto ov=b.emit(Op::DivOverflow,Type::I1,args,word?32u:64u,uns?1u:0u,&i); const ValueId z[]={ov}; b.emit(Op::SetXerOverflowSticky,Type::Void,z); }
+    if(i.oe()){ auto ov=b.emit(Op::DivOverflow,Type::I1,args,word?32u:64u,uns?1u:0u,&i); set_xer_overflow(b,ov); }
     if(i.rc()) emit_cr0(b,r);
     return true;
   }
@@ -233,8 +246,7 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
       auto minv = b.constant_i64(0x8000000000000000ull);
       const ValueId cmp[] = {a, minv};
       auto ov = b.emit(Op::CompareEq, Type::I1, cmp);
-      const ValueId oa[] = {ov};
-      b.emit(Op::SetXerOverflowSticky, Type::Void, oa);
+      set_xer_overflow(b, ov);
     }
     if (i.rc()) emit_cr0(b, r);
     return true;
@@ -322,8 +334,8 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     auto lt = b.emit(logical ? Op::CompareUlt : Op::CompareSlt, Type::I1, pair);
     auto gt = b.emit(logical ? Op::CompareUgt : Op::CompareSgt, Type::I1, pair);
     auto eq = b.emit(Op::CompareEq, Type::I1, pair);
-    auto xer = b.emit(Op::ReadXER, Type::I32);
-    const ValueId fields[] = {lt, gt, eq, xer};
+    auto so = b.emit(Op::ReadXerSO, Type::I1);
+    const ValueId fields[] = {lt, gt, eq, so};
     b.emit(Op::WriteCRCompare, Type::Void, fields, i.crfd());
     return true;
   }

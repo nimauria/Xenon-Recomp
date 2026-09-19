@@ -305,7 +305,8 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
 }
 
 DecodedTexture decode_texture(const TextureDescriptor& descriptor,
-                              std::span<const std::byte> physical_memory) {
+                              std::span<const std::byte> physical_memory,
+                              std::uint32_t physical_base) {
   DecodedTexture result{};
   result.layout = build_texture_layout(descriptor);
   if (!result.layout.valid || !result.layout.format.host_supported()) {
@@ -338,14 +339,17 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           const auto destination = sub.linear_offset_bytes +
               (std::uint64_t(z) * sub.height_blocks + y) * sub.linear_row_pitch_bytes +
               std::uint64_t(x) * bpb;
-          if (source + bpb > physical_memory.size() ||
+          if (source < physical_base ||
+              source + bpb >
+                  std::uint64_t{physical_base} + physical_memory.size() ||
               destination + bpb > result.linear_data.size()) {
             result.error = "Xenos texture references guest memory outside physical RAM";
             result.linear_data.clear();
             return result;
           }
           endian_copy(result.linear_data.data() + destination,
-                      physical_memory.data() + source, bpb, descriptor.endian);
+                      physical_memory.data() + (source - physical_base), bpb,
+                      descriptor.endian);
         }
       }
     }
@@ -449,13 +453,6 @@ ResolveWriteResult write_raw_resolve(
     std::span<const std::byte> source, std::uint32_t source_row_pitch,
     memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
-  const auto* physical_base = physical_memory.physical_data();
-  if (!physical_base) {
-    result.error = "raw resolve has no physical memory backing";
-    return result;
-  }
-  const auto physical_bytes = std::span<const std::byte>(
-      physical_base, memory::kPhysicalMemorySize);
   if (copy.command != CopyCommand::Raw) {
     result.error = "converted Xenos resolve requires format conversion";
     return result;
@@ -512,19 +509,23 @@ ResolveWriteResult write_raw_resolve(
           : tiled_offset_2d(destination_x, destination_y, pitch_aligned,
                             bytes_per_pixel);
       const auto destination = std::uint64_t(copy.destination_base) + tiled;
-      if (destination + bytes_per_pixel > physical_bytes.size()) {
+      if (destination + bytes_per_pixel > memory::kPhysicalMemorySize) {
         result.error = "raw resolve destination is outside physical memory";
         return result;
       }
       const auto block_address = static_cast<std::uint32_t>(destination & ~15ull);
       auto [block_it, inserted] = blocks.try_emplace(block_address);
       if (inserted) {
-        if (std::uint64_t(block_address) + 16u > physical_bytes.size()) {
+        if (std::uint64_t(block_address) + 16u >
+            memory::kPhysicalMemorySize) {
           result.error = "raw resolve endian block is outside physical memory";
           return result;
         }
-        std::memcpy(block_it->second.data(),
-                    physical_bytes.data() + block_address, 16);
+        if (!physical_memory.copy_physical_range(block_address,
+                                                  block_it->second)) {
+          result.error = "raw resolve could not snapshot destination block";
+          return result;
+        }
         apply_endian128(block_it->second, copy.destination_endian);
       }
       const auto block_offset = static_cast<std::size_t>(destination & 15ull);

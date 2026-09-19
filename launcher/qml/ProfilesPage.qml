@@ -13,6 +13,22 @@ Item {
     readonly property bool testMode: launcherBridge.testMode
     readonly property var selected: ProfileStore.profile(ProfileStore.selectedIndex)
 
+    function selectProfileById(profileId) {
+        var target = String(profileId || "")
+        if (target.length === 0) return false
+        for (var i = 0; i < ProfileStore.profiles.length; ++i) {
+            if (String(ProfileStore.profiles[i].profileId || "") === target) {
+                ProfileStore.selectedIndex = i
+                return true
+            }
+        }
+        return false
+    }
+
+    function openCreateProfile() {
+        profileEditor.openForCreate()
+    }
+
     function runtimeSummary(profile) {
         var effective = profile.effectiveRuntimeSettings || ({})
         return {

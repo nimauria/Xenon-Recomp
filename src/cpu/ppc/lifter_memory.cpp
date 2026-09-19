@@ -15,27 +15,36 @@ ValueId add(ir::Builder& b, ValueId a, ValueId c) {
   return b.emit(Op::Add, Type::I64, x);
 }
 
+ValueId add_immediate(ir::Builder& b, ValueId base, std::int64_t displacement) {
+  if (displacement == 0) return base;
+  const ValueId a[] = {base};
+  return b.emit(Op::AddImmediate, Type::I64, a,
+                static_cast<std::uint64_t>(displacement));
+}
+
 ValueId ea_d(const DecodedInstruction& i, ir::Builder& b, bool update) {
-  auto base = (!update && i.ra() == 0) ? b.constant_i64(0) : b.read_gpr(i.ra());
-  auto disp = b.constant_i64(static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16())));
-  return add(b, base, disp);
+  const auto displacement = static_cast<std::int64_t>(i.simm16());
+  if (!update && i.ra() == 0)
+    return b.constant_i64(static_cast<std::uint64_t>(displacement));
+  return add_immediate(b, b.read_gpr(i.ra()), displacement);
 }
 
 ValueId ea_ds(const DecodedInstruction& i, ir::Builder& b, bool update) {
-  auto base = (!update && i.ra() == 0) ? b.constant_i64(0) : b.read_gpr(i.ra());
-  auto disp = b.constant_i64(static_cast<std::uint64_t>(static_cast<std::int64_t>(i.ds_displacement())));
-  return add(b, base, disp);
+  const auto displacement = static_cast<std::int64_t>(i.ds_displacement());
+  if (!update && i.ra() == 0)
+    return b.constant_i64(static_cast<std::uint64_t>(displacement));
+  return add_immediate(b, b.read_gpr(i.ra()), displacement);
 }
 
 ValueId ea_x(const DecodedInstruction& i, ir::Builder& b, bool update) {
-  auto base = (!update && i.ra() == 0) ? b.constant_i64(0) : b.read_gpr(i.ra());
-  return add(b, base, b.read_gpr(i.rb()));
+  if (!update && i.ra() == 0) return b.read_gpr(i.rb());
+  return add(b, b.read_gpr(i.ra()), b.read_gpr(i.rb()));
 }
 
-ValueId memory_address(ir::Builder& b, ValueId ea) {
-  const ValueId a[] = {ea};
-  return b.emit(Op::Truncate, Type::I32, a);
-}
+// Memory V2 accepts either I32 or I64 guest addresses and performs the single
+// GuestAddress cast at the access boundary. Preserve the full 64-bit EA for
+// update-form architectural writes and avoid a redundant IR truncate.
+ValueId memory_address(ir::Builder&, ValueId ea) { return ea; }
 
 ValueId load_raw(ir::Builder& b, ValueId ea, Type type, Endian endian, const DecodedInstruction& i) {
   ea = memory_address(b, ea);
@@ -144,9 +153,9 @@ bool Lifter::lift_memory(const DecodedInstruction& i, ir::Builder& b) const {
   if (m == "lmw" || m == "stmw") {
     auto base = i.ra() ? b.read_gpr(i.ra()) : b.constant_i64(0);
     for (unsigned r = i.rt(); r < 32; ++r) {
-      auto off = b.constant_i64(static_cast<std::uint64_t>(
-          static_cast<std::int64_t>(i.simm16()) + static_cast<std::int64_t>((r-i.rt())*4)));
-      auto ea = add(b, base, off);
+      const auto displacement = static_cast<std::int64_t>(i.simm16()) +
+                                static_cast<std::int64_t>((r - i.rt()) * 4);
+      auto ea = add_immediate(b, base, displacement);
       if (m == "lmw") {
         auto raw = load_raw(b, ea, Type::I32, Endian::Big, i);
         b.write_gpr(r, extend(b, raw, Type::I32, false));
@@ -240,10 +249,12 @@ bool Lifter::lift_memory(const DecodedInstruction& i, ir::Builder& b) const {
     const ValueId a[] = {ea, value};
     auto ok = b.emit(Op::StoreConditional, Type::I1, a,
                      static_cast<std::uint64_t>(Endian::Big), static_cast<std::uint64_t>(t), &i);
-    // CR0 = 00 | success | XER.SO. Backend/state lowering performs exact nibble assembly.
-    auto xer = b.emit(Op::ReadXER, Type::I32);
-    const ValueId cr_args[] = {ok, xer};
-    b.emit(Op::WriteCR0StoreConditional, Type::Void, cr_args, 0, 0, &i);
+    // CR0 = 00 | success | XER.SO. Use the same typed compare-field IR as
+    // integer compares so CR forwarding can consume EQ without a state round-trip.
+    auto no = b.constant_i1(false);
+    auto so = b.emit(Op::ReadXerSO, Type::I1);
+    const ValueId cr_args[] = {no, no, ok, so};
+    b.emit(Op::WriteCRCompare, Type::Void, cr_args, 0, 0, &i);
     return true;
   }
 

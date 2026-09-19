@@ -5,8 +5,10 @@
 #include <bit>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace xenon::gpu {
 namespace {
@@ -21,6 +23,20 @@ namespace {
   return v;
 }
 
+[[nodiscard]] std::array<std::byte, 4> encode_be32(
+    std::uint32_t value) noexcept {
+  return {static_cast<std::byte>(value >> 24),
+          static_cast<std::byte>(value >> 16),
+          static_cast<std::byte>(value >> 8),
+          static_cast<std::byte>(value)};
+}
+
+[[nodiscard]] std::array<std::byte, 2> encode_be16(
+    std::uint16_t value) noexcept {
+  return {static_cast<std::byte>(value >> 8),
+          static_cast<std::byte>(value)};
+}
+
 [[nodiscard]] std::array<std::byte, 4> encode_le32(
     std::uint32_t value) noexcept {
   if constexpr (std::endian::native == std::endian::big) {
@@ -32,6 +48,16 @@ namespace {
   std::array<std::byte, 4> bytes{};
   std::memcpy(bytes.data(), &value, sizeof(value));
   return bytes;
+}
+
+[[nodiscard]] std::uint32_t load_le32(const std::byte* p) noexcept {
+  std::uint32_t v{};
+  std::memcpy(&v, p, sizeof(v));
+  if constexpr (std::endian::native == std::endian::big) {
+    v = ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
+        ((v & 0x00FF0000u) >> 8) | ((v & 0xFF000000u) >> 24);
+  }
+  return v;
 }
 
 [[nodiscard]] bool is_draw_opcode(Type3Opcode opcode) noexcept {
@@ -132,6 +158,10 @@ namespace {
 constexpr std::uint32_t kVgtDmaBase = 0x21FAu;
 constexpr std::uint32_t kVgtDmaSize = 0x21FBu;
 constexpr std::uint32_t kVgtDrawInitiator = 0x21FCu;
+constexpr std::uint32_t kVgtEventInitiator = 0x21F9u;
+constexpr std::uint32_t kPaScVizQueryStatus0 = 0x0C44u;
+constexpr std::uint32_t kPaScVizQueryStatus1 = 0x0C45u;
+constexpr std::uint32_t kTexture2DCubeMaxWidthHeight = 8192u;
 
 struct DrawInitiatorFields {
   PrimitiveType primitive{PrimitiveType::None};
@@ -180,12 +210,22 @@ class CommandProcessor::Reader {
   [[nodiscard]] std::uint32_t read() {
     if (!remaining_) throw std::runtime_error("truncated GPU command packet");
     const std::uint32_t address = base_ + index_ * 4u;
-    const auto* ptr = memory_.physical_data(address);
-    if (!ptr) throw std::runtime_error("GPU command read from invalid physical RAM");
-    const std::uint32_t value = load_be32(ptr);
+    std::array<std::byte, 4> snapshot{};
+    if (!memory_.copy_physical_range(address, snapshot)) {
+      throw std::runtime_error("GPU command read from invalid physical RAM");
+    }
+    const std::uint32_t value = load_be32(snapshot.data());
     index_ = (index_ + 1u) % capacity_;
     --remaining_;
     return value;
+  }
+
+  void skip(std::uint32_t dwords) {
+    if (dwords > remaining_) {
+      throw std::runtime_error("truncated PM4 conditional execution block");
+    }
+    index_ = (index_ + dwords) % capacity_;
+    remaining_ -= dwords;
   }
 
   [[nodiscard]] std::uint32_t remaining() const noexcept { return remaining_; }
@@ -209,9 +249,15 @@ void CommandProcessor::reset() {
   stats_ = {};
   active_vertex_shader_ = {};
   active_pixel_shader_ = {};
+  active_vertex_program_.reset();
+  active_pixel_program_.reset();
+  shader_partition_ = {};
   bin_base_offset_ = 0;
   bin_mask_ = 0;
   bin_select_ = 0;
+  active_viz_queries_ = 0;
+  viz_query_draws_ = 0;
+  swap_counter_ = 0;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
 }
@@ -327,6 +373,481 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   }
   stream_.emit(ir::PhysicalMemoryWrite{address, logical_value, endian});
   ++stats_.physical_writes;
+}
+
+std::uint32_t CommandProcessor::read_physical_dword(
+    std::uint32_t address_with_endian) const {
+  const Endian endian = static_cast<Endian>(address_with_endian & 0x3u);
+  const std::uint32_t address =
+      cpu_to_gpu_address(address_with_endian & ~0x3u);
+  if (std::uint64_t(address) + 4u > memory::kPhysicalMemorySize) {
+    throw std::out_of_range("Xenos physical read outside RAM");
+  }
+  std::array<std::byte, 4> snapshot{};
+  if (!memory_.copy_physical_range(address, snapshot)) {
+    throw std::runtime_error("Xenos physical read has no backing");
+  }
+  return gpu_swap(load_le32(snapshot.data()), endian);
+}
+
+bool CommandProcessor::wait_condition_matches(std::uint32_t wait_info,
+                                              std::uint32_t value,
+                                              std::uint32_t reference,
+                                              std::uint32_t mask) noexcept {
+  const std::uint32_t masked = value & mask;
+  switch (wait_info & 0x7u) {
+    case 0x0u: return false;
+    case 0x1u: return masked < reference;
+    case 0x2u: return masked <= reference;
+    case 0x3u: return masked == reference;
+    case 0x4u: return masked != reference;
+    case 0x5u: return masked >= reference;
+    case 0x6u: return masked > reference;
+    case 0x7u: return true;
+  }
+  return false;
+}
+
+void CommandProcessor::execute_reg_rmw(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 3u) {
+    throw std::runtime_error("PM4_REG_RMW requires exactly 3 dwords");
+  }
+
+  const std::uint32_t rmw_info = payload[0];
+  const std::uint32_t target = rmw_info & 0x1FFFu;
+  if (!registers_.valid(target)) {
+    throw std::out_of_range("PM4_REG_RMW target register outside register file");
+  }
+
+  std::uint32_t value = registers_.read(target);
+  if ((rmw_info & 0x80000000u) != 0u) {
+    const std::uint32_t source = payload[1] & 0x1FFFu;
+    if (!registers_.valid(source)) {
+      throw std::out_of_range("PM4_REG_RMW AND register outside register file");
+    }
+    value &= registers_.read(source);
+  } else {
+    value &= payload[1];
+  }
+
+  if ((rmw_info & 0x40000000u) != 0u) {
+    const std::uint32_t source = payload[2] & 0x1FFFu;
+    if (!registers_.valid(source)) {
+      throw std::out_of_range("PM4_REG_RMW OR register outside register file");
+    }
+    value |= registers_.read(source);
+  } else {
+    value |= payload[2];
+  }
+
+  emit_register_write(target, value);
+  ++stats_.register_rmw_packets;
+}
+
+void CommandProcessor::execute_reg_to_mem(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 2u) {
+    throw std::runtime_error("PM4_REG_TO_MEM requires exactly 2 dwords");
+  }
+
+  // A2xx/Xenos-family REG_TO_MEM packs the source register in bits 0..17
+  // and a repeat count in bits 18..29. A zero count still transfers one
+  // dword. The 64-byte and accumulate forms are distinct transfer modes and
+  // are intentionally rejected until their Xenos-specific behavior is needed.
+  const std::uint32_t source_info = payload[0];
+  if ((source_info & 0xC0000000u) != 0u) {
+    throw std::runtime_error(
+        "PM4_REG_TO_MEM 64B/ACCUMULATE mode is not supported yet");
+  }
+  const std::uint32_t first_register = source_info & 0x3FFFFu;
+  const std::uint32_t encoded_count = (source_info >> 18) & 0xFFFu;
+  const std::uint32_t transfer_count = std::max(1u, encoded_count);
+  if (!registers_.valid(first_register) ||
+      std::uint64_t(first_register) + transfer_count >
+          RegisterFile::kRegisterCount) {
+    throw std::out_of_range(
+        "PM4_REG_TO_MEM source range outside register file");
+  }
+
+  const std::uint32_t endian_bits = payload[1] & 0x3u;
+  const std::uint32_t destination = payload[1] & ~0x3u;
+  if (std::uint64_t(cpu_to_gpu_address(destination)) +
+          std::uint64_t(transfer_count) * 4u >
+      memory::kPhysicalMemorySize) {
+    throw std::out_of_range("PM4_REG_TO_MEM destination outside physical RAM");
+  }
+  for (std::uint32_t i = 0; i < transfer_count; ++i) {
+    write_physical_dword((destination + i * 4u) | endian_bits,
+                         registers_.read(first_register + i));
+  }
+  ++stats_.register_to_memory_packets;
+  stats_.register_to_memory_dwords += transfer_count;
+}
+
+void CommandProcessor::execute_cond_exec(
+    Reader& reader, std::span<const std::uint32_t> payload) {
+  if (payload.size() != 4u) {
+    throw std::runtime_error("PM4_COND_EXEC requires exactly 4 dwords");
+  }
+
+  // The Xenos-era CP_COND_EXEC body stores two physical addresses in dword
+  // units, followed by a signed reference and the number of subsequent command
+  // dwords controlled by the condition. Execute when *ADDR0 != 0 and
+  // int32(*ADDR1) < int32(REF).
+  const auto decode_dword_address = [](std::uint32_t encoded) {
+    const std::uint64_t byte_address = std::uint64_t(encoded) << 2u;
+    if (byte_address > UINT32_MAX) {
+      throw std::out_of_range("PM4_COND_EXEC address overflow");
+    }
+    return cpu_to_gpu_address(static_cast<std::uint32_t>(byte_address));
+  };
+  const std::uint32_t address0 = decode_dword_address(payload[0]);
+  const std::uint32_t address1 = decode_dword_address(payload[1]);
+  const std::uint32_t value0 = read_physical_dword(address0);
+  const std::uint32_t value1 = read_physical_dword(address1);
+  const bool execute =
+      value0 != 0u &&
+      static_cast<std::int32_t>(value1) <
+          static_cast<std::int32_t>(payload[2]);
+
+  ++stats_.conditional_exec_packets;
+  if (execute) {
+    ++stats_.conditional_exec_taken;
+    return;
+  }
+  reader.skip(payload[3]);
+  stats_.conditional_exec_dwords_skipped += payload[3];
+}
+
+void CommandProcessor::execute_cond_write(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 6u) {
+    throw std::runtime_error("PM4_COND_WRITE requires exactly 6 dwords");
+  }
+
+  const std::uint32_t wait_info = payload[0];
+  std::uint32_t value{};
+  if ((wait_info & 0x10u) != 0u) {
+    value = read_physical_dword(payload[1]);
+  } else {
+    if (!registers_.valid(payload[1])) {
+      throw std::out_of_range("PM4_COND_WRITE poll register outside register file");
+    }
+    value = registers_.read(payload[1]);
+  }
+
+  ++stats_.conditional_write_packets;
+  if (!wait_condition_matches(wait_info, value, payload[2], payload[3])) {
+    return;
+  }
+
+  if ((wait_info & 0x100u) != 0u) {
+    write_physical_dword(payload[4], payload[5]);
+  } else {
+    emit_register_write(payload[4], payload[5]);
+  }
+  ++stats_.conditional_writes_taken;
+}
+
+void CommandProcessor::execute_wait_reg_mem(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 5u) {
+    throw std::runtime_error("PM4_WAIT_REG_MEM requires exactly 5 dwords");
+  }
+
+  const std::uint32_t wait_info = payload[0];
+  const bool memory_source = (wait_info & 0x10u) != 0u;
+  if (!memory_source && !registers_.valid(payload[1])) {
+    throw std::out_of_range("PM4_WAIT_REG_MEM poll register outside register file");
+  }
+
+  ++stats_.wait_reg_mem_packets;
+  for (std::uint32_t poll = 0; poll < kMaximumWaitPollIterations; ++poll) {
+    const std::uint32_t value =
+        memory_source ? read_physical_dword(payload[1])
+                      : registers_.read(payload[1]);
+    ++stats_.wait_reg_mem_polls;
+    if (wait_condition_matches(wait_info, value, payload[2], payload[3])) {
+      return;
+    }
+
+    // WAIT_REG_MEM is a real hardware wait. Yield periodically so a concurrently
+    // running recompiled CPU thread or asynchronous producer can satisfy a
+    // memory condition, but retain an upper safety bound so corrupt captures do
+    // not deadlock the host process forever.
+    if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
+  }
+  throw std::runtime_error("PM4_WAIT_REG_MEM exceeded host safety poll limit");
+}
+
+void CommandProcessor::execute_wait_register(
+    std::span<const std::uint32_t> payload, bool greater_or_equal) {
+  // The compact WAIT_REG_EQ / WAIT_REG_GTE packet family uses the same
+  // four-dword body used by the contemporary A2xx command processor:
+  // register, reference, mask, poll interval. Xenos shares these opcodes and
+  // packet descriptions. The interval is a hardware scheduling hint; on the
+  // host we periodically yield instead of attempting to model CP clock cycles.
+  if (payload.size() != 4u) {
+    throw std::runtime_error(
+        "PM4_WAIT_REG_EQ/GTE requires exactly 4 dwords");
+  }
+  const std::uint32_t register_index = payload[0];
+  if (!registers_.valid(register_index)) {
+    throw std::out_of_range("PM4 compact wait register outside register file");
+  }
+
+  ++stats_.wait_register_packets;
+  for (std::uint32_t poll = 0; poll < kMaximumWaitPollIterations; ++poll) {
+    const std::uint32_t value = registers_.read(register_index) & payload[2];
+    ++stats_.wait_register_polls;
+    if (greater_or_equal ? value >= payload[1] : value == payload[1]) {
+      return;
+    }
+    if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
+  }
+  throw std::runtime_error(
+      "PM4_WAIT_REG_EQ/GTE exceeded host safety poll limit");
+}
+
+void CommandProcessor::execute_load_alu_constant(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 3u) {
+    throw std::runtime_error("PM4_LOAD_ALU_CONSTANT requires exactly 3 dwords");
+  }
+
+  const std::uint32_t address =
+      cpu_to_gpu_address(payload[0] & 0x3FFFFFFFu);
+  std::uint32_t index = (payload[1] & 0x7FFu) +
+                        constant_register_base((payload[1] >> 16) & 0xFFu);
+  const std::uint32_t size = payload[2] & 0xFFFu;
+  if (std::uint64_t(address) + std::uint64_t(size) * 4u >
+      memory::kPhysicalMemorySize) {
+    throw std::out_of_range("PM4_LOAD_ALU_CONSTANT outside physical RAM");
+  }
+
+  std::vector<std::byte> snapshot(std::size_t(size) * 4u);
+  if (!memory_.copy_physical_range(address, snapshot)) {
+    throw std::runtime_error("PM4_LOAD_ALU_CONSTANT snapshot failed");
+  }
+  for (std::uint32_t i = 0; i < size; ++i) {
+    emit_register_write(
+        index++, load_be32(snapshot.data() + std::size_t(i) * 4u));
+  }
+  ++stats_.memory_constant_load_packets;
+}
+
+void CommandProcessor::execute_set_shader_bases(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 1u) {
+    throw std::runtime_error("PM4_SET_SHADER_BASES requires exactly 1 dword");
+  }
+  const std::uint32_t raw = payload[0];
+  shader_partition_.raw = raw;
+  shader_partition_.instruction_store_size_code = (raw >> 29u) & 0x7u;
+  shader_partition_.vertex_start = (raw >> 16u) & 0xFFFu;
+  shader_partition_.pixel_start = raw & 0xFFFu;
+  ++stats_.shader_base_packets;
+}
+
+bool CommandProcessor::execute_im_store(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 2u) {
+    throw std::runtime_error("PM4_IM_STORE requires exactly 2 dwords");
+  }
+  const std::uint32_t stage_bits = payload[0] & 0x3u;
+  // Public Xenos implementations expose vertex/pixel instruction stores. The
+  // A2xx-family shared-store selector (2) isn't promoted to Xenos semantics
+  // without title/hardware evidence, so retain such a packet losslessly.
+  if (stage_bits > 1u) return false;
+
+  const auto& program = stage_bits == 0u ? active_vertex_program_
+                                          : active_pixel_program_;
+  if (!program) {
+    throw std::runtime_error("PM4_IM_STORE has no active shader program");
+  }
+  if (program->start_slot() > 0xFFFFu || program->dwords().size() > 0xFFFFu) {
+    throw std::runtime_error("PM4_IM_STORE shader metadata overflow");
+  }
+
+  const std::uint32_t destination = cpu_to_gpu_address(payload[0] & ~0x3u);
+  const std::uint64_t byte_count64 =
+      std::uint64_t(program->dwords().size()) * 4u;
+  if (byte_count64 > UINT32_MAX ||
+      std::uint64_t(destination) + byte_count64 > memory::kPhysicalMemorySize) {
+    throw std::out_of_range("PM4_IM_STORE destination outside physical RAM");
+  }
+
+  if (byte_count64) {
+    auto write = memory_.physical_write_span(
+        destination, static_cast<std::uint32_t>(byte_count64));
+    if (!write) throw std::runtime_error("PM4_IM_STORE has no destination backing");
+    std::uint32_t offset = 0;
+    for (const std::uint32_t dword : program->dwords()) {
+      const auto encoded = encode_be32(dword);
+      if (!write.write(offset, encoded)) {
+        throw std::runtime_error("PM4_IM_STORE write span overflow");
+      }
+      offset += 4u;
+    }
+  }
+
+  // IM_STORE also saves the instruction-store start/size descriptor into the
+  // command/state shadow supplied by the second dword. This lets a later
+  // IM_LOAD restore exactly the bank that was saved.
+  const std::uint32_t metadata_address = cpu_to_gpu_address(payload[1]);
+  const std::uint32_t start_size =
+      (program->start_slot() << 16u) |
+      static_cast<std::uint32_t>(program->dwords().size());
+  const auto encoded_metadata = encode_be32(start_size);
+  if (!memory_.write_physical(metadata_address, encoded_metadata)) {
+    throw std::runtime_error("PM4_IM_STORE metadata write failed");
+  }
+
+  ++stats_.shader_store_packets;
+  stats_.shader_store_dwords += program->dwords().size();
+  stats_.physical_writes += program->dwords().size() + 1u;
+  return true;
+}
+
+void CommandProcessor::execute_invalidate_state(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 1u) {
+    throw std::runtime_error("PM4_INVALIDATE_STATE requires exactly 1 dword");
+  }
+  const std::uint32_t mask = payload[0];
+  // A2xx/Xenos-era context streams identify 0x100 and 0x200 specifically as
+  // vertex and pixel instruction-code address/size invalidation. Other bits
+  // remain preserved in IR until their Xenos meaning is independently known.
+  if ((mask & 0x100u) != 0u) {
+    active_vertex_shader_ = {};
+    active_vertex_program_.reset();
+    ++stats_.shader_invalidations;
+  }
+  if ((mask & 0x200u) != 0u) {
+    active_pixel_shader_ = {};
+    active_pixel_program_.reset();
+    ++stats_.shader_invalidations;
+  }
+  ++stats_.invalidate_state_packets;
+}
+
+void CommandProcessor::execute_event_write(
+    std::span<const std::uint32_t> payload) {
+  if (payload.empty()) {
+    throw std::runtime_error("PM4_EVENT_WRITE missing initiator");
+  }
+  // The one-dword form is the well-established event-initiator write. Longer
+  // forms are retained in EventPacket IR, but their additional destination
+  // semantics are not assigned without Xenos-specific evidence.
+  emit_register_write(kVgtEventInitiator, payload[0] & 0x3Fu);
+  ++stats_.event_packets;
+}
+
+void CommandProcessor::execute_event_write_shader_done(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 3u) {
+    throw std::runtime_error(
+        "PM4_EVENT_WRITE_SHD requires initiator, address and value");
+  }
+
+  const std::uint32_t initiator = payload[0];
+  emit_register_write(kVgtEventInitiator, initiator & 0x3Fu);
+  const bool write_progress_counter = (initiator & 0x80000000u) != 0u;
+  const std::uint32_t value = write_progress_counter ? swap_counter_ : payload[2];
+  if ((payload[1] & ~0x3u) != 0u) {
+    write_physical_dword(payload[1], value);
+    ++stats_.event_memory_writes;
+    if (write_progress_counter) ++stats_.event_counter_writes;
+  }
+  ++stats_.event_packets;
+}
+
+void CommandProcessor::execute_event_write_extent(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 2u) {
+    throw std::runtime_error(
+        "PM4_EVENT_WRITE_EXT requires initiator and address");
+  }
+
+  emit_register_write(kVgtEventInitiator, payload[0] & 0x3Fu);
+  const Endian endian = static_cast<Endian>(payload[1] & 0x3u);
+  if (endian != Endian::Swap8In16) {
+    throw std::runtime_error(
+        "PM4_EVENT_WRITE_EXT requires Xenos 8-in-16 destination endian");
+  }
+  const std::uint32_t address = cpu_to_gpu_address(payload[1] & ~0x3u);
+  if (std::uint64_t(address) + 12u > memory::kPhysicalMemorySize) {
+    throw std::out_of_range("PM4_EVENT_WRITE_EXT destination outside RAM");
+  }
+
+  // Until the backend exposes a real raster extent query, report the complete
+  // architectural 2D range. This is intentionally conservative: it may
+  // over-report affected pixels, but never hides work from the guest runtime.
+  constexpr std::array<std::uint16_t, 6> extents = {
+      0u, static_cast<std::uint16_t>(kTexture2DCubeMaxWidthHeight >> 3u),
+      0u, static_cast<std::uint16_t>(kTexture2DCubeMaxWidthHeight >> 3u),
+      0u, 1u};
+  std::array<std::byte, 12> encoded{};
+  for (std::size_t i = 0; i < extents.size(); ++i) {
+    const auto value = encode_be16(extents[i]);
+    encoded[i * 2u] = value[0];
+    encoded[i * 2u + 1u] = value[1];
+  }
+  if (!memory_.write_physical(address, encoded)) {
+    throw std::runtime_error("PM4_EVENT_WRITE_EXT write failed");
+  }
+  stats_.physical_writes += 3u;
+  ++stats_.event_memory_writes;
+  ++stats_.extent_event_writes;
+  ++stats_.event_packets;
+}
+
+void CommandProcessor::execute_viz_query(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 1u) {
+    throw std::runtime_error("PM4_VIZ_QUERY requires exactly 1 dword");
+  }
+  const std::uint32_t id = payload[0] & 0x3Fu;
+  const bool end = (payload[0] & 0x100u) != 0u;
+  const std::uint64_t bit = UINT64_C(1) << id;
+  const std::uint32_t status_register =
+      id < 32u ? kPaScVizQueryStatus0 : kPaScVizQueryStatus1;
+  const std::uint32_t status_bit = UINT32_C(1) << (id & 31u);
+
+  if (!end) {
+    active_viz_queries_ |= bit;
+    viz_query_draws_ &= ~bit;
+    emit_register_write(status_register,
+                        registers_.read(status_register) & ~status_bit);
+    emit_register_write(kVgtEventInitiator, 7u);  // VIZQUERY_START.
+    ++stats_.viz_query_begins;
+  } else {
+    active_viz_queries_ &= ~bit;
+    emit_register_write(kVgtEventInitiator, 8u);  // VIZQUERY_END.
+    if ((viz_query_draws_ & bit) != 0u) {
+      emit_register_write(status_register,
+                          registers_.read(status_register) | status_bit);
+      ++stats_.viz_query_visible_results;
+    }
+    viz_query_draws_ &= ~bit;
+    ++stats_.viz_query_ends;
+  }
+  ++stats_.event_packets;
+}
+
+void CommandProcessor::execute_interrupt(
+    std::span<const std::uint32_t> payload) {
+  if (payload.size() != 1u) {
+    throw std::runtime_error("PM4_INTERRUPT requires exactly 1 dword");
+  }
+  ++stats_.interrupt_packets;
+  if (!interrupt_callback_) return;
+  for (std::uint32_t cpu = 0; cpu < 6u; ++cpu) {
+    if ((payload[0] & (UINT32_C(1) << cpu)) == 0u) continue;
+    interrupt_callback_(cpu);
+    ++stats_.interrupt_dispatches;
+  }
 }
 
 void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload) {
@@ -472,6 +993,12 @@ void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
       break;
   }
 
+  // Until backend sample-count feedback is wired into the common frontend,
+  // treat any successfully decoded draw inside a visibility-query scope as
+  // visible. Empty query scopes still report not-visible, which is less
+  // destructive than unconditionally marking every query visible.
+  viz_query_draws_ |= active_viz_queries_;
+
   draw.register_generation = registers_.generation();
   draw.raw_payload = std::move(payload);
   stream_.emit(std::move(draw));
@@ -516,6 +1043,42 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     return;
   }
 
+  if (header.opcode == Type3Opcode::RegRmw) {
+    execute_reg_rmw(payload);
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::RegToMem) {
+    execute_reg_to_mem(payload);
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::CondExec) {
+    execute_cond_exec(reader, payload);
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::CondWrite) {
+    execute_cond_write(payload);
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::WaitRegMem) {
+    execute_wait_reg_mem(payload);
+    stream_.emit(ir::SynchronizationPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::WaitRegEq ||
+      header.opcode == Type3Opcode::WaitRegGte) {
+    execute_wait_register(payload, header.opcode == Type3Opcode::WaitRegGte);
+    stream_.emit(ir::SynchronizationPacket{header.opcode, payload});
+    return;
+  }
+
   if (header.opcode == Type3Opcode::SetConstant) {
     if (payload.empty()) throw std::runtime_error("PM4_SET_CONSTANT missing selector");
     std::uint32_t index = (payload[0] & 0x7FFu) +
@@ -542,6 +1105,28 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     return;
   }
 
+  if (header.opcode == Type3Opcode::SetShaderBases) {
+    execute_set_shader_bases(payload);
+    stream_.emit(ir::ShaderPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::InvalidateState) {
+    execute_invalidate_state(payload);
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::ImStore) {
+    if (execute_im_store(payload)) {
+      stream_.emit(ir::ShaderPacket{header.opcode, payload});
+      return;
+    }
+    // Unknown/shared instruction-store selectors remain losslessly represented.
+    stream_.emit(ir::ShaderPacket{header.opcode, std::move(payload)});
+    return;
+  }
+
   if (header.opcode == Type3Opcode::ImLoad) {
     if (payload.size() < 2) {
       throw std::runtime_error("PM4_IM_LOAD requires address/type and start/size");
@@ -555,17 +1140,24 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     if (std::uint64_t(address) + std::uint64_t(size) * 4u > memory::kPhysicalMemorySize) {
       throw std::out_of_range("PM4_IM_LOAD shader outside physical RAM");
     }
+    std::vector<std::byte> microcode_snapshot(std::size_t(size) * 4u);
+    if (!memory_.copy_physical_range(address, microcode_snapshot)) {
+      throw std::runtime_error("PM4_IM_LOAD shader snapshot failed");
+    }
     std::vector<std::uint32_t> microcode;
     microcode.reserve(size);
     for (std::uint32_t i = 0; i < size; ++i) {
-      microcode.push_back(load_be32(memory_.physical_data(address + i * 4u)));
+      microcode.push_back(
+          load_be32(microcode_snapshot.data() + std::size_t(i) * 4u));
     }
     ShaderProgram program(stage, microcode, start);
     const ir::ShaderReference reference{true, program.hash(), start};
     if (stage == ShaderStage::Vertex) {
       active_vertex_shader_ = reference;
+      active_vertex_program_ = program;
     } else {
       active_pixel_shader_ = reference;
+      active_pixel_program_ = program;
     }
     auto decoded = ShaderDecoder::decode(program);
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
@@ -590,8 +1182,10 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     const ir::ShaderReference reference{true, program.hash(), start};
     if (stage == ShaderStage::Vertex) {
       active_vertex_shader_ = reference;
+      active_vertex_program_ = program;
     } else {
       active_pixel_shader_ = reference;
+      active_pixel_program_ = program;
     }
     auto decoded = ShaderDecoder::decode(program);
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
@@ -610,10 +1204,52 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     if (std::uint64_t(address) + std::uint64_t(size) * 4u > memory::kPhysicalMemorySize) {
       throw std::out_of_range("PM4_LOAD_CONSTANT_CONTEXT outside physical RAM");
     }
+    std::vector<std::byte> constant_snapshot(std::size_t(size) * 4u);
+    if (!memory_.copy_physical_range(address, constant_snapshot)) {
+      throw std::runtime_error("PM4_LOAD_CONSTANT_CONTEXT snapshot failed");
+    }
     for (std::uint32_t i = 0; i < size; ++i) {
-      emit_register_write(index++, load_be32(memory_.physical_data(address + i * 4u)));
+      emit_register_write(
+          index++,
+          load_be32(constant_snapshot.data() + std::size_t(i) * 4u));
     }
     stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::LoadAluConstant) {
+    execute_load_alu_constant(payload);
+    stream_.emit(ir::StatePacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::VizQuery) {
+    execute_viz_query(payload);
+    stream_.emit(ir::EventPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::EventWrite) {
+    execute_event_write(payload);
+    stream_.emit(ir::EventPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::EventWriteShaderDone) {
+    execute_event_write_shader_done(payload);
+    stream_.emit(ir::EventPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::EventWriteExtent) {
+    execute_event_write_extent(payload);
+    stream_.emit(ir::EventPacket{header.opcode, payload});
+    return;
+  }
+
+  if (header.opcode == Type3Opcode::Interrupt) {
+    execute_interrupt(payload);
+    stream_.emit(ir::EventPacket{header.opcode, payload});
     return;
   }
 

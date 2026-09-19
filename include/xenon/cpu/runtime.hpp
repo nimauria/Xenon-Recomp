@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "xenon/cpu/memory_port.hpp"
 #include "xenon/cpu/state.hpp"
@@ -53,6 +54,54 @@ class RuntimeServices {
   // clock directly. Keeping this at the runtime boundary also makes tests and
   // deterministic replay possible without changing CPU IR.
   virtual std::uint64_t read_time_base(const CpuState& state) = 0;
+
+  // CPU-v1 compatibility hook for imported platform calls. CPU v2 may replace
+  // how imports reach this boundary, but subsystem handlers remain unchanged.
+  virtual bool external_call(std::string_view module, std::uint32_t ordinal,
+                             CpuState& state, MemoryPort& memory) {
+    static_cast<void>(module); static_cast<void>(ordinal);
+    static_cast<void>(state); static_cast<void>(memory); return false;
+  }
+};
+
+// CPU V2 native-entry ABI. A caller creates one context for a guest execution
+// chain and compiled functions reuse its Memory V2 access view rather than
+// reacquiring the legacy polymorphic MemoryPort boundary on every guest call.
+struct ExecutionContext;
+using NativeCompiledEntry = ExecutionResult (*)(ExecutionContext&);
+enum class CompiledLookupKind : std::uint8_t {
+  Branch,
+  Call,
+};
+using CompiledLookupCallback = NativeCompiledEntry (*)(
+    void* registry, ExecutionContext& context, GuestAddress target,
+    CompiledLookupKind kind);
+
+struct ExecutionContext {
+  CpuState& state;
+  MemoryPort& memory;
+  RuntimeServices& runtime;
+  MemoryAccessContext memory_access;
+  void* compiled_registry{};
+  CompiledLookupCallback compiled_lookup{};
+
+  [[nodiscard]] NativeCompiledEntry lookup_compiled(
+      GuestAddress target,
+      CompiledLookupKind kind = CompiledLookupKind::Branch) {
+    return compiled_lookup ? compiled_lookup(compiled_registry, *this, target,
+                                               kind)
+                           : nullptr;
+  }
+
+  ExecutionContext(CpuState& state_in, MemoryPort& memory_in,
+                   RuntimeServices& runtime_in) noexcept
+      : state(state_in),
+        memory(memory_in),
+        runtime(runtime_in),
+        memory_access(memory_in.access_context()) {}
+
+  ExecutionContext(const ExecutionContext&) = delete;
+  ExecutionContext& operator=(const ExecutionContext&) = delete;
 };
 
 class NullRuntimeServices final : public RuntimeServices {

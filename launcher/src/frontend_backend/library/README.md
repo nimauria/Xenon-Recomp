@@ -57,10 +57,12 @@ removal and the runtime-facing installed-DLC list. It refuses deletion outside t
 ## Import boundary
 
 Production game and DLC import has exactly one route: `ContentImportService -> IContentProbe`.
-The default `UnavailableContentProbe` intentionally changes nothing until the Xenon filesystem/content
-subsystem can identify Xbox content.
+When `Xenon::Filesystem` is present the production implementation is `XenonContentProbe`; the
+`UnavailableContentProbe` remains only as the truthful fallback for builds without the filesystem
+subsystem. Game identification handles XEX2/extracted/GDFX sources, while DLC identification handles
+single-file CON/LIVE/PIRS STFS packages.
 
-The future implementation only needs to provide these operations:
+The boundary provides these operations:
 
 ```text
 identifyGame(source, installed module candidates) -> normalized module/title metadata
@@ -81,6 +83,10 @@ probe identify dlcId
   -> DlcService::commitInstall()
   -> receipt + UI state + launch mount become available
 ```
+
+STFS DLC ownership is matched by the exact 20-byte XContent Content ID declared in the module
+catalogue (`contentIds`). Filename and friendly-name guesses are deliberately rejected. Optional
+title/media/version metadata can further narrow a content-ID match.
 
 This means the Project Gracemeria manifest and Xbox package parser can change later without changing
 the Library page or its QML contracts.
@@ -107,3 +113,19 @@ background Add/Import actions.
 QML may still own ephemeral search text, selection, menu/dialog state and visual filtering. It must
 not own persistent library metadata, manifest interpretation, DLC install state, paths, verification,
 import logic or launch-contract assembly.
+
+## GitHub presentation metadata
+
+Library presentation metadata is sourced from the official Xenon Modules registry, not from QML and
+not from the runtime module ABI. Registry entries may provide a `launcher` projection, game metadata,
+a DLC catalogue, compatibility text and artwork paths. `GitHubModuleCatalogProvider` validates and
+normalizes those fields, while `ModuleCatalogAssetCache` downloads declared artwork into the launcher
+cache and exposes only local `file://` URLs to QML.
+
+The selected Library entry is rebuilt whenever the registry or its cached artwork changes. This means
+title/description/tags/regions/compatibility/DLC presentation and cover/hero artwork can update without
+shipping a new launcher. A manual **Refresh GitHub metadata** action forces a registry refresh and
+conditional artwork revalidation.
+
+This metadata is presentation/discovery data only. Runtime behavior, executable compatibility and
+module code remain authoritative in the installed module package and Xenon framework APIs.

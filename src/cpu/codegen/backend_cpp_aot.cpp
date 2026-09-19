@@ -1,5 +1,7 @@
 #include "xenon/cpu/backend/cpp_aot.hpp"
+#include "xenon/cpu/decoder.hpp"
 
+#include <cctype>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -31,13 +33,23 @@ unsigned bits(Type t){switch(t){case Type::I1:return 1;case Type::I8:return 8;ca
 std::string arg(const Instruction&i,unsigned n){if(n>=i.args.size())return "{}";return v(i.args[n]);}
 std::string decl(const Instruction&i,const std::string&e){return std::string("  [[maybe_unused]] ")+ctype(i.type)+" "+v(i.result)+" = "+e+";\n";}
 std::string signed_type(Type t){switch(t){case Type::I8:return "std::int8_t";case Type::I16:return "std::int16_t";case Type::I32:return "std::int32_t";default:return "std::int64_t";}}
+std::string_view guest_mnemonic(const Instruction& i) {
+  const auto* info = Decoder::opcode_info(i.guest_opcode);
+  return info ? info->mnemonic : std::string_view{};
+}
 std::string enum_name(const Instruction&i){
-  if(i.guest_mnemonic.empty()) throw std::runtime_error("vector IR missing guest mnemonic");
-  return "aot::VectorSemantic::"+i.guest_mnemonic;
+  const auto mnemonic = guest_mnemonic(i);
+  if(mnemonic.empty()) throw std::runtime_error("vector IR missing guest opcode metadata");
+  return "aot::VectorSemantic::" + std::string(mnemonic);
 }
 
 bool is_vector_compute(Op op){
   return op>=Op::VAdd && op<=Op::VMultiplyEvenOdd;
+}
+
+// Check if this is a vector splat operation that can be lowered natively
+bool is_vector_splat(Op op) {
+  return op == Op::VSplat;
 }
 
 std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
@@ -63,14 +75,19 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::WriteCRBit:o<<"  state.set_cr_bit("<<i.imm0<<", "<<arg(i,0)<<");\n";break;
     case Op::ReadCRField:return decl(i,"state.cr_field("+std::to_string(i.imm0)+")");
     case Op::WriteCRField:o<<"  state.set_cr_field("<<i.imm0<<", static_cast<std::uint8_t>("<<arg(i,0)<<"));\n";break;
-    case Op::WriteCRCompare:{o<<"  { std::uint8_t f = "<<arg(i,0)<<" ? 0x8u : ("<<arg(i,1)<<" ? 0x4u : 0x2u); if (("<<arg(i,3)<<" & xer_bits::SO)!=0) f|=1u; state.set_cr_field("<<i.imm0<<", f); }\n";break;}
+    case Op::WriteCRCompare:{o<<"  { std::uint8_t f = "<<arg(i,0)<<" ? 0x8u : ("<<arg(i,1)<<" ? 0x4u : ("<<arg(i,2)<<" ? 0x2u : 0u)); if ("<<arg(i,3)<<") f|=1u; state.set_cr_field("<<i.imm0<<", f); }\n";break;}
     case Op::WriteCR0StoreConditional:o<<"  state.set_cr_field(0, static_cast<std::uint8_t>(("<<arg(i,0)<<" ? 0x2u : 0u) | (("<<arg(i,1)<<" & xer_bits::SO) ? 1u : 0u)));\n";break;
     case Op::UpdateCR0Signed:o<<"  state.update_cr0_signed(static_cast<std::uint64_t>("<<arg(i,0)<<"));\n";break;
     case Op::MoveCRFields:{o<<"  { [[maybe_unused]] const std::uint32_t src=static_cast<std::uint32_t>("<<arg(i,0)<<");";for(unsigned f=0;f<8;++f)if(i.imm0&(0x80u>>f))o<<" state.set_cr_field("<<f<<", std::uint8_t((src>>"<<((7-f)*4)<<")&0xFu));";o<<" }\n";break;}
     case Op::MoveXERToCR:o<<"  { std::uint8_t f=(state.xer_so()?8u:0u)|(state.xer_ov()?4u:0u)|(state.xer_ca()?2u:0u); state.set_cr_field("<<i.imm0<<",f); state.xer &= ~(xer_bits::SO|xer_bits::OV|xer_bits::CA); }\n";break;
     case Op::ReadXER:return decl(i,"state.xer");
+    case Op::ReadXerCA:return decl(i,"state.xer_ca()");
+    case Op::ReadXerOV:return decl(i,"state.xer_ov()");
+    case Op::ReadXerSO:return decl(i,"state.xer_so()");
     case Op::WriteXER:o<<"  state.xer = static_cast<std::uint32_t>("<<arg(i,0)<<");\n";break;
     case Op::SetXerCA:o<<"  state.set_xer_ca("<<arg(i,0)<<");\n";break;
+    case Op::SetXerOV:o<<"  state.set_xer_ov("<<arg(i,0)<<");\n";break;
+    case Op::SetXerSO:o<<"  state.set_xer_so("<<arg(i,0)<<");\n";break;
     case Op::SetXerOverflowSticky:o<<"  state.set_xer_overflow("<<arg(i,0)<<");\n";break;
     case Op::ReadFPSCR:return decl(i,"state.fpscr");
     case Op::WriteFPSCR:o<<"  state.fpscr=static_cast<std::uint32_t>("<<arg(i,0)<<");\n";break;
@@ -94,7 +111,9 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::ReadSPR:return decl(i,"runtime.read_spr("+std::to_string(i.imm0)+",state)");
     case Op::WriteSPR:o<<"  runtime.write_spr("<<i.imm0<<","<<arg(i,0)<<",state);\n";break;
 
-    case Op::Add:return bin("+"); case Op::Sub:return bin("-"); case Op::Mul:return bin("*");
+    case Op::Add:return bin("+");
+    case Op::AddImmediate:return decl(i,"static_cast<std::uint64_t>("+arg(i,0)+" + "+u64(i.imm0)+")");
+    case Op::Sub:return bin("-"); case Op::Mul:return bin("*");
     case Op::And:return bin("&"); case Op::Or:return bin("|"); case Op::Xor:return bin("^");
     case Op::Not:return i.type==Type::I1 ? decl(i,"!"+arg(i,0)) : decl(i,"static_cast<"+std::string(ctype(i.type))+">(~"+arg(i,0)+")");
     case Op::AddCarry:return decl(i,"static_cast<"+std::string(ctype(i.type))+">(aot::add_carry("+arg(i,0)+","+arg(i,1)+","+arg(i,2)+"))");
@@ -108,8 +127,8 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::DivOverflow:return decl(i,"aot::div_overflow("+arg(i,0)+","+arg(i,1)+","+std::to_string(i.imm0)+","+(i.imm1?"true":"false")+")");
     case Op::Neg:return decl(i,"static_cast<"+std::string(ctype(i.type))+">(0-"+arg(i,0)+")");
     case Op::CountLeadingZeros:{std::string fn=bits(i.type)==32?"std::countl_zero(static_cast<std::uint32_t>(":"std::countl_zero(static_cast<std::uint64_t>(";return decl(i,"static_cast<"+std::string(ctype(i.type))+">("+fn+arg(i,0)+")))");}
-    case Op::PpcShift:return decl(i,"static_cast<std::uint64_t>(aot::ppc_shift(\""+i.guest_mnemonic+"\","+arg(i,0)+","+arg(i,1)+"))");
-    case Op::PpcShiftCarry:return decl(i,"aot::ppc_shift_carry(\""+i.guest_mnemonic+"\","+arg(i,0)+","+arg(i,1)+")");
+    case Op::PpcShift:return decl(i,"static_cast<std::uint64_t>(aot::ppc_shift(\""+std::string(guest_mnemonic(i))+"\","+arg(i,0)+","+arg(i,1)+"))");
+    case Op::PpcShiftCarry:return decl(i,"aot::ppc_shift_carry(\""+std::string(guest_mnemonic(i))+"\","+arg(i,0)+","+arg(i,1)+")");
     case Op::Shl:return decl(i,"static_cast<"+std::string(ctype(i.type))+">((std::uint64_t("+arg(i,1)+") >= "+std::to_string(bits(i.type))+"u) ? 0 : ("+arg(i,0)+" << "+arg(i,1)+"))");
     case Op::ShrLogical:return decl(i,"static_cast<"+std::string(ctype(i.type))+">((std::uint64_t("+arg(i,1)+") >= "+std::to_string(bits(i.type))+"u) ? 0 : ("+arg(i,0)+" >> "+arg(i,1)+"))");
     case Op::ShrArithmetic:return decl(i,"static_cast<"+std::string(ctype(i.type))+">((std::uint64_t("+arg(i,1)+") >= "+std::to_string(bits(i.type))+"u) ? (static_cast<"+signed_type(i.type)+">("+arg(i,0)+")<0 ? -1 : 0) : (static_cast<"+signed_type(i.type)+">("+arg(i,0)+") >> "+arg(i,1)+"))");
@@ -166,8 +185,8 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::Store:{std::string ea="static_cast<GuestAddress>("+arg(i,0)+")";Type st=static_cast<Type>(i.imm1);if(st==Type::I8)o<<"  memory_access.write8("<<ea<<","<<arg(i,1)<<");\n";else if(st==Type::V128)o<<"  memory_access.write128("<<ea<<","<<arg(i,1)<<");\n";else{bool little=i.imm0==static_cast<std::uint64_t>(ir::Endian::Little);o<<"  memory_access.write"<<bits(st)<<(little?"_le":"_be")<<"("<<ea<<","<<arg(i,1)<<");\n";}break;}
     case Op::ReserveLoad:{
       const bool w=i.type==Type::I32;
-      o<<"  if (state.reservation.valid) memory.cancel_reservation(state.reservation.token);\n";
-      o<<"  std::"<<(w?"uint32_t":"uint64_t")<<" tmp_res_"<<i.result<<"{}; state.reservation.token=memory.reserve"<<(w?32:64)<<"(static_cast<GuestAddress>("<<arg(i,0)<<"),tmp_res_"<<i.result<<"); state.reservation.valid=(state.reservation.token != 0u); state.reservation.width="<<(w?4:8)<<"; state.reservation.address=static_cast<GuestAddress>("<<arg(i,0)<<"); state.reservation.observed_value=tmp_res_"<<i.result<<";\n"<<decl(i,"tmp_res_"+std::to_string(i.result));
+      o<<"  if (state.reservation.valid) memory_access.cancel_reservation(state.reservation.token);\n";
+      o<<"  std::"<<(w?"uint32_t":"uint64_t")<<" tmp_res_"<<i.result<<"{}; state.reservation.token=memory_access.reserve"<<(w?32:64)<<"(static_cast<GuestAddress>("<<arg(i,0)<<"),tmp_res_"<<i.result<<"); state.reservation.valid=(state.reservation.token != 0u); state.reservation.width="<<(w?4:8)<<"; state.reservation.address=static_cast<GuestAddress>("<<arg(i,0)<<"); state.reservation.observed_value=tmp_res_"<<i.result<<";\n"<<decl(i,"tmp_res_"+std::to_string(i.result));
       break;
     }
     case Op::StoreConditional:{
@@ -176,8 +195,8 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       const auto tmp="tmp_sc_"+std::to_string(i.result);
       o<<"  bool "<<tmp<<" = false;\n";
       o<<"  if (state.reservation.valid) {\n";
-      o<<"    if (state.reservation.width == "<<(w?4:8)<<") "<<tmp<<" = memory.store_conditional"<<(w?32:64)<<"("<<ea<<",state.reservation.token,static_cast<"<<(w?"std::uint32_t":"std::uint64_t")<<">("<<arg(i,1)<<"));\n";
-      o<<"    else memory.cancel_reservation(state.reservation.token);\n";
+      o<<"    if (state.reservation.width == "<<(w?4:8)<<") "<<tmp<<" = memory_access.store_conditional"<<(w?32:64)<<"("<<ea<<",state.reservation.token,static_cast<"<<(w?"std::uint32_t":"std::uint64_t")<<">("<<arg(i,1)<<"));\n";
+      o<<"    else memory_access.cancel_reservation(state.reservation.token);\n";
       o<<"  }\n";
       o<<decl(i,tmp)<<"  state.reservation.clear();\n";
       break;
@@ -186,7 +205,7 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::StringStore:o<<"  aot::string_store(state,memory_access,static_cast<GuestAddress>("<<arg(i,0)<<"),static_cast<std::uint32_t>("<<arg(i,1)<<"),"<<i.imm0<<");\n";break;
     case Op::Barrier:{
       const char* k=i.imm0==1?"Sync":i.imm0==2?"LightweightSync":i.imm0==3?"Eieio":"InstructionSync";
-      o<<"  memory.barrier(BarrierKind::"<<k<<");\n";
+      o<<"  memory_access.barrier(BarrierKind::"<<k<<");\n";
       if(i.imm0==4){
         // isync discards already-fetched guest instructions. Recompiled guest
         // code therefore leaves the current native translation after the host
@@ -199,23 +218,75 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       break;
     }
     case Op::CacheZero:o<<"  memory_access.zero_cache_block(static_cast<GuestAddress>("<<arg(i,0)<<"),"<<i.imm0<<");\n";break;
-    case Op::ICacheInvalidate:o<<"  memory.instruction_cache_invalidate(static_cast<GuestAddress>("<<arg(i,0)<<"));\n";break;
+    case Op::ICacheInvalidate:o<<"  memory_access.instruction_cache_invalidate(static_cast<GuestAddress>("<<arg(i,0)<<"));\n";break;
     case Op::CacheHint:o<<"  (void)"<<arg(i,0)<<";\n";break;
 
     case Op::Branch:o<<"  return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,0)<<"),0};\n";break;
     case Op::Call:o<<"  { auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,0)<<"),state,memory); if(rr.terminal()) return rr; }\n";break;
     case Op::BranchIf:{o<<"  if("<<arg(i,0)<<") { ";if(i.imm0)o<<"auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,1)<<"),state,memory); if(rr.terminal()) return rr;";else o<<"return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,1)<<"),0};";o<<" }\n";break;}
-    case Op::BranchIndirect:{o<<"  if("<<arg(i,0)<<") { ";if(i.imm0)o<<"auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,1)<<"),state,memory); if(rr.terminal()) return rr;";else if(i.imm1==1)o<<"return {FlowReason::Return,static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull),0};";else o<<"return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull),0};";o<<" }\n";break;}
-    case Op::CallIndirect:o<<"  { auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,0)<<"),state,memory); if(rr.terminal()) return rr; }\n";break;
+    case Op::BranchIndirect:{
+      o<<"  if("<<arg(i,0)<<") { ";
+      if(i.imm0){
+        const auto expected=static_cast<GuestAddress>(i.guest_address+4u);
+        o<<"const auto raw_target=static_cast<GuestAddress>("<<arg(i,1)<<"); "
+         <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
+         <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
+         <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+         <<expected<<"u) return rr; } else { auto rr=runtime.call(raw_target,state,memory); "
+         <<"if(rr.terminal()) return rr; }";
+      }else if(i.imm1==1){
+        o<<"return {FlowReason::Return,static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull),0};";
+      }else{
+        o<<"const auto guest_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); "
+         <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) "
+         <<"return native(context); return {FlowReason::Branch,guest_target,0};";
+      }
+      o<<" }\n";break;
+    }
+    case Op::CallIndirect:{
+      o<<"  { const auto raw_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
+       <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
+       <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
+       <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+       <<"static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } else { "
+       <<"auto rr=runtime.call(raw_target,state,memory); if(rr.terminal()) return rr; } }\n";break;
+    }
     case Op::Return:o<<"  return {FlowReason::Return,static_cast<GuestAddress>(state.lr & ~3ull),0};\n";break;
     case Op::Syscall:o<<"  return runtime.syscall("<<i.imm0<<",state,memory);\n";break;
-    case Op::Trap:{const std::uint32_t w=i.guest_word;const bool word=i.guest_mnemonic=="tw"||i.guest_mnemonic=="twi";const bool imm=i.guest_mnemonic=="tdi"||i.guest_mnemonic=="twi";unsigned ra=(w>>16)&31u;unsigned rb=(w>>11)&31u;std::int64_t simm=static_cast<std::int16_t>(w&0xFFFFu);o<<"  if(aot::trap_condition("<<i.imm0<<",state.gpr["<<ra<<"],"<<(imm?("std::uint64_t(std::int64_t("+std::to_string(simm)+"))"):("state.gpr["+std::to_string(rb)+"]"))<<","<<(word?"true":"false")<<")) return runtime.trap("<<i.imm0<<",state,memory);\n";break;}
+    case Op::Trap:{const std::uint32_t w=i.guest_word;const auto m=guest_mnemonic(i);const bool word=m=="tw"||m=="twi";const bool imm=m=="tdi"||m=="twi";unsigned ra=(w>>16)&31u;unsigned rb=(w>>11)&31u;std::int64_t simm=static_cast<std::int16_t>(w&0xFFFFu);o<<"  if(aot::trap_condition("<<i.imm0<<",state.gpr["<<ra<<"],"<<(imm?("std::uint64_t(std::int64_t("+std::to_string(simm)+"))"):("state.gpr["+std::to_string(rb)+"]"))<<","<<(word?"true":"false")<<")) return runtime.trap("<<i.imm0<<",state,memory);\n";break;}
     default:
+      if (i.op == Op::VSelect)
+        return decl(i, "aot::vector_select(" + arg(i,0) + "," + arg(i,1) + "," + arg(i,2) + ")");
+      if (i.op == Op::VAnd || i.op == Op::VAndNot || i.op == Op::VOr || i.op == Op::VXor || i.op == Op::VNot)
+        return decl(i, "aot::vector_logic<" + enum_name(i) + ">(" + arg(i,0) + "," + arg(i,1) + ")");
+      
+      // Native vector splat
+      if (i.op == Op::VSplat) {
+        const auto m = guest_mnemonic(i);
+        if (m.find("vspltb") == 0) return decl(i, "aot::vector_splat_byte<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
+        if (m.find("vsplth") == 0) return decl(i, "aot::vector_splat_halfword<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
+        if (m.find("vspltw") == 0) return decl(i, "aot::vector_splat_word<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
+        if (m.find("vspltisb") == 0) return decl(i, "aot::vector_splat_immediate_byte<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
+        if (m.find("vspltish") == 0) return decl(i, "aot::vector_splat_immediate_halfword<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
+        if (m.find("vspltisw") == 0) return decl(i, "aot::vector_splat_immediate_word<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
+      }
+      
+      // Native modular vector arithmetic
+      if (i.op == Op::VAdd || i.op == Op::VSub) {
+        const auto m = guest_mnemonic(i);
+        if (m == "vaddubm") return decl(i, "aot::vector_add_modular<std::uint8_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+        if (m == "vadduhm") return decl(i, "aot::vector_add_modular<std::uint16_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+        if (m == "vadduwm") return decl(i, "aot::vector_add_modular<std::uint32_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+        if (m == "vsububm") return decl(i, "aot::vector_sub_modular<std::uint8_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+        if (m == "vsubuhm") return decl(i, "aot::vector_sub_modular<std::uint16_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+        if (m == "vsubuwm") return decl(i, "aot::vector_sub_modular<std::uint32_t>(" + arg(i,0) + "," + arg(i,1) + ")");
+      }
+      
       if(is_vector_compute(i.op)){
         std::string args="state,"+arg(i,0)+","+arg(i,1)+","+arg(i,2)+","+arg(i,3);
         return decl(i,"aot::execute_vector("+enum_name(i)+","+std::to_string(i.guest_word)+"u,"+args+")");
       }
-      throw std::runtime_error("CppAotBackend: unsupported IR op " + std::to_string(static_cast<unsigned>(i.op)) + " from " + i.guest_mnemonic);
+      throw std::runtime_error("CppAotBackend: unsupported IR op " + std::to_string(static_cast<unsigned>(i.op)) + " from " + std::string(guest_mnemonic(i)));
   }
   return o.str();
 }
@@ -234,17 +305,80 @@ std::string local_label(GuestAddress address) {
   return o.str();
 }
 
-bool is_unconditional_terminal(const ir::Block& block) {
+bool has_guest_source(const Instruction& instruction) noexcept {
+  return instruction.guest_opcode.valid();
+}
+
+void emit_guest_pc(std::ostringstream& out, const Instruction& instruction,
+                   std::optional<GuestAddress>& current_guest,
+                   std::optional<GuestAddress>& materialized_guest) {
+  if (!has_guest_source(instruction)) return;
+  current_guest = instruction.guest_address;
+  const auto effect = ir::effects(instruction.op);
+  const bool boundary = ir::has_effect(effect, ir::Effect::MayFault) ||
+                        ir::has_effect(effect, ir::Effect::Call) ||
+                        ir::has_effect(effect, ir::Effect::Trap) ||
+                        ir::has_effect(effect, ir::Effect::ControlFlow) ||
+                        ir::has_effect(effect, ir::Effect::Barrier) ||
+                        ir::has_effect(effect, ir::Effect::Synchronization);
+  if (!boundary || materialized_guest == current_guest) return;
+  materialized_guest = current_guest;
+  out << "  state.cia=" << *current_guest << "u;\n";
+  out << "  state.nia=" << static_cast<GuestAddress>(*current_guest + 4u)
+      << "u;\n";
+}
+
+void emit_exit_pc(std::ostringstream& out, std::optional<GuestAddress> current_guest,
+                  std::optional<GuestAddress>& materialized_guest) {
+  if (!current_guest || materialized_guest == current_guest) return;
+  materialized_guest = current_guest;
+  out << "  state.cia=" << *current_guest << "u;\n";
+}
+
+std::optional<GuestAddress> local_fallthrough(const ir::Block& block) {
+  for (const auto& edge : block.successors) {
+    if (edge.local && edge.kind == ir::EdgeKind::Fallthrough) return edge.target;
+  }
+  return std::nullopt;
+}
+
+bool is_guaranteed_terminal(const ir::Block& block) {
   for (const auto& insn : block.instructions) {
-    if (insn.op == Op::Branch || insn.op == Op::Return || insn.op == Op::Syscall) return true;
+    if (insn.op == Op::Branch || insn.op == Op::Return || insn.op == Op::Syscall)
+      return true;
+    if (insn.op == Op::Barrier && insn.imm0 == 4u) return true;
+    if ((insn.op == Op::BranchIf || insn.op == Op::BranchIndirect) &&
+        insn.imm0 == 0u && !insn.args.empty()) {
+      const auto condition = constant_value(block, insn.args[0]);
+      if (condition && *condition != 0u) return true;
+    }
   }
   return false;
+}
+
+bool valid_cpp_identifier(std::string_view symbol) {
+  if (symbol.empty()) return false;
+  const auto first = static_cast<unsigned char>(symbol.front());
+  if (!(std::isalpha(first) || symbol.front() == '_')) return false;
+  for (const char c : symbol) {
+    const auto ch = static_cast<unsigned char>(c);
+    if (!(std::isalnum(ch) || c == '_')) return false;
+  }
+  return true;
+}
+
+const DirectCallBinding* find_direct_call(
+    GuestAddress target, std::span<const DirectCallBinding> direct_calls) {
+  for (const auto& binding : direct_calls)
+    if (binding.guest_target == target) return &binding;
+  return nullptr;
 }
 
 std::string emit_one_in_function(const Instruction& i,
                                  const std::vector<Type>& value_types,
                                  const ir::Block& block,
-                                 const std::unordered_set<GuestAddress>& local_targets) {
+                                 const std::unordered_set<GuestAddress>& local_targets,
+                                 std::span<const DirectCallBinding> direct_calls) {
   std::ostringstream o;
   if (i.op == Op::Branch) {
     const auto target = i.args.empty() ? std::optional<std::uint64_t>{} : constant_value(block, i.args[0]);
@@ -257,6 +391,32 @@ std::string emit_one_in_function(const Instruction& i,
         o << "  return {FlowReason::Branch," << guest_target << "u,0};\n";
       }
       return o.str();
+    }
+  }
+  if (i.op == Op::Call && !i.args.empty()) {
+    const auto target = constant_value(block, i.args[0]);
+    if (target) {
+      const auto guest_target = static_cast<GuestAddress>(*target);
+      if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
+        const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
+        o << "  { auto rr=" << binding->native_symbol
+          << "(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+          << expected_return << "u) return rr; }\n";
+        return o.str();
+      }
+    }
+  }
+  if (i.op == Op::BranchIf && i.imm0 == 1 && i.args.size() >= 2) {
+    const auto target = constant_value(block, i.args[1]);
+    if (target) {
+      const auto guest_target = static_cast<GuestAddress>(*target);
+      if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
+        const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
+        o << "  if(" << arg(i,0) << ") { auto rr=" << binding->native_symbol
+          << "(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+          << expected_return << "u) return rr; }\n";
+        return o.str();
+      }
     }
   }
   if (i.op == Op::BranchIf && i.imm0 == 0 && i.args.size() >= 2) {
@@ -279,13 +439,34 @@ std::string emit_one_in_function(const Instruction& i,
 
 std::string CppAotBackend::emit_function(const ir::Block& block,std::string_view name) const {
   std::ostringstream o;
-  o<<"ExecutionResult "<<name<<"([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, [[maybe_unused]] RuntimeServices& runtime) {\n";
-  o<<"  auto memory_access = memory.access_context();\n";
-  o<<"  state.cia="<<block.guest_address<<"u;\n";
+  o<<"ExecutionResult "<<name<<"_v2([[maybe_unused]] ExecutionContext& context) {\n";
+  o<<"  auto& state = context.state;\n";
+  o<<"  auto& memory = context.memory;\n";
+  o<<"  auto& runtime = context.runtime;\n";
+  o<<"  auto& memory_access = context.memory_access;\n";
   std::vector<Type> value_types;
   for (const auto& i : block.instructions) if (i.result != ir::kNoValue) { if (value_types.size() <= i.result) value_types.resize(i.result + 1, Type::Void); value_types[i.result] = i.type; }
-  for(const auto&i:block.instructions)o<<emit_one(i,value_types);
-  o<<"  return {FlowReason::Fallthrough,"<<(block.guest_address+4u)<<"u,0};\n}\n";
+  std::optional<GuestAddress> current_guest;
+  std::optional<GuestAddress> materialized_guest;
+  if (block.instructions.empty() || !has_guest_source(block.instructions.front())) {
+    o<<"  state.cia="<<block.guest_address<<"u;\n";
+    o<<"  state.nia="<<static_cast<GuestAddress>(block.guest_address+4u)<<"u;\n";
+  }
+  for(const auto&i:block.instructions){
+    emit_guest_pc(o,i,current_guest,materialized_guest);
+    o<<emit_one(i,value_types);
+  }
+  emit_exit_pc(o,current_guest,materialized_guest);
+  GuestAddress fallthrough = block.end_address;
+  if (!fallthrough) {
+    fallthrough = current_guest ? static_cast<GuestAddress>(*current_guest + 4u)
+                                : static_cast<GuestAddress>(block.guest_address + 4u);
+  }
+  o<<"  state.nia="<<fallthrough<<"u;\n";
+  o<<"  return {FlowReason::Fallthrough,"<<fallthrough<<"u,0};\n}\n";
+  o<<"ExecutionResult "<<name<<"([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, [[maybe_unused]] RuntimeServices& runtime) {\n";
+  o<<"  ExecutionContext context(state, memory, runtime);\n";
+  o<<"  return "<<name<<"_v2(context);\n}\n";
   return o.str();
 }
 
@@ -299,25 +480,31 @@ std::string CppAotBackend::emit_translation_unit(const ir::Block& block,std::str
 }
 
 
-std::string CppAotBackend::emit_function(const ir::Function& function,
-                                         std::string_view name) const {
+std::string CppAotBackend::emit_function(
+    const ir::Function& function, std::string_view name,
+    std::span<const DirectCallBinding> direct_calls) const {
   if (function.blocks.empty()) throw std::runtime_error("CppAotBackend: empty function");
 
   std::unordered_set<GuestAddress> local_targets;
   for (const auto& block : function.blocks) local_targets.insert(block.guest_address);
 
   std::ostringstream o;
-  o << "ExecutionResult " << name
-    << "([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, "
-       "[[maybe_unused]] RuntimeServices& runtime) {\n";
-  o << "  auto memory_access = memory.access_context();\n";
+  std::unordered_set<std::string> declared_symbols;
+  for (const auto& binding : direct_calls) {
+    if (!valid_cpp_identifier(binding.native_symbol))
+      throw std::invalid_argument("CppAotBackend: invalid direct-call native symbol");
+    if (declared_symbols.insert(binding.native_symbol).second)
+      o << "ExecutionResult " << binding.native_symbol << "(ExecutionContext&);\n";
+  }
+  o << "ExecutionResult " << name << "_v2([[maybe_unused]] ExecutionContext& context) {\n";
+  o << "  auto& state = context.state;\n";
+  o << "  auto& memory = context.memory;\n";
+  o << "  auto& runtime = context.runtime;\n";
+  o << "  auto& memory_access = context.memory_access;\n";
   o << "  goto " << local_label(function.guest_address) << ";\n";
 
-  for (std::size_t bi = 0; bi < function.blocks.size(); ++bi) {
-    const auto& block = function.blocks[bi];
+  for (const auto& block : function.blocks) {
     o << local_label(block.guest_address) << ": {\n";
-    o << "  state.cia=" << block.guest_address << "u;\n";
-    o << "  state.nia=" << static_cast<GuestAddress>(block.guest_address + 4u) << "u;\n";
 
     std::vector<Type> value_types;
     for (const auto& i : block.instructions) {
@@ -326,32 +513,60 @@ std::string CppAotBackend::emit_function(const ir::Function& function,
         value_types[i.result] = i.type;
       }
     }
+
+    std::optional<GuestAddress> current_guest;
+    std::optional<GuestAddress> materialized_guest;
+    if (block.instructions.empty() || !has_guest_source(block.instructions.front())) {
+      o << "  state.cia=" << block.guest_address << "u;\n";
+      o << "  state.nia=" << static_cast<GuestAddress>(block.guest_address + 4u) << "u;\n";
+    }
     for (const auto& i : block.instructions) {
-      o << emit_one_in_function(i, value_types, block, local_targets);
+      emit_guest_pc(o, i, current_guest, materialized_guest);
+      o << emit_one_in_function(i, value_types, block, local_targets, direct_calls);
     }
 
-    if (!is_unconditional_terminal(block)) {
-      if (bi + 1 < function.blocks.size()) {
-        const auto next = function.blocks[bi + 1].guest_address;
-        o << "  state.nia=" << next << "u;\n";
-        o << "  goto " << local_label(next) << ";\n";
+    if (!is_guaranteed_terminal(block)) {
+      emit_exit_pc(o, current_guest, materialized_guest);
+      if (const auto fallthrough = local_fallthrough(block)) {
+        o << "  state.nia=" << *fallthrough << "u;\n";
+        o << "  goto " << local_label(*fallthrough) << ";\n";
       } else {
-        o << "  return {FlowReason::Fallthrough,state.nia,0};\n";
+        const auto next = block.end_address
+                              ? block.end_address
+                              : (current_guest ? static_cast<GuestAddress>(*current_guest + 4u)
+                                               : static_cast<GuestAddress>(block.guest_address + 4u));
+        o << "  state.nia=" << next << "u;\n";
+        o << "  return {FlowReason::Fallthrough," << next << "u,0};\n";
       }
+    } else {
+      // Keep the generated C++ well-formed even for IR terminals represented
+      // as an always-true conditional (for example canonical blr). The host
+      // compiler removes this unreachable fallback.
+      const auto next = block.end_address
+                            ? block.end_address
+                            : (current_guest ? static_cast<GuestAddress>(*current_guest + 4u)
+                                             : static_cast<GuestAddress>(block.guest_address + 4u));
+      o << "  return {FlowReason::Fallthrough," << next << "u,0};\n";
     }
     o << "}\n";
   }
   o << "}\n";
+  o << "ExecutionResult " << name
+    << "([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, "
+       "[[maybe_unused]] RuntimeServices& runtime) {\n";
+  o << "  ExecutionContext context(state, memory, runtime);\n";
+  o << "  return " << name << "_v2(context);\n}\n";
   return o.str();
 }
 
-std::string CppAotBackend::emit_translation_unit(const ir::Function& function,
-                                                  std::string_view name) const {
+std::string CppAotBackend::emit_translation_unit(
+    const ir::Function& function, std::string_view name,
+    std::span<const DirectCallBinding> direct_calls) const {
   std::ostringstream o;
   o << "#include <bit>\n#include <cmath>\n#include <cfenv>\n#include <cstdint>\n#include <limits>\n";
   o << "#include \"xenon/cpu/aot_semantics.hpp\"\n\n";
   o << "using namespace xenon::cpu;\n";
-  o << emit_function(function, name);
+  o << emit_function(function, name, direct_calls);
   return o.str();
 }
 

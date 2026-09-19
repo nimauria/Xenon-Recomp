@@ -12,19 +12,22 @@ LauncherBridge                Qt/QML transport facade only
     v
 FrontendBackend               feature composition / workflow layer
     |
-    +-- application/          system appearance hints and page state
+    +-- application/          system appearance, recovery, window + desktop integration
     +-- branding/             runtime-coloured launcher brand assets
     +-- community/            support links + optional Discord Rich Presence
-    +-- diagnostics/          user/developer environment summaries
+    +-- diagnostics/          summaries + privacy-sanitized support bundles
     +-- filesystem/           local folders, external URLs and clipboard actions
     +-- import_export/        import/export workflow coordinator
     +-- launch/               UI launch workflow and launch-contract handoff
     +-- library/              game/library workflows, properties and DLC projection
     +-- modules/              module workflows, manifests, settings and catalog view
+    +-- notifications/        persistent launcher event history + actions
     +-- paths/                configured launcher path workflows
     +-- profiles/             profile workflows, fixtures and avatar handling
     +-- runtime/              runtime state/capability projection
+    +-- search/               global command/search routing
     +-- settings/             validated settings schema + appearance/theme engine
+    +-- home/                 recent activity/session aggregation
     +-- updates/              launcher/module update workflow and provider seam
     |
     v
@@ -52,7 +55,7 @@ state, animation state and layout calculations. It must not own authoritative be
 - module manifest parsing or module setting persistence;
 - test/preview fixture generation;
 - import/export file formats;
-- platform diagnostics or OS integration.
+- platform diagnostics, support bundle generation or OS integration.
 
 If a page needs new behaviour, add or extend the corresponding feature slice here and expose the
 smallest required operation through `LauncherBridge`. Do not implement the behaviour directly in
@@ -74,6 +77,16 @@ adapters.
 The Library slice is further divided into `library/`, `library/properties/` and `library/dlc/`. QML
 consumes their projections and actions only; manifest parsing, DLC folder ownership and verification
 remain in Core services. See `library/README.md`.
+
+The Diagnostics slice owns support-bundle collection and privacy filtering. QML can request a bundle
+and open its destination, but it must not decide which settings, paths, session fields or logs are safe
+to include. See `diagnostics/README.md`.
+
+The Application/System slice owns persisted window geometry, safe restoration after display changes,
+`xenon://` routing and OS-facing registration. Process-level single-instance coordination lives in
+`services/SingleInstanceService` so a secondary process forwards its arguments before it creates
+recovery state or a second frontend backend. Deep links are intentionally navigation-only; they do
+not form a remote mutation API. See `application/system/README.md`.
 
 ## Adding a feature
 

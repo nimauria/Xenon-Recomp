@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "xenon/cpu/memory_ordering.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::memory {
@@ -18,6 +19,8 @@ struct DirtyPhysicalWrite {
   std::uint64_t epoch{};
   std::uint32_t address{};
   std::uint32_t size{};
+  xenon::cpu::MemoryOrderingDomain ordering_domain{
+      xenon::cpu::MemoryOrderingDomain::Normal};
 };
 
 // Backend-neutral CPU/GPU/DMA dirty state. Writers publish a monotonically
@@ -33,7 +36,8 @@ class GuestMemoryCoherency {
   GuestMemoryCoherency()
       : page_epochs_(kPageCount),
         write_journal_epochs_(kWriteJournalCapacity),
-        write_journal_ranges_(kWriteJournalCapacity) {
+        write_journal_ranges_(kWriteJournalCapacity),
+        write_journal_domains_(kWriteJournalCapacity) {
     for (auto& epoch : page_epochs_) {
       epoch.store(0, std::memory_order_relaxed);
     }
@@ -71,9 +75,14 @@ class GuestMemoryCoherency {
   [[nodiscard]] std::atomic<std::uint64_t>* write_journal_ranges_data() noexcept {
     return write_journal_ranges_.data();
   }
+  [[nodiscard]] std::atomic<std::uint8_t>* write_journal_domains_data() noexcept {
+    return write_journal_domains_.data();
+  }
 
-  std::uint64_t mark_write(std::uint32_t physical_address,
-                           std::uint32_t width) noexcept {
+  std::uint64_t mark_write(
+      std::uint32_t physical_address, std::uint32_t width,
+      xenon::cpu::MemoryOrderingDomain ordering_domain =
+          xenon::cpu::MemoryOrderingDomain::Normal) noexcept {
     if (!width || physical_address >= kPhysicalMemorySize) return current_epoch();
     const auto end = std::min<std::uint64_t>(
         std::uint64_t{physical_address} + width, kPhysicalMemorySize);
@@ -91,7 +100,8 @@ class GuestMemoryCoherency {
       page_epochs_[page].store(epoch, std::memory_order_release);
     }
     publish_journal(epoch, physical_address,
-                    static_cast<std::uint32_t>(end - physical_address));
+                    static_cast<std::uint32_t>(end - physical_address),
+                    ordering_domain);
     active_writers_.fetch_sub(1u, std::memory_order_release);
     return epoch;
   }
@@ -106,7 +116,8 @@ class GuestMemoryCoherency {
     for (auto& page_epoch : page_epochs_) {
       page_epoch.store(epoch, std::memory_order_release);
     }
-    publish_journal(epoch, 0u, kPhysicalMemorySize);
+    publish_journal(epoch, 0u, kPhysicalMemorySize,
+                    xenon::cpu::MemoryOrderingDomain::Normal);
     active_writers_.fetch_sub(1u, std::memory_order_release);
     return epoch;
   }
@@ -197,7 +208,9 @@ class GuestMemoryCoherency {
       }
       const auto address = static_cast<std::uint32_t>(packed >> 32u);
       const auto size = static_cast<std::uint32_t>(packed);
-      if (size) out.push_back({epoch, address, size});
+      const auto domain = static_cast<xenon::cpu::MemoryOrderingDomain>(
+          write_journal_domains_[index].load(std::memory_order_relaxed));
+      if (size) out.push_back({epoch, address, size, domain});
     }
     return true;
   }
@@ -220,12 +233,15 @@ class GuestMemoryCoherency {
   }
 
  private:
-  void publish_journal(std::uint64_t epoch, std::uint32_t address,
-                       std::uint32_t size) noexcept {
+  void publish_journal(
+      std::uint64_t epoch, std::uint32_t address, std::uint32_t size,
+      xenon::cpu::MemoryOrderingDomain ordering_domain) noexcept {
     const auto index = static_cast<std::uint32_t>(epoch) &
                        (kWriteJournalCapacity - 1u);
     write_journal_ranges_[index].store(
         (std::uint64_t{address} << 32u) | size, std::memory_order_relaxed);
+    write_journal_domains_[index].store(
+        static_cast<std::uint8_t>(ordering_domain), std::memory_order_relaxed);
     write_journal_epochs_[index].store(epoch, std::memory_order_release);
   }
 
@@ -233,6 +249,7 @@ class GuestMemoryCoherency {
   static_assert((kWriteJournalCapacity & (kWriteJournalCapacity - 1u)) == 0u);
   std::vector<std::atomic<std::uint64_t>> write_journal_epochs_{};
   std::vector<std::atomic<std::uint64_t>> write_journal_ranges_{};
+  std::vector<std::atomic<std::uint8_t>> write_journal_domains_{};
   std::atomic<std::uint64_t> write_epoch_{0};
   std::atomic<std::uint32_t> active_writers_{0};
 };

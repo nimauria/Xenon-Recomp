@@ -27,6 +27,27 @@ class AddressSpace;
 // the reservation monitor and Xenon-owned coherency tracker. This replaces the
 // old "mutate physical_data() then remember notify_external_write()" contract
 // that allowed production callers to bypass bookkeeping or race CPU accesses.
+class PhysicalWriteWindow {
+ public:
+  PhysicalWriteWindow() = default;
+  ~PhysicalWriteWindow() noexcept;
+  PhysicalWriteWindow(PhysicalWriteWindow&& other) noexcept;
+  PhysicalWriteWindow& operator=(PhysicalWriteWindow&& other) noexcept;
+  PhysicalWriteWindow(const PhysicalWriteWindow&) = delete;
+  PhysicalWriteWindow& operator=(const PhysicalWriteWindow&) = delete;
+
+  [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
+  [[nodiscard]] bool write(std::uint32_t physical_address,
+                           std::span<const std::byte> source,
+                           std::uint64_t* published_epoch = nullptr) noexcept;
+
+ private:
+  friend class AddressSpace;
+  explicit PhysicalWriteWindow(AddressSpace* owner) noexcept : owner_(owner) {}
+  void release() noexcept;
+  AddressSpace* owner_{};
+};
+
 class PhysicalWriteSpan {
  public:
   PhysicalWriteSpan() = default;
@@ -117,11 +138,13 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] bool reserve_fixed(GuestAddress base, std::uint32_t size,
                                    Protect protect);
   [[nodiscard]] bool commit_fixed(GuestAddress base, std::uint32_t size,
-                                  Protect protect);
+                                  Protect protect,
+                                  bool zero_initialize = true);
   [[nodiscard]] bool allocate(std::uint32_t size, std::uint32_t alignment,
                               Protect protect, bool top_down,
                               GuestAddress& out_address,
-                              std::optional<std::uint32_t> page_size = std::nullopt);
+                              std::optional<std::uint32_t> page_size = std::nullopt,
+                              VirtualAllocationOptions options = {});
   [[nodiscard]] bool decommit(GuestAddress base, std::uint32_t size);
   [[nodiscard]] bool release(GuestAddress allocation_base);
   [[nodiscard]] bool protect(GuestAddress base, std::uint32_t size, Protect protect,
@@ -133,17 +156,31 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] bool allocate_physical(std::uint32_t size, std::uint32_t alignment,
                                        bool top_down,
                                        std::uint32_t& out_physical_address);
+  [[nodiscard]] bool allocate_physical(
+      std::uint32_t size, const PhysicalAllocationOptions& options,
+      std::uint32_t& out_physical_address);
   [[nodiscard]] bool free_physical(std::uint32_t physical_base, std::uint32_t size);
+  [[nodiscard]] bool protect_physical(std::uint32_t physical_base,
+                                      std::uint32_t size, Protect protect,
+                                      Protect* old_protect = nullptr);
+  [[nodiscard]] std::optional<PhysicalAllocationInfo> query_physical_allocation(
+      std::uint32_t physical_address) const;
+  [[nodiscard]] static std::optional<GuestAddress> physical_guest_alias(
+      std::uint32_t physical_address,
+      PhysicalPageClass page_class) noexcept;
   [[nodiscard]] bool map_virtual_to_physical(GuestAddress virtual_base,
                                              std::uint32_t physical_base,
                                              std::uint32_t size,
                                              Protect protect);
   [[nodiscard]] std::uint32_t get_physical_address(GuestAddress address) const;
-  [[nodiscard]] std::uint32_t fetch32_be(GuestAddress address);
+  [[nodiscard]] std::uint32_t fetch32_be(GuestAddress address) override;
 
-  // Raw physical memory is read-only outside AddressSpace. Production writers
-  // must use write_physical/fill_physical/physical_write_span so reservation
-  // invalidation and CPU<->GPU coherency cannot be forgotten.
+  // Raw physical memory is read-only outside AddressSpace and is intended only
+  // for diagnostics/tests or callers that can prove guest execution is quiescent.
+  // Production concurrent readers use copy_physical_range() so CPU/GPU reads
+  // share the same atomic access discipline; production writers must use
+  // write_physical/fill_physical/physical_write_span so reservation invalidation
+  // and CPU<->GPU coherency cannot be forgotten.
   [[nodiscard]] const std::byte* physical_data(
       std::uint32_t physical_address = 0) const;
   [[nodiscard]] bool copy_physical_range(std::uint32_t physical_address,
@@ -158,8 +195,15 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] bool validate_invariants(std::string* error = nullptr) const;
   [[nodiscard]] PhysicalWriteSpan physical_write_span(
       std::uint32_t physical_address, std::uint32_t size) noexcept;
+  // Rare GPU->CPU reconciliation window. It serializes only the final
+  // physical-RAM ownership handoff; normal RAM accesses remain mutex-free.
+  [[nodiscard]] PhysicalWriteWindow physical_write_window() noexcept;
   [[nodiscard]] std::size_t reservation_monitor_storage_bytes() const noexcept;
   [[nodiscard]] std::uint32_t executable_generation(
+      GuestAddress address) const noexcept;
+  [[nodiscard]] xenon::cpu::ExecutablePageStamp executable_page_stamp(
+      xenon::cpu::GuestAddress address) const noexcept override;
+  [[nodiscard]] MemoryTypeInfo memory_type_info(
       GuestAddress address) const noexcept;
 
   void zero(GuestAddress address, std::uint32_t size);
@@ -248,6 +292,16 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
     PageState state{PageState::Free};
     RegionKind kind{RegionKind::Virtual};
     bool explicit_physical_mapping{};
+    bool permanent_guard{};
+  };
+
+  struct PhysicalPageMetadata {
+    std::uint32_t allocation_base_page{kInvalidPhysicalPage};
+    std::uint32_t allocation_page_count{};
+    std::uint32_t allocation_page_size{kBasePageSize};
+    Protect allocation_protect{kReadWrite};
+    Protect current_protect{kReadWrite};
+    bool explicit_allocation{};
   };
 
   struct ResolvedByte {
@@ -271,7 +325,8 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] bool reserve_pages(GuestAddress base, std::uint32_t size,
                                    Protect protect, bool commit_now);
   [[nodiscard]] bool commit_pages(GuestAddress base, std::uint32_t size,
-                                  Protect protect);
+                                  Protect protect,
+                                  bool zero_initialize = true);
   [[nodiscard]] bool map_xex_alias_page(std::uint32_t page_index,
                                         std::uint32_t physical_page,
                                         PageState state, Protect allocation_protect,
@@ -290,17 +345,35 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   [[nodiscard]] bool reserve_physical_run(std::uint32_t page_count,
                                           std::uint32_t alignment_pages,
                                           bool top_down,
+                                          std::uint32_t minimum_page,
+                                          std::uint32_t maximum_page_exclusive,
                                           std::uint32_t& out_first_page);
+  void publish_physical_alias_range(std::uint32_t physical_address,
+                                    std::uint32_t size);
+  [[nodiscard]] Protect physical_protect(
+      std::uint32_t physical_address) const noexcept;
 
   [[nodiscard]] ResolvedByte resolve_byte(GuestAddress address, AccessKind access);
+  [[nodiscard]] ResolvedByte resolve_byte_for_request(
+      GuestAddress fault_address, AccessKind access, GuestAddress request_address,
+      std::size_t request_width);
   [[nodiscard]] std::optional<ResolvedByte> resolve_contiguous(GuestAddress address,
                                                                   std::size_t width,
                                                                   AccessKind access);
   [[nodiscard]] ConstResolvedByte resolve_byte_const(GuestAddress address,
                                                       AccessKind access) const;
-  [[nodiscard]] const MmioRange* find_mmio(GuestAddress address,
+  // MMIO ranges are kept sorted and non-overlapping. The hot page table only
+  // answers RAM-vs-slow; actual device lookup is a cold O(log N) interval
+  // lookup. Shared ownership lets callbacks run after the management lock is
+  // released, so arbitrary device handlers can never execute while the global
+  // AddressSpace mutex is held.
+  using MmioRangeRef = std::shared_ptr<const MmioRange>;
+  [[nodiscard]] MmioRangeRef find_mmio_locked(GuestAddress address,
+                                              std::uint32_t width) const;
+  [[nodiscard]] MmioRangeRef snapshot_mmio(GuestAddress address,
                                            std::uint32_t width) const;
-  [[nodiscard]] MmioRange* find_mmio(GuestAddress address, std::uint32_t width);
+  [[nodiscard]] bool range_has_mmio(GuestAddress address,
+                                    std::uint32_t width) const;
 
   [[nodiscard]] std::uint64_t read_mmio(GuestAddress address,
                                         std::uint32_t width) const;
@@ -313,6 +386,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void write_integer(GuestAddress address, T value, bool little_endian);
 
   friend class PhysicalWriteSpan;
+  friend class PhysicalWriteWindow;
   [[nodiscard]] std::uint64_t make_hot_entry(std::uint32_t page_index) const;
   void publish_hot_entry(std::uint32_t page_index, std::uint64_t entry);
   void publish_hot_page(std::uint32_t page_index);
@@ -320,11 +394,17 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void rebuild_hot_pages();
   [[nodiscard]] bool page_has_mmio(std::uint32_t page_index) const;
   [[nodiscard]] xenon::cpu::FastMemoryView make_fast_memory_view() noexcept;
+  void advance_executable_generation(std::uint32_t physical_page) noexcept;
   [[nodiscard]] bool begin_physical_write(std::uint32_t physical_address,
                                           std::uint32_t width) noexcept;
+  [[nodiscard]] bool write_physical_exclusive(
+      std::uint32_t physical_address, std::span<const std::byte> source,
+      std::uint64_t* published_epoch) noexcept;
+  void release_physical_write_window() noexcept;
   std::uint64_t complete_physical_write(
       std::uint32_t physical_address, std::uint32_t width,
-      bool reservation_participant) noexcept;
+      bool reservation_participant,
+      xenon::cpu::MemoryOrderingDomain ordering_domain) noexcept;
   void begin_reservation_operation() noexcept;
   void end_reservation_operation() noexcept;
   [[nodiscard]] std::uint64_t claim_reservation(
@@ -337,9 +417,18 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                                std::uint32_t width) noexcept;
   [[nodiscard]] std::uint32_t physical_alias_address(GuestAddress address) const;
 
-  [[noreturn]] static void fault(GuestAddress address, std::size_t width,
-                                 AccessKind access, FaultReason reason,
-                                 const char* message);
+  [[nodiscard]] MemoryFaultInfo make_fault_info(
+      GuestAddress request_address, GuestAddress fault_address,
+      std::size_t width, AccessKind access, FaultReason reason) const;
+  void validate_guest_range(GuestAddress address, std::size_t width,
+                            AccessKind access) const;
+  [[noreturn]] void fault(GuestAddress address, std::size_t width,
+                          AccessKind access, FaultReason reason,
+                          const char* message) const;
+  [[noreturn]] void fault_at(GuestAddress request_address,
+                             GuestAddress fault_address, std::size_t width,
+                             AccessKind access, FaultReason reason,
+                             const char* message) const;
 
   std::unique_ptr<PhysicalBacking> physical_{};
   std::unique_ptr<GuestAperture> guest_aperture_{};
@@ -352,6 +441,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   // aliases still hold mapping references.
   std::vector<std::uint8_t> physical_page_used_{};
   std::vector<std::uint32_t> physical_mapping_refs_{};
+  std::vector<PhysicalPageMetadata> physical_page_metadata_{};
   // Six active reservation slots model Xenon's six hardware threads. The
   // 512 KiB sticky bitmap is only a hot-path hint; exact reservation state
   // remains in the slots and is always keyed by physical RAM.
@@ -361,12 +451,13 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   std::atomic<std::uint32_t> reservation_next_generation_{1u};
   std::atomic<std::uint32_t> reservation_commit_gate_{0u};
   std::atomic<std::uint32_t> active_reservation_ops_{0u};
+  std::atomic<std::uint32_t> coherency_commit_gate_{0u};
   GuestMemoryCoherency coherency_{};
   std::vector<std::atomic<std::uint32_t>> executable_page_generations_{};
   std::atomic<std::uint32_t> active_fast_readers_{0};
 
   mutable std::recursive_mutex mutex_{};
-  std::vector<MmioRange> mmio_ranges_{};
+  std::vector<MmioRangeRef> mmio_ranges_{};
   std::vector<std::pair<std::uint64_t, InvalidationCallback>>
       invalidation_callbacks_{};
   std::uint64_t next_invalidation_callback_id_{1};

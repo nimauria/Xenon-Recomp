@@ -301,11 +301,11 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
     CASE2(vmaxfp,vmaxfp128,fp_binary(a,b,'x',state));
     CASE2(vminfp,vminfp128,fp_binary(a,b,'n',state));
 
-    CASE2(vand,vand128,([&]{Vector128 q{};for(unsigned i=0;i<16;++i)q.bytes[i]=a.bytes[i]&b.bytes[i];return q;})());
-    CASE2(vandc,vandc128,([&]{Vector128 q{};for(unsigned i=0;i<16;++i)q.bytes[i]=a.bytes[i]&~b.bytes[i];return q;})());
-    CASE2(vor,vor128,([&]{Vector128 q{};for(unsigned i=0;i<16;++i)q.bytes[i]=a.bytes[i]|b.bytes[i];return q;})());
-    CASE2(vxor,vxor128,([&]{Vector128 q{};for(unsigned i=0;i<16;++i)q.bytes[i]=a.bytes[i]^b.bytes[i];return q;})());
-    CASE2(vnor,vnor128,([&]{Vector128 q{};for(unsigned i=0;i<16;++i)q.bytes[i]=~(a.bytes[i]|b.bytes[i]);return q;})());
+    CASE2(vand,vand128,vector_logic<VectorSemantic::vand>(a,b));
+    CASE2(vandc,vandc128,vector_logic<VectorSemantic::vandc>(a,b));
+    CASE2(vor,vor128,vector_logic<VectorSemantic::vor>(a,b));
+    CASE2(vxor,vxor128,vector_logic<VectorSemantic::vxor>(a,b));
+    CASE2(vnor,vnor128,vector_logic<VectorSemantic::vnor>(a,b));
 
     case VectorSemantic::vaddubm:return lane_binary<std::uint8_t,std::uint16_t>(a,b,[](auto x,auto y){return x+y;});
     case VectorSemantic::vadduhm:return lane_binary<std::uint16_t,std::uint32_t>(a,b,[](auto x,auto y){return x+y;});
@@ -387,7 +387,7 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
 
     case VectorSemantic::vperm:case VectorSemantic::vperm128:return permute_bytes(a,b,c);
     case VectorSemantic::vpermwi128:{unsigned p=vx128_perm(w);for(unsigned i=0;i<4;++i)r.set_u32_be(i,a.u32_be((p>>(6-2*i))&3u));return r;}
-    case VectorSemantic::vsel:case VectorSemantic::vsel128:for(unsigned i=0;i<16;++i)r.bytes[i]=(a.bytes[i]&~c.bytes[i])|(b.bytes[i]&c.bytes[i]);return r;
+    case VectorSemantic::vsel:case VectorSemantic::vsel128:return vector_select(a,b,c);
 
     case VectorSemantic::vspltb:{unsigned n=vx_imm5(w)&15u;std::fill(r.bytes.begin(),r.bytes.end(),a.bytes[n]);return r;}
     case VectorSemantic::vsplth:{unsigned n=vx_imm5(w)&7u;for(unsigned i=0;i<8;++i)r.set_u16_be(i,a.u16_be(n));return r;}

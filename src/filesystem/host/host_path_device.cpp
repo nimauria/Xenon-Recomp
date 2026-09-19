@@ -693,6 +693,47 @@ FsError HostPathDevice::rename(std::string_view old_relative_path,
   return map_error(ec);
 }
 
+FsError HostPathDevice::set_attributes(
+    std::string_view relative_path, const FileAttributeUpdate& update) {
+  if (read_only_) return FsError::ReadOnly;
+  constexpr std::uint32_t kSupportedMask = FileAttributeReadOnly;
+  if ((update.mask & ~kSupportedMask) != 0) return FsError::Unsupported;
+  if (update.mask == FileAttributeNone) return FsError::None;
+
+  std::filesystem::path path;
+  const auto error = resolve_existing(relative_path, path);
+  if (error != FsError::None) return error;
+
+  std::error_code ec;
+  auto permissions = std::filesystem::status(path, ec).permissions();
+  if (ec) return map_error(ec);
+  const auto write_bits = std::filesystem::perms::owner_write |
+                          std::filesystem::perms::group_write |
+                          std::filesystem::perms::others_write;
+  if ((update.value & FileAttributeReadOnly) != 0) {
+    permissions &= ~write_bits;
+  } else {
+    // Restoring owner write is the portable minimum. Do not broaden group or
+    // other permissions that the host file did not previously grant.
+    permissions |= std::filesystem::perms::owner_write;
+  }
+  std::filesystem::permissions(path, permissions,
+                               std::filesystem::perm_options::replace, ec);
+  return map_error(ec);
+}
+
+FsError HostPathDevice::set_last_write_time(
+    std::string_view relative_path,
+    std::filesystem::file_time_type last_write_time) {
+  if (read_only_) return FsError::ReadOnly;
+  std::filesystem::path path;
+  const auto error = resolve_existing(relative_path, path);
+  if (error != FsError::None) return error;
+  std::error_code ec;
+  std::filesystem::last_write_time(path, last_write_time, ec);
+  return map_error(ec);
+}
+
 FsError HostPathDevice::disk_space(DiskSpace& out_space) const {
   if (!initialized_) return FsError::IoError;
   std::error_code ec;

@@ -27,7 +27,7 @@ bool GuestMemoryMirror::initialize(ID3D12Device* device, CommandQueue& queue,
   }
   memory_ = &memory;
   queue_ = &queue;
-  coherency_.reset(memory::kPhysicalMemorySize, true);
+  coherency_.reset(memory::kPhysicalMemorySize, false);
   return true;
 }
 
@@ -42,17 +42,19 @@ void GuestMemoryMirror::reset() noexcept {
 }
 
 bool GuestMemoryMirror::synchronize() {
-  return synchronize_range(0u, memory::kPhysicalMemorySize);
+  return synchronize_range(0u, memory::kPhysicalMemorySize,
+                           memory::GpuRangeUsage::Unrestricted);
 }
 
-bool GuestMemoryMirror::synchronize_range(std::uint32_t address,
-                                          std::uint32_t width) {
+bool GuestMemoryMirror::synchronize_range(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_upload(memory_->coherency(), address, width,
-                                            kTransferSize);
+                                            kTransferSize, usage);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> upload_bytes;
@@ -116,13 +118,15 @@ bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
   return coherency_.has_gpu_dirty(address, width);
 }
 
-bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
-                                         std::uint32_t width) {
+bool GuestMemoryMirror::make_cpu_visible(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "D3D12 guest-memory mirror is not initialized";
     return false;
   }
-  const auto plan = coherency_.plan_readback(address, width, kTransferSize);
+  const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
+                                             kTransferSize, usage);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> readback_bytes;
@@ -154,20 +158,27 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
       }
       state_ = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
-      std::uint64_t publication_epoch = 0u;
-      if (!memory_->write_physical(
-              chunk_address, readback_bytes.first(chunk_size),
-              &publication_epoch)) {
-        error_ = "D3D12 guest-memory readback destination is outside physical RAM";
+      auto write_window = memory_->physical_write_window();
+      if (!write_window) {
+        error_ = "failed to acquire D3D12 guest-memory readback window";
         return false;
       }
-
-      // Xenon Memory acknowledges this mirror's exact publication epoch. That
-      // prevents a GPU->CPU download from echoing back as a false CPU upload
-      // while retaining unrelated CPU/DMA writes published in the same window.
-      (void)coherency_.commit_gpu_download(
-          memory_->coherency(), plan, chunk_address, chunk_size,
-          publication_epoch);
+      const auto safe_ranges = coherency_.prepare_gpu_download(
+          memory_->coherency(), range, kTransferSize);
+      for (const auto& safe : safe_ranges) {
+        const auto offset = safe.address - chunk_address;
+        std::uint64_t publication_epoch = 0u;
+        if (!write_window.write(
+                safe.address, readback_bytes.subspan(offset, safe.size),
+                &publication_epoch)) {
+          error_ =
+              "D3D12 guest-memory readback destination is outside physical RAM";
+          return false;
+        }
+        (void)coherency_.commit_gpu_download(
+            memory_->coherency(), safe, safe.address, safe.size,
+            publication_epoch);
+      }
   }
   return true;
 }

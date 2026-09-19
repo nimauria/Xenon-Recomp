@@ -44,12 +44,16 @@ QVariantList stringOptions(std::initializer_list<const char*> values) {
 const QList<Definition>& definitions() {
   static const QList<Definition> values{
       {"general/startupPage", "general", "enum", QStringLiteral("Library"),
-       stringOptions({"Library", "Modules", "Profiles", "Settings"})},
+       stringOptions({"Home", "Library", "Modules", "Profiles", "Settings"})},
       {"general/sidebarMode", "general", "enum", QStringLiteral("Auto"),
        stringOptions({"Auto", "Expanded", "Compact"})},
       {"general/restoreLastPage", "general", "bool", false, {}},
       {"general/animations", "general", "bool", true, {}},
       {"general/compact", "appearance", "bool", false, {}},
+
+      {"system/rememberWindowGeometry", "system", "bool", true, {}},
+      {"system/restoreMaximized", "system", "bool", true, {}},
+      {"system/startMinimized", "system", "bool", false, {}},
 
       {"appearance/themeBackdrop", "appearance", "bool", true, {}},
       {"appearance/backdropIntensity", "appearance", "number", 0.72,
@@ -75,8 +79,11 @@ const QList<Definition>& definitions() {
       {"graphics/shaderCacheMode", "graphics", "enum", QStringLiteral("Persistent"),
        stringOptions({"Persistent", "Session only"})},
 
+      {"input/backend", "input", "enum", QStringLiteral("Automatic"),
+       stringOptions({"Automatic", "Native XInput", "SDL"})},
       {"input/preferredDevice", "input", "enum", QStringLiteral("Automatic"),
-       stringOptions({"Automatic", "Controller", "Keyboard & Mouse"})},
+       stringOptions({"Automatic", "Controller", "Keyboard & Mouse", "Flight Stick / HOTAS", "Multiple Sources"})},
+      {"input/backgroundInput", "input", "bool", false, {}},
       {"input/rumble", "input", "bool", true, {}},
       {"input/deadzone", "input", "number", 0.10,
        {option(QStringLiteral("5%"), 0.05), option(QStringLiteral("10%"), 0.10),
@@ -178,7 +185,7 @@ QVariantList SettingsCatalog::categories() {
       QVariantMap{{"id", "graphics"}, {"name", "Graphics"}, {"feature", "settings.graphics"}, {"page", 5},
                   {"keywords", "vulkan d3d12 renderer graphics shader cache"}},
       QVariantMap{{"id", "input"}, {"name", "Input"}, {"feature", "settings.input"}, {"page", 6},
-                  {"keywords", "controller keyboard gamepad input rumble deadzone"}},
+                  {"keywords", "controller keyboard gamepad input rumble deadzone xinput sdl hotas flight stick background"}},
       QVariantMap{{"id", "audio"}, {"name", "Audio"}, {"feature", "settings.audio"}, {"page", 7},
                   {"keywords", "sound audio volume device latency mute"}},
       QVariantMap{{"id", "network"}, {"name", "Network"}, {"feature", "settings.network"}, {"page", 8},
@@ -193,6 +200,8 @@ QVariantList SettingsCatalog::categories() {
                   {"keywords", "test fixture diagnostics logging gracemeria development"}},
       QVariantMap{{"id", "about"}, {"name", "About"}, {"feature", "settings.about"}, {"page", 13},
                   {"keywords", "version system qt github licence diagnostics discord community"}},
+      QVariantMap{{"id", "system"}, {"name", "Window & System"}, {"feature", "settings.system"}, {"page", 14},
+                  {"keywords", "window position size startup minimized single instance protocol xenon links windows desktop system"}},
   };
 }
 

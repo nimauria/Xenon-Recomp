@@ -2,6 +2,7 @@
 
 #include "../../updates/version/semantic_version.hpp"
 
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -37,13 +38,38 @@ QVariantMap ModuleUpdateService::state(const QString& module_id) const {
     value.insert(QStringLiteral("updateAvailable"), false);
     value.insert(QStringLiteral("downloadProgress"), 0.0);
   }
+  const auto rollback = modules_.latestRollback(module_id);
+  value.insert(QStringLiteral("rollbackAvailable"), !rollback.isEmpty());
+  value.insert(QStringLiteral("rollbackVersion"), rollback.value(QStringLiteral("version")));
+  value.insert(QStringLiteral("rollbackCreatedAt"), rollback.value(QStringLiteral("createdAt")));
   return value;
 }
 
 QVariantMap ModuleUpdateService::states() const {
   QVariantMap result;
-  for (auto it = states_.cbegin(); it != states_.cend(); ++it) result.insert(it.key(), it.value());
+  for (auto it = states_.cbegin(); it != states_.cend(); ++it) result.insert(it.key(), state(it.key()));
   return result;
+}
+
+QVariantList ModuleUpdateService::history(const QString& module_id) const {
+  return history_.entries(module_id);
+}
+
+void ModuleUpdateService::recordHistory(const QString& module_id, const QString& action,
+                                        const QString& outcome, const QString& from_version,
+                                        const QString& to_version, const QString& message,
+                                        const QVariantMap& metadata) {
+  history_.record(module_id, action, outcome, from_version, to_version, message, metadata);
+  emit historyChanged(module_id);
+}
+
+void ModuleUpdateService::refreshRollbackState(const QString& module_id) {
+  auto value = state(module_id);
+  const auto rollback = modules_.latestRollback(module_id);
+  value.insert(QStringLiteral("rollbackAvailable"), !rollback.isEmpty());
+  value.insert(QStringLiteral("rollbackVersion"), rollback.value(QStringLiteral("version")));
+  value.insert(QStringLiteral("rollbackCreatedAt"), rollback.value(QStringLiteral("createdAt")));
+  states_.insert(module_id, value);
 }
 
 void ModuleUpdateService::setState(const QString& module_id, const QString& status,
@@ -58,7 +84,7 @@ void ModuleUpdateService::setState(const QString& module_id, const QString& stat
 QNetworkRequest ModuleUpdateService::apiRequest(const QUrl& url) const {
   QNetworkRequest request{url};
   request.setRawHeader("Accept", "application/vnd.github+json");
-  request.setRawHeader("X-GitHub-Api-Version", "2026-03-10");
+  request.setRawHeader("X-GitHub-Api-Version", "2022-11-28");
   request.setRawHeader("User-Agent", "Xenon-Launcher-Module-Updater");
   request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                        QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -92,7 +118,7 @@ void ModuleUpdateService::check(const QString& module_id, const QVariantMap& cat
     value.insert(QStringLiteral("updateAvailable"), false);
     states_.insert(module_id, value);
     setState(module_id, QStringLiteral("catalog-missing"),
-             QStringLiteral("This module does not have a valid GitHub release repository in the official catalog."));
+             QStringLiteral("This module does not have a valid GitHub release repository in the official Xenon Modules registry."));
     return;
   }
   if (asset_name.isEmpty()) {
@@ -103,14 +129,23 @@ void ModuleUpdateService::check(const QString& module_id, const QVariantMap& cat
     value.insert(QStringLiteral("updateAvailable"), false);
     states_.insert(module_id, value);
     setState(module_id, QStringLiteral("host-unsupported"),
-             QStringLiteral("The catalog does not define a module package for this operating system and CPU architecture."));
+             QStringLiteral("The Xenon Modules registry does not define a module package for this operating system and CPU architecture."));
     return;
   }
 
   catalog_entries_.insert(module_id, catalog_entry);
   auto value = state(module_id);
+  const auto staged_path = value.value(QStringLiteral("stagedPath")).toString();
+  if (!staged_path.isEmpty()) QFile::remove(staged_path);
+  value.insert(QStringLiteral("stagedPath"), QString{});
+  value.insert(QStringLiteral("stagedAt"), QString{});
+  value.insert(QStringLiteral("verifiedDigest"), QString{});
   value.insert(QStringLiteral("repository"), repository);
   value.insert(QStringLiteral("repositoryUrl"), catalog_entry.value(QStringLiteral("repositoryUrl")));
+  value.insert(QStringLiteral("registryEntryUrl"), catalog_entry.value(QStringLiteral("registryEntryUrl")));
+  value.insert(QStringLiteral("publisher"), catalog_entry.value(QStringLiteral("publisher")));
+  value.insert(QStringLiteral("publisherVerified"), catalog_entry.value(QStringLiteral("verified")));
+  value.insert(QStringLiteral("hostKey"), catalog_entry.value(QStringLiteral("hostKey")));
   value.insert(QStringLiteral("assetName"), asset_name);
   value.insert(QStringLiteral("installedVersion"), installed_version);
   value.insert(QStringLiteral("canDownload"), false);
@@ -129,14 +164,18 @@ void ModuleUpdateService::check(const QString& module_id, const QVariantMap& cat
       auto value = state(module_id);
       value.insert(QStringLiteral("lastError"), reply->errorString());
       states_.insert(module_id, value);
-      setState(module_id, QStringLiteral("error"),
-               QStringLiteral("GitHub release check failed: %1").arg(reply->errorString()));
+      const auto message = QStringLiteral("GitHub release check failed: %1").arg(reply->errorString());
+      setState(module_id, QStringLiteral("error"), message);
+      recordHistory(module_id, QStringLiteral("check"), QStringLiteral("failure"),
+                    installed_version, {}, message);
       return;
     }
     const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (status < 200 || status >= 300) {
-      setState(module_id, QStringLiteral("error"),
-               QStringLiteral("GitHub returned HTTP %1 while checking this module.").arg(status));
+      const auto message = QStringLiteral("GitHub returned HTTP %1 while checking this module.").arg(status);
+      setState(module_id, QStringLiteral("error"), message);
+      recordHistory(module_id, QStringLiteral("check"), QStringLiteral("failure"),
+                    installed_version, {}, message);
       return;
     }
 
@@ -144,6 +183,8 @@ void ModuleUpdateService::check(const QString& module_id, const QVariantMap& cat
     const auto release = parseBestRelease(reply->readAll(), asset_name, include_prerelease, &error);
     if (!error.isEmpty()) {
       setState(module_id, QStringLiteral("error"), error);
+      recordHistory(module_id, QStringLiteral("check"), QStringLiteral("failure"),
+                    installed_version, {}, error);
       return;
     }
     handleCheckSucceeded(module_id, release, installed_version);
@@ -211,8 +252,10 @@ void ModuleUpdateService::handleCheckSucceeded(const QString& module_id,
     value.insert(QStringLiteral("canInstall"), false);
     value.insert(QStringLiteral("updateAvailable"), false);
     states_.insert(module_id, value);
-    setState(module_id, QStringLiteral("no-release"),
-             QStringLiteral("This catalog module does not have a published semantic-version GitHub release yet."));
+    const auto message = QStringLiteral("This registry module does not have a published semantic-version GitHub release yet.");
+    setState(module_id, QStringLiteral("no-release"), message);
+    recordHistory(module_id, QStringLiteral("check"), QStringLiteral("success"),
+                  installed_version, {}, message);
     return;
   }
 
@@ -233,9 +276,11 @@ void ModuleUpdateService::handleCheckSucceeded(const QString& module_id,
     value.insert(QStringLiteral("canInstall"), false);
     value.insert(QStringLiteral("updateAvailable"), false);
     states_.insert(module_id, value);
-    setState(module_id, QStringLiteral("package-unavailable"),
-             QStringLiteral("Release %1 exists, but it does not contain the catalog package %2.")
-                 .arg(release.version, value.value(QStringLiteral("assetName")).toString()));
+    const auto message = QStringLiteral("Release %1 exists, but it does not contain the registry package %2.")
+                             .arg(release.version, value.value(QStringLiteral("assetName")).toString());
+    setState(module_id, QStringLiteral("package-unavailable"), message);
+    recordHistory(module_id, QStringLiteral("check"), QStringLiteral("failure"),
+                  installed_version, release.version, message);
     return;
   }
 
@@ -249,20 +294,24 @@ void ModuleUpdateService::handleCheckSucceeded(const QString& module_id,
   value.insert(QStringLiteral("updateAvailable"), installed && newer);
   states_.insert(module_id, value);
 
+  QString message;
   if (!installed) {
-    setState(module_id, QStringLiteral("available"),
-             QStringLiteral("Module %1 is available to download.").arg(release.version));
+    message = QStringLiteral("Module %1 is available to download.").arg(release.version);
+    setState(module_id, QStringLiteral("available"), message);
   } else if (!newer) {
-    setState(module_id, QStringLiteral("up-to-date"),
-             QStringLiteral("Installed module %1 is current.").arg(installed_version));
+    message = QStringLiteral("Installed module %1 is current.").arg(installed_version);
+    setState(module_id, QStringLiteral("up-to-date"), message);
   } else {
-    setState(module_id, QStringLiteral("update-available"),
-             QStringLiteral("Module %1 is available; installed version is %2.")
-                 .arg(release.version, installed_version));
+    message = QStringLiteral("Module %1 is available; installed version is %2.")
+                  .arg(release.version, installed_version);
+    setState(module_id, QStringLiteral("update-available"), message);
     emit notificationRequested(QStringLiteral("Module update available"),
                                QStringLiteral("%1 can be updated to %2.")
                                    .arg(module_id, release.version));
   }
+  recordHistory(module_id, QStringLiteral("check"), QStringLiteral("success"),
+                installed_version, release.version, message,
+                QVariantMap{{QStringLiteral("assetName"), release.asset.name}});
 }
 
 ServiceResult ModuleUpdateService::download(const QString& module_id) {
@@ -279,10 +328,18 @@ ServiceResult ModuleUpdateService::download(const QString& module_id) {
 
   const auto expected_digest = digestHex(release.asset.digest);
   if (expected_digest.size() != 64) {
-    return ServiceResult::failure(
-        QStringLiteral("Module download"),
-        QStringLiteral("The GitHub release asset does not provide a valid SHA-256 digest, so Xenon will not install it."));
+    const auto message = QStringLiteral("The GitHub release asset does not provide a valid SHA-256 digest, so Xenon will not install it.");
+    recordHistory(module_id, QStringLiteral("download"), QStringLiteral("failure"),
+                  value.value(QStringLiteral("installedVersion")).toString(), release.version, message);
+    return ServiceResult::failure(QStringLiteral("Module download"), message);
   }
+
+  const auto old_staged_path = value.value(QStringLiteral("stagedPath")).toString();
+  if (!old_staged_path.isEmpty()) QFile::remove(old_staged_path);
+  value.insert(QStringLiteral("stagedPath"), QString{});
+  value.insert(QStringLiteral("stagedAt"), QString{});
+  value.insert(QStringLiteral("verifiedDigest"), QString{});
+  states_.insert(module_id, value);
 
   const auto target = packages_.allocateStagingPath(
       QStringLiteral("modules/updates/") + module_id, release.asset.name);
@@ -353,6 +410,10 @@ ServiceResult ModuleUpdateService::download(const QString& module_id) {
       value.insert(QStringLiteral("lastError"), message);
       states_.insert(module_id, value);
       setState(module_id, QStringLiteral("error"), message);
+      const auto release = releases_.value(module_id);
+      recordHistory(module_id, QStringLiteral("download"), QStringLiteral("failure"),
+                    value.value(QStringLiteral("installedVersion")).toString(),
+                    release.version, message);
     };
 
     if (cancel_requested_) {
@@ -370,8 +431,12 @@ ServiceResult ModuleUpdateService::download(const QString& module_id) {
       value.insert(QStringLiteral("downloadProgress"), 0.0);
       value.insert(QStringLiteral("lastError"), QString{});
       states_.insert(module_id, value);
-      setState(module_id, QStringLiteral("cancelled"),
-               QStringLiteral("Module package download was cancelled."));
+      const auto message = QStringLiteral("Module package download was cancelled.");
+      setState(module_id, QStringLiteral("cancelled"), message);
+      const auto release = releases_.value(module_id);
+      recordHistory(module_id, QStringLiteral("download"), QStringLiteral("cancelled"),
+                    value.value(QStringLiteral("installedVersion")).toString(),
+                    release.version, message);
       return;
     }
 
@@ -409,6 +474,8 @@ ServiceResult ModuleUpdateService::download(const QString& module_id) {
 
     auto value = state(module_id);
     value.insert(QStringLiteral("stagedPath"), path);
+    value.insert(QStringLiteral("stagedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    value.insert(QStringLiteral("verifiedDigest"), expected_digest);
     value.insert(QStringLiteral("downloadProgress"), 1.0);
     value.insert(QStringLiteral("canDownload"), false);
     value.insert(QStringLiteral("canInstall"), ModulePackageInstaller::platformSupported());
@@ -417,8 +484,13 @@ ServiceResult ModuleUpdateService::download(const QString& module_id) {
              ModulePackageInstaller::platformSupported()
                  ? QStringLiteral("The module package was downloaded and SHA-256 verified. Ready to install.")
                  : QStringLiteral("The module package was downloaded and verified, but automatic installation is unavailable on this platform."));
-    emit notificationRequested(QStringLiteral("Module package ready"),
-                               state(module_id).value(QStringLiteral("statusMessage")).toString());
+    const auto ready_message = state(module_id).value(QStringLiteral("statusMessage")).toString();
+    recordHistory(module_id, QStringLiteral("download"), QStringLiteral("success"),
+                  value.value(QStringLiteral("installedVersion")).toString(),
+                  releases_.value(module_id).version, ready_message,
+                  QVariantMap{{QStringLiteral("assetName"), releases_.value(module_id).asset.name},
+                              {QStringLiteral("sha256"), expected_digest}});
+    emit notificationRequested(QStringLiteral("Module package ready"), ready_message);
   });
 
   return ServiceResult::success(QStringLiteral("Module download started"),
@@ -444,34 +516,114 @@ ServiceResult ModuleUpdateService::install(const QString& module_id) {
                                   QStringLiteral("Download and verify the module package before installing it."));
   }
 
+  const auto release = releases_.value(module_id);
+  const auto from_version = value.value(QStringLiteral("installedVersion")).toString();
   value.insert(QStringLiteral("canInstall"), false);
   states_.insert(module_id, value);
-  setState(module_id, QStringLiteral("installing"), QStringLiteral("Installing the verified module package…"));
+  setState(module_id, QStringLiteral("installing"),
+           QStringLiteral("Validating and installing the verified module package…"));
 
-  const auto result = installer_.install(module_id, path);
+  const auto result = installer_.install(module_id, path, release.version, true);
   if (!result.ok) {
     value = state(module_id);
     value.insert(QStringLiteral("canInstall"), true);
     value.insert(QStringLiteral("lastError"), result.message);
     states_.insert(module_id, value);
     setState(module_id, QStringLiteral("error"), result.message);
+    recordHistory(module_id, QStringLiteral("install"), QStringLiteral("failure"),
+                  from_version, release.version, result.message);
     return result;
   }
 
-  const auto release = releases_.value(module_id);
   QFile::remove(path);
   value = state(module_id);
   value.insert(QStringLiteral("installedVersion"), release.version);
   value.insert(QStringLiteral("stagedPath"), QString{});
+  value.insert(QStringLiteral("stagedAt"), QString{});
   value.insert(QStringLiteral("canDownload"), false);
   value.insert(QStringLiteral("canInstall"), false);
   value.insert(QStringLiteral("updateAvailable"), false);
+  value.insert(QStringLiteral("lastError"), QString{});
+  const auto metadata = result.data.toMap();
+  value.insert(QStringLiteral("rollbackAvailable"),
+               metadata.value(QStringLiteral("rollbackAvailable"), false));
+  value.insert(QStringLiteral("rollbackVersion"), metadata.value(QStringLiteral("rollbackVersion")));
+  value.insert(QStringLiteral("rollbackCreatedAt"), metadata.value(QStringLiteral("rollbackCreatedAt")));
   states_.insert(module_id, value);
-  setState(module_id, QStringLiteral("up-to-date"),
-           QStringLiteral("Module %1 was installed successfully and is current.").arg(release.version));
+  refreshRollbackState(module_id);
+  const auto message = QStringLiteral("Module %1 was installed successfully and is current.").arg(release.version);
+  setState(module_id, QStringLiteral("up-to-date"), message);
+  recordHistory(module_id, QStringLiteral("install"), QStringLiteral("success"),
+                from_version, release.version, message,
+                QVariantMap{{QStringLiteral("rollbackAvailable"),
+                             state(module_id).value(QStringLiteral("rollbackAvailable"))},
+                            {QStringLiteral("rollbackVersion"),
+                             state(module_id).value(QStringLiteral("rollbackVersion"))}});
   emit moduleInstalled(module_id);
   emit notificationRequested(QStringLiteral("Module installed"), result.message);
   return result;
+}
+
+ServiceResult ModuleUpdateService::rollback(const QString& module_id) {
+  if (active_download_) {
+    return ServiceResult::failure(QStringLiteral("Module rollback"),
+                                  QStringLiteral("Wait for the active module download to finish before rolling back."));
+  }
+  auto value = state(module_id);
+  const auto snapshot = modules_.latestRollback(module_id);
+  if (snapshot.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Module rollback"),
+                                  QStringLiteral("There is no retained previous module version to restore."));
+  }
+  const auto from_version = modules_.module(module_id).value(QStringLiteral("version")).toString();
+  const auto target_version = snapshot.value(QStringLiteral("version")).toString();
+  value.insert(QStringLiteral("canDownload"), false);
+  value.insert(QStringLiteral("canInstall"), false);
+  states_.insert(module_id, value);
+  setState(module_id, QStringLiteral("rolling-back"),
+           QStringLiteral("Restoring module version %1…").arg(target_version));
+
+  const auto result = modules_.restoreLatestRollback(module_id);
+  if (!result.ok) {
+    setState(module_id, QStringLiteral("error"), result.message);
+    recordHistory(module_id, QStringLiteral("rollback"), QStringLiteral("failure"),
+                  from_version, target_version, result.message);
+    refreshRollbackState(module_id);
+    return result;
+  }
+
+  const auto installed_version = modules_.module(module_id).value(QStringLiteral("version")).toString();
+  value = state(module_id);
+  value.insert(QStringLiteral("installedVersion"), installed_version);
+  value.insert(QStringLiteral("availableVersion"), QString{});
+  value.insert(QStringLiteral("updateAvailable"), false);
+  value.insert(QStringLiteral("canDownload"), false);
+  value.insert(QStringLiteral("canInstall"), false);
+  value.insert(QStringLiteral("stagedPath"), QString{});
+  states_.insert(module_id, value);
+  refreshRollbackState(module_id);
+  setState(module_id, QStringLiteral("rolled-back"), result.message);
+  recordHistory(module_id, QStringLiteral("rollback"), QStringLiteral("success"),
+                from_version, installed_version, result.message,
+                QVariantMap{{QStringLiteral("rollbackAvailable"),
+                             state(module_id).value(QStringLiteral("rollbackAvailable"))},
+                            {QStringLiteral("rollbackVersion"),
+                             state(module_id).value(QStringLiteral("rollbackVersion"))}});
+  emit moduleInstalled(module_id);
+  emit notificationRequested(QStringLiteral("Module rolled back"), result.message);
+  return result;
+}
+
+ServiceResult ModuleUpdateService::clearHistory(const QString& module_id) {
+  if (!history_.clear(module_id)) {
+    return ServiceResult::failure(QStringLiteral("Module update history"),
+                                  QStringLiteral("Xenon could not save the cleared module update history."));
+  }
+  emit historyChanged(module_id);
+  return ServiceResult::success(QStringLiteral("Module update history cleared"),
+                                module_id.trimmed().isEmpty()
+                                    ? QStringLiteral("Module update history was cleared.")
+                                    : QStringLiteral("Update history for %1 was cleared.").arg(module_id));
 }
 
 }  // namespace xenon::launcher::frontend_backend

@@ -18,11 +18,13 @@ class GuestMemoryMirror {
                                 memory::AddressSpace& memory);
   void reset() noexcept;
   [[nodiscard]] bool synchronize();
-  [[nodiscard]] bool synchronize_range(std::uint32_t address,
-                                       std::uint32_t width);
+  [[nodiscard]] bool synchronize_range(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::Generic);
   void mark_gpu_write(std::uint32_t address, std::uint32_t width);
-  [[nodiscard]] bool make_cpu_visible(std::uint32_t address,
-                                      std::uint32_t width);
+  [[nodiscard]] bool make_cpu_visible(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::RenderReadback);
   [[nodiscard]] bool has_gpu_dirty(std::uint32_t address,
                                    std::uint32_t width) const;
   [[nodiscard]] bool device_range_valid(std::uint32_t address,

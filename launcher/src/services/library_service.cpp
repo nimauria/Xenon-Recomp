@@ -93,7 +93,9 @@ ServiceResult LibraryService::registerIdentifiedContent(const QUrl& source,
       QStringLiteral("title"), QStringLiteral("moduleName"), QStringLiteral("moduleVersion"),
       QStringLiteral("tileArt"), QStringLiteral("heroArt"), QStringLiteral("description"),
       QStringLiteral("renderer"), QStringLiteral("mode"), QStringLiteral("regions"),
-      QStringLiteral("contentState"), QStringLiteral("tags"), QStringLiteral("titleId")};
+      QStringLiteral("contentState"), QStringLiteral("tags"), QStringLiteral("titleId"),
+      QStringLiteral("mediaId"), QStringLiteral("xexVersion"), QStringLiteral("discNumber"),
+      QStringLiteral("discCount"), QStringLiteral("sourceType"), QStringLiteral("executablePath")};
   for (const auto& field : identified_fields) {
     if (identification.contains(field)) item.insert(field, identification.value(field));
   }
@@ -169,7 +171,9 @@ ServiceResult LibraryService::applyIdentification(const QString& game_id,
         QStringLiteral("title"), QStringLiteral("moduleName"), QStringLiteral("moduleVersion"),
         QStringLiteral("tileArt"), QStringLiteral("heroArt"), QStringLiteral("description"),
         QStringLiteral("renderer"), QStringLiteral("mode"), QStringLiteral("regions"),
-        QStringLiteral("contentState"), QStringLiteral("tags"), QStringLiteral("titleId")};
+        QStringLiteral("contentState"), QStringLiteral("tags"), QStringLiteral("titleId"),
+      QStringLiteral("mediaId"), QStringLiteral("xexVersion"), QStringLiteral("discNumber"),
+      QStringLiteral("discCount"), QStringLiteral("sourceType"), QStringLiteral("executablePath")};
     for (const auto& field : mutable_fields) {
       if (identification.contains(field)) current.insert(field, identification.value(field));
     }

@@ -33,11 +33,19 @@ option(XENON_ENABLE_VULKAN "Build the Vulkan backend when the SDK is available" 
 option(XENON_ENABLE_D3D12 "Build the Direct3D 12 backend on Windows" ON)
 option(XENON_ENABLE_DXC "Build the HLSL/DXC shader compiler when DXC is available" ON)
 option(XENON_ENABLE_AUDIO "Enable audio subsystem" OFF)
-option(XENON_ENABLE_INPUT "Enable input subsystem" OFF)
+option(XENON_ENABLE_INPUT "Enable input subsystem" ON)
+option(XENON_INPUT_ENABLE_SDL2 "Enable SDL2 controller backend when SDL2 is available" ON)
+option(XENON_INPUT_ENABLE_SDL3 "Enable SDL3 controller backend when SDL3 is available" ON)
+option(XENON_INPUT_ENABLE_XINPUT "Enable native Windows XInput backend" ON)
 option(XENON_ENABLE_NETWORK "Enable networking subsystem" OFF)
+option(XENON_ENABLE_FILESYSTEM "Build the Xenon virtual filesystem subsystem" ON)
+option(XENON_ENABLE_KERNEL "Build the Xenon host-side kernel object/I/O layer" ${XENON_ENABLE_FILESYSTEM})
 
 if(XENON_ENABLE_GRAPHICS AND NOT XENON_ENABLE_MEMORY)
   message(FATAL_ERROR "XENON_ENABLE_GRAPHICS requires XENON_ENABLE_MEMORY")
+endif()
+if(XENON_ENABLE_KERNEL AND NOT XENON_ENABLE_FILESYSTEM)
+  message(FATAL_ERROR "XENON_ENABLE_KERNEL currently requires XENON_ENABLE_FILESYSTEM")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -51,9 +59,55 @@ xenon_enable_warnings(xenon_core)
 add_library(Xenon::Core ALIAS xenon_core)
 
 # -----------------------------------------------------------------------------
+# Filesystem: host-independent Xbox-style VFS and content providers.
+# This target deliberately remains independent of guest Memory.
+if(XENON_ENABLE_FILESYSTEM)
+  add_library(xenon_filesystem STATIC
+    src/filesystem/content/xex_metadata.cpp
+    src/filesystem/content/content_probe.cpp
+    src/filesystem/content/gdfx_image_source.cpp
+    src/filesystem/content/stfs_package.cpp
+    src/filesystem/content/stfs_package_source.cpp
+    src/filesystem/content/content_materializer.cpp
+    src/filesystem/virtual/path.cpp
+    src/filesystem/virtual/device.cpp
+    src/filesystem/virtual/directory_cursor.cpp
+    src/filesystem/virtual/virtual_file_system.cpp
+    src/filesystem/devices/null_device.cpp
+    src/filesystem/devices/read_only_content_device.cpp
+    src/filesystem/host/host_path_device.cpp
+  )
+  target_include_directories(xenon_filesystem PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_features(xenon_filesystem PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_filesystem)
+  add_library(Xenon::Filesystem ALIAS xenon_filesystem)
+endif()
+
+# -----------------------------------------------------------------------------
+# Host-side kernel object/I/O layer. This still has no guest Memory dependency.
+if(XENON_ENABLE_KERNEL)
+  add_library(xenon_kernel STATIC
+    src/kernel/handles/object.cpp
+    src/kernel/handles/handle_table.cpp
+    src/kernel/handles/io_request.cpp
+    src/kernel/handles/file_object.cpp
+    src/kernel/handles/io_manager.cpp
+    src/kernel/xboxkrnl/xbox_io.cpp
+    src/kernel/synchronization/completion_port.cpp
+    src/kernel/synchronization/event.cpp
+  )
+  target_link_libraries(xenon_kernel PUBLIC xenon_filesystem)
+  target_include_directories(xenon_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_features(xenon_kernel PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_kernel)
+  add_library(Xenon::Kernel ALIAS xenon_kernel)
+endif()
+
+# -----------------------------------------------------------------------------
 # CPU: Xenon PPC/VMX128 frontend -> Xenon IR -> optimizer -> native C++ AOT.
 add_library(xenon_cpu STATIC
   src/cpu/ppc/state.cpp
+  src/cpu/external_calls.cpp
   src/cpu/ppc/decoder.cpp
   src/cpu/ppc/lifter.cpp
   src/cpu/ppc/lifter_integer.cpp
@@ -63,9 +117,11 @@ add_library(xenon_cpu STATIC
   src/cpu/ppc/lifter_vector.cpp
   src/cpu/ppc/flat_memory.cpp
   src/cpu/ir/ir.cpp
+  src/cpu/ir/verifier.cpp
   src/cpu/optimizer/optimizer.cpp
   src/cpu/codegen/aot_semantics.cpp
   src/cpu/codegen/backend_cpp_aot.cpp
+  src/cpu/codegen/executable_code_cache.cpp
   src/cpu/codegen/function_compiler.cpp
 )
 target_include_directories(xenon_cpu
@@ -100,10 +156,100 @@ if(XENON_ENABLE_MEMORY)
   add_library(Xenon::Memory ALIAS xenon_memory)
 endif()
 
+# -----------------------------------------------------------------------------
+# Input: host-neutral Xbox controller model. Platform backends are optional.
+add_library(xenon_input_api INTERFACE)
+target_include_directories(xenon_input_api INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_features(xenon_input_api INTERFACE cxx_std_20)
+add_library(Xenon::InputAPI ALIAS xenon_input_api)
+
+if(XENON_ENABLE_INPUT)
+  add_library(xenon_input STATIC
+    src/input/system.cpp
+    src/input/module_api.cpp
+    src/input/state_merge.cpp
+    src/input/profile.cpp
+    src/input/flight_driver.cpp
+    src/input/xinput/xinput_driver.cpp
+    src/input/keyboard_mouse_driver.cpp
+    src/input/xam_facade.cpp
+    src/input/null_driver.cpp
+    src/input/sdl/sdl_driver.cpp
+  )
+  target_include_directories(xenon_input PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(xenon_input PUBLIC xenon_input_api)
+  target_compile_features(xenon_input PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_input)
+  add_library(Xenon::Input ALIAS xenon_input)
+
+  if(WIN32 AND XENON_INPUT_ENABLE_XINPUT)
+    target_sources(xenon_input PRIVATE src/input/xinput/xinput_host_win32.cpp)
+    target_compile_definitions(xenon_input PUBLIC XENON_INPUT_HAS_XINPUT=1)
+  endif()
+
+  if(XENON_INPUT_ENABLE_SDL3)
+    find_package(SDL3 3.2 QUIET CONFIG)
+    if(TARGET SDL3::SDL3)
+      target_sources(xenon_input PRIVATE src/input/sdl/sdl3_host.cpp)
+      target_link_libraries(xenon_input PRIVATE SDL3::SDL3)
+      target_compile_definitions(xenon_input PUBLIC XENON_INPUT_HAS_SDL3=1)
+    endif()
+  endif()
+
+  if(XENON_INPUT_ENABLE_SDL2)
+    find_package(SDL2 2.0.9 QUIET CONFIG)
+    if(NOT TARGET SDL2::SDL2)
+      find_package(SDL2 2.0.9 QUIET)
+    endif()
+    set(XENON_SDL2_TARGET "")
+    if(TARGET SDL2::SDL2)
+      set(XENON_SDL2_TARGET SDL2::SDL2)
+    elseif(TARGET SDL2::SDL2-static)
+      set(XENON_SDL2_TARGET SDL2::SDL2-static)
+    elseif(SDL2_FOUND AND SDL2_LIBRARIES)
+      add_library(xenon_sdl2_external INTERFACE)
+      target_include_directories(xenon_sdl2_external INTERFACE ${SDL2_INCLUDE_DIRS})
+      target_link_libraries(xenon_sdl2_external INTERFACE ${SDL2_LIBRARIES})
+      set(XENON_SDL2_TARGET xenon_sdl2_external)
+    endif()
+    if(XENON_SDL2_TARGET)
+      target_sources(xenon_input PRIVATE src/input/sdl/sdl2_host.cpp)
+      target_link_libraries(xenon_input PRIVATE ${XENON_SDL2_TARGET})
+      target_compile_definitions(xenon_input PUBLIC XENON_INPUT_HAS_SDL2=1)
+    endif()
+  endif()
+
+  if(XENON_ENABLE_MEMORY)
+    add_library(xenon_input_guest STATIC src/input/xam_guest.cpp)
+    target_include_directories(xenon_input_guest PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(xenon_input_guest PUBLIC xenon_input xenon_memory)
+    target_compile_features(xenon_input_guest PUBLIC cxx_std_20)
+    xenon_enable_warnings(xenon_input_guest)
+    add_library(Xenon::InputGuest ALIAS xenon_input_guest)
+  endif()
+endif()
+
+# Guest xboxkrnl filesystem ABI bridge. Kept separate so Xenon::Kernel can
+# still be built/tested without guest memory.
+if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
+  add_library(xenon_xbox_kernel_io STATIC
+    src/kernel/xboxkrnl/xbox_io_guest.cpp
+    src/xbox/imports/import_registry.cpp
+    src/xbox/exports/xboxkrnl_io_exports.cpp
+  )
+  target_link_libraries(xenon_xbox_kernel_io PUBLIC xenon_kernel xenon_memory)
+  target_include_directories(xenon_xbox_kernel_io PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_features(xenon_xbox_kernel_io PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_xbox_kernel_io)
+  add_library(Xenon::XboxKernelIo ALIAS xenon_xbox_kernel_io)
+endif()
+
 if(XENON_BUILD_BENCHMARKS AND XENON_ENABLE_MEMORY)
   add_executable(xenon_memory_v2_benchmarks
     tests/memory/memory_benchmarks.cpp)
   target_link_libraries(xenon_memory_v2_benchmarks PRIVATE xenon_memory)
+  target_compile_definitions(xenon_memory_v2_benchmarks PRIVATE
+    XENON_BENCHMARK_BUILD_CONFIG="$<CONFIG>")
   xenon_enable_test_asserts(xenon_memory_v2_benchmarks)
 endif()
 
@@ -125,6 +271,7 @@ if(XENON_ENABLE_GRAPHICS)
     src/graphics/xenos/edram_ownership.cpp
     src/graphics/xenos/primitive_processor.cpp
     src/graphics/xenos/command_processor.cpp
+    src/graphics/xenos/capture.cpp
     src/graphics/xenos/graphics_system.cpp
     src/graphics/windows/backend_capabilities.cpp
   )
@@ -233,11 +380,54 @@ endif()
 if(XENON_BUILD_TESTS)
   enable_testing()
 
+  if(XENON_ENABLE_FILESYSTEM)
+    add_executable(xenon_filesystem_tests tests/filesystem/filesystem_tests.cpp)
+    target_link_libraries(xenon_filesystem_tests PRIVATE xenon_filesystem)
+    xenon_enable_test_asserts(xenon_filesystem_tests)
+    add_test(NAME xenon_filesystem_tests COMMAND xenon_filesystem_tests)
+  endif()
+
+  if(XENON_ENABLE_KERNEL)
+    add_executable(xenon_kernel_io_tests tests/kernel/kernel_io_tests.cpp)
+    target_link_libraries(xenon_kernel_io_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_io_tests)
+    add_test(NAME xenon_kernel_io_tests COMMAND xenon_kernel_io_tests)
+  endif()
+
+  if(TARGET xenon_xbox_kernel_io)
+    add_executable(xenon_xbox_guest_io_tests tests/kernel/xbox_guest_io_tests.cpp)
+    target_link_libraries(xenon_xbox_guest_io_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_xbox_guest_io_tests)
+    add_test(NAME xenon_xbox_guest_io_tests COMMAND xenon_xbox_guest_io_tests)
+  endif()
+
+  if(TARGET xenon_xbox_kernel_io)
+    add_executable(xenon_xbox_import_tests tests/xbox/xbox_import_tests.cpp)
+    target_link_libraries(xenon_xbox_import_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_xbox_import_tests)
+    add_test(NAME xenon_xbox_import_tests COMMAND xenon_xbox_import_tests)
+  endif()
+
   add_executable(xenon_cpu_tests tests/cpu/ppc/cpu_tests.cpp)
   target_link_libraries(xenon_cpu_tests PRIVATE xenon_cpu)
   target_include_directories(xenon_cpu_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ppc")
   xenon_enable_test_asserts(xenon_cpu_tests)
   add_test(NAME xenon_cpu_tests COMMAND xenon_cpu_tests)
+
+  add_executable(xenon_cpu_v2_cfg tests/cpu/ir/cpu_v2_cfg.cpp)
+  target_link_libraries(xenon_cpu_v2_cfg PRIVATE xenon_cpu)
+  xenon_enable_test_asserts(xenon_cpu_v2_cfg)
+  add_test(NAME xenon_cpu_v2_cfg COMMAND xenon_cpu_v2_cfg)
+
+  add_executable(xenon_cpu_v2_ir tests/cpu/ir/cpu_v2_ir.cpp)
+  target_link_libraries(xenon_cpu_v2_ir PRIVATE xenon_cpu)
+  xenon_enable_test_asserts(xenon_cpu_v2_ir)
+  add_test(NAME xenon_cpu_v2_ir COMMAND xenon_cpu_v2_ir)
+
+  add_executable(xenon_cpu_v2_state_promotion tests/cpu/optimizer/cpu_v2_state_promotion.cpp)
+  target_link_libraries(xenon_cpu_v2_state_promotion PRIVATE xenon_cpu)
+  xenon_enable_test_asserts(xenon_cpu_v2_state_promotion)
+  add_test(NAME xenon_cpu_v2_state_promotion COMMAND xenon_cpu_v2_state_promotion)
 
   # Generate and compile one function for every canonical instruction.
   add_executable(xenon_cpu_codegen_all tests/cpu/codegen/codegen_all.cpp)
@@ -300,11 +490,39 @@ if(XENON_BUILD_TESTS)
   xenon_add_generated_cpu_test(scalar_memory codegen_scalar_memory.cpp scalar_memory.cpp)
   xenon_add_generated_cpu_test(integer_edges codegen_integer_edges.cpp integer_edges.cpp)
 
+  if(XENON_ENABLE_INPUT)
+    add_executable(xenon_input_tests tests/input/input_tests.cpp)
+    target_link_libraries(xenon_input_tests PRIVATE xenon_input)
+    xenon_enable_test_asserts(xenon_input_tests)
+    add_test(NAME xenon_input_tests COMMAND xenon_input_tests)
+
+    foreach(test_name IN ITEMS sdl_driver keyboard_mouse xam_facade profile advanced module_api)
+      set(target "xenon_input_${test_name}_tests")
+      add_executable(${target} "tests/input/${test_name}_tests.cpp")
+      target_link_libraries(${target} PRIVATE xenon_input)
+      xenon_enable_test_asserts(${target})
+      add_test(NAME ${target} COMMAND ${target})
+    endforeach()
+    if(TARGET xenon_input_guest)
+      add_executable(xenon_input_xam_guest_tests tests/input/xam_guest_tests.cpp)
+      target_link_libraries(xenon_input_xam_guest_tests PRIVATE xenon_input_guest)
+      xenon_enable_test_asserts(xenon_input_xam_guest_tests)
+      add_test(NAME xenon_input_xam_guest_tests COMMAND xenon_input_xam_guest_tests)
+    endif()
+  endif()
+
   if(XENON_ENABLE_MEMORY)
     add_executable(xenon_memory_tests tests/memory/memory_tests.cpp)
     target_link_libraries(xenon_memory_tests PRIVATE xenon_memory)
     xenon_enable_test_asserts(xenon_memory_tests)
     add_test(NAME xenon_memory_tests COMMAND xenon_memory_tests)
+
+    add_executable(xenon_memory_hardening_tests
+      tests/memory/memory_hardening_tests.cpp)
+    target_link_libraries(xenon_memory_hardening_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_memory_hardening_tests)
+    add_test(NAME xenon_memory_hardening_tests
+      COMMAND xenon_memory_hardening_tests)
 
     add_executable(xenon_memory_ordering_tests
       tests/memory/memory_ordering_tests.cpp)
@@ -312,10 +530,41 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_memory_ordering_tests)
     add_test(NAME xenon_memory_ordering_tests COMMAND xenon_memory_ordering_tests)
 
+    add_executable(xenon_memory_type_tests
+      tests/memory/memory_type_tests.cpp)
+    target_link_libraries(xenon_memory_type_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_memory_type_tests)
+    add_test(NAME xenon_memory_type_tests COMMAND xenon_memory_type_tests)
+
+    add_executable(xenon_mmio_tests
+      tests/memory/mmio_tests.cpp)
+    target_link_libraries(xenon_mmio_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_mmio_tests)
+    add_test(NAME xenon_mmio_tests COMMAND xenon_mmio_tests)
+
+    add_executable(xenon_memory_fault_tests
+      tests/memory/fault_tests.cpp)
+    target_link_libraries(xenon_memory_fault_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_memory_fault_tests)
+    add_test(NAME xenon_memory_fault_tests COMMAND xenon_memory_fault_tests)
+
+    add_executable(xenon_executable_code_cache_tests
+      tests/memory/executable_code_cache_tests.cpp)
+    target_link_libraries(xenon_executable_code_cache_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_executable_code_cache_tests)
+    add_test(NAME xenon_executable_code_cache_tests
+      COMMAND xenon_executable_code_cache_tests)
+
     add_executable(xenon_host_vm_tests tests/memory/host_vm_tests.cpp)
     target_link_libraries(xenon_host_vm_tests PRIVATE xenon_memory)
     xenon_enable_test_asserts(xenon_host_vm_tests)
     add_test(NAME xenon_host_vm_tests COMMAND xenon_host_vm_tests)
+
+    add_executable(xenon_gpu_coherency_tests
+      tests/memory/gpu_coherency_tests.cpp)
+    target_link_libraries(xenon_gpu_coherency_tests PRIVATE xenon_memory)
+    xenon_enable_test_asserts(xenon_gpu_coherency_tests)
+    add_test(NAME xenon_gpu_coherency_tests COMMAND xenon_gpu_coherency_tests)
 
     add_executable(xenon_memory_codegen_integration tests/memory/codegen_memory_integration.cpp)
     target_link_libraries(xenon_memory_codegen_integration PRIVATE xenon_cpu)

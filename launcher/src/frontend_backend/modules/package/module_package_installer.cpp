@@ -1,5 +1,7 @@
 #include "module_package_installer.hpp"
 
+#include "../../updates/version/semantic_version.hpp"
+
 #include <QDir>
 #include <QFileInfo>
 #include <QProcess>
@@ -151,7 +153,9 @@ ServiceResult ModulePackageInstaller::installDiscovered(const QString& archive_p
 }
 
 ServiceResult ModulePackageInstaller::install(const QString& module_id,
-                                               const QString& archive_path) const {
+                                               const QString& archive_path,
+                                               const QString& expected_version,
+                                               bool retain_rollback) const {
   if (!platformSupported()) {
     return ServiceResult::failure(QStringLiteral("Module install"),
                                   QStringLiteral("Automatic module installation is unavailable on this platform."));
@@ -179,7 +183,36 @@ ServiceResult ModulePackageInstaller::install(const QString& module_id,
             .arg(module_id));
   }
 
-  return modules_.installFromDirectory(module_id, module_root, true);
+  const auto manifest = modules_.inspectDirectory(module_root);
+  const auto package_version = manifest.value(QStringLiteral("version")).toString().trimmed();
+  if (!expected_version.trimmed().isEmpty()) {
+    if (package_version.isEmpty()) {
+      return ServiceResult::failure(
+          QStringLiteral("Module install"),
+          QStringLiteral("The official release package does not declare a module version, so Xenon cannot verify that it matches release %1.")
+              .arg(expected_version));
+    }
+    const auto expected = SemanticVersion::parse(expected_version);
+    const auto packaged = SemanticVersion::parse(package_version);
+    const auto matches = expected.valid() && packaged.valid()
+                             ? expected.compare(packaged) == 0
+                             : expected_version.compare(package_version, Qt::CaseInsensitive) == 0;
+    if (!matches) {
+      return ServiceResult::failure(
+          QStringLiteral("Module install"),
+          QStringLiteral("The package manifest declares version %1, but GitHub release metadata selected version %2.")
+              .arg(package_version, expected_version));
+    }
+  }
+
+  auto result = modules_.installFromDirectory(module_id, module_root, true, retain_rollback);
+  if (result.ok) {
+    auto metadata = result.data.toMap();
+    metadata.insert(QStringLiteral("packageVersion"), package_version);
+    metadata.insert(QStringLiteral("expectedVersion"), expected_version);
+    result.data = metadata;
+  }
+  return result;
 }
 
 }  // namespace xenon::launcher::frontend_backend

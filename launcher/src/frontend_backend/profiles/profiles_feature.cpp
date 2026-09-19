@@ -260,9 +260,9 @@ QString ProfilesFeature::fixtureCopyName(const QString& base_name) const {
 ServiceResult ProfilesFeature::normalizeProfileData(QVariantMap& data) const {
   static const QStringList regions{QStringLiteral("Auto (Global)"), QStringLiteral("NTSC-U"),
                                    QStringLiteral("PAL"), QStringLiteral("NTSC-J")};
-  static const QStringList pages{QStringLiteral("Launcher default"), QStringLiteral("Library"),
-                                 QStringLiteral("Modules"), QStringLiteral("Profiles"),
-                                 QStringLiteral("Settings")};
+  static const QStringList pages{QStringLiteral("Launcher default"), QStringLiteral("Home"),
+                                 QStringLiteral("Library"), QStringLiteral("Modules"),
+                                 QStringLiteral("Profiles"), QStringLiteral("Settings")};
 
   auto region = data.value(QStringLiteral("region"), QStringLiteral("Auto (Global)")).toString().trimmed();
   if (!containsValue(regions, region)) region = QStringLiteral("Auto (Global)");

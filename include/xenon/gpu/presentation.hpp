@@ -57,6 +57,6 @@ struct PreparedPresentationFrame {
 [[nodiscard]] PreparedPresentationFrame prepare_presentation_frame(
     const PresentationFrame& frame, std::span<const std::byte> physical_memory,
     std::uint32_t target_width, std::uint32_t target_height,
-    bool preserve_aspect_ratio = true);
+    bool preserve_aspect_ratio = true, std::uint32_t physical_base = 0u);
 
 }  // namespace xenon::gpu

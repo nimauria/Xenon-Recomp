@@ -8,6 +8,7 @@
 namespace xenon::launcher {
 
 class DlcService;
+class FilesystemService;
 class LibraryService;
 class ModuleService;
 class PathService;
@@ -19,7 +20,7 @@ class LaunchService final {
  public:
   LaunchService(SettingsService& settings, PathService& paths, ProfileService& profiles,
                 LibraryService& library, ModuleService& modules, DlcService& dlc,
-                IRuntimeBridge& runtime);
+                FilesystemService& filesystem, IRuntimeBridge& runtime);
 
   [[nodiscard]] std::optional<LaunchConfiguration> configurationFor(const QString& game_id) const;
   [[nodiscard]] ServiceResult validate(const QString& game_id) const;
@@ -34,6 +35,7 @@ class LaunchService final {
   LibraryService& library_;
   ModuleService& modules_;
   DlcService& dlc_;
+  FilesystemService& filesystem_;
   IRuntimeBridge& runtime_;
 };
 

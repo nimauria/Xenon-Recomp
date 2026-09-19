@@ -18,6 +18,23 @@ namespace xenon::cpu {
 
 class MemoryPort;
 
+// Stable executable-page identity consumed by the native translation cache.
+// The physical page prevents an unmap/remap ABA from validating merely because
+// a replacement page happens to have the same generation value. A zero
+// generation means the guest page is not currently executable.
+struct ExecutablePageStamp {
+  static constexpr std::uint32_t kInvalidPhysicalPage = 0xFFFFFFFFu;
+
+  std::uint32_t physical_page{kInvalidPhysicalPage};
+  std::uint32_t generation{};
+
+  [[nodiscard]] constexpr bool executable() const noexcept {
+    return physical_page != kInvalidPhysicalPage && generation != 0u;
+  }
+  friend constexpr bool operator==(const ExecutablePageStamp&,
+                                   const ExecutablePageStamp&) = default;
+};
+
 // Compact page-entry contract published by the production Xenon memory system.
 // The CPU only consumes this representation; AddressSpace remains the authority
 // that creates mappings, permissions, aliases and MMIO overlays.
@@ -67,13 +84,19 @@ struct FastMemoryView {
   std::uint32_t reservation_granule_count{};
   std::atomic<std::uint32_t>* reservation_commit_gate{};
   std::atomic<std::uint32_t>* active_reservation_ops{};
+  std::atomic<std::uint32_t>* reservation_next_generation{};
 
   std::atomic<std::uint64_t>* physical_page_epochs{};
   std::uint32_t physical_page_count{};
   std::atomic<std::uint64_t>* global_write_epoch{};
   std::atomic<std::uint32_t>* active_coherency_writers{};
+  // Cold GPU/DMA readback reconciliation may briefly close this gate to
+  // obtain a stable physical-RAM ownership point. Ordinary stores only pay
+  // the uncontended atomic load; no global mutex is involved.
+  std::atomic<std::uint32_t>* coherency_commit_gate{};
   std::atomic<std::uint64_t>* coherency_journal_epochs{};
   std::atomic<std::uint64_t>* coherency_journal_ranges{};
+  std::atomic<std::uint8_t>* coherency_journal_domains{};
   std::uint32_t coherency_journal_capacity{};
 
   // Sticky executable-page generations. Zero means the physical page has not
@@ -144,6 +167,22 @@ class MemoryAccessContext {
   void fill_bytes(GuestAddress address, std::uint32_t size, std::uint8_t value);
   void zero_cache_block(GuestAddress address, std::uint32_t bytes);
 
+  // Reservation operations use the same Memory V2 fast view as ordinary RAM.
+  // Slow/MMIO/reference ports retain the virtual fallback contract.
+  [[nodiscard]] std::uint64_t reserve32(GuestAddress address, std::uint32_t& value);
+  [[nodiscard]] std::uint64_t reserve64(GuestAddress address, std::uint64_t& value);
+  [[nodiscard]] bool store_conditional32(GuestAddress address, std::uint64_t token,
+                                         std::uint32_t value);
+  [[nodiscard]] bool store_conditional64(GuestAddress address, std::uint64_t token,
+                                         std::uint64_t value);
+  void cancel_reservation(std::uint64_t token) noexcept;
+
+  // Barriers map directly to the canonical host ordering implementation. icbi
+  // remains a cold MemoryPort callback because executable-code subscribers live
+  // above the raw page table and must be notified synchronously.
+  void barrier(BarrierKind kind) noexcept { host_memory_ordering::apply(kind); }
+  void instruction_cache_invalidate(GuestAddress address);
+
   [[nodiscard]] bool has_fast_path() const noexcept {
     return fast_.physical_base && fast_.page_table && fast_.page_count;
   }
@@ -153,6 +192,8 @@ class MemoryAccessContext {
   // RAM, write-combined and cache-inhibited pages are encoded in the hot page
   // entry. Slow/MMIO pages delegate to the owning MemoryPort.
   [[nodiscard]] MemoryOrderingDomain ordering_domain(
+      GuestAddress address) const noexcept;
+  [[nodiscard]] ExecutablePageStamp executable_page_stamp(
       GuestAddress address) const noexcept;
 
   struct PhysicalResolution {
@@ -177,6 +218,7 @@ class MemoryAccessContext {
   struct Resolved {
     std::byte* ptr{};
     std::uint32_t physical_address{};
+    MemoryOrderingDomain ordering_domain{MemoryOrderingDomain::Normal};
   };
 
   [[nodiscard]] bool resolve_fast(GuestAddress address, std::size_t width,
@@ -185,7 +227,8 @@ class MemoryAccessContext {
   [[nodiscard]] bool begin_write(std::uint32_t physical_address,
                                  std::uint32_t width) const noexcept;
   void complete_write(std::uint32_t physical_address, std::uint32_t width,
-                      bool reservation_participant) const noexcept;
+                      bool reservation_participant,
+                      MemoryOrderingDomain ordering_domain) const noexcept;
 
   template <typename T>
   [[nodiscard]] T read_integer(GuestAddress address, bool little_endian);
@@ -226,6 +269,13 @@ class MemoryPort {
   virtual std::uint8_t read8(GuestAddress address) = 0;
   virtual std::uint16_t read16_be(GuestAddress address) = 0;
   virtual std::uint32_t read32_be(GuestAddress address) = 0;
+  // Instruction fetch stays distinct from an ordinary data read so the
+  // production memory model can enforce Execute protection for dynamic/native
+  // translation without adding an interpreter. Test/reference memories may
+  // use ordinary big-endian reads.
+  virtual std::uint32_t fetch32_be(GuestAddress address) {
+    return read32_be(address);
+  }
   virtual std::uint64_t read64_be(GuestAddress address) = 0;
   virtual Vector128 read128(GuestAddress address) = 0;
 
@@ -285,6 +335,15 @@ class MemoryPort {
       GuestAddress address) const noexcept {
     (void)address;
     return MemoryOrderingDomain::Normal;
+  }
+
+  // Cold executable-translation validation hook. Normal loads/stores never
+  // call this. Production AddressSpace returns physical identity + generation;
+  // fixtures without executable-memory semantics may retain the zero default.
+  [[nodiscard]] virtual ExecutablePageStamp executable_page_stamp(
+      GuestAddress address) const noexcept {
+    (void)address;
+    return {};
   }
 
   virtual void barrier(BarrierKind kind) = 0;
@@ -458,7 +517,13 @@ inline bool MemoryAccessContext::resolve_fast(GuestAddress address,
       (reinterpret_cast<std::uintptr_t>(ptr) & (alignment - 1u)) != 0) {
     return false;
   }
-  out = {ptr, physical};
+  const auto ordering_domain =
+      (entry & fast_memory::kNoCache)
+          ? MemoryOrderingDomain::CacheInhibited
+          : (entry & fast_memory::kWriteCombine)
+                ? MemoryOrderingDomain::WriteCombined
+                : MemoryOrderingDomain::Normal;
+  out = {ptr, physical, ordering_domain};
   return true;
 }
 
@@ -481,7 +546,50 @@ inline MemoryOrderingDomain MemoryAccessContext::ordering_domain(
   return MemoryOrderingDomain::Normal;
 }
 
+inline ExecutablePageStamp MemoryAccessContext::executable_page_stamp(
+    GuestAddress address) const noexcept {
+  if (has_fast_path() && fast_.executable_page_generations &&
+      fast_.physical_page_count) {
+    const auto page = static_cast<std::uint32_t>(address >> fast_.page_shift);
+    if (page < fast_.page_count) {
+      const auto entry = fast_.page_table[page].load(std::memory_order_acquire);
+      if ((entry & (fast_memory::kMapped | fast_memory::kExecute)) ==
+          (fast_memory::kMapped | fast_memory::kExecute)) {
+        const auto physical_page = static_cast<std::uint32_t>(
+            entry & fast_memory::kPhysicalPageMask);
+        if (physical_page < fast_.physical_page_count) {
+          const auto generation = fast_.executable_page_generations[physical_page]
+                                      .load(std::memory_order_acquire);
+          if (generation) return {physical_page, generation};
+        }
+      }
+      return {};
+    }
+  }
+  return slow_ ? slow_->executable_page_stamp(address) : ExecutablePageStamp{};
+}
+
+
 namespace reservation_monitor_detail {
+
+inline constexpr std::uint64_t kReservationTokenSlotMask = 0x7ull;
+
+[[nodiscard]] constexpr std::uint64_t make_token(
+    std::uint32_t slot_index, std::uint32_t generation) noexcept {
+  return (std::uint64_t{generation} << 3u) |
+         std::uint64_t{slot_index + 1u};
+}
+
+[[nodiscard]] constexpr bool decode_token(
+    std::uint64_t token, std::uint32_t& slot_index,
+    std::uint32_t& generation) noexcept {
+  const auto encoded_slot =
+      static_cast<std::uint32_t>(token & kReservationTokenSlotMask);
+  if (encoded_slot == 0u || encoded_slot > 6u) return false;
+  slot_index = encoded_slot - 1u;
+  generation = static_cast<std::uint32_t>(token >> 3u);
+  return generation != 0u;
+}
 
 inline constexpr std::uint64_t kPhysicalAddressMask = (1ull << 29u) - 1u;
 inline constexpr unsigned kStatusShift = 29u;
@@ -588,6 +696,108 @@ inline void invalidate_range(const FastMemoryView& fast,
   }
 }
 
+[[nodiscard]] inline bool reservation_fast_ready(
+    const FastMemoryView& fast) noexcept {
+  return fast.reservation_slots && fast.reservation_seen_bitmap &&
+         fast.reservation_slot_count && fast.reservation_seen_word_count &&
+         fast.reservation_granule_size && fast.reservation_granule_count &&
+         fast.reservation_commit_gate && fast.active_reservation_ops &&
+         fast.reservation_next_generation && fast.global_write_epoch &&
+         fast.active_coherency_writers;
+}
+
+inline void begin_reservation_operation(const FastMemoryView& fast) noexcept {
+  for (;;) {
+    while (fast.reservation_commit_gate->load(std::memory_order_acquire) != 0u)
+      std::this_thread::yield();
+    fast.active_reservation_ops->fetch_add(1u, std::memory_order_acq_rel);
+    if (fast.reservation_commit_gate->load(std::memory_order_acquire) == 0u) return;
+    fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
+  }
+}
+
+inline void end_reservation_operation(const FastMemoryView& fast) noexcept {
+  fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
+}
+
+[[nodiscard]] inline std::uint64_t claim_reservation(
+    const FastMemoryView& fast, std::uint32_t physical_address,
+    std::uint32_t width) noexcept {
+  if (!reservation_fast_ready(fast) || physical_address >= fast.physical_size ||
+      (width != 4u && width != 8u)) return 0u;
+
+  const auto granule = physical_address / fast.reservation_granule_size;
+  if (granule >= fast.reservation_granule_count) return 0u;
+  const auto word = granule >> 6u;
+  if (word >= fast.reservation_seen_word_count) return 0u;
+  const auto bit = std::uint64_t{1} << (granule & 63u);
+  fast.reservation_seen_bitmap[word].fetch_or(bit, std::memory_order_release);
+
+  auto generation = fast.reservation_next_generation->fetch_add(
+      1u, std::memory_order_acq_rel);
+  if (generation == 0u) {
+    generation = fast.reservation_next_generation->fetch_add(
+        1u, std::memory_order_acq_rel);
+    if (generation == 0u) generation = 1u;
+  }
+
+  const auto descriptor = encode_slot(
+      physical_address, width, generation, SlotStatus::Active);
+  for (std::uint32_t slot_index = 0; slot_index < fast.reservation_slot_count;
+       ++slot_index) {
+    auto expected = std::uint64_t{0};
+    if (fast.reservation_slots[slot_index].compare_exchange_strong(
+            expected, descriptor, std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return make_token(slot_index, generation);
+    }
+  }
+  return 0u;
+}
+
+inline void cancel_reservation(const FastMemoryView& fast,
+                               std::uint64_t token) noexcept {
+  std::uint32_t slot_index = 0u;
+  std::uint32_t generation = 0u;
+  if (!reservation_fast_ready(fast) ||
+      !decode_token(token, slot_index, generation) ||
+      slot_index >= fast.reservation_slot_count) return;
+  auto& slot = fast.reservation_slots[slot_index];
+  auto descriptor = slot.load(std::memory_order_acquire);
+  for (;;) {
+    if (descriptor == 0u || slot_generation(descriptor) != generation ||
+        slot_status(descriptor) != SlotStatus::Active) return;
+    if (slot.compare_exchange_weak(descriptor, 0u, std::memory_order_acq_rel,
+                                   std::memory_order_acquire)) return;
+  }
+}
+
+[[nodiscard]] inline bool claim_store_conditional(
+    const FastMemoryView& fast, std::uint32_t physical_address,
+    std::uint32_t width, std::uint64_t token, std::uint32_t& slot_index,
+    std::uint64_t& committing_descriptor) noexcept {
+  std::uint32_t generation = 0u;
+  if (!reservation_fast_ready(fast) ||
+      !decode_token(token, slot_index, generation) ||
+      slot_index >= fast.reservation_slot_count) return false;
+
+  auto& slot = fast.reservation_slots[slot_index];
+  auto descriptor = slot.load(std::memory_order_acquire);
+  if (descriptor == 0u || slot_status(descriptor) != SlotStatus::Active ||
+      slot_generation(descriptor) != generation ||
+      slot_physical_address(descriptor) != physical_address ||
+      slot_width(descriptor) != width) {
+    cancel_reservation(fast, token);
+    return false;
+  }
+
+  committing_descriptor = encode_slot(
+      physical_address, width, generation, SlotStatus::Committing);
+  return slot.compare_exchange_strong(descriptor, committing_descriptor,
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire);
+}
+
 [[nodiscard]] inline bool enter_write(const FastMemoryView& fast,
                                       std::uint32_t physical_address,
                                       std::uint32_t width) noexcept {
@@ -596,7 +806,22 @@ inline void invalidate_range(const FastMemoryView& fast,
   // commit gate. The boolean return is carried to finish_write so a sticky-bit
   // transition while the store is in flight cannot unbalance the counter.
   if (fast.active_coherency_writers) {
-    fast.active_coherency_writers->fetch_add(1u, std::memory_order_acq_rel);
+    for (;;) {
+      if (fast.coherency_commit_gate) {
+        while (fast.coherency_commit_gate->load(std::memory_order_acquire) !=
+               0u) {
+          std::this_thread::yield();
+        }
+      }
+      fast.active_coherency_writers->fetch_add(1u,
+                                                std::memory_order_acq_rel);
+      if (!fast.coherency_commit_gate ||
+          fast.coherency_commit_gate->load(std::memory_order_acquire) == 0u) {
+        break;
+      }
+      fast.active_coherency_writers->fetch_sub(1u,
+                                                std::memory_order_release);
+    }
   }
 
   const bool reservation_participant =
@@ -623,10 +848,9 @@ inline void invalidate_range(const FastMemoryView& fast,
   return reservation_participant;
 }
 
-inline std::uint64_t finish_write(const FastMemoryView& fast,
-                                  std::uint32_t physical_address,
-                                  std::uint32_t width,
-                                  bool reservation_participant) noexcept {
+inline std::uint64_t publish_write_metadata(
+    const FastMemoryView& fast, std::uint32_t physical_address,
+    std::uint32_t width, MemoryOrderingDomain ordering_domain) noexcept {
   std::uint64_t published_epoch = 0u;
   if (fast.global_write_epoch && fast.physical_page_epochs &&
       fast.physical_page_count) {
@@ -647,11 +871,14 @@ inline std::uint64_t finish_write(const FastMemoryView& fast,
       fast.physical_page_epochs[i].store(epoch, std::memory_order_release);
     }
     if (fast.coherency_journal_epochs && fast.coherency_journal_ranges &&
-        fast.coherency_journal_capacity) {
+        fast.coherency_journal_domains && fast.coherency_journal_capacity) {
       const auto index = static_cast<std::uint32_t>(epoch) &
                          (fast.coherency_journal_capacity - 1u);
       fast.coherency_journal_ranges[index].store(
           (std::uint64_t{physical_address} << 32u) | width,
+          std::memory_order_relaxed);
+      fast.coherency_journal_domains[index].store(
+          static_cast<std::uint8_t>(ordering_domain),
           std::memory_order_relaxed);
       fast.coherency_journal_epochs[index].store(epoch,
                                                  std::memory_order_release);
@@ -674,6 +901,15 @@ inline std::uint64_t finish_write(const FastMemoryView& fast,
                  std::memory_order_release, std::memory_order_relaxed)) {}
     }
   }
+  return published_epoch;
+}
+
+inline std::uint64_t finish_write(
+    const FastMemoryView& fast, std::uint32_t physical_address,
+    std::uint32_t width, bool reservation_participant,
+    MemoryOrderingDomain ordering_domain) noexcept {
+  const auto published_epoch = publish_write_metadata(
+      fast, physical_address, width, ordering_domain);
   if (reservation_participant && fast.active_reservation_ops) {
     fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
   }
@@ -693,10 +929,11 @@ inline bool MemoryAccessContext::begin_write(
 
 inline void MemoryAccessContext::complete_write(
     std::uint32_t physical_address, std::uint32_t width,
-    bool reservation_participant) const noexcept {
+    bool reservation_participant,
+    MemoryOrderingDomain ordering_domain) const noexcept {
   if (!width || physical_address >= fast_.physical_size) return;
   reservation_monitor_detail::finish_write(
-      fast_, physical_address, width, reservation_participant);
+      fast_, physical_address, width, reservation_participant, ordering_domain);
 }
 
 template <typename T>
@@ -771,7 +1008,7 @@ inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
       begin_write(resolved.physical_address, sizeof(T));
   detail::atomic_store_relaxed<T>(resolved.ptr, byteswap_if(value, swap));
   complete_write(resolved.physical_address, sizeof(T),
-                 reservation_participant);
+                 reservation_participant, resolved.ordering_domain);
 }
 
 inline std::uint8_t MemoryAccessContext::read8(GuestAddress address) {
@@ -810,7 +1047,8 @@ inline void MemoryAccessContext::write8(GuestAddress address,
   }
   const bool reservation_participant = begin_write(resolved.physical_address, 1);
   detail::atomic_store_relaxed<std::uint8_t>(resolved.ptr, value);
-  complete_write(resolved.physical_address, 1, reservation_participant);
+  complete_write(resolved.physical_address, 1, reservation_participant,
+                 resolved.ordering_domain);
 }
 inline void MemoryAccessContext::write16_be(GuestAddress address,
                                             std::uint16_t value) {
@@ -837,7 +1075,8 @@ inline void MemoryAccessContext::write128(GuestAddress address,
   const bool reservation_participant = begin_write(resolved.physical_address, 16);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr, lo);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr + 8u, hi);
-  complete_write(resolved.physical_address, 16, reservation_participant);
+  complete_write(resolved.physical_address, 16, reservation_participant,
+                 resolved.ordering_domain);
 }
 
 inline std::uint16_t MemoryAccessContext::read16_le(GuestAddress address) {
@@ -899,7 +1138,7 @@ inline void MemoryAccessContext::write_bytes(
           begin_write(resolved.physical_address, static_cast<std::uint32_t>(chunk));
       detail::atomic_copy_to_guest(resolved.ptr, remaining.first(chunk));
       complete_write(resolved.physical_address, static_cast<std::uint32_t>(chunk),
-                     reservation_participant);
+                     reservation_participant, resolved.ordering_domain);
     } else {
       slow_->write_bytes(cursor, remaining.first(chunk));
     }
@@ -924,7 +1163,8 @@ inline void MemoryAccessContext::fill_bytes(GuestAddress address,
       const bool reservation_participant =
           begin_write(resolved.physical_address, chunk);
       detail::atomic_fill_guest(resolved.ptr, chunk, value);
-      complete_write(resolved.physical_address, chunk, reservation_participant);
+      complete_write(resolved.physical_address, chunk, reservation_participant,
+                     resolved.ordering_domain);
     } else {
       slow_->fill_bytes(cursor, chunk, value);
     }
@@ -933,10 +1173,160 @@ inline void MemoryAccessContext::fill_bytes(GuestAddress address,
   }
 }
 
+inline void MemoryAccessContext::instruction_cache_invalidate(
+    GuestAddress address) {
+  slow_->instruction_cache_invalidate(address);
+}
+
 inline void MemoryAccessContext::zero_cache_block(GuestAddress address,
                                                    std::uint32_t bytes) {
   if (!bytes || !std::has_single_bit(bytes)) return;
   fill_bytes(address & ~(bytes - 1u), bytes, 0u);
+}
+
+inline std::uint64_t MemoryAccessContext::reserve32(
+    GuestAddress address, std::uint32_t& value) {
+  Resolved resolved{};
+  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+      !resolve_fast(address, sizeof(value), false, alignof(std::uint32_t), resolved)) {
+    return slow_->reserve32(address, value);
+  }
+
+  reservation_monitor_detail::begin_reservation_operation(fast_);
+  const auto epoch_before =
+      fast_.global_write_epoch->load(std::memory_order_acquire);
+  auto token = reservation_monitor_detail::claim_reservation(
+      fast_, resolved.physical_address, sizeof(value));
+  const auto raw = detail::atomic_load_relaxed<std::uint32_t>(resolved.ptr);
+  value = byteswap_if(raw, std::endian::native == std::endian::little);
+  const auto epoch_after =
+      fast_.global_write_epoch->load(std::memory_order_acquire);
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_acquire);
+  if (token && (epoch_before != epoch_after || writers != 0u)) {
+    reservation_monitor_detail::cancel_reservation(fast_, token);
+    token = 0u;
+  }
+  reservation_monitor_detail::end_reservation_operation(fast_);
+  return token;
+}
+
+inline std::uint64_t MemoryAccessContext::reserve64(
+    GuestAddress address, std::uint64_t& value) {
+  Resolved resolved{};
+  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+      !resolve_fast(address, sizeof(value), false, alignof(std::uint64_t), resolved)) {
+    return slow_->reserve64(address, value);
+  }
+
+  reservation_monitor_detail::begin_reservation_operation(fast_);
+  const auto epoch_before =
+      fast_.global_write_epoch->load(std::memory_order_acquire);
+  auto token = reservation_monitor_detail::claim_reservation(
+      fast_, resolved.physical_address, sizeof(value));
+  const auto raw = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr);
+  value = byteswap_if(raw, std::endian::native == std::endian::little);
+  const auto epoch_after =
+      fast_.global_write_epoch->load(std::memory_order_acquire);
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_acquire);
+  if (token && (epoch_before != epoch_after || writers != 0u)) {
+    reservation_monitor_detail::cancel_reservation(fast_, token);
+    token = 0u;
+  }
+  reservation_monitor_detail::end_reservation_operation(fast_);
+  return token;
+}
+
+inline void MemoryAccessContext::cancel_reservation(std::uint64_t token) noexcept {
+  if (!token) return;
+  if (reservation_monitor_detail::reservation_fast_ready(fast_)) {
+    reservation_monitor_detail::cancel_reservation(fast_, token);
+    return;
+  }
+  slow_->cancel_reservation(token);
+}
+
+inline bool MemoryAccessContext::store_conditional32(
+    GuestAddress address, std::uint64_t token, std::uint32_t value) {
+  Resolved resolved{};
+  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+      !resolve_fast(address, sizeof(value), true, alignof(std::uint32_t), resolved)) {
+    return slow_->store_conditional32(address, token, value);
+  }
+  if (!token) return false;
+
+  std::uint32_t expected_gate = 0u;
+  while (!fast_.reservation_commit_gate->compare_exchange_weak(
+      expected_gate, 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    expected_gate = 0u;
+    std::this_thread::yield();
+  }
+  while (fast_.active_coherency_writers->load(std::memory_order_acquire) != 0u ||
+         fast_.active_reservation_ops->load(std::memory_order_acquire) != 0u) {
+    std::this_thread::yield();
+  }
+
+  std::uint32_t slot_index = 0u;
+  std::uint64_t committing = 0u;
+  if (!reservation_monitor_detail::claim_store_conditional(
+          fast_, resolved.physical_address, sizeof(value), token,
+          slot_index, committing)) {
+    fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+    return false;
+  }
+
+  reservation_monitor_detail::invalidate_range(
+      fast_, resolved.physical_address, sizeof(value));
+  detail::atomic_store_relaxed<std::uint32_t>(
+      resolved.ptr,
+      byteswap_if(value, std::endian::native == std::endian::little));
+  reservation_monitor_detail::publish_write_metadata(
+      fast_, resolved.physical_address, sizeof(value), resolved.ordering_domain);
+  fast_.reservation_slots[slot_index].store(0u, std::memory_order_release);
+  fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+  return true;
+}
+
+inline bool MemoryAccessContext::store_conditional64(
+    GuestAddress address, std::uint64_t token, std::uint64_t value) {
+  Resolved resolved{};
+  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+      !resolve_fast(address, sizeof(value), true, alignof(std::uint64_t), resolved)) {
+    return slow_->store_conditional64(address, token, value);
+  }
+  if (!token) return false;
+
+  std::uint32_t expected_gate = 0u;
+  while (!fast_.reservation_commit_gate->compare_exchange_weak(
+      expected_gate, 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
+    expected_gate = 0u;
+    std::this_thread::yield();
+  }
+  while (fast_.active_coherency_writers->load(std::memory_order_acquire) != 0u ||
+         fast_.active_reservation_ops->load(std::memory_order_acquire) != 0u) {
+    std::this_thread::yield();
+  }
+
+  std::uint32_t slot_index = 0u;
+  std::uint64_t committing = 0u;
+  if (!reservation_monitor_detail::claim_store_conditional(
+          fast_, resolved.physical_address, sizeof(value), token,
+          slot_index, committing)) {
+    fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+    return false;
+  }
+
+  reservation_monitor_detail::invalidate_range(
+      fast_, resolved.physical_address, sizeof(value));
+  detail::atomic_store_relaxed<std::uint64_t>(
+      resolved.ptr,
+      byteswap_if(value, std::endian::native == std::endian::little));
+  reservation_monitor_detail::publish_write_metadata(
+      fast_, resolved.physical_address, sizeof(value), resolved.ordering_domain);
+  fast_.reservation_slots[slot_index].store(0u, std::memory_order_release);
+  fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+  return true;
 }
 
 }  // namespace xenon::cpu

@@ -1,11 +1,21 @@
 #pragma once
 
+#include <span>
 #include <string>
 #include <string_view>
 
 #include "xenon/cpu/ir.hpp"
 
 namespace xenon::cpu::backend {
+
+// Explicit static-AOT link supplied by function analysis/module activation.
+// Merely having a constant guest target is not sufficient: callers only add a
+// binding after proving the target is a safe native translation to call
+// directly. Noncanonical returns are still propagated at runtime.
+struct DirectCallBinding {
+  GuestAddress guest_target{};
+  std::string native_symbol{};
+};
 
 // Portable native AOT backend. It emits C++20 containing no guest decoder or
 // PPC runtime dispatch. The host C++ compiler performs final x86-64/ARM64
@@ -19,10 +29,12 @@ class CppAotBackend {
 
   // Whole-function AOT path. Local direct branches are emitted as native host
   // control flow rather than returning to an instruction dispatcher.
-  [[nodiscard]] std::string emit_function(const ir::Function& function,
-                                          std::string_view function_name) const;
-  [[nodiscard]] std::string emit_translation_unit(const ir::Function& function,
-                                                   std::string_view function_name) const;
+  [[nodiscard]] std::string emit_function(
+      const ir::Function& function, std::string_view function_name,
+      std::span<const DirectCallBinding> direct_calls = {}) const;
+  [[nodiscard]] std::string emit_translation_unit(
+      const ir::Function& function, std::string_view function_name,
+      std::span<const DirectCallBinding> direct_calls = {}) const;
 };
 
 }  // namespace xenon::cpu::backend

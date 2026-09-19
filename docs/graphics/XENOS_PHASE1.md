@@ -55,9 +55,18 @@ Render-target storage:
 - Lossless type-3 packet retention for commands not yet lowered further.
 - PM4 `MEM_WRITE`, including Xenos 32-bit endian modes and memory coherency
   notification back into the CPU memory system.
+- PM4 command-processor execution for `REG_RMW`, counted `REG_TO_MEM`,
+  `COND_EXEC`, `COND_WRITE`, `WAIT_REG_MEM`, `WAIT_REG_EQ`, `WAIT_REG_GTE`, and
+  `LOAD_ALU_CONSTANT`.
 - `SET_CONSTANT`, `SET_CONSTANT2`, `SET_SHADER_CONSTANTS` and
   `LOAD_CONSTANT_CONTEXT` register-state effects.
 - Pointer and immediate shader loads.
+- Shader partition tracking through `SET_SHADER_BASES`, vertex/pixel instruction
+  store export through `IM_STORE`, and verified shader invalidation state.
+- Evidence-backed event/fence/extent writeback, 64-ID visibility-query scope
+  tracking and six-thread command-stream interrupt dispatch.
+- Deterministic in-process normalized submission capture/replay with complete
+  register preambles for backend differential testing.
 - Stable shader identity hashing.
 - 96-bit shader grouping.
 - Unpacking of two 48-bit control-flow instructions from each 96-bit group.
@@ -85,10 +94,14 @@ Xenos EDRAM is separate from the 512 MiB unified RAM. It is represented as the
 architectural 10 MiB circular render-backend store. Resolve/copy operations will
 bridge EDRAM to the unified physical backing in later GPU work.
 
-## Deliberately not complete yet
+## Historical checkpoint note
 
-This checkpoint is the GPU frontend/hardware-boundary milestone, not a complete
-renderer. Still required:
+The list below described what was still required when GPU Phase 1 was first
+written. Most renderer items have since moved substantially beyond this
+checkpoint; current validation state is tracked in `VALIDATION.md`, and current
+PM4 execution coverage is tracked in `PM4_EXECUTION.md`.
+
+At the time of this checkpoint, the remaining work was:
 
 - full Xenos ALU instruction decoding and semantics
 - full vertex/texture fetch instruction decoding and semantics

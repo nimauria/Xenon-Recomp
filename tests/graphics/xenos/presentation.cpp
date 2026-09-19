@@ -47,6 +47,12 @@ void test_rgba8_scale_and_letterbox(bool tiled) {
   frame.texture = descriptor;
   const auto prepared = prepare_presentation_frame(frame, memory, 4, 4, true);
   assert(prepared.valid);
+  const auto snapshot = std::span<const std::byte>(memory).subspan(
+      base, static_cast<std::size_t>(layout.base_extent_bytes));
+  const auto prepared_snapshot =
+      prepare_presentation_frame(frame, snapshot, 4, 4, true, base);
+  assert(prepared_snapshot.valid);
+  assert(prepared_snapshot.rgba8 == prepared.rgba8);
   assert(prepared.width == 4 && prepared.height == 4);
   assert(prepared.row_pitch == 16);
   // 2:1 source inside a square target -> one black row above and below.

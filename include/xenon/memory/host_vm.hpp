@@ -47,9 +47,11 @@ class SharedMemory {
 // about guest addresses, aliases, XEX mappings or Xenon memory types.
 //
 // Address/range operations use host-page granularity. Callers should pass
-// page-aligned addresses and page-sized ranges. Shared mapping offsets must be
-// aligned to allocation_granularity(), which is 64 KiB on Windows and normally
-// the system page size on POSIX hosts.
+// page-aligned addresses and page-sized ranges. Ordinary shared mapping
+// offsets must be aligned to allocation_granularity(), which is 64 KiB on
+// Windows and normally the system page size on POSIX hosts. Fixed placeholder
+// replacement may advertise finer page-sized offsets through
+// supports_fixed_shared_mapping().
 [[nodiscard]] std::size_t page_size() noexcept;
 [[nodiscard]] std::size_t allocation_granularity() noexcept;
 [[nodiscard]] void* reserve(std::size_t size) noexcept;
@@ -76,11 +78,22 @@ void release(void* address, std::size_t size) noexcept;
 // aperture. A backend returning false from supports_fixed_shared_mapping()
 // must leave the portable compact page-table path fully functional.
 [[nodiscard]] bool supports_fixed_shared_mapping() noexcept;
+// Reserve/release the enclosing address range used by a direct guest aperture.
+// Windows uses placeholder reservations so 4 KiB section offsets can replace
+// slices despite the ordinary 64 KiB MapViewOfFile allocation granularity.
+[[nodiscard]] void* reserve_fixed_shared_mapping_region(
+    std::size_t size) noexcept;
+void release_fixed_shared_mapping_region(void* address,
+                                         std::size_t size) noexcept;
+// Windows placeholder replacement is kept page-view-sized so later guest
+// remaps can replace individual 4 KiB translations without tearing down a
+// neighboring view. POSIX MAP_FIXED can replace arbitrary subranges directly.
+[[nodiscard]] bool fixed_shared_mapping_requires_page_views() noexcept;
 [[nodiscard]] bool map_shared_fixed(
     const SharedMemory& shared, void* address, std::size_t offset,
     std::size_t size,
     Protection protection = Protection::ReadWrite) noexcept;
-// Replaces a fixed shared view with an inaccessible anonymous reservation,
+// Replaces fixed shared views with inaccessible reserved address-space slices,
 // keeping the enclosing aperture address range owned by Xenon.
 [[nodiscard]] bool restore_reservation(void* address, std::size_t size) noexcept;
 

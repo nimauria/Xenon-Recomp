@@ -10,13 +10,14 @@
 namespace xenon::launcher::frontend_backend {
 class LibraryFeature;
 class SettingsFeature;
+class ModulesFeature;
 
 class DlcFeature final : public QObject {
   Q_OBJECT
 
  public:
-  DlcFeature(DlcService& dlc, LibraryFeature& library, SettingsFeature& settings,
-             bool test_mode, QObject* parent = nullptr);
+  DlcFeature(DlcService& dlc, LibraryFeature& library, ModulesFeature& modules,
+             SettingsFeature& settings, bool test_mode, QObject* parent = nullptr);
 
   [[nodiscard]] QVariantList entries(const QString& game_id) const;
   [[nodiscard]] QVariantMap entry(const QString& game_id, const QString& dlc_id) const;
@@ -33,12 +34,15 @@ class DlcFeature final : public QObject {
 
  private:
   [[nodiscard]] QVariantList fixtureEntries(const QString& game_id) const;
+  [[nodiscard]] QVariantList catalogEntries(const QString& game_id) const;
+  [[nodiscard]] QVariantList applyMissingContentPolicy(QVariantList values) const;
   [[nodiscard]] QVariantMap fixtureEntry(QString game_id, QString dlc_id, QString name,
                                          bool installed, QString description = {}) const;
   [[nodiscard]] QString fixtureMode() const;
 
   DlcService& dlc_;
   LibraryFeature& library_;
+  ModulesFeature& modules_;
   SettingsFeature& settings_;
   bool test_mode_ = false;
   QSet<QString> removed_fixture_entries_;

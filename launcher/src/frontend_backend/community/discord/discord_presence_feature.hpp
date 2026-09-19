@@ -18,7 +18,8 @@ class DiscordPresenceFeature final : public QObject {
 
  public:
   DiscordPresenceFeature(SettingsFeature& settings, SessionController& session,
-                         QString application_id, QObject* parent = nullptr);
+                         QString application_id, bool suppressed = false,
+                         QObject* parent = nullptr);
   ~DiscordPresenceFeature() override;
 
   [[nodiscard]] QVariantMap state() const;
@@ -43,6 +44,7 @@ class DiscordPresenceFeature final : public QObject {
   SessionController& session_;
   std::unique_ptr<IDiscordPresenceProvider> provider_;
   QString application_id_;
+  bool suppressed_ = false;
   QString page_ = QStringLiteral("Library");
   QVariantMap desired_activity_;
   QString last_publish_error_;

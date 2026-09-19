@@ -15,12 +15,15 @@ QVariantMap button(const QString& label, const QString& url) {
 }
 
 DiscordPresenceFeature::DiscordPresenceFeature(SettingsFeature& settings, SessionController& session,
-                                               QString application_id, QObject* parent)
+                                               QString application_id, bool suppressed, QObject* parent)
     : QObject(parent),
       settings_(settings),
       session_(session),
-      provider_(createDiscordPresenceProvider(application_id)),
-      application_id_(std::move(application_id)) {
+      provider_(suppressed
+                    ? std::make_unique<UnavailableDiscordPresenceProvider>(application_id)
+                    : createDiscordPresenceProvider(application_id)),
+      application_id_(std::move(application_id)),
+      suppressed_(suppressed) {
   // A dormant/unavailable provider must never leave behind a latent opt-in.
   // This keeps future SDK-enabled builds privacy-safe: Rich Presence still
   // requires an explicit user opt-in after the provider actually exists.
@@ -48,7 +51,7 @@ DiscordPresenceFeature::DiscordPresenceFeature(SettingsFeature& settings, Sessio
       emit changed();
     }
   });
-  if (provider_->available()) callback_timer_.start();
+  if (provider_->available() && !suppressed_) callback_timer_.start();
   rebuild();
 }
 
@@ -63,7 +66,7 @@ bool DiscordPresenceFeature::requestedEnabled() const {
 }
 
 bool DiscordPresenceFeature::enabled() const {
-  return provider_->available() && requestedEnabled();
+  return !suppressed_ && provider_->available() && requestedEnabled();
 }
 
 bool DiscordPresenceFeature::showGameTitle() const {
@@ -80,6 +83,7 @@ void DiscordPresenceFeature::setPage(const QString& page_name) {
 QVariantMap DiscordPresenceFeature::state() const {
   return {{QStringLiteral("enabled"), enabled()},
           {QStringLiteral("requestedEnabled"), requestedEnabled()},
+          {QStringLiteral("suppressed"), suppressed_},
           {QStringLiteral("providerId"), provider_->id()},
           {QStringLiteral("providerAvailable"), provider_->available()},
           {QStringLiteral("providerStatus"), provider_->status()},
@@ -148,6 +152,7 @@ void DiscordPresenceFeature::rebuild() {
 }
 
 QString DiscordPresenceFeature::pageDetails() const {
+  if (page_ == QStringLiteral("Home")) return QStringLiteral("Viewing Xenon activity");
   if (page_ == QStringLiteral("Modules")) return QStringLiteral("Managing Xenon modules");
   if (page_ == QStringLiteral("Profiles")) return QStringLiteral("Managing launcher profiles");
   if (page_ == QStringLiteral("Settings")) return QStringLiteral("Customising Xenon");

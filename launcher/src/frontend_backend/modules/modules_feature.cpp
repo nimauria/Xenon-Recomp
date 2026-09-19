@@ -1,9 +1,11 @@
 #include "modules_feature.hpp"
 
 #include "../settings/settings_feature.hpp"
+#include "../../services/path_service.hpp"
 
 #include <QFileInfo>
 #include <QStringList>
+#include <QTimer>
 #include <utility>
 
 namespace xenon::launcher::frontend_backend {
@@ -47,14 +49,16 @@ QVariantMap setting(QString id, QString label, QString description, QString type
 }  // namespace
 
 ModulesFeature::ModulesFeature(ModuleService& modules, LibraryService& library,
-                               PackageService& packages, SettingsFeature& settings,
-                               bool test_mode, QObject* parent)
+                               PackageService& packages, PathService& paths, SettingsFeature& settings,
+                               bool test_mode, bool suppress_startup_external_work, QObject* parent)
     : QObject(parent),
       modules_(modules),
       library_(library),
       settings_(settings),
       test_mode_(test_mode),
+      suppress_startup_external_work_(suppress_startup_external_work),
       catalog_(nullptr),
+      asset_cache_(paths, nullptr),
       importer_(modules, nullptr),
       updater_(packages, modules, nullptr) {
   connect(&modules_, &ModuleService::changed, this, [this]() {
@@ -71,22 +75,41 @@ ModulesFeature::ModulesFeature(ModuleService& modules, LibraryService& library,
               emit catalogChanged();
             }
           });
-  connect(&catalog_, &GitHubModuleCatalogProvider::changed, this,
-          &ModulesFeature::catalogChanged);
-  connect(&catalog_, &GitHubModuleCatalogProvider::refreshed, this, [this]() {
+  connect(&catalog_, &GitHubModuleCatalogProvider::changed, this, [this]() {
     emit catalogChanged();
+  });
+  connect(&catalog_, &GitHubModuleCatalogProvider::refreshed, this, [this]() {
+    syncCatalogAssets();
+    emit catalogChanged();
+    emit changed();
     if (settings_.boolValue(QStringLiteral("updates/modules"), true)) {
       (void)checkAllUpdates();
     }
   });
+  connect(&asset_cache_, &ModuleCatalogAssetCache::changed, this,
+          [this](const QString&) {
+            emit catalogChanged();
+            emit changed();
+          });
   connect(&updater_, &ModuleUpdateService::changed, this,
           [this](const QString& module_id) {
             emit updateStateChanged(module_id);
             emit changed();
             emit catalogChanged();
+            if (install_requests_.contains(module_id)) {
+              QTimer::singleShot(0, this, [this, module_id]() {
+                continueInstallRequest(module_id);
+              });
+            }
+          });
+  connect(&updater_, &ModuleUpdateService::historyChanged, this,
+          [this](const QString& module_id) {
+            emit updateHistoryChanged(module_id);
+            emit changed();
           });
   connect(&updater_, &ModuleUpdateService::moduleInstalled, this,
-          [this](const QString&) {
+          [this](const QString& module_id) {
+            install_requests_.remove(module_id);
             (void)modules_.refresh();
             emit changed();
             emit catalogChanged();
@@ -95,7 +118,10 @@ ModulesFeature::ModulesFeature(ModuleService& modules, LibraryService& library,
           &ModulesFeature::notificationRequested);
 
   if (test_mode_) rebuildFixtures();
-  catalog_.refresh();
+  if (!suppress_startup_external_work_) {
+    syncCatalogAssets();
+    catalog_.refresh();
+  }
 }
 
 QString ModulesFeature::fixtureMode() const {
@@ -165,6 +191,43 @@ QVariantMap ModulesFeature::catalogEntry(const QString& module_id) const {
   return {};
 }
 
+QVariantMap ModulesFeature::catalogEntryData(const QString& module_id) const {
+  auto item = catalogEntry(module_id);
+  if (item.isEmpty()) return item;
+  auto launcher = item.value(QStringLiteral("launcher")).toMap();
+  const auto tile = asset_cache_.localAssetUrl(module_id, QStringLiteral("tileArt"));
+  const auto hero = asset_cache_.localAssetUrl(module_id, QStringLiteral("heroArt"));
+  if (!tile.isEmpty()) launcher.insert(QStringLiteral("tileArtLocalUrl"), tile);
+  if (!hero.isEmpty()) launcher.insert(QStringLiteral("heroArtLocalUrl"), hero);
+  launcher.insert(QStringLiteral("assetCacheState"), asset_cache_.state(module_id));
+  item.insert(QStringLiteral("launcher"), launcher);
+  return item;
+}
+
+QVariantMap ModulesFeature::launcherMetadata(const QString& module_id) const {
+  return catalogEntryData(module_id).value(QStringLiteral("launcher")).toMap();
+}
+
+QVariantList ModulesFeature::catalogDlc(const QString& module_id) const {
+  return catalogEntryData(module_id).value(QStringLiteral("dlc")).toList();
+}
+
+ServiceResult ModulesFeature::refreshPresentationMetadata(const QString& module_id) {
+  if (catalogEntry(module_id).isEmpty()) {
+    return ServiceResult::failure(
+        QStringLiteral("Game metadata refresh"),
+        QStringLiteral("This game module is not present in the official Xenon Modules registry."));
+  }
+  catalog_.refresh();
+  return ServiceResult::success(
+      QStringLiteral("Game metadata refresh started"),
+      QStringLiteral("Xenon is refreshing the official module registry and presentation assets from GitHub."));
+}
+
+void ModulesFeature::syncCatalogAssets() {
+  asset_cache_.sync(catalog_.entries());
+}
+
 QVariantMap ModulesFeature::fixtureUpdateState(const QString& module_id) const {
   auto value = fixture_update_states_.value(module_id);
   if (value.isEmpty()) {
@@ -187,6 +250,7 @@ QVariantMap ModulesFeature::decorated(QVariantMap item) const {
     item.insert(QStringLiteral("catalogKnown"), true);
     item.insert(QStringLiteral("repository"), catalog_item.value(QStringLiteral("repository")));
     item.insert(QStringLiteral("repositoryUrl"), catalog_item.value(QStringLiteral("repositoryUrl")));
+    item.insert(QStringLiteral("registryEntryUrl"), catalog_item.value(QStringLiteral("registryEntryUrl")));
     item.insert(QStringLiteral("publisher"), catalog_item.value(QStringLiteral("publisher")));
     item.insert(QStringLiteral("license"), catalog_item.value(QStringLiteral("license")));
     item.insert(QStringLiteral("catalogVerified"), catalog_item.value(QStringLiteral("verified")));
@@ -218,7 +282,10 @@ QVariantMap ModulesFeature::decorated(QVariantMap item) const {
                                                      ? linked_titles.first()
                                                      : QStringLiteral("%1 library games").arg(linked_titles.size()));
   item.insert(QStringLiteral("settingsCount"), settingsSchema(module_id).size());
-  item.insert(QStringLiteral("dlcDefinitionCount"), test_mode_ ? 0 : modules_.dlcCatalog(module_id).size());
+  const auto local_dlc_count = test_mode_ ? 0 : modules_.dlcCatalog(module_id).size();
+  const auto registry_dlc_count = catalogDlc(module_id).size();
+  item.insert(QStringLiteral("dlcDefinitionCount"),
+              qMax(local_dlc_count, registry_dlc_count));
 
   const auto update = updateState(module_id);
   item.insert(QStringLiteral("updateStatus"), update.value(QStringLiteral("status")));
@@ -229,6 +296,10 @@ QVariantMap ModulesFeature::decorated(QVariantMap item) const {
   item.insert(QStringLiteral("canDownloadUpdate"), update.value(QStringLiteral("canDownload")));
   item.insert(QStringLiteral("canInstallUpdate"), update.value(QStringLiteral("canInstall")));
   item.insert(QStringLiteral("downloadProgress"), update.value(QStringLiteral("downloadProgress"), 0.0));
+  item.insert(QStringLiteral("downloadedBytes"), update.value(QStringLiteral("downloadedBytes"), 0));
+  item.insert(QStringLiteral("downloadTotalBytes"), update.value(QStringLiteral("downloadTotalBytes"), 0));
+  item.insert(QStringLiteral("stagedAt"), update.value(QStringLiteral("stagedAt")));
+  item.insert(QStringLiteral("verifiedDigest"), update.value(QStringLiteral("verifiedDigest")));
   item.insert(QStringLiteral("releaseUrl"), update.value(QStringLiteral("releaseUrl")));
   item.insert(QStringLiteral("releaseName"), update.value(QStringLiteral("releaseName")));
   item.insert(QStringLiteral("releaseNotes"), update.value(QStringLiteral("releaseNotes")));
@@ -236,6 +307,9 @@ QVariantMap ModulesFeature::decorated(QVariantMap item) const {
   item.insert(QStringLiteral("assetName"), update.value(QStringLiteral("assetName"),
                                                         catalog_item.value(QStringLiteral("assetName"))));
   item.insert(QStringLiteral("assetSize"), update.value(QStringLiteral("assetSize"), 0));
+  item.insert(QStringLiteral("rollbackAvailable"), update.value(QStringLiteral("rollbackAvailable"), false));
+  item.insert(QStringLiteral("rollbackVersion"), update.value(QStringLiteral("rollbackVersion")));
+  item.insert(QStringLiteral("rollbackCreatedAt"), update.value(QStringLiteral("rollbackCreatedAt")));
 
   if (!item.value(QStringLiteral("active")).toBool() && !linked_titles.isEmpty()) {
     item.insert(QStringLiteral("impactMessage"),
@@ -444,10 +518,15 @@ QVariantMap ModulesFeature::updateState(const QString& module_id) const {
   return updater_.state(module_id);
 }
 
+QVariantList ModulesFeature::updateHistory(const QString& module_id) const {
+  if (test_mode_) return {};
+  return updater_.history(module_id);
+}
+
 QVariantList ModulesFeature::catalogEntries() const {
   QVariantList result;
   for (const auto& value : catalog_.entries()) {
-    auto item = value.toMap();
+    auto item = catalogEntryData(value.toMap().value(QStringLiteral("moduleId")).toString());
     const auto id = item.value(QStringLiteral("moduleId")).toString();
     const auto installed = !installedVersion(id).isEmpty();
     const auto installed_module = module(id);
@@ -462,11 +541,17 @@ QVariantList ModulesFeature::catalogEntries() const {
     item.insert(QStringLiteral("canDownload"), update.value(QStringLiteral("canDownload")));
     item.insert(QStringLiteral("canInstall"), update.value(QStringLiteral("canInstall")));
     item.insert(QStringLiteral("downloadProgress"), update.value(QStringLiteral("downloadProgress"), 0.0));
+    item.insert(QStringLiteral("downloadedBytes"), update.value(QStringLiteral("downloadedBytes"), 0));
+    item.insert(QStringLiteral("downloadTotalBytes"), update.value(QStringLiteral("downloadTotalBytes"), 0));
+    item.insert(QStringLiteral("stagedAt"), update.value(QStringLiteral("stagedAt")));
+    item.insert(QStringLiteral("verifiedDigest"), update.value(QStringLiteral("verifiedDigest")));
     item.insert(QStringLiteral("releaseUrl"), update.value(QStringLiteral("releaseUrl")));
     item.insert(QStringLiteral("releaseName"), update.value(QStringLiteral("releaseName")));
     item.insert(QStringLiteral("releaseNotes"), update.value(QStringLiteral("releaseNotes")));
     item.insert(QStringLiteral("publishedAt"), update.value(QStringLiteral("publishedAt")));
     item.insert(QStringLiteral("assetSize"), update.value(QStringLiteral("assetSize"), 0));
+    item.insert(QStringLiteral("rollbackAvailable"), update.value(QStringLiteral("rollbackAvailable"), false));
+    item.insert(QStringLiteral("rollbackVersion"), update.value(QStringLiteral("rollbackVersion")));
     item.insert(QStringLiteral("installable"), item.value(QStringLiteral("packageSupported")).toBool());
     result.append(item);
   }
@@ -478,14 +563,28 @@ QVariantMap ModulesFeature::catalogState() const { return catalog_.state(); }
 ServiceResult ModulesFeature::refreshCatalog() {
   catalog_.refresh();
   return ServiceResult::success(QStringLiteral("Module catalog refresh started"),
-                                QStringLiteral("Xenon is refreshing the official module catalog from GitHub."));
+                                QStringLiteral("Xenon is refreshing the official Xenon Modules registry from GitHub."));
 }
 
 ServiceResult ModulesFeature::checkForUpdate(const QString& module_id) {
+  const auto current_update = updateState(module_id);
+  const auto current_status = current_update.value(QStringLiteral("status")).toString();
+  if (current_status == QStringLiteral("checking") ||
+      current_status == QStringLiteral("downloading") ||
+      current_status == QStringLiteral("installing") ||
+      current_status == QStringLiteral("rolling-back")) {
+    return ServiceResult::failure(QStringLiteral("Module update"),
+                                  QStringLiteral("An update operation is already in progress for this module."));
+  }
+  if (current_update.value(QStringLiteral("canInstall")).toBool()) {
+    return ServiceResult::failure(QStringLiteral("Module update"),
+                                  QStringLiteral("Install the already verified staged package before checking this module again."));
+  }
+
   const auto entry = catalogEntry(module_id);
   if (entry.isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Module update"),
-                                  QStringLiteral("This module is not present in the official module catalog, so Xenon has no trusted GitHub release source for it."));
+                                  QStringLiteral("This module is not present in the official Xenon Modules registry, so Xenon has no trusted GitHub release source for it."));
   }
 
   if (test_mode_ && !module(module_id).isEmpty()) {
@@ -520,7 +619,7 @@ ServiceResult ModulesFeature::checkAllUpdates() {
   }
   if (started == 0) {
     return ServiceResult::success(QStringLiteral("Module update check"),
-                                  QStringLiteral("No installed modules currently have an official catalog update source."));
+                                  QStringLiteral("No installed modules currently have an official Xenon Modules registry update source."));
   }
   return ServiceResult::success(QStringLiteral("Module update checks started"),
                                 QStringLiteral("Checking %1 installed module(s) against their GitHub releases.").arg(started));
@@ -587,20 +686,75 @@ ServiceResult ModulesFeature::installUpdate(const QString& module_id) {
   return updater_.install(module_id);
 }
 
+ServiceResult ModulesFeature::rollbackUpdate(const QString& module_id) {
+  if (test_mode_) {
+    return ServiceResult::failure(QStringLiteral("Fixture module rollback"),
+                                  QStringLiteral("Fixture modules do not create persistent rollback snapshots."));
+  }
+  return updater_.rollback(module_id);
+}
+
+ServiceResult ModulesFeature::clearUpdateHistory(const QString& module_id) {
+  if (test_mode_) {
+    return ServiceResult::success(QStringLiteral("Fixture update history"),
+                                  QStringLiteral("Fixture mode does not persist module update history."));
+  }
+  return updater_.clearHistory(module_id);
+}
+
 ServiceResult ModulesFeature::requestInstall(const QString& module_id) {
   if (!installedVersion(module_id).isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Module install"),
                                   QStringLiteral("This module is already installed. Use the module updater for newer releases."));
   }
+  if (catalogEntry(module_id).isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Module install"),
+                                  QStringLiteral("This module is not present in the official Xenon Modules registry."));
+  }
+
+  install_requests_.insert(module_id);
+  QTimer::singleShot(0, this, [this, module_id]() { continueInstallRequest(module_id); });
+  return ServiceResult::success(
+      QStringLiteral("Module install started"),
+      QStringLiteral("Xenon will check the module release, download and verify the package, then install it automatically."));
+}
+
+void ModulesFeature::continueInstallRequest(const QString& module_id) {
+  if (!install_requests_.contains(module_id)) return;
+
+  if (!installedVersion(module_id).isEmpty()) {
+    install_requests_.remove(module_id);
+    return;
+  }
+
   const auto state = updater_.state(module_id);
   const auto status = state.value(QStringLiteral("status")).toString();
-  if (state.value(QStringLiteral("canInstall")).toBool()) return installUpdate(module_id);
-  if (state.value(QStringLiteral("canDownload")).toBool()) return downloadUpdate(module_id);
-  if (status == QStringLiteral("checking") || status == QStringLiteral("downloading")) {
-    return ServiceResult::success(QStringLiteral("Module install in progress"),
-                                  state.value(QStringLiteral("statusMessage")).toString());
+
+  if (status == QStringLiteral("error") ||
+      status == QStringLiteral("no-release") ||
+      status == QStringLiteral("package-unavailable") ||
+      status == QStringLiteral("cancelled")) {
+    install_requests_.remove(module_id);
+    return;
   }
-  return checkForUpdate(module_id);
+
+  if (status == QStringLiteral("checking") ||
+      status == QStringLiteral("downloading") ||
+      status == QStringLiteral("installing") ||
+      status == QStringLiteral("rolling-back")) {
+    return;
+  }
+
+  ServiceResult result;
+  if (state.value(QStringLiteral("canInstall")).toBool()) {
+    result = installUpdate(module_id);
+  } else if (state.value(QStringLiteral("canDownload")).toBool()) {
+    result = downloadUpdate(module_id);
+  } else {
+    result = checkForUpdate(module_id);
+  }
+
+  if (!result.ok) install_requests_.remove(module_id);
 }
 
 ServiceResult ModulesFeature::requestUpdate(const QString& module_id) {

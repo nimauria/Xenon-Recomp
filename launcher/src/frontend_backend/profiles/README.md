@@ -22,7 +22,7 @@ The current override set covers renderer, shader-cache policy, preferred input f
 
 ## Startup page
 
-New profiles use `Launcher default`, which defers to Settings > General. A profile may explicitly override this with Library, Modules, Profiles or Settings. Existing profiles that already store an explicit page retain that choice.
+New profiles use `Launcher default`, which defers to Settings > General. A profile may explicitly override this with Home, Library, Modules, Profiles or Settings. Existing profiles that already store an explicit page retain that choice.
 
 ## Paths and storage
 

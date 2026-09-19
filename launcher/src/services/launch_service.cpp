@@ -39,6 +39,7 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   config.module_path = module.value(QStringLiteral("path")).toString();
   config.module_version = module.value(QStringLiteral("version")).toString();
   config.module_settings = modules_.settingsValues(module_id);
+  config.runtime_api_requirements = modules_.runtimeApiRequirements(module_id);
   config.profile_id = profile.value(QStringLiteral("profileId")).toString();
   config.profile_name = profile.value(QStringLiteral("profileName")).toString();
   config.region = profile.value(QStringLiteral("region"), QStringLiteral("Auto (Global)")).toString();
@@ -57,6 +58,9 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   config.shader_cache_mode = overrideOr(QStringLiteral("graphics/shaderCacheMode"),
                                         settings_.stringValue(QStringLiteral("frontend/graphics/shaderCacheMode"),
                                                               QStringLiteral("Persistent"))).toString();
+  config.input_backend = overrideOr(QStringLiteral("input/backend"),
+                                    settings_.stringValue(QStringLiteral("frontend/input/backend"),
+                                                          QStringLiteral("Automatic"))).toString();
   config.input_preferred_device = overrideOr(QStringLiteral("input/preferredDevice"),
                                              settings_.stringValue(QStringLiteral("frontend/input/preferredDevice"),
                                                                    QStringLiteral("Automatic"))).toString();
@@ -64,6 +68,17 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
                                      settings_.numberValue(QStringLiteral("frontend/input/deadzone"), 0.10)).toDouble();
   config.input_rumble = overrideOr(QStringLiteral("input/rumble"),
                                    settings_.boolValue(QStringLiteral("frontend/input/rumble"), true)).toBool();
+  config.input_background = overrideOr(QStringLiteral("input/backgroundInput"),
+                                       settings_.boolValue(QStringLiteral("frontend/input/backgroundInput"), false)).toBool();
+  config.input_module_api_version =
+      runtime_.capabilities().value(QStringLiteral("inputModuleApiVersion"), 0).toInt();
+  config.input_profile_store_path = QDir{paths_.configuredPath(QStringLiteral("profiles"))}
+      .filePath(QStringLiteral("input-profiles-v1.conf"));
+  for (int user = 0; user < 4; ++user) {
+    const auto sources = settings_.value(QStringLiteral("frontend/input/user%1/sources").arg(user)).toStringList();
+    config.input_user_sources.append(QVariantMap{{QStringLiteral("userIndex"), user},
+                                                 {QStringLiteral("sources"), sources}});
+  }
   config.audio_master_volume = overrideOr(QStringLiteral("audio/masterVolume"),
                                           settings_.numberValue(QStringLiteral("frontend/audio/masterVolume"), 1.0)).toDouble();
   config.audio_mute_unfocused = overrideOr(QStringLiteral("audio/muteUnfocused"),
@@ -115,6 +130,9 @@ ServiceResult LaunchService::validate(const QString& game_id) const {
     return ServiceResult::failure(QStringLiteral("Module disabled"),
                                   QStringLiteral("Enable the assigned Xenon module before launching this game."));
   }
+
+  const auto module_verification = modules_.verify(module_id);
+  if (!module_verification.ok) return module_verification;
 
   const auto config = configurationFor(game_id);
   if (!config.has_value()) {

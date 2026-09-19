@@ -6,11 +6,13 @@
 #include "../../services/service_result.hpp"
 #include "actions/module_action_catalog.hpp"
 #include "catalog/github_module_catalog_provider.hpp"
+#include "catalog/assets/module_catalog_asset_cache.hpp"
 #include "import/module_import_service.hpp"
 #include "updates/module_update_service.hpp"
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QUrl>
 #include <QVariantList>
 #include <QVariantMap>
@@ -23,7 +25,8 @@ class ModulesFeature final : public QObject {
 
  public:
   ModulesFeature(ModuleService& modules, LibraryService& library, PackageService& packages,
-                 SettingsFeature& settings, bool test_mode, QObject* parent = nullptr);
+                 PathService& paths, SettingsFeature& settings, bool test_mode,
+                 bool suppress_startup_external_work = false, QObject* parent = nullptr);
 
   [[nodiscard]] QVariantList entries() const;
   [[nodiscard]] QVariantMap module(const QString& module_id) const;
@@ -41,14 +44,21 @@ class ModulesFeature final : public QObject {
                                          const QVariant& value);
 
   [[nodiscard]] QVariantList catalogEntries() const;
+  [[nodiscard]] QVariantMap catalogEntryData(const QString& module_id) const;
+  [[nodiscard]] QVariantMap launcherMetadata(const QString& module_id) const;
+  [[nodiscard]] QVariantList catalogDlc(const QString& module_id) const;
+  [[nodiscard]] ServiceResult refreshPresentationMetadata(const QString& module_id);
   [[nodiscard]] QVariantMap catalogState() const;
   [[nodiscard]] QVariantMap updateState(const QString& module_id) const;
+  [[nodiscard]] QVariantList updateHistory(const QString& module_id) const;
   [[nodiscard]] ServiceResult refreshCatalog();
   [[nodiscard]] ServiceResult checkForUpdate(const QString& module_id);
   [[nodiscard]] ServiceResult checkAllUpdates();
   [[nodiscard]] ServiceResult downloadUpdate(const QString& module_id);
   [[nodiscard]] ServiceResult cancelUpdateDownload(const QString& module_id);
   [[nodiscard]] ServiceResult installUpdate(const QString& module_id);
+  [[nodiscard]] ServiceResult rollbackUpdate(const QString& module_id);
+  [[nodiscard]] ServiceResult clearUpdateHistory(const QString& module_id);
   [[nodiscard]] ServiceResult requestInstall(const QString& module_id);
   [[nodiscard]] ServiceResult requestUpdate(const QString& module_id);
   [[nodiscard]] ServiceResult unlinkGame(const QString& module_id);
@@ -57,6 +67,7 @@ class ModulesFeature final : public QObject {
   void changed();
   void catalogChanged();
   void updateStateChanged(const QString& module_id);
+  void updateHistoryChanged(const QString& module_id);
   void notificationRequested(const QString& title, const QString& message);
 
  private:
@@ -69,17 +80,22 @@ class ModulesFeature final : public QObject {
   [[nodiscard]] QVariantMap catalogEntry(const QString& module_id) const;
   [[nodiscard]] QVariantMap fixtureUpdateState(const QString& module_id) const;
   [[nodiscard]] QString installedVersion(const QString& module_id) const;
+  void continueInstallRequest(const QString& module_id);
+  void syncCatalogAssets();
 
   ModuleService& modules_;
   LibraryService& library_;
   SettingsFeature& settings_;
   bool test_mode_ = false;
+  bool suppress_startup_external_work_ = false;
   GitHubModuleCatalogProvider catalog_;
+  ModuleCatalogAssetCache asset_cache_;
   ModuleImportService importer_;
   ModuleUpdateService updater_;
   QVariantList fixture_modules_;
   QHash<QString, QVariantMap> fixture_settings_;
   QHash<QString, QVariantMap> fixture_update_states_;
+  QSet<QString> install_requests_;
 };
 
 }  // namespace xenon::launcher::frontend_backend

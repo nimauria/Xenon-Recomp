@@ -12,18 +12,21 @@ LauncherBridge                Qt/QML transport facade only
     v
 FrontendBackend               feature composition / workflow layer
     |
-    +-- application/          system appearance hints and page state
+    +-- application/          system appearance, page state and crash recovery/safe mode
     +-- branding/             runtime-coloured launcher brand assets
     +-- community/            support links + optional Discord Rich Presence
     +-- diagnostics/          user/developer environment summaries
     +-- filesystem/           local folders, external URLs and clipboard actions
+    +-- home/                 recent activity/dashboard aggregation
     +-- import_export/        import/export workflow coordinator
     +-- launch/               UI launch workflow and launch-contract handoff
     +-- library/              game/library workflows, properties and DLC projection
     +-- modules/              module workflows, manifests, settings and catalog view
+    +-- notifications/        durable notification history, unread state and actions
     +-- paths/                configured launcher path workflows
     +-- profiles/             profile workflows, fixtures and avatar handling
     +-- runtime/              runtime state/capability projection
+    +-- search/               global command palette, ranking and command routing
     +-- settings/             validated settings schema + appearance/theme engine
     +-- updates/              launcher/module update workflow and provider seam
     |
@@ -52,7 +55,11 @@ state, animation state and layout calculations. It must not own authoritative be
 - module manifest parsing or module setting persistence;
 - test/preview fixture generation;
 - import/export file formats;
-- platform diagnostics or OS integration.
+- platform diagnostics or OS integration;
+- startup crash detection, recovery markers or Safe Mode policy;
+- global command/search indexing, ranking or command execution;
+- notification persistence, severity/read state, de-duplication or action routing;
+- home/recent-activity aggregation, ranking or persistent activity interpretation.
 
 If a page needs new behaviour, add or extend the corresponding feature slice here and expose the
 smallest required operation through `LauncherBridge`. Do not implement the behaviour directly in

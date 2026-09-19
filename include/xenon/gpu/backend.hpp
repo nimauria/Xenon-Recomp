@@ -28,6 +28,10 @@ class Backend {
   // newer bits. Used for backend migration, captures and save-state/debug
   // checkpoints; normal rendering should keep EDRAM native/GPU-resident.
   [[nodiscard]] virtual bool make_edram_canonical() = 0;
+  // Called after a portable capture restores the canonical EDRAM byte store.
+  // Native render-target/depth ownership must be discarded so the next use is
+  // rehydrated from the restored canonical bytes rather than stale host images.
+  [[nodiscard]] virtual bool invalidate_edram_native_state() = 0;
   // Presents an explicit runtime-provided scanout resource. Native window /
   // surface attachment is backend-specific, while frame semantics stay common.
   [[nodiscard]] virtual PresentStatus present(const PresentationFrame& frame) = 0;
@@ -48,6 +52,7 @@ class NullBackend final : public Backend {
     return true;
   }
   [[nodiscard]] bool make_edram_canonical() override { return true; }
+  [[nodiscard]] bool invalidate_edram_native_state() override { return true; }
   [[nodiscard]] PresentStatus present(const PresentationFrame&) override {
     return PresentStatus::NotConfigured;
   }

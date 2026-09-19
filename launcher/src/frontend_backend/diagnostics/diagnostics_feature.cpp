@@ -1,10 +1,16 @@
 #include "diagnostics_feature.hpp"
 
 #include "../application/application_feature.hpp"
+#include "../application/recovery/recovery_feature.hpp"
+#include "../launch/session/session_controller.hpp"
+#include "../library/library_feature.hpp"
+#include "../input/input_feature.hpp"
+#include "../modules/modules_feature.hpp"
 #include "../settings/appearance/appearance_feature.hpp"
 #include "../profiles/profiles_feature.hpp"
 #include "../runtime/runtime_feature.hpp"
 #include "../settings/settings_feature.hpp"
+#include "../../services/path_service.hpp"
 
 #include <QGuiApplication>
 #include <QScreen>
@@ -86,9 +92,19 @@ QString primaryGraphicsAdapter() {
 }
 }  // namespace
 
-DiagnosticsFeature::DiagnosticsFeature(ApplicationFeature& application, AppearanceFeature& appearance,
-                                       RuntimeFeature& runtime, ProfilesFeature& profiles, SettingsFeature& settings)
-    : application_(application), appearance_(appearance), runtime_(runtime), profiles_(profiles), settings_(settings) {}
+DiagnosticsFeature::DiagnosticsFeature(PathService& paths, ApplicationFeature& application,
+                                       RecoveryFeature& recovery, AppearanceFeature& appearance,
+                                       RuntimeFeature& runtime, InputFeature& input, ProfilesFeature& profiles,
+                                       SettingsFeature& settings, LibraryFeature& library,
+                                       ModulesFeature& modules, SessionController& session)
+    : application_(application),
+      recovery_(recovery),
+      appearance_(appearance),
+      runtime_(runtime),
+      input_(input),
+      profiles_(profiles),
+      settings_(settings),
+      support_bundle_(paths, library, modules, session, runtime, settings) {}
 
 QString DiagnosticsFeature::version() const { return QStringLiteral(XENON_LAUNCHER_VERSION); }
 QString DiagnosticsFeature::hostArchitecture() const { return friendlyArchitecture(QSysInfo::currentCpuArchitecture()); }
@@ -118,7 +134,7 @@ QString DiagnosticsFeature::developerDiagnostics() const {
   const auto renderer = settings_.stringValue(QStringLiteral("runtime/graphicsBackend"), QStringLiteral("Automatic"));
   const auto caps = runtime_.capabilities();
 
-  return QStringLiteral(
+  auto text = QStringLiteral(
       "Project Xenon Launcher - Developer Diagnostics\n"
       "Launcher version: %1\nBuild mode: %2\nQt runtime: %3\nOperating system: %4\n"
       "Kernel: %5 %6\nArchitecture: %7\nLogical CPU threads: %8\nPhysical memory: %9\n"
@@ -150,14 +166,55 @@ QString DiagnosticsFeature::developerDiagnostics() const {
       .arg(settings_.boolValue(QStringLiteral("accessibility/reduceMotion"), false) ? QStringLiteral("yes") : QStringLiteral("no"))
       .arg(settings_.boolValue(QStringLiteral("accessibility/highContrast"), false) ? QStringLiteral("yes") : QStringLiteral("no"))
       .arg(settings_.stringValue(QStringLiteral("general/sidebarMode"), QStringLiteral("Auto")));
+  const auto recovery = recovery_.state();
+  text += QStringLiteral("Safe mode: %1\nRecovery prompt pending: %2\nPrevious unclean shutdown: %3\n"
+                         "Previous startup phase: %4\nConsecutive unclean starts: %5\n")
+              .arg(recovery_.safeMode() ? QStringLiteral("yes") : QStringLiteral("no"))
+              .arg(recovery.value(QStringLiteral("recoveryPromptPending")).toBool() ? QStringLiteral("yes") : QStringLiteral("no"))
+              .arg(recovery.value(QStringLiteral("previousUncleanShutdown")).toBool() ? QStringLiteral("yes") : QStringLiteral("no"))
+              .arg(recovery.value(QStringLiteral("previousPhase"), QStringLiteral("none")).toString())
+              .arg(recovery.value(QStringLiteral("consecutiveUncleanStarts"), 0).toInt());
+  const auto input = input_.diagnostics();
+  text += QStringLiteral("Input frontend: %1\nInput status: %2\nConnected input devices: %3\nAssigned input users: %4\nInput module API: v%5\n")
+              .arg(input.value(QStringLiteral("available")).toBool() ? QStringLiteral("connected") : QStringLiteral("unavailable"))
+              .arg(input.value(QStringLiteral("status")).toString())
+              .arg(input.value(QStringLiteral("connectedDeviceCount"), 0).toLongLong())
+              .arg(input.value(QStringLiteral("assignedUserCount"), 0).toLongLong())
+              .arg(input_.moduleApiInfo().value(QStringLiteral("version"), 1).toInt());
+  return text;
 }
 
 QString DiagnosticsFeature::userDiagnostics() const {
-  return QStringLiteral(
+  auto text = QStringLiteral(
       "Project Xenon Launcher\nVersion: %1\nSystem: %2 (%3)\nQt: %4\nRuntime status: %5\nTheme: %6\nActive profile: %7\n")
       .arg(version()).arg(QSysInfo::prettyProductName()).arg(hostArchitecture()).arg(qtVersion())
       .arg(runtime_.status()).arg(appearance_.themeId())
       .arg(profiles_.activeProfile().value(QStringLiteral("profileName"), QStringLiteral("Profile")).toString());
+  text += QStringLiteral("Safe mode: %1\n").arg(recovery_.safeMode() ? QStringLiteral("yes") : QStringLiteral("no"));
+  const auto input = input_.diagnostics();
+  text += QStringLiteral("Input: %1 (%2 connected device(s))\n")
+              .arg(input.value(QStringLiteral("status")).toString())
+              .arg(input.value(QStringLiteral("connectedDeviceCount"), 0).toLongLong());
+  return text;
+}
+
+ServiceResult DiagnosticsFeature::createSupportBundle() const {
+  auto summary = userDiagnostics();
+  const auto profile_name = profiles_.activeProfile().value(QStringLiteral("profileName")).toString().trimmed();
+  if (!profile_name.isEmpty()) summary.replace(profile_name, QStringLiteral("<profile>"));
+  return support_bundle_.create(summary, developerDiagnostics());
+}
+
+QString DiagnosticsFeature::supportBundleDirectory() const {
+  return support_bundle_.bundleDirectory();
+}
+
+QString DiagnosticsFeature::diagnosticsDirectory() const {
+  return support_bundle_.diagnosticsDirectory();
+}
+
+QString DiagnosticsFeature::startupLogPath() const {
+  return support_bundle_.startupLogPath();
 }
 
 }  // namespace xenon::launcher::frontend_backend

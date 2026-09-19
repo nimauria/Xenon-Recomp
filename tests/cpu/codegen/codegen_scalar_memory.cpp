@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -6,6 +7,7 @@
 #include "xenon/cpu/backend/cpp_aot.hpp"
 #include "xenon/cpu/decoder.hpp"
 #include "xenon/cpu/lifter.hpp"
+#include "xenon/cpu/function_compiler.hpp"
 
 using namespace xenon::cpu;
 struct Spec { const char* name; const char* mnemonic; GuestAddress address; std::uint32_t word; };
@@ -55,4 +57,12 @@ int main(int argc,char**argv){
   out<<"#include <bit>\n#include <cmath>\n#include <cfenv>\n#include <cstdint>\n#include <limits>\n#include \"xenon/cpu/aot_semantics.hpp\"\nusing namespace xenon::cpu;\n";
   Decoder dec;Lifter lifter;backend::CppAotBackend be;
   for(const auto&e:s){auto di=dec.decode(e.address,e.word);if(!di.valid()||di.mnemonic()!=e.mnemonic){std::cerr<<"decode "<<e.name<<" got "<<di.mnemonic()<<" word="<<std::hex<<e.word<<"\n";return 4;}ir::Block b{e.address,{}};ir::Builder ib(b);if(!lifter.lift(di,ib)){std::cerr<<"lift "<<e.name<<"\n";return 5;}out<<be.emit_function(b,e.name)<<"\n";}
+  constexpr std::array<std::uint32_t, 3> fault_words = {
+      0x38630001u,  // addi r3,r3,1
+      0x80830000u,  // lwz r4,0(r3)
+      0x38630001u,  // addi r3,r3,1
+  };
+  const auto fault = StaticFunctionCompiler{}.compile(0x5000u, fault_words);
+  if (!fault.ok) return 6;
+  out << be.emit_function(fault.function, "mem_fault_site") << "\n";
 }

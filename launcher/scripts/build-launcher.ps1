@@ -7,6 +7,9 @@ param(
     [switch]$Clean,
     [switch]$Deploy,
     [switch]$Run,
+    [switch]$SafeMode,
+    [switch]$StartMinimized,
+    [string[]]$LauncherArguments = @(),
     [switch]$FullRuntime,
     [string]$DiscordSdkRoot = $env:DISCORD_SOCIAL_SDK_ROOT,
     [switch]$EnableDiscordRichPresence,
@@ -167,7 +170,20 @@ Write-Host "Launcher ready: $exe" -ForegroundColor Green
 
 if ($Run) {
     Write-Host "Starting Xenon Launcher" -ForegroundColor Cyan
-    $process = Start-Process -FilePath $exe -PassThru
+    $runArgs = @($LauncherArguments)
+    if ($SafeMode) {
+        $runArgs += "--safe-mode"
+        Write-Host "Safe Mode requested for this launcher run" -ForegroundColor Yellow
+    }
+    if ($StartMinimized) {
+        $runArgs += "--start-minimized"
+        Write-Host "Start minimized requested for this launcher run" -ForegroundColor DarkGray
+    }
+    if ($runArgs.Count -gt 0) {
+        $process = Start-Process -FilePath $exe -ArgumentList $runArgs -PassThru
+    } else {
+        $process = Start-Process -FilePath $exe -PassThru
+    }
     $process.WaitForExit()
     Write-Host "Xenon Launcher exited with code $($process.ExitCode)" -ForegroundColor $(if ($process.ExitCode -eq 0) { "Green" } else { "Yellow" })
 

@@ -231,6 +231,17 @@ bool supports_fixed_shared_mapping() noexcept {
 #endif
 }
 
+void* reserve_fixed_shared_mapping_region(std::size_t size) noexcept {
+  return supports_fixed_shared_mapping() ? reserve(size) : nullptr;
+}
+
+void release_fixed_shared_mapping_region(void* address,
+                                         std::size_t size) noexcept {
+  release(address, size);
+}
+
+bool fixed_shared_mapping_requires_page_views() noexcept { return false; }
+
 bool map_shared_fixed(const SharedMemory& shared, void* address,
                       std::size_t offset, std::size_t size,
                       Protection protection) noexcept {

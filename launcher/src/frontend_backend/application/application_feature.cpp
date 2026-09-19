@@ -45,7 +45,7 @@ int ApplicationFeature::rememberedPage() const {
 
 int ApplicationFeature::initialPage() const {
   if (settings_.boolValue(QStringLiteral("frontend/general/restoreLastPage"), false)) {
-    return qBound(0, rememberedPage(), 3);
+    return qBound(0, rememberedPage(), 4);
   }
 
   const auto startup = settings_.stringValue(QStringLiteral("frontend/general/startupPage"),
@@ -53,16 +53,18 @@ int ApplicationFeature::initialPage() const {
   if (startup == QStringLiteral("Modules")) return 1;
   if (startup == QStringLiteral("Profiles")) return 2;
   if (startup == QStringLiteral("Settings")) return 3;
+  if (startup == QStringLiteral("Home")) return 4;
   return 0;
 }
 
 void ApplicationFeature::rememberPage(int page_index) {
-  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, 3));
+  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, 4));
 }
 
 bool ApplicationFeature::featureEnabled(const QString& feature) const noexcept {
   const auto& f = kUiFeatures;
   if (feature == QStringLiteral("settings.general")) return f.settings_general;
+  if (feature == QStringLiteral("settings.system")) return f.settings_system;
   if (feature == QStringLiteral("settings.appearance")) return f.settings_appearance;
   if (feature == QStringLiteral("settings.library")) return f.settings_library;
   if (feature == QStringLiteral("settings.paths")) return f.settings_paths;

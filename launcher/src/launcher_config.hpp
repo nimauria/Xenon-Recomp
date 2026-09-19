@@ -18,6 +18,7 @@ inline constexpr bool kTestMode = kForceTestMode || (XENON_LAUNCHER_TEST_MODE !=
 // live capabilities on top without redesigning the QML pages.
 struct UiFeatures {
   bool settings_general = true;
+  bool settings_system = true;
   bool settings_appearance = true;
   bool settings_library = true;
   bool settings_paths = true;

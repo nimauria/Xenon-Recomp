@@ -319,7 +319,8 @@ bool is_full_color_resolve(CopySampleSelect selection,
 }
 
 ResolvePlan plan_resolve(const DrawResourceState& state,
-                         std::span<const std::byte> physical_memory) {
+                         std::span<const std::byte> physical_memory,
+                         std::uint32_t physical_base) {
   ResolvePlan result{};
   result.copy = state.copy;
   result.depth = state.copy.copies_depth();
@@ -334,7 +335,8 @@ ResolvePlan plan_resolve(const DrawResourceState& state,
     result.error = "invalid Xenos resolve color source";
     return result;
   }
-  result.rectangle = decode_resolve_rectangle(state, physical_memory);
+  result.rectangle =
+      decode_resolve_rectangle(state, physical_memory, physical_base);
   if (!result.rectangle.valid) {
     result.error = "invalid Xenos resolve rectangle";
     return result;
@@ -402,7 +404,8 @@ std::int32_t float_to_d3d_fixed_16_8(float value) noexcept {
 
 ResolveRectangle decode_resolve_rectangle(
     const DrawResourceState& state,
-    std::span<const std::byte> physical_memory) noexcept {
+    std::span<const std::byte> physical_memory,
+    std::uint32_t physical_base) noexcept {
   ResolveRectangle result{};
   if (state.edram_mode != EdramMode::Copy ||
       (state.copy.command != CopyCommand::Raw &&
@@ -410,16 +413,19 @@ ResolveRectangle decode_resolve_rectangle(
     return result;
   }
   const auto& fetch = state.vertex_buffers[0][0];
+  constexpr auto kVertexBytes = 6u * sizeof(std::uint32_t);
   if (!fetch || !fetch->valid || fetch->size_dwords != 6 ||
-      std::uint64_t(fetch->physical_address) + 6u * sizeof(std::uint32_t) >
-          physical_memory.size()) {
+      fetch->physical_address < physical_base ||
+      std::uint64_t(fetch->physical_address) + kVertexBytes >
+          std::uint64_t{physical_base} + physical_memory.size()) {
     return result;
   }
 
+  const auto fetch_offset = fetch->physical_address - physical_base;
   std::array<std::int32_t, 6> vertices{};
   for (std::size_t i = 0; i < vertices.size(); ++i) {
     std::uint32_t word{};
-    std::memcpy(&word, physical_memory.data() + fetch->physical_address +
+    std::memcpy(&word, physical_memory.data() + fetch_offset +
                            i * sizeof(word), sizeof(word));
     const float value = std::bit_cast<float>(gpu_swap(word, fetch->endian)) +
                         (state.raster.d3d_pixel_center ? 0.5f : 0.0f);

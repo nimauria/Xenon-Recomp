@@ -17,6 +17,10 @@ Item {
     property string pendingDlcName: ""
     property string pendingImportDlcId: ""
     property string pendingRemoveGameId: ""
+    property int contextGameIndex: -1
+    property string contextDlcGameId: ""
+    property string contextDlcId: ""
+    property string contextDlcName: ""
 
     signal requestPage(int index)
 
@@ -87,8 +91,12 @@ Item {
         return {
             title: "", moduleName: "", status: "", ready: false,
             installed: false, tileArt: "", heroArt: "", description: "",
-            gameId: "", renderer: "", mode: "", regions: "", contentState: "",
-            tags: "", moduleVersion: "", lastPlayed: ""
+            gameId: "", titleId: "", renderer: "", mode: "", regions: "", contentState: "",
+            tags: "", moduleVersion: "", lastPlayed: "",
+            gameDeveloper: "", gamePublisher: "", gamePlatform: "", releaseYear: 0,
+            compatibilityStatus: "", compatibilityLabel: "", compatibilitySummary: "",
+            metadataAvailable: false, metadataSource: "", metadataStatus: "",
+            metadataStatusMessage: "", metadataLastCheckedAt: ""
         }
     }
 
@@ -96,6 +104,19 @@ Item {
         if (!hasGames || selectedGameIndex < 0 || selectedGameIndex >= gamesModel.count)
             return emptyGame()
         return gamesModel.get(selectedGameIndex)
+    }
+
+    function selectGameById(gameId) {
+        var target = String(gameId || "")
+        if (target.length === 0) return false
+        for (var i = 0; i < gamesModel.count; ++i) {
+            if (String(gamesModel.get(i).gameId || "") === target) {
+                selectedGameIndex = i
+                populateDlcForSelection()
+                return true
+            }
+        }
+        return false
     }
 
     function matchesSearch(title, moduleName) {
@@ -158,6 +179,99 @@ Item {
             if (gamePropertiesLoader.item)
                 gamePropertiesLoader.item.openFor(gameId)
         })
+    }
+
+    function runGameAction(actionId, index) {
+        if (index < 0 || index >= gamesModel.count)
+            return
+        root.selectedGameIndex = index
+        var game = gamesModel.get(index)
+        if (actionId === "enableModule") {
+            launcherBridge.setModuleEnabled(game.moduleId || "", true)
+        } else if (actionId === "play") {
+            launcherBridge.launchGame(game.gameId)
+        } else if (actionId === "properties") {
+            root.openGameProperties(game.gameId)
+        } else if (actionId === "refreshMetadata") {
+            launcherBridge.refreshLibraryMetadata(game.gameId)
+        } else if (actionId === "moduleSettings") {
+            moduleSettingsDialog.openFor(game.moduleName, launcherBridge.moduleSettingsSchema(game.moduleId || ""))
+        } else if (actionId === "browse") {
+            launcherBridge.openFolder(launcherBridge.libraryContentFolder(game.gameId))
+        } else if (actionId === "saves") {
+            var props = launcherBridge.libraryGameProperties(game.gameId)
+            launcherBridge.openFolder(String(props.savePath || ""))
+        } else if (actionId === "module") {
+            launcherBridge.openFolder(launcherBridge.modulePath(game.moduleId || ""))
+        } else if (actionId === "verify") {
+            launcherBridge.verifyLibraryEntry(game.gameId)
+        } else if (actionId === "copyId") {
+            launcherBridge.copyText(String(game.gameId || ""))
+            launcherBridge.notify("Game ID copied", String(game.gameId || ""))
+        } else if (actionId === "remove") {
+            root.pendingRemoveGameId = game.gameId
+            removeGameConfirm.title = "Remove “" + game.title + "” from Library?"
+            removeGameConfirm.message = "This removes only the launcher library record. Registered game files and Xenon-managed DLC are not deleted."
+            removeGameConfirm.open()
+        }
+    }
+
+    function openGameContext(index, item, localX, localY) {
+        if (index < 0 || index >= gamesModel.count)
+            return
+        root.selectedGameIndex = index
+        root.contextGameIndex = index
+        var game = gamesModel.get(index)
+        libraryContextMenu.actions = launcherBridge.libraryGameActions(game.gameId)
+        libraryContextMenu.openAt(item, localX, localY)
+    }
+
+    function openLibraryBackgroundContext(item, localX, localY) {
+        root.contextGameIndex = -1
+        libraryBackgroundMenu.actions = launcherBridge.libraryBackgroundActions()
+        libraryBackgroundMenu.openAt(item, localX, localY)
+    }
+
+    function runLibraryBackgroundAction(actionId) {
+        if (actionId === "add")
+            gameContentDialog.open()
+    }
+
+    function runDlcAction(actionId, gameId, dlcId, name) {
+        if (actionId === "open") {
+            launcherBridge.openFolder(launcherBridge.libraryDlcItemFolder(gameId, dlcId))
+        } else if (actionId === "verify") {
+            launcherBridge.verifyLibraryDlc(gameId, dlcId)
+        } else if (actionId === "remove") {
+            root.pendingDlcGameId = gameId
+            root.pendingDlcId = dlcId
+            root.pendingDlcName = name
+            removeDlcConfirm.open()
+        } else if (actionId === "import") {
+            root.pendingImportDlcId = dlcId
+            importDlcDialog.open()
+        }
+    }
+
+    function openDlcContext(index, item, localX, localY) {
+        if (index < 0 || index >= dlcModel.count)
+            return
+        var dlc = dlcModel.get(index)
+        var gameId = root.selectedGame().gameId || ""
+        root.contextDlcGameId = gameId
+        root.contextDlcId = String(dlc.dlcId || "")
+        root.contextDlcName = String(dlc.name || "")
+        dlcContextMenu.actions = launcherBridge.libraryDlcActions(gameId, root.contextDlcId)
+        dlcContextMenu.openAt(item, localX, localY)
+    }
+
+    function openDlcBackgroundContext(item, localX, localY) {
+        var gameId = root.selectedGame().gameId || ""
+        root.contextDlcGameId = gameId
+        root.contextDlcId = ""
+        root.contextDlcName = ""
+        dlcBackgroundMenu.actions = launcherBridge.libraryDlcBackgroundActions(gameId)
+        dlcBackgroundMenu.openAt(item, localX, localY)
     }
 
     function installedDlcCount() {
@@ -224,6 +338,7 @@ Item {
                 }
 
                 StackLayout {
+                    id: libraryStack
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     currentIndex: root.hasGames ? 1 : 0
@@ -273,6 +388,31 @@ Item {
                                 onActivated: root.selectedGameIndex = gameDelegate.index
                             }
                         }
+                    }
+                }
+
+                // Right-click belongs to the visible Library viewport rather than
+                // the ListView contentItem. This keeps row hit-testing correct
+                // after scrolling and gives unused/empty library space a target.
+                MouseArea {
+                    parent: libraryStack
+                    anchors.fill: libraryStack
+                    z: 1000
+                    acceptedButtons: Qt.RightButton
+                    hoverEnabled: false
+                    preventStealing: true
+                    onClicked: function(mouse) {
+                        if (libraryStack.currentIndex === 1) {
+                            var point = libraryStack.mapToItem(gameList, mouse.x, mouse.y)
+                            var index = gameList.indexAt(
+                                point.x + gameList.contentX,
+                                point.y + gameList.contentY)
+                            if (index >= 0) {
+                                root.openGameContext(index, libraryStack, mouse.x, mouse.y)
+                                return
+                            }
+                        }
+                        root.openLibraryBackgroundContext(libraryStack, mouse.x, mouse.y)
                     }
                 }
 
@@ -367,31 +507,23 @@ Item {
                                         iconName: "more"
                                         tooltip: "More game actions"
                                         variant: "filled"
-                                        onClicked: gameActionsMenu.open()
+                                        onClicked: {
+                                            if (gameActionsMenu.visible) {
+                                                gameActionsMenu.close()
+                                            } else {
+                                                gameActionsMenu.actions = launcherBridge.libraryGameActions(root.selectedGame().gameId)
+                                                gameActionsMenu.open()
+                                            }
+                                        }
                                         XActionMenu {
                                             id: gameActionsMenu
+                                            parent: gameActionsButton
                                             x: gameActionsButton.width - width
                                             y: gameActionsButton.height + 4
-                                            menuWidth: 290
-                                            actions: [
-                                                { id: "enableModule", label: "Enable “" + root.selectedGame().moduleName + "”", icon: "▶", enabled: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive), visible: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive) },
-                                                { id: "properties", label: "Game properties", icon: "ⓘ", separatorBefore: Boolean(root.selectedGame().moduleInstalled) && !Boolean(root.selectedGame().moduleActive) },
-                                                { id: "moduleSettings", label: "Module settings", icon: "◇", enabled: Boolean(root.selectedGame().moduleInstalled) },
-                                                { id: "remove", label: "Remove “" + root.selectedGame().title + "” from Library", icon: "×", destructive: true, separatorBefore: true }
-                                            ]
+                                            menuWidth: 300
+                                            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
                                             onActionTriggered: function(actionId) {
-                                                if (actionId === "enableModule") {
-                                                    launcherBridge.setModuleEnabled(root.selectedGame().moduleId, true)
-                                                } else if (actionId === "remove") {
-                                                    root.pendingRemoveGameId = root.selectedGame().gameId
-                                                    removeGameConfirm.title = "Remove “" + root.selectedGame().title + "” from Library?"
-                                                    removeGameConfirm.message = "This removes only the launcher library record. Registered game files and Xenon-managed DLC are not deleted."
-                                                    removeGameConfirm.open()
-                                                } else if (actionId === "properties") {
-                                                    root.openGameProperties(root.selectedGame().gameId)
-                                                } else if (actionId === "moduleSettings") {
-                                                    moduleSettingsDialog.openFor(root.selectedGame().moduleName, root.moduleSettingsSchema())
-                                                }
+                                                root.runGameAction(actionId, root.selectedGameIndex)
                                             }
                                         }
                                     }
@@ -406,6 +538,11 @@ Item {
                                         delegate: StatusPill { required property var modelData; label: String(modelData); tone: Theme.textMuted }
                                     }
                                     StatusPill { label: root.selectedGame().ready ? "Ready" : root.selectedGame().status; tone: root.selectedGame().ready ? Theme.success : Theme.warning }
+                                    StatusPill {
+                                        visible: String(root.selectedGame().compatibilityLabel || "").length > 0
+                                        label: String(root.selectedGame().compatibilityLabel || "")
+                                        tone: String(root.selectedGame().compatibilityStatus || "").toLowerCase() === "development" ? Theme.warning : Theme.textMuted
+                                    }
                                     StatusPill {
                                         visible: root.sessionMatchesSelected() && root.selectedSessionState() !== "idle"
                                         label: String(root.currentSession.stateLabel || "Session")
@@ -442,27 +579,23 @@ Item {
                                         id: manageFilesButton
                                         visible: launcherBridge.featureEnabled("library.manageFiles")
                                         text: "Manage Files  ▾"
-                                        onClicked: manageMenu.open()
+                                        onClicked: {
+                                            if (manageMenu.visible) {
+                                                manageMenu.close()
+                                            } else {
+                                                manageMenu.actions = launcherBridge.libraryManageActions(root.selectedGame().gameId)
+                                                manageMenu.open()
+                                            }
+                                        }
                                         XActionMenu {
                                             id: manageMenu
-                                            x: 0; y: manageFilesButton.height + 5; menuWidth: 270
-                                            actions: [
-                                                { id: "browse", label: "Browse game files", icon: "▣" },
-                                                { id: "saves", label: "Open save data", icon: "▤" },
-                                                { id: "module", label: "Open module folder", icon: "◇" },
-                                                { id: "verify", label: "Verify imported content", icon: "✓", separatorBefore: true }
-                                            ]
+                                            parent: manageFilesButton
+                                            x: 0
+                                            y: manageFilesButton.height + 5
+                                            menuWidth: 270
+                                            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
                                             onActionTriggered: function(actionId) {
-                                                if (actionId === "browse")
-                                                    launcherBridge.openFolder(launcherBridge.libraryContentFolder(root.selectedGame().gameId))
-                                                else if (actionId === "saves") {
-                                                    var props = launcherBridge.libraryGameProperties(root.selectedGame().gameId)
-                                                    launcherBridge.openFolder(String(props.savePath || ""))
-                                                }
-                                                else if (actionId === "module")
-                                                    launcherBridge.openFolder(launcherBridge.modulePath(root.selectedGame().moduleId || ""))
-                                                else if (actionId === "verify")
-                                                    launcherBridge.verifyLibraryEntry(root.selectedGame().gameId)
+                                                root.runGameAction(actionId, root.selectedGameIndex)
                                             }
                                         }
                                     }
@@ -594,6 +727,7 @@ Item {
                                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
 
                                 Item {
+                                    id: dlcViewport
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     clip: true
@@ -647,37 +781,46 @@ Item {
                                                     iconName: "more"
                                                     tooltip: "DLC actions"
                                                     variant: "ghost"
-                                                    onClicked: dlcActionsMenu.open()
+                                                    onClicked: {
+                                                        if (dlcActionsMenu.visible) {
+                                                            dlcActionsMenu.close()
+                                                        } else {
+                                                            dlcActionsMenu.actions = launcherBridge.libraryDlcActions(root.selectedGame().gameId, dlcId)
+                                                            dlcActionsMenu.open()
+                                                        }
+                                                    }
                                                     XActionMenu {
                                                         id: dlcActionsMenu
+                                                        parent: dlcActionsButton
                                                         x: dlcActionsButton.width - width
                                                         y: dlcActionsButton.height + 4
                                                         menuWidth: 230
-                                                        actions: installed ? [
-                                                            { id: "open", label: "Open DLC folder", icon: "▣" },
-                                                            { id: "verify", label: "Verify DLC", icon: "✓" },
-                                                            { id: "remove", label: "Remove DLC", icon: "×", destructive: true, separatorBefore: true }
-                                                        ] : [
-                                                            { id: "import", label: "Import local DLC…", icon: "+" }
-                                                        ]
+                                                        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
                                                         onActionTriggered: function(actionId) {
-                                                            if (actionId === "open")
-                                                                launcherBridge.openFolder(launcherBridge.libraryDlcItemFolder(root.selectedGame().gameId, dlcId))
-                                                            else if (actionId === "verify")
-                                                                launcherBridge.verifyLibraryDlc(root.selectedGame().gameId, dlcId)
-                                                            else if (actionId === "remove") {
-                                                                root.pendingDlcGameId = root.selectedGame().gameId
-                                                                root.pendingDlcId = dlcId
-                                                                root.pendingDlcName = name
-                                                                removeDlcConfirm.open()
-                                                            } else if (actionId === "import") {
-                                                                root.pendingImportDlcId = dlcId
-                                                                importDlcDialog.open()
-                                                            }
+                                                            root.runDlcAction(actionId, root.selectedGame().gameId, dlcId, name)
                                                         }
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        parent: dlcViewport
+                                        anchors.fill: dlcViewport
+                                        z: 1000
+                                        acceptedButtons: Qt.RightButton
+                                        hoverEnabled: false
+                                        preventStealing: true
+                                        onClicked: function(mouse) {
+                                            var point = dlcViewport.mapToItem(dlcList, mouse.x, mouse.y)
+                                            var index = dlcList.indexAt(
+                                                point.x + dlcList.contentX,
+                                                point.y + dlcList.contentY)
+                                            if (index >= 0)
+                                                root.openDlcContext(index, dlcViewport, mouse.x, mouse.y)
+                                            else
+                                                root.openDlcBackgroundContext(dlcViewport, mouse.x, mouse.y)
                                         }
                                     }
 
@@ -725,6 +868,11 @@ Item {
                                 Text { text: "Game information"; color: Theme.text; font.pixelSize: Theme.typeBodyLarge; font.weight: Font.DemiBold }
                                 Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
                                 XInfoRow { label: "Game ID"; value: root.selectedGame().gameId }
+                                XInfoRow { visible: String(root.selectedGame().titleId || "").length > 0; label: "Xbox Title ID"; value: String(root.selectedGame().titleId || "") }
+                                XInfoRow { visible: String(root.selectedGame().gameDeveloper || "").length > 0; label: "Developer"; value: String(root.selectedGame().gameDeveloper || "") }
+                                XInfoRow { visible: String(root.selectedGame().gamePublisher || "").length > 0; label: "Publisher"; value: String(root.selectedGame().gamePublisher || "") }
+                                XInfoRow { visible: String(root.selectedGame().gamePlatform || "").length > 0; label: "Platform"; value: String(root.selectedGame().gamePlatform || "") }
+                                XInfoRow { visible: Number(root.selectedGame().releaseYear || 0) > 0; label: "Released"; value: String(root.selectedGame().releaseYear || "") }
                                 XInfoRow { label: "Module"; value: root.selectedGame().moduleName }
                                 XInfoRow { label: "Module version"; value: root.selectedGame().moduleVersion || "Module defined" }
                                 XInfoRow { label: "Runtime"; value: "Xenon Recomp" }
@@ -736,7 +884,18 @@ Item {
                                 XInfoRow { label: "Play count"; value: String(root.selectedGame().playCount || 0) }
                                 XInfoRow { label: "Total play time"; value: root.formatDuration(root.selectedGame().totalPlayTimeMs || 0) }
                                 XInfoRow { label: "Last session"; value: root.selectedGame().lastSessionOutcome ? String(root.selectedGame().lastSessionOutcome) : "Not recorded" }
-                                XInfoRow { label: "Status"; value: root.selectedGame().ready ? "Early development" : root.selectedGame().status }
+                                XInfoRow { label: "Status"; value: String(root.selectedGame().compatibilityLabel || "").length > 0 ? String(root.selectedGame().compatibilityLabel) : (root.selectedGame().ready ? "Launch ready" : root.selectedGame().status) }
+                                XInfoRow { visible: Boolean(root.selectedGame().metadataAvailable); label: "Metadata"; value: String(root.selectedGame().metadataSource || "GitHub") }
+                                XInfoRow {
+                                    visible: Boolean(root.selectedGame().metadataAvailable)
+                                    label: "Registry sync"
+                                    value: String(root.selectedGame().metadataStatus || "ready")
+                                }
+                                XInfoRow {
+                                    visible: Boolean(root.selectedGame().metadataAvailable) && String(root.selectedGame().metadataLastCheckedAt || "").length > 0
+                                    label: "Last metadata check"
+                                    value: String(root.selectedGame().metadataLastCheckedAt || "")
+                                }
                             }
                         }
 
@@ -764,9 +923,22 @@ Item {
                                 XInfoRow { label: "Audio"; value: "Backend pending" }
                                 XInfoRow { label: "Online features"; value: "Not implemented" }
                                 XInfoRow { label: "Achievements"; value: "Not implemented" }
+                                XInfoRow {
+                                    visible: String(root.selectedGame().compatibilityLabel || "").length > 0
+                                    label: "Registry compatibility"
+                                    value: String(root.selectedGame().compatibilityLabel || "")
+                                }
+                                Text {
+                                    visible: String(root.selectedGame().compatibilitySummary || "").length > 0
+                                    Layout.fillWidth: true
+                                    text: String(root.selectedGame().compatibilitySummary || "")
+                                    color: Theme.textMuted
+                                    wrapMode: Text.WordWrap
+                                    font.pixelSize: Theme.typeCaption
+                                }
                                 Text {
                                     Layout.fillWidth: true
-                                    text: root.testMode ? "Fixture data is active. Commands exercise the launcher core only." : "Library, module and DLC state is launcher-core backed. Session execution follows the Xenon runtime capability state."
+                                    text: root.testMode ? "Fixture content is active, while presentation metadata and the DLC catalogue can be refreshed from the official Xenon Modules registry." : "Library, module and DLC state is launcher-core backed. Presentation metadata is refreshed from the official Xenon Modules registry."
                                     color: Theme.textMuted
                                     wrapMode: Text.WordWrap
                                     font.pixelSize: Theme.typeCaption
@@ -777,6 +949,45 @@ Item {
 
                     Item { Layout.preferredHeight: Theme.spaceSm }
                 }
+            }
+        }
+    }
+
+    XActionMenu {
+        id: libraryContextMenu
+        parent: root
+        menuWidth: 310
+        onActionTriggered: function(actionId) {
+            root.runGameAction(actionId, root.contextGameIndex)
+        }
+    }
+
+    XActionMenu {
+        id: libraryBackgroundMenu
+        parent: root
+        menuWidth: 230
+        onActionTriggered: function(actionId) {
+            root.runLibraryBackgroundAction(actionId)
+        }
+    }
+
+    XActionMenu {
+        id: dlcContextMenu
+        parent: root
+        menuWidth: 250
+        onActionTriggered: function(actionId) {
+            root.runDlcAction(actionId, root.contextDlcGameId, root.contextDlcId, root.contextDlcName)
+        }
+    }
+
+    XActionMenu {
+        id: dlcBackgroundMenu
+        parent: root
+        menuWidth: 230
+        onActionTriggered: function(actionId) {
+            if (actionId === "import") {
+                root.pendingImportDlcId = ""
+                importDlcDialog.open()
             }
         }
     }

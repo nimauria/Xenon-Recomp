@@ -1,7 +1,9 @@
 #include "xenon/filesystem/device.hpp"
 
+#include <memory>
 #include <stdexcept>
 
+#include "xenon/filesystem/directory_cursor.hpp"
 #include "xenon/filesystem/path.hpp"
 
 namespace xenon::filesystem {
@@ -42,6 +44,31 @@ FsError Device::query_directory(
     }
   }
   return FsError::None;
+}
+
+FsError Device::open_directory_cursor(
+    std::string_view relative_path, const DirectoryQuery& query,
+    std::unique_ptr<DirectoryCursor>& out_cursor) const {
+  out_cursor.reset();
+  auto cursor_query = query;
+  // Pagination belongs to DirectoryCursor::read. Capture the complete filtered
+  // snapshot here so a later Xbox file object can restart or resume reliably.
+  cursor_query.max_entries = 0;
+  std::vector<DirectoryEntry> entries;
+  const auto error = query_directory(relative_path, cursor_query, entries);
+  if (error != FsError::None) return error;
+  out_cursor = std::make_unique<DirectoryCursor>(std::move(entries));
+  return FsError::None;
+}
+
+FsError Device::set_attributes(std::string_view,
+                               const FileAttributeUpdate&) {
+  return read_only_ ? FsError::ReadOnly : FsError::Unsupported;
+}
+
+FsError Device::set_last_write_time(
+    std::string_view, std::filesystem::file_time_type) {
+  return read_only_ ? FsError::ReadOnly : FsError::Unsupported;
 }
 
 }  // namespace xenon::filesystem

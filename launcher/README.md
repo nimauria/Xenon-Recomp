@@ -2,7 +2,7 @@
 
 This folder contains the standalone Project Xenon launcher front-end.
 
-The launcher is intentionally isolated from `xenon_core`, CPU, memory, and graphics. Qt is a launcher dependency only and does not leak into the runtime ABI or game-module interfaces.
+The launcher is intentionally isolated from CPU, guest memory, and graphics internals. It may consume narrow public `Xenon::Core` and `Xenon::Filesystem` services through launcher adapters, while Qt remains a launcher-only dependency and never leaks into runtime or game-module interfaces.
 
 ## V7 front-end and branding pass
 
@@ -11,7 +11,7 @@ The v7 launcher pass moves the front-end from a functional prototype toward a po
 Key v7 work includes:
 
 - Official Xenon mark/wordmark/lockup resources, theme-aware recolouring, and a bundled Windows application icon.
-- One contextual top-bar search surface for Library, Modules, Profiles, and Settings instead of page-specific duplicate search fields.
+- One launcher-wide command/search surface across Home, Library, Modules, Profiles, Settings, and launcher actions.
 - A simplified primary sidebar with collapse/expand at the top; keyboard shortcuts moved to the Help popover rather than occupying permanent navigation space.
 - Create/Edit Profile dialogs with dirty-state protection, outside-click/Escape discard confirmation, immutable generated profile IDs, locally stored user avatars, and optional per-profile content-location overrides.
 - A configurable launcher-wide profile storage path. Normal-mode profile state is written atomically to `profiles.json`; profile avatars live under their profile ID.
@@ -43,7 +43,7 @@ Current front-end behaviour includes:
 - Application-data/configuration folder actions create missing directories before opening them, so the About-page buttons work on a clean installation.
 - The top profile control is now a quick profile switcher only; creation and editing stay on the Profiles page.
 
-- Library, Modules, Profiles, and Settings navigation.
+- Home dashboard plus Library, Modules, Profiles, and Settings navigation.
 - A normal empty library/module state with no bundled game or copyrighted content.
 - One clear **Add Game** flow on the Library page for user-provided local content.
 - Module import and management on the Modules page rather than duplicating it in Library.
@@ -132,7 +132,7 @@ QML UI -> LauncherBridge -> FrontendBackend -> LauncherCore services -> RuntimeB
 
 Launcher behaviour is split into feature-owned C++ slices for application state, settings/paths, profiles, library/DLC, modules/catalog/settings, import/export, updates, filesystem integration, diagnostics, branding, runtime projection and launching. Production persistence is implemented by shared Launcher Core services, while test fixtures live in the same feature layer so QML does not maintain a second set of business rules.
 
-The runtime boundary is intentionally truthful: the current `xenon::Runtime` API supports initialization/shutdown but does not yet expose a generic game-session execution API or live subsystem registry. `RuntimeBridge` therefore validates and carries a launch contract to that boundary without reporting a fake successful launch. Xbox 360 content probing, module ABI loading, packaged-module installation, DLC/save services, and actual session execution remain framework work below the launcher API.
+The runtime boundary is intentionally truthful: the current `xenon::Runtime` API supports initialization/shutdown but does not yet expose a generic game-session execution API or live subsystem registry. `RuntimeBridge` therefore validates and carries a launch contract to that boundary without reporting a fake successful launch. When `Xenon::Filesystem` is built, the launcher now uses the framework content probe to identify extracted/root `default.xex` content and direct XEX2 files and matches their Xbox title/media metadata against installed module manifests. GDFX disc-image parsing is now available through `Xenon::Filesystem`, including `.dvd` descriptor resolution and XEX2 identity probing inside the image. STFS/DLC packages, module ABI loading, save services, and actual session execution remain later framework work below the launcher API.
 
 See [`BACKEND.md`](BACKEND.md) and [`src/frontend_backend/README.md`](src/frontend_backend/README.md) for feature/service ownership, persistence, the launch contract, QML boundary rules, and the remaining Xenon framework seams.
 
@@ -182,3 +182,26 @@ Omit `-TestMode` for the normal empty-library production behaviour. The helper d
 ## Front-end regression testing
 
 See [`TESTING.md`](TESTING.md) for the front-end regression checklist used before packaging launcher UI revisions.
+
+## Live Input frontend and module API
+
+The launcher Input page is now backed by the real `Xenon::Input` subsystem when
+that target is compiled. It exposes live connected devices, stable identities,
+four Xbox-user routes, optional multi-source assignment, profile selection,
+background-input policy, rumble testing and support diagnostics. These values
+are persisted through Launcher Core rather than QML-owned state and are carried
+into `LaunchConfiguration` for the future game-session runtime.
+
+Game modules do not consume the Qt frontend. A module may instead negotiate the
+versioned native Input ABI with `runtimeApis.input` in its manifest and include
+`xenon/input/module_api.hpp` through the header-only `Xenon::InputAPI` target.
+For example Project Gracemeria can consume the runtime's final merged/profiled
+Xbox-visible state without importing SDL/XInput or private `InputSystem` types.
+See `../docs/modules/INPUT_API_V1.md`.
+
+The current runtime still lacks the final generic game-session/native-module
+loader, so the launch contract records the API requirement and input routing
+without pretending a module has already been handed a live function table. The
+future session loader only needs to create the runtime-owned Input API provider
+and pass its `ApiV1` table to the negotiated module; the Input ABI itself is
+already defined.

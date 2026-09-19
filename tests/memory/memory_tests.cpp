@@ -75,7 +75,13 @@ int main() {
   assert(rs[1].base == 0x40000000u && rs[1].allocation_page_size == 0x10000u);
   assert(rs[5].base == 0xA0000000u && rs[5].kind == RegionKind::PhysicalAlias);
 
-  assert(faults([&] { (void)mem.read8(0); }, FaultReason::Uncommitted));
+  // Retail low 64 KiB is committed as a permanent no-access guard rather than
+  // merely reserved. This distinction is observable through memory queries.
+  auto low_guard = mem.query(0u);
+  assert(low_guard && low_guard->state == PageState::Committed);
+  assert(low_guard->current_protect == Protect::None);
+  assert(low_guard->physical_address == 0xFFFFFFFFu);
+  assert(faults([&] { (void)mem.read8(0); }, FaultReason::Protection));
 
   // 4 KiB virtual mapping backed by real 512 MiB physical RAM.
   assert(mem.commit_fixed(0x00100000u, 0x2000u, kReadWrite));
@@ -106,10 +112,16 @@ int main() {
     AddressSpace aperture_mem(GuestTranslationMode::DirectAperture);
     assert(aperture_mem.initialize());
     assert(aperture_mem.direct_aperture_active());
-    assert(aperture_mem.direct_aperture_maps(kGpuWritebackBase));
-    assert(aperture_mem.direct_aperture_maps(kPhysical64KBase));
-    assert(aperture_mem.direct_aperture_maps(kPhysical16MBase));
-    assert(aperture_mem.direct_aperture_maps(kPhysical4KBase));
+    const bool compact_physical_aliases =
+        host_vm::fixed_shared_mapping_requires_page_views();
+    assert(aperture_mem.direct_aperture_maps(kGpuWritebackBase) ==
+           !compact_physical_aliases);
+    assert(aperture_mem.direct_aperture_maps(kPhysical64KBase) ==
+           !compact_physical_aliases);
+    assert(aperture_mem.direct_aperture_maps(kPhysical16MBase) ==
+           !compact_physical_aliases);
+    assert(aperture_mem.direct_aperture_maps(kPhysical4KBase) ==
+           !compact_physical_aliases);
     constexpr GuestAddress kAperturePage = 0x00200000u;
     assert(aperture_mem.commit_fixed(kAperturePage, kBasePageSize, kReadWrite));
     assert(aperture_mem.direct_aperture_maps(kAperturePage));
@@ -452,6 +464,45 @@ int main() {
     mapping_churn.join();
     assert(!failed.load(std::memory_order_relaxed));
     assert(concurrent_mem.validate_invariants());
+  }
+
+  // Phase 14 readback reconciliation takes a short write-quiescence window.
+  // A CPU store that starts while the window is held must not race the GPU
+  // writeback into physical RAM; it completes after the window is released and
+  // therefore deterministically wins the later ownership order.
+  {
+    AddressSpace gated_mem;
+    assert(gated_mem.initialize());
+    constexpr GuestAddress kGateWord = 0x00400000u;
+    assert(gated_mem.commit_fixed(kGateWord, kBasePageSize, kReadWrite));
+    const auto gate_physical = gated_mem.get_physical_address(kGateWord);
+    assert(gate_physical != 0xFFFFFFFFu);
+
+    std::atomic<bool> entered{false};
+    std::atomic<bool> completed{false};
+    std::thread cpu_writer;
+    {
+      auto window = gated_mem.physical_write_window();
+      assert(window);
+      cpu_writer = std::thread([&] {
+        entered.store(true, std::memory_order_release);
+        gated_mem.write32_be(kGateWord, 0x55667788u);
+        completed.store(true, std::memory_order_release);
+      });
+      while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
+      for (std::uint32_t i = 0; i < 2000u; ++i) std::this_thread::yield();
+      assert(!completed.load(std::memory_order_acquire));
+
+      const std::array gpu_value{std::byte{0x11}, std::byte{0x22},
+                                 std::byte{0x33}, std::byte{0x44}};
+      std::uint64_t publication_epoch = 0u;
+      assert(window.write(gate_physical, gpu_value, &publication_epoch));
+      assert(publication_epoch != 0u);
+      assert(gated_mem.read32_be(kGateWord) == 0x11223344u);
+    }
+    cpu_writer.join();
+    assert(completed.load(std::memory_order_acquire));
+    assert(gated_mem.read32_be(kGateWord) == 0x55667788u);
   }
 
   // Range operations use page-chunked native copies/fills. Overlap keeps the
@@ -820,7 +871,8 @@ int main() {
 
   // Memory V2 physical range allocator: bottom-up and top-down allocation
   // preserve Xbox-facing alignment semantics without scanning every physical
-  // page. The first 16 MiB remain reserved for the GPU writeback/XPS window.
+  // page. The first 16 MiB remain reserved for the GPU writeback/XPS window,
+  // and the final 64 KiB remains unavailable to physical allocations.
   {
     AddressSpace allocator_mem;
     assert(allocator_mem.initialize());
@@ -833,7 +885,16 @@ int main() {
     std::uint32_t high{};
     assert(allocator_mem.allocate_physical(kBasePageSize, kBasePageSize,
                                            true, high));
-    assert(high == kPhysicalMemorySize - kBasePageSize);
+    // Default physical allocations are 4 KiB-class allocations, so their
+    // top-down placement is bounded by the E-view heap before MMIO.
+    assert(high ==
+           (kPhysical4KAddressableEndInclusive + 1u - kBasePageSize));
+    assert(faults(
+        [&] {
+          (void)allocator_mem.read8(kPhysical64KBase +
+                                    kPhysicalAllocatableEndExclusive);
+        },
+        FaultReason::Protection));
 
     std::uint32_t aligned{};
     constexpr std::uint32_t kAlignment = 0x40000u;
@@ -949,7 +1010,8 @@ int main() {
       }
       assert((base & (alignment - 1u)) == 0u);
       assert(base >= kHugePageSize);
-      assert(std::uint64_t(base) + size <= kPhysicalMemorySize);
+      assert(std::uint64_t(base) + size <=
+             kPhysicalAllocatableEndExclusive);
       assert(!overlaps_live(base, size));
       live.push_back({base, size});
     }
@@ -965,6 +1027,353 @@ int main() {
                                              false, coalesced));
     assert(coalesced == kHugePageSize);
     assert(fragmented_mem.free_physical(coalesced, kLargeRun));
+  }
+
+  // Xbox-facing physical allocation policy sits above the range allocator:
+  // page classes round allocation size/alignment, min/max physical bounds are
+  // honored, and cache/protection metadata is visible through every physical
+  // alias rather than silently becoming generic RW cached RAM.
+  {
+    AddressSpace physical_policy_mem;
+    assert(physical_policy_mem.initialize());
+
+    PhysicalAllocationOptions options{};
+    options.page_class = PhysicalPageClass::Page64K;
+    options.minimum_address = 0x02000000u;
+    options.maximum_address = 0x02FFFFFFu;
+    options.protect = Protect::Read | Protect::NoCache;
+    std::uint32_t physical{};
+    assert(physical_policy_mem.allocate_physical(0x1234u, options, physical));
+    assert((physical & (kLargePageSize - 1u)) == 0u);
+    assert(physical >= options.minimum_address);
+    assert(std::uint64_t{physical} + kLargePageSize - 1u <=
+           options.maximum_address);
+
+    auto allocation =
+        physical_policy_mem.query_physical_allocation(physical + 0x100u);
+    assert(allocation);
+    assert(allocation->allocation_base == physical);
+    assert(allocation->allocation_size == kLargePageSize);
+    assert(allocation->page_size == kLargePageSize);
+    assert(allocation->page_class == PhysicalPageClass::Page64K);
+    assert(allocation->allocation_protect == options.protect);
+    assert(allocation->current_protect == options.protect);
+
+    const auto primary_alias = AddressSpace::physical_guest_alias(
+        physical, PhysicalPageClass::Page64K);
+    assert(primary_alias && *primary_alias == kPhysical64KBase + physical);
+    const auto alias = *primary_alias;
+    const auto alias_query = physical_policy_mem.query(alias);
+    assert(alias_query && alias_query->page_size == kLargePageSize);
+    assert(alias_query->allocation_protect == options.protect);
+    assert(alias_query->current_protect == options.protect);
+    const auto cache_info = physical_policy_mem.memory_type_info(alias);
+    assert(cache_info.type == MemoryType::CacheInhibited);
+
+    // A/C/E are views of the same physical backing and therefore must expose
+    // identical protection/cache policy. The primary alias differs by page
+    // class, but alternate architectural aliases cannot bypass that policy.
+    const auto alias_c = kPhysical16MBase + physical;
+    const auto alias_e = kPhysical4KBase +
+                         (physical - kPhysical4KViewOffset);
+    for (const auto physical_alias : {alias, alias_c, alias_e}) {
+      const auto info = physical_policy_mem.query(physical_alias);
+      assert(info && info->allocation_protect == options.protect);
+      assert(info->current_protect == options.protect);
+      assert(physical_policy_mem.memory_type_info(physical_alias).type ==
+             MemoryType::CacheInhibited);
+      assert(faults(
+          [&] { physical_policy_mem.write8(physical_alias, 0x77u); },
+          FaultReason::Protection));
+    }
+
+    Protect old_physical_protect{};
+    const auto wc_protect =
+        Protect::Read | Protect::Write | Protect::WriteCombine;
+    assert(physical_policy_mem.protect_physical(
+        physical, kLargePageSize, wc_protect, &old_physical_protect));
+    assert(old_physical_protect == options.protect);
+    allocation = physical_policy_mem.query_physical_allocation(physical);
+    assert(allocation && allocation->allocation_protect == options.protect);
+    assert(allocation->current_protect == wc_protect);
+    for (const auto physical_alias : {alias, alias_c, alias_e}) {
+      assert(physical_policy_mem.memory_type_info(physical_alias).type ==
+             MemoryType::WriteCombined);
+    }
+    physical_policy_mem.write8(alias_e, 0x5Au);
+    assert(physical_policy_mem.read8(alias) == 0x5Au);
+    assert(physical_policy_mem.read8(alias_c) == 0x5Au);
+    // The caller may free using the original unrounded byte count; the page
+    // class still identifies the complete physical allocation.
+    assert(physical_policy_mem.free_physical(physical, 0x1234u));
+
+    PhysicalAllocationOptions four_k_options{};
+    four_k_options.page_class = PhysicalPageClass::Page4K;
+    four_k_options.top_down = true;
+    std::uint32_t four_k{};
+    assert(physical_policy_mem.allocate_physical(kBasePageSize,
+                                                 four_k_options, four_k));
+    assert(four_k + kBasePageSize - 1u <=
+           kPhysical4KAddressableEndInclusive);
+    const auto four_k_alias = AddressSpace::physical_guest_alias(
+        four_k, PhysicalPageClass::Page4K);
+    assert(four_k_alias && *four_k_alias <= kPhysical4KHeapEnd);
+    assert(physical_policy_mem.free_physical(four_k, kBasePageSize));
+
+    // The 64 KiB A-view spans the full 512 MiB physical address range, so it
+    // is not artificially limited by the E-view/MMIO boundary.
+    PhysicalAllocationOptions top_a_options{};
+    top_a_options.page_class = PhysicalPageClass::Page64K;
+    top_a_options.top_down = true;
+    std::uint32_t top_a{};
+    assert(physical_policy_mem.allocate_physical(kLargePageSize,
+                                                 top_a_options, top_a));
+    assert(top_a ==
+           kPhysicalAllocatableEndExclusive - kLargePageSize);
+    assert(physical_policy_mem.free_physical(top_a, kLargePageSize));
+
+    PhysicalAllocationOptions huge_options{};
+    huge_options.page_class = PhysicalPageClass::Page16M;
+    huge_options.minimum_address = 0x04000000u;
+    huge_options.maximum_address = 0x07FFFFFFu;
+    huge_options.zero_initialize = false;
+    std::uint32_t huge{};
+    assert(physical_policy_mem.allocate_physical(1u, huge_options, huge));
+    assert((huge & (kHugePageSize - 1u)) == 0u);
+    assert(huge >= huge_options.minimum_address);
+    assert(std::uint64_t{huge} + kHugePageSize - 1u <=
+           huge_options.maximum_address);
+    const auto huge_alias = AddressSpace::physical_guest_alias(
+        huge, PhysicalPageClass::Page16M);
+    assert(huge_alias && *huge_alias == kPhysical16MBase + huge);
+    assert(physical_policy_mem.free_physical(huge, 1u));
+    assert(physical_policy_mem.validate_invariants());
+  }
+
+  // MEM_NOZERO-style policy is expressible without a parallel memory system.
+  // A no-zero commit may reuse the previous physical contents; ordinary
+  // commits still guarantee zero initialization.
+  {
+    AddressSpace nozero_mem;
+    assert(nozero_mem.initialize());
+    std::uint32_t stale_physical{};
+    assert(nozero_mem.allocate_physical(kBasePageSize, kBasePageSize, false,
+                                        stale_physical));
+    nozero_mem.write32_be(kPhysical64KBase + stale_physical, 0xA1B2C3D4u);
+    assert(nozero_mem.free_physical(stale_physical, kBasePageSize));
+
+    GuestAddress nozero_va{};
+    VirtualAllocationOptions nozero{};
+    nozero.zero_initialize = false;
+    assert(nozero_mem.allocate(kBasePageSize, kBasePageSize, kReadWrite,
+                               false, nozero_va, std::nullopt, nozero));
+    assert(nozero_mem.get_physical_address(nozero_va) == stale_physical);
+    assert(nozero_mem.read32_be(nozero_va) == 0xA1B2C3D4u);
+    assert(nozero_mem.release(nozero_va));
+
+    std::uint32_t stale_again{};
+    assert(nozero_mem.allocate_physical(kBasePageSize, kBasePageSize, false,
+                                        stale_again));
+    nozero_mem.write32_be(kPhysical64KBase + stale_again, 0x11223344u);
+    assert(nozero_mem.free_physical(stale_again, kBasePageSize));
+    GuestAddress zeroed_va{};
+    assert(nozero_mem.allocate(kBasePageSize, kBasePageSize, kReadWrite,
+                               false, zeroed_va));
+    assert(nozero_mem.get_physical_address(zeroed_va) == stale_again);
+    assert(nozero_mem.read32_be(zeroed_va) == 0u);
+    assert(nozero_mem.release(zeroed_va));
+  }
+
+  // Non-fixed virtual allocation can reserve without committing. This is the
+  // Memory V2 primitive needed by an NtAllocateVirtualMemory-compatible layer.
+  {
+    AddressSpace reserve_only_mem;
+    assert(reserve_only_mem.initialize());
+    VirtualAllocationOptions reserve_only{};
+    reserve_only.commit = false;
+    GuestAddress reserved{};
+    assert(reserve_only_mem.allocate(2u * kBasePageSize, kBasePageSize,
+                                     kReadWrite, false, reserved,
+                                     std::nullopt, reserve_only));
+    auto info = reserve_only_mem.query(reserved);
+    assert(info && info->state == PageState::Reserved);
+    assert(faults([&] { (void)reserve_only_mem.read8(reserved); },
+                  FaultReason::Uncommitted));
+    assert(reserve_only_mem.commit_fixed(reserved, 2u * kBasePageSize,
+                                         kReadWrite));
+    info = reserve_only_mem.query(reserved);
+    assert(info && info->state == PageState::Committed);
+    assert(reserve_only_mem.release(reserved));
+  }
+
+  // Query regions may never cross the allocation that supplied their first
+  // page, even when adjacent allocations have identical state/protection.
+  {
+    AddressSpace query_mem;
+    assert(query_mem.initialize());
+    constexpr GuestAddress first = 0x00500000u;
+    constexpr GuestAddress second = first + kBasePageSize;
+    assert(query_mem.commit_fixed(first, kBasePageSize, kReadWrite));
+    assert(query_mem.commit_fixed(second, kBasePageSize, kReadWrite));
+    const auto first_info = query_mem.query(first);
+    const auto second_info = query_mem.query(second);
+    assert(first_info && first_info->allocation_base == first);
+    assert(second_info && second_info->allocation_base == second);
+    assert(first_info->region_size == kBasePageSize);
+    assert(second_info->region_size == kBasePageSize);
+    assert(query_mem.release(first));
+    assert(query_mem.release(second));
+  }
+
+  // Byte-granular decommit follows NT/XDK range semantics: every page touched
+  // by the byte range is decommitted, including an unaligned boundary cross.
+  {
+    AddressSpace decommit_range_mem;
+    assert(decommit_range_mem.initialize());
+    constexpr GuestAddress base = 0x00600000u;
+    assert(decommit_range_mem.commit_fixed(base, 2u * kBasePageSize,
+                                           kReadWrite));
+    assert(decommit_range_mem.decommit(base + kBasePageSize - 1u, 2u));
+    const auto first = decommit_range_mem.query(base);
+    const auto second = decommit_range_mem.query(base + kBasePageSize);
+    assert(first && first->state == PageState::Reserved);
+    assert(second && second->state == PageState::Reserved);
+    assert(decommit_range_mem.release(base));
+  }
+
+  // Memory-management operations use the architectural page size of the
+  // selected heap. A byte request in the 64 KiB virtual heap changes the
+  // complete Xbox page, and protection may not span two independent
+  // reservations even when they are adjacent.
+  {
+    AddressSpace native_page_mem;
+    assert(native_page_mem.initialize());
+    constexpr GuestAddress first = kVirtual64KBase + 0x00100000u;
+    constexpr GuestAddress second = first + kLargePageSize;
+    assert(native_page_mem.commit_fixed(first, kLargePageSize, kReadWrite));
+    assert(native_page_mem.commit_fixed(second, kLargePageSize, kReadWrite));
+
+    Protect old{};
+    assert(!native_page_mem.protect(first + kLargePageSize - 0x1000u,
+                                    0x2000u, Protect::Read, &old));
+    auto first_info = native_page_mem.query(first);
+    auto second_info = native_page_mem.query(second);
+    assert(first_info && first_info->current_protect == kReadWrite);
+    assert(second_info && second_info->current_protect == kReadWrite);
+
+    assert(native_page_mem.protect(first + 0x1234u, 1u, Protect::Read, &old));
+    assert(old == kReadWrite);
+    first_info = native_page_mem.query(first);
+    const auto first_tail = native_page_mem.query(first + 0xF000u);
+    second_info = native_page_mem.query(second);
+    assert(first_info && first_tail && second_info);
+    assert(first_info->current_protect == Protect::Read);
+    assert(first_tail->current_protect == Protect::Read);
+    assert(second_info->current_protect == kReadWrite);
+    assert(faults([&] { native_page_mem.write8(first, 0x11u); },
+                  FaultReason::Protection));
+    assert(faults([&] { native_page_mem.write8(first + 0xF000u, 0x22u); },
+                  FaultReason::Protection));
+
+    // A one-byte decommit in the 64 KiB heap decommits all sixteen hot pages
+    // making up that architectural page, not just the internal 4 KiB entry.
+    assert(native_page_mem.decommit(second + 0x2345u, 1u));
+    second_info = native_page_mem.query(second);
+    const auto second_tail = native_page_mem.query(second + 0xF000u);
+    assert(second_info && second_tail);
+    assert(second_info->state == PageState::Reserved);
+    assert(second_tail->state == PageState::Reserved);
+    assert(native_page_mem.release(first));
+    assert(native_page_mem.release(second));
+  }
+
+  // The 0x800 XEX view is a 64 KiB heap even though it shares backing with
+  // the 0x900 4 KiB alias. Management through the 64 KiB view must never
+  // expose a partial 4 KiB state, and the backing alias observes the result.
+  {
+    AddressSpace xex_page_mem;
+    assert(xex_page_mem.initialize());
+    constexpr GuestAddress xex = kXex64KBase + 0x00200000u;
+    constexpr GuestAddress xex_alias = xex + 0x10000000u;
+    assert(xex_page_mem.commit_fixed(xex, kLargePageSize, kReadWrite));
+    assert(xex_page_mem.protect(xex + 0x3210u, 1u, Protect::Read));
+    const auto xex_tail = xex_page_mem.query(xex + 0xF000u);
+    const auto alias_tail = xex_page_mem.query(xex_alias + 0xF000u);
+    assert(xex_tail && alias_tail);
+    assert(xex_tail->current_protect == Protect::Read);
+    assert(alias_tail->current_protect == Protect::Read);
+    assert(xex_page_mem.decommit(xex + 0x2222u, 1u));
+    assert(xex_page_mem.query(xex)->state == PageState::Reserved);
+    assert(xex_page_mem.query(xex + 0xF000u)->state == PageState::Reserved);
+    assert(xex_page_mem.query(xex_alias)->state == PageState::Reserved);
+    assert(xex_page_mem.release(xex));
+  }
+
+  // Physical protection obeys the allocation's 4K/64K/16M page class and
+  // cannot cross into another physical allocation. Alias views therefore
+  // cannot observe a sub-page protection split that the Xbox heap could not
+  // represent.
+  {
+    AddressSpace physical_protect_mem;
+    assert(physical_protect_mem.initialize());
+    PhysicalAllocationOptions options{};
+    options.page_class = PhysicalPageClass::Page64K;
+    options.minimum_address = 0x03000000u;
+    options.maximum_address = 0x03FFFFFFu;
+    options.top_down = false;
+    std::uint32_t physical{};
+    assert(physical_protect_mem.allocate_physical(
+        2u * kLargePageSize, options, physical));
+    assert(physical_protect_mem.protect_physical(
+        physical + kLargePageSize + 0x123u, 1u, Protect::Read));
+    const auto first =
+        physical_protect_mem.query_physical_allocation(physical);
+    const auto second = physical_protect_mem.query_physical_allocation(
+        physical + kLargePageSize + 0xF000u);
+    assert(first && second);
+    assert(first->current_protect == kReadWrite);
+    assert(second->current_protect == Protect::Read);
+    const auto first_alias = kPhysical64KBase + physical;
+    const auto second_alias = first_alias + kLargePageSize;
+    physical_protect_mem.write8(first_alias, 0x5Au);
+    assert(faults([&] { physical_protect_mem.write8(second_alias, 0xA5u); },
+                  FaultReason::Protection));
+    assert(!physical_protect_mem.protect_physical(
+        physical + 2u * kLargePageSize - 1u, 2u, kReadWrite));
+    assert(physical_protect_mem.free_physical(
+        physical, 2u * kLargePageSize));
+
+    PhysicalAllocationOptions huge{};
+    huge.page_class = PhysicalPageClass::Page16M;
+    huge.minimum_address = 0x04000000u;
+    huge.maximum_address = 0x07FFFFFFu;
+    huge.top_down = false;
+    std::uint32_t huge_physical{};
+    assert(physical_protect_mem.allocate_physical(1u, huge, huge_physical));
+    assert(physical_protect_mem.protect_physical(
+        huge_physical + 0x1234u, 1u, Protect::Read));
+    const auto huge_tail = physical_protect_mem.query_physical_allocation(
+        huge_physical + kHugePageSize - kBasePageSize);
+    assert(huge_tail && huge_tail->current_protect == Protect::Read);
+    assert(physical_protect_mem.free_physical(huge_physical, 1u));
+  }
+
+  // Queries of free memory report the remaining free run rather than a
+  // zero-length region. Mid-page queries retain a byte-accurate starting
+  // address while terminating at the next occupied page.
+  {
+    AddressSpace free_query_mem;
+    assert(free_query_mem.initialize());
+    constexpr GuestAddress occupied = 0x00800000u;
+    assert(free_query_mem.commit_fixed(occupied, kBasePageSize, kReadWrite));
+    const auto page_query = free_query_mem.query(occupied - kBasePageSize);
+    const auto mid_query = free_query_mem.query(occupied - 0x800u);
+    assert(page_query && mid_query);
+    assert(page_query->state == PageState::Free);
+    assert(mid_query->state == PageState::Free);
+    assert(page_query->region_size == kBasePageSize);
+    assert(mid_query->region_size == 0x800u);
+    assert(free_query_mem.release(occupied));
   }
 
   // 64 KiB virtual allocations use the second guest heap and preserve alignment.

@@ -19,6 +19,7 @@ struct LaunchConfiguration {
   QString module_path;
   QString module_version;
   QVariantMap module_settings;
+  QVariantMap runtime_api_requirements;
 
   QString profile_id;
   QString profile_name;
@@ -27,9 +28,14 @@ struct LaunchConfiguration {
   QString renderer;
   bool shader_cache = true;
   QString shader_cache_mode;
+  QString input_backend;
   QString input_preferred_device;
   double input_deadzone = 0.10;
   bool input_rumble = true;
+  bool input_background = false;
+  int input_module_api_version = 1;
+  QString input_profile_store_path;
+  QVariantList input_user_sources;
   double audio_master_volume = 1.0;
   bool audio_mute_unfocused = false;
   QString audio_latency_profile;

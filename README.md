@@ -1,673 +1,361 @@
 # Xenon Recomp
 
-**Xenon Recomp** is an experimental modular static-recompilation platform for Xbox 360 software, built around a reusable native runtime and a multi-game desktop launcher.
+**Xenon Recomp** is an experimental, modular Xbox 360 static-recompilation runtime and native compatibility framework for modern hardware and operating systems.
 
-The project is designed so individual game recompilation projects can share one implementation of Xbox 360 CPU behaviour, memory semantics, Xenos graphics translation, filesystem services, launcher infrastructure, module management, and host-platform support instead of rebuilding those foundations independently for every title.
+The project is being built so that individual game recompilation projects can share one reusable implementation of the Xbox 360 CPU, memory model, Xenos-facing graphics layer, host graphics backends, runtime services, launcher infrastructure, and platform abstractions instead of rebuilding the same foundations for every title.
 
-The long-term user-facing model is:
-
-```text
-                     Xenon Launcher
-                          |
-          +---------------+---------------+
-          |               |               |
-          v               v               v
-      Game Module     Game Module     Game Module
-          |               |               |
-          +---------------+---------------+
-                          |
-                          v
-                     Xenon Runtime
-                          |
-       +------------------+------------------+
-       |           |            |            |
-       v           v            v            v
-      CPU        Memory      Filesystem    Services
-                    |
-                    v
-              Xenos Graphics
-                    |
-              +-----+-----+
-              |           |
-              v           v
-           Vulkan       D3D12
-              |           |
-              +-----+-----+
-                    |
-                    v
-               Host Platform
-```
-
-Xenon is **not a finished emulator or finished compatibility layer**. It is under active development, interfaces are still evolving, and real-title execution is not yet complete.
+Xenon is **not a finished emulator or a finished compatibility layer**. It is under active development, interfaces are still changing, and game-level execution is not yet complete.
 
 > [!IMPORTANT]
-> Xenon does not distribute Xbox 360 firmware, executables, games, title updates, DLC, keys, or other proprietary content. Supported recompilation projects are expected to operate on content legally obtained and supplied by the user.
-
----
+> Xenon does not distribute Xbox 360 firmware, executables, games, title updates, DLC, keys, or other proprietary content. Supported game projects are expected to work from content legally obtained and supplied by the user.
 
 ## Project direction
 
-Xenon is built around **native/static recompilation**, rather than interpreting Xbox 360 PowerPC instructions at runtime.
-
-The current CPU path is:
+The core direction is native/static recompilation rather than a guest instruction interpreter:
 
 ```text
-Xbox 360 PPC / VMX128 machine code
+Xbox 360 title / recompiled game code
+                |
+                v
+       Xenon CPU + Runtime
+                |
+        +-------+-------+
+        |               |
+        v               v
+   Xenon Memory      Xbox Services
         |
         v
-   Xenon Decoder
+   Xenos Frontend
         |
         v
-     Xenon IR
+   Xenon Graphics IR
         |
-        v
-    Optimizer
-        |
-        v
- Native C++ AOT
-        |
-        v
- Host C++ Compiler
-        |
-        v
- Native Host Code
+   +----+--------------------+
+   |                         |
+   v                         v
+Vulkan 1.3               Direct3D 12
+   |                         |
+   +------------+------------+
+                |
+                v
+          Host platform
 ```
 
-The shared runtime is deliberately game-independent.
+Game projects may depend on Xenon. **Xenon must not depend on any individual game project.** Title-specific hooks, patches, symbols, content definitions, artwork, workarounds, and game-specific renderer behavior belong in the game module/project that owns them.
 
-Game modules may depend on Xenon.
-
-**Xenon must not depend on any individual game project.**
-
-Title-specific hooks, patches, generated code, symbols, content definitions, artwork, compatibility workarounds, and title-specific services belong to the module/project that owns that title.
-
-Project Gracemeria / Ace Combat 6 is the first intended real-game integration and validation target, but Ace Combat 6-specific behaviour must remain outside the generic Xenon runtime.
+Project Gracemeria / Ace Combat 6 is the first intended real-title integration and validation target, but AC6-specific behavior must remain outside the generic Xenon runtime.
 
 ---
 
-# Current development status
+## Current development status
 
-Status reflects the `dev` branch as of **18 September 2026**.
+Status reflects the source tree and validation work as of **19 September 2026**.
 
 | Area | Status | Current state |
 | --- | --- | --- |
-| CPU | **Advanced stable foundation** | 455/455 canonical Xenon PPC/VMX/VMX128 opcode patterns decode, lift to Xenon IR and lower through the native AOT path. |
-| Memory V2 | **Advanced development** | Phases 1–13 complete. Lock-free/atomic hot translation, physical ownership, reservation monitoring, range operations, controlled external writes and shared coherency are implemented. |
-| Xenos frontend | **Advanced** | PM4 processing, register state, draw normalization, shaders, resources, textures, EDRAM, ownership and presentation contracts are implemented. |
-| Vulkan | **Advanced native backend** | Vulkan 1.3 device/resources/pipelines, guest-memory mirror, textures, MRT/depth, rendering and presentation infrastructure exist. |
-| Direct3D 12 | **Advanced native backend** | Native Windows device/resources/pipelines, guest-memory mirror, MRT/depth, rendering and presentation infrastructure exist. |
-| EDRAM / resolves | **Advanced / incomplete** | Canonical EDRAM ownership and major colour/depth foundations exist; remaining fidelity and ownership paths are still being completed. |
-| Filesystem | **V1 implemented** | Generic host-independent VFS, host-directory devices, mounts, aliases, sharing semantics, metadata, enumeration and filesystem tests are present. |
-| Launcher UI | **Advanced frontend** | Qt 6 Quick launcher with Library, Modules, Profiles, Settings, themes, branding, diagnostics and responsive desktop UI. |
-| Launcher Core | **Active implementation** | Persistent profiles/library/module state, settings, package staging, launch-contract assembly, filesystem integration, updates and runtime bridge are backend-owned. |
-| Module ecosystem | **Initial infrastructure implemented** | Public module catalog, GitHub Releases-based discovery/update model, digest verification and catalog validation workflow exist. |
-| Xbox kernel/XAM/XAPI | **Early / planned** | Kernel handles, guest API marshalling, Xbox exports and higher runtime services remain major future phases. |
-| Audio / Input / Network | **Planned** | Module boundaries exist but runtime implementations remain future work. |
-| ARM64 | **Planned** | Core architecture remains host-neutral; x86-64 remains the current execution target. |
-| Linux | **Supported development target** | CPU/memory validation and Vulkan-oriented architecture are supported; broader launcher/runtime qualification remains ongoing. |
-| Android | **Future target** | Intended through the host-neutral runtime and Vulkan path. |
+| CPU | Advanced foundation | 455/455 canonical Xenon PPC/VMX/VMX128 opcode patterns decode, lift to Xenon IR, lower to the native C++ AOT path, and are covered by generated/native validation. |
+| Memory | Production foundation | 512 MiB unified physical RAM model, Xbox virtual/physical aliases, protections, MMIO, reservations, coherency notifications, physical mappings, and CPU/GPU sharing are implemented. |
+| Xenos frontend | Advanced | PM4/register processing, draw normalization, shader loading/decoding, resource state, primitive processing, EDRAM state, predication, and normalized graphics IR are implemented. |
+| Shader translation | In progress / working foundation | Xenos shader state is translated through Xenon-owned HLSL generation and DXC to DXIL and Vulkan SPIR-V. |
+| Vulkan | Active native backend | Vulkan 1.3 device/resource/pipeline, guest-memory mirror, textures, descriptors, dynamic rendering, MRT, depth, draw submission, and hardware validation are present. |
+| Direct3D 12 | Active native backend | D3D12 device/resource/pipeline, guest-memory mirror, textures, root resources, MRT, depth, draw submission, and hardware validation are present. |
+| EDRAM / resolves | Advanced but incomplete | Color ownership, native targets, MSAA mapping, raw bit-compatible color resolves, alias handling, and canonical EDRAM ownership are implemented; several fidelity paths remain. |
+| Launcher | Frontend development | Optional Qt 6 Quick launcher UI is being developed as a generic multi-game/module frontend. Runtime-backed actions are not all connected yet. |
+| Input | Active subsystem | Portable four-user routing, SDL2 gamepads, keyboard/mouse virtual gamepad mapping, host-side XAM semantics, and persistent calibration/deadzone/response profiles are implemented; guest XAM ABI marshalling waits for Memory v2. |
+| Other Xbox runtime services | Early / planned | Filesystem, user/profile services, achievements, content, audio, networking, and higher Xbox API layers remain later phases in this branch. |
+| ARM64 | Planned | The architecture is intended to remain host-neutral, but the current validation focus is x86-64. |
+| Linux / Android | Planned / partial foundations | Vulkan is the intended cross-platform graphics path; desktop x86-64 bring-up remains the current priority. |
+
+### Validation snapshot
+
+The CPU baseline covers all **455 canonical opcode patterns** through decode, IR lifting, AOT source generation, compilation, and execution without adding a guest-opcode runtime interpreter fallback.
+
+The current Windows graphics validation documented in the tree reaches **24/24 CTest targets in Visual C++ Release**, including hardware-backed Vulkan and Direct3D 12 validation. The corresponding Debug tree passes all configured tests; one recorded Debug tree contained 23 configured tests because DXC discovery was not enabled in that build directory.
+
+Earlier Linux CPU/memory/frontend checkpoints were also validated with GCC, Clang, and sanitizer builds. See the detailed validation documents under `docs/` for the exact checkpoint, host, compiler, and test matrix rather than treating a single test count as a permanent project-wide number.
 
 ---
 
-# CPU
+## CPU
 
-The Xenon CPU layer provides the static-recompilation frontend used by supported game projects.
+The current CPU pipeline is:
 
-Current architectural state includes:
+```text
+Xbox 360 PPC / VMX128 machine code
+        -> Xenon decoder
+        -> guest semantic frontend
+        -> architecture-neutral Xenon IR
+        -> optimizer
+        -> native C++ AOT backend
+        -> host C++ compiler
+        -> native host executable code
+```
 
-- 32 × 64-bit GPRs;
-- floating-point register state;
-- 128 VMX128 vector registers;
-- CR, XER, FPSCR and VSCR;
-- LR, CTR, MSR, VRSAVE and PVR;
-- guest time-base support;
-- load-reserve/store-conditional state;
-- integer and control-flow instructions;
-- floating-point instructions;
-- scalar and vector memory operations;
-- VMX and VMX128 instruction families;
-- big-endian Xbox memory semantics;
-- explicit byte-reversed PPC operations;
-- generated compile/execution validation;
-- architecture-neutral IR.
+Current CPU work includes:
 
-All **455 canonical opcode patterns** in the current catalogue decode, lift and lower through the native AOT path.
+- 32 64-bit GPRs.
+- 32 floating-point register bit containers.
+- 128 VMX128 vector registers.
+- CR, XER, FPSCR, VSCR, LR, CTR, MSR, VRSAVE, PVR and time-base state.
+- Integer, control-flow, floating-point, scalar memory, vector memory, VMX and VMX128 instruction families represented in the opcode catalogue.
+- Load-reserve/store-conditional behavior.
+- Big-endian Xbox memory semantics and explicit byte-reversed PPC operations.
+- Generated compile/execution tests covering the canonical opcode corpus.
+- A host-neutral IR boundary intended to keep ARM64 possible later.
 
-The current production target is **x86-64 first**.
+The current production target is **x86-64 first**. ARM64 work is deliberately deferred until the first title path is running reliably.
 
-ARM64 remains an intended backend, but development is deliberately prioritising complete x86-64 game execution before expanding the host architecture matrix.
-
-See:
-
-[`docs/cpu/VALIDATION.md`](docs/cpu/VALIDATION.md)
+Detailed CPU validation: [`docs/cpu/VALIDATION.md`](docs/cpu/VALIDATION.md)
 
 ---
 
-# Memory V2
+## Memory
 
-Memory V2 is the current production evolution of Xenon's Xbox 360 memory subsystem.
+`memory::AddressSpace` is the production guest memory implementation. `FlatMemory` remains a CPU/test fixture.
 
-The design keeps Xbox-visible memory semantics owned by Xenon while replacing expensive V1 implementation mechanisms with native host-friendly equivalents.
+Implemented memory foundations include:
 
-```text
-Xbox 360 memory semantics
-          |
-          v
- canonical Xenon model
-          |
-          v
-efficient host representation
-          |
-    +-----+------+
-    |            |
-    v            v
- Windows       Linux
- x86-64        x86-64
-                   |
-                   v
-              future ARM64
-```
+- 512 MiB unified Xbox 360 physical RAM.
+- Xbox virtual address-space regions and allocation page sizes.
+- Physical RAM views and alias relationships.
+- XEX dual-view aliasing.
+- GPU/writeback physical view handling.
+- Fixed reserve/commit and aligned allocation.
+- 4 KiB, 64 KiB and large-page semantics where required by the guest map.
+- Decommit, release, protection and region queries.
+- Virtual-to-physical translation.
+- Explicit physical allocation and virtual mapping.
+- Read/write/execute protection enforcement.
+- 8/16/32/64/128-bit CPU accesses.
+- Reservation tracking by physical granule rather than virtual alias.
+- External DMA/GPU write notification.
+- Physical write observers.
+- MMIO registration and overlay routing.
+- Instruction-cache invalidation callback routing.
 
-## Completed Memory V2 work
+A core design rule is that the CPU and GPU do **not** maintain separate guest RAM implementations. Xenos-facing work consumes the same production physical backing used by recompiled CPU code.
 
-The first thirteen implementation phases are complete:
-
-1. architecture and hot-path audit;
-2. hot/cold access architecture;
-3. compact atomic page translation;
-4. removal of global normal-RAM access serialization;
-5. host VM abstraction;
-6. optional direct 4 GiB guest aperture;
-7. coalescing physical allocator;
-8. physical ownership and alias lifetime;
-9. Xenon/PPC reservation monitor;
-10. explicit PPC memory-ordering model;
-11. block/range memory access;
-12. dirty tracking and observer replacement;
-13. safe controlled external/DMA writes.
-
-Important improvements include:
-
-- generated PPC code obtains a concrete `MemoryAccessContext`;
-- normal RAM access avoids virtual dispatch and the global management lock;
-- 1,048,576 guest pages use compact atomic hot translation entries;
-- physical page retirement uses safe read-side quiescence;
-- reservation state is physical rather than virtual;
-- the old ~16 MiB reservation-generation table has been replaced by a much smaller monitor;
-- Windows/POSIX host VM behaviour is separated from Xbox memory policy;
-- controlled GPU/DMA writes automatically publish reservation, executable and coherency changes;
-- synchronous physical-write observer work has been removed from normal scalar stores;
-- range operations replace repeated byte/scalar loops where possible;
-- Vulkan, D3D12 and texture tracking consume Xenon-owned coherency state.
-
-## Current remaining Memory V2 phases
-
-Work continues on:
-
-- shared CPU/GPU coherency hardening;
-- lazy/range GPU synchronization;
-- complete memory-type semantics;
-- MMIO slow-path refinement;
-- richer memory faults and kernel exception translation;
-- executable-page/native code-cache invalidation;
-- expanded benchmarks;
-- additional fuzzing and platform hardening.
-
-The optional direct guest aperture is implemented but is **not currently the default**. Current Linux x86-64 measurements favour the compact translation path, so platforms should only opt into the aperture after qualification.
-
-See:
-
-- [`docs/MEMORY_V2.md`](docs/MEMORY_V2.md)
-- [`docs/memory/BASELINE.md`](docs/memory/BASELINE.md)
-- [`docs/memory/VALIDATION.md`](docs/memory/VALIDATION.md)
+Memory architecture: [`docs/memory/BASELINE.md`](docs/memory/BASELINE.md)  
+Memory validation: [`docs/memory/VALIDATION.md`](docs/memory/VALIDATION.md)
 
 ---
 
-# Graphics / Xenos
+## Graphics / Xenos
 
-Xenon separates Xbox 360/Xenos behaviour from native host rendering APIs.
+Xenon keeps Xbox/Xenos behavior in a common host-independent graphics layer and keeps Vulkan/D3D12 as native host backends.
 
-```text
-Xbox / Xenos state
-       |
-       v
-Common Xenos frontend
-       |
-       v
-Normalized Xenon graphics state
-       |
-   +---+---+
-   |       |
-   v       v
- Vulkan   D3D12
-```
+The host backends consume normalized Xenon graphics state. They do not contain a second title-specific Xbox GPU command processor.
 
-Vulkan and D3D12 do not maintain independent Xbox GPU semantics.
+### Common Xenos layer
 
-## Common Xenos layer
+Current common graphics work includes:
 
-Current common functionality includes:
+- PM4 packet processing and register-file state.
+- Circular command ring and indirect-buffer handling.
+- Type-3 packet predication.
+- Draw-state normalization and graphics IR.
+- DMA/immediate/auto-index draw sources.
+- Primitive topology processing and primitive-restart handling.
+- Shader container loading, hashing, decoding and reflection.
+- Host-neutral shader/resource ABI.
+- Fetch constants, texture descriptors and constant banks.
+- Texture formats, tiled addressing, mip handling and endian conversion.
+- Shared guest-memory write/coherency handling.
+- 10 MiB Xenos EDRAM model.
+- EDRAM surface identity and circular tile ownership.
+- Color/depth target planning.
+- MRT slot preservation.
+- Raster, depth/stencil, blend, color-mask, viewport and scissor state.
+- D24FS8 / 20e4 depth support foundations.
+- Backend-neutral resource barrier planning.
+- Raw color resolve/copy paths back into Xbox tiled guest memory.
 
-- PM4 packet processing;
-- register-file state;
-- circular command rings;
-- indirect buffers;
-- predication;
-- draw normalization;
-- graphics IR;
-- DMA, immediate and auto-index draw sources;
-- primitive topology conversion;
-- primitive restart;
-- shader loading and hashing;
-- Xenos shader decoding;
-- shader reflection;
-- HLSL lowering;
-- common shader/resource ABI;
-- fetch constants;
-- texture descriptors;
-- texture format catalogue;
-- tiled addressing and detiling;
-- mip handling;
-- endian conversion;
-- EDRAM modelling;
-- EDRAM ownership;
-- colour/depth target planning;
-- MRT state;
-- D24S8 / D24FS8 / 20e4 foundations;
-- raster/depth/stencil/blend state;
-- resource barriers;
-- resolve/copy infrastructure;
-- presentation-frame preparation.
+### Vulkan
 
-## DXC shader pipeline
+`Xenon::GraphicsVulkan` currently targets Vulkan 1.3 and includes foundations for:
 
-A shared Xenon HLSL lowering path targets both native graphics APIs:
-
-```text
-Xenos shader
-     |
-     v
-Xenon shader model
-     |
-     v
-    HLSL
-     |
-     v
-    DXC
-   /   \
-  v     v
-DXIL   SPIR-V
- |       |
-D3D12  Vulkan
-```
-
-Xenon owns its shader ABI, translation model and cache identity rather than inheriting title-specific bindings.
-
-## Vulkan
-
-`Xenon::GraphicsVulkan` currently includes:
-
-- Vulkan 1.3 device and queue creation;
-- synchronization and command submission;
-- guest-memory mirroring;
+- device and queue creation;
+- synchronization and submission;
+- guest physical-memory mirroring;
 - buffers and images;
-- resource layouts;
-- textures and samplers;
-- SPIR-V pipelines;
+- descriptor/resource layouts;
+- texture realization and samplers;
+- SPIR-V shader pipelines;
 - dynamic rendering;
-- MRT;
-- depth targets;
-- indexed and non-indexed draws;
-- target resolve/readback;
-- presentation/swapchain infrastructure;
-- resize and synchronization handling.
-
-## Direct3D 12
-
-`Xenon::GraphicsD3D12` provides equivalent Windows-native foundations including:
-
-- device/queue/fence management;
-- guest-memory mirroring;
-- resources and transitions;
-- descriptors/root resources;
-- DXIL pipelines;
-- textures and samplers;
-- MRT;
+- multiple render targets;
 - depth targets;
 - native draw submission;
-- resolve/readback;
-- DXGI swapchain/presentation infrastructure.
+- render-target readback/resolve support.
 
-## Presentation
+### Direct3D 12
 
-A backend-neutral presentation contract now exists above both APIs.
+`Xenon::GraphicsD3D12` contains equivalent native foundations for Windows, including:
 
-The correctness-first GPU V1 presentation path can:
+- device/queue/fence handling;
+- guest physical-memory mirroring;
+- native resources and state transitions;
+- root-resource/descriptor handling;
+- DXIL pipelines;
+- textures and samplers;
+- MRT/depth targets;
+- native draw submission;
+- render-target readback/resolve support.
 
-- consume a Xenos scanout texture;
-- crop to the visible dimensions;
-- convert supported source formats into RGBA8;
-- scale to the host output;
-- preserve aspect ratio with letterboxing;
-- feed backend presentation swapchains.
+### DXC shader path
 
-Both Vulkan and D3D12 now contain native `PresentationSwapchain` implementations.
+Xenon uses a shared HLSL lowering boundary and DXC so the same normalized shader work can target:
 
-Remaining work is therefore no longer simply “implement a swapchain”; it is integration, hardware validation, frame scheduling/performance work and eventual real-title presentation.
+- DXIL for Direct3D 12;
+- SPIR-V for Vulkan 1.3.
 
-## Remaining graphics work
+The project intentionally owns its shader ABI, translation state, cache identity, and backend integration rather than tying the generic runtime to mappings from one specific game.
 
-Major work before real-game graphics can be considered mature includes:
+### Remaining graphics completion gates
 
-- remaining EDRAM/depth ownership and conversion fidelity;
-- additional resolve modes and destination formats;
-- resolve clear behaviour;
-- remaining primitive/copy/fill cases;
-- improved per-frame upload/resource allocation;
-- less immediate queue synchronization;
-- full presentation validation on supported hardware;
-- captured-command regression fixtures;
-- Project Gracemeria first-frame testing;
-- Project Gracemeria multi-frame/gameplay validation.
+Major work still required before a real title renderer can be considered complete includes:
 
-See [`docs/graphics/`](docs/graphics/) for the detailed architecture and validation documents.
+1. Reversible native depth/stencil upload and readback for complete EDRAM depth ownership/alias fidelity.
+2. Native resolve support beyond the completed raw/full-sample color path, including individual MSAA sample selection, converted color destinations, and depth destinations.
+3. Resolve-region color/depth clear values through the EDRAM ownership system.
+4. Remaining primitive expansion paths, including RectangleList and copy/fill cases.
+5. Rotating frame contexts, per-frame upload/constant/descriptor allocation, and less immediate queue synchronization.
+6. Vulkan and D3D12 swapchain creation, resize, synchronization, and presentation.
+7. Captured-command regression fixtures followed by Project Gracemeria / Ace Combat 6 first-frame and multi-frame validation.
 
----
+Graphics documentation:
 
-# Filesystem
-
-Filesystem V1 now provides the generic filesystem boundary required by future Xbox kernel/XAM APIs and game modules.
-
-The filesystem is deliberately independent from CPU execution internals, graphics and guest-pointer marshalling.
-
-Current VFS functionality includes:
-
-- Xbox-style guest path normalization;
-- case-insensitive path matching;
-- host-independent device abstraction;
-- device registration and removal;
-- symbolic aliases such as `game:` and `d:`;
-- bounded alias chaining;
-- relative paths and working-directory support;
-- longest-prefix mount routing;
-- host-directory devices;
-- case-insensitive host lookup;
-- path sandboxing;
-- `..` traversal protection;
-- symlink/junction escape protection;
-- read-only mounts;
-- create/open dispositions;
-- sequential and positional I/O;
-- seek, resize and flush;
-- file and directory metadata;
-- directory creation;
-- deterministic directory enumeration;
-- wildcard filtering;
-- rename and removal;
-- disk-space queries;
-- Xbox/NT-style open outcomes;
-- explicit share flags;
-- live-handle sharing conflict detection;
-- `NullDevice`;
-- mount and symbolic-link diagnostics.
-
-Still deferred to higher runtime layers are:
-
-- `NtCreateFile`, `NtReadFile`, `NtWriteFile` and other Xbox kernel exports;
-- guest-pointer marshalling;
-- kernel file objects;
-- the global kernel handle table;
-- overlapped/asynchronous I/O;
-- Xbox `FILE_*_INFORMATION` structures;
-- GDFX/ISO devices;
-- STFS/container support;
-- save/content policy;
-- title-specific update and DLC discovery.
-
-See:
-
-[`docs/filesystem/FILESYSTEM_V1.md`](docs/filesystem/FILESYSTEM_V1.md)
+- [`docs/graphics/NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md)
+- [`docs/graphics/XENOS_DRAW_IR.md`](docs/graphics/XENOS_DRAW_IR.md)
+- [`docs/graphics/XENOS_SHADER_IR.md`](docs/graphics/XENOS_SHADER_IR.md)
+- [`docs/graphics/HLSL_DXC.md`](docs/graphics/HLSL_DXC.md)
+- [`docs/graphics/NATIVE_RESOURCE_ABI.md`](docs/graphics/NATIVE_RESOURCE_ABI.md)
+- [`docs/graphics/TEXTURES.md`](docs/graphics/TEXTURES.md)
+- [`docs/graphics/EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md)
+- [`docs/graphics/XENOS_DEPTH_20E4.md`](docs/graphics/XENOS_DEPTH_20E4.md)
+- [`docs/graphics/VALIDATION.md`](docs/graphics/VALIDATION.md)
 
 ---
 
-# Xenon Launcher
+## Launcher
 
-Xenon is designed around a **single launcher capable of managing multiple independently developed recompiled-game modules**.
+Xenon is also moving toward a **single generic launcher for multiple recompiled games/modules**, rather than requiring a separate launcher for every title.
 
-The launcher uses **Qt 6 Quick/QML**, but Qt is isolated entirely from the reusable Xenon runtime.
+The current frontend direction uses **Qt 6 Quick/QML** and is deliberately isolated from the runtime libraries so Qt does not leak into the CPU, memory, graphics, or game-module interfaces.
 
-```text
-QML UI
-  |
-  v
-LauncherBridge
-  |
-  v
-FrontendBackend
-  |
-  v
-Launcher Core services
-  |
-  v
-RuntimeBridge
-  |
-  v
-Xenon Runtime
-```
+The launcher design includes:
 
-## Frontend
+- Library, Modules, Profiles, and Settings views.
+- Generic module-provided game metadata and artwork slots.
+- Local game-content/module/DLC import flows.
+- Per-game information and compatibility state.
+- Profile creation and selection.
+- Theme support.
+- Frontend feedback for actions whose runtime services are not connected yet.
 
-The current launcher contains mature frontend work for:
+A normal launcher build should start with **no games, modules, or DLC pre-populated**. Development builds can enable a code-level test mode that injects fictional data solely to exercise the UI.
 
-- Library;
-- Modules;
-- Profiles;
-- Settings;
-- game properties;
-- module settings;
-- module catalog;
-- profile creation/editing;
-- profile avatars;
-- search;
-- theme selection;
-- accent colours;
-- responsive layouts;
-- accessibility/text scaling;
-- diagnostics;
-- custom window controls;
-- Xenon branding;
-- theme-specific backgrounds;
-- reusable Xenon UI components;
-- contextual right-click/action menus;
-- notifications and confirmations.
-
-Production builds start with an empty library.
-
-Development/test builds may explicitly enable fictional fixtures for UI testing.
-
-No commercial game content is bundled.
-
-## Launcher Core and backend
-
-The launcher is no longer just a QML prototype.
-
-Authoritative application behaviour is owned by C++ backend/core services.
-
-Current feature slices include:
-
-- application state;
-- branding;
-- community/support integration;
-- diagnostics;
-- filesystem integration;
-- import/export;
-- launch configuration;
-- library management;
-- game properties;
-- DLC projection;
-- module management;
-- module manifests;
-- module settings;
-- public module catalog;
-- path management;
-- profiles;
-- runtime capability projection;
-- settings;
-- themes/appearance;
-- launcher updates;
-- module updates.
-
-QML owns presentation and transient UI state.
-
-It does **not** own persistence, filesystem mutation, module installation, update state, launch-contract creation or runtime capability decisions.
-
-See:
-
-- [`launcher/README.md`](launcher/README.md)
-- [`launcher/BACKEND.md`](launcher/BACKEND.md)
-- [`launcher/TESTING.md`](launcher/TESTING.md)
+The launcher is not intended to provide commercial game downloads. Game content, title updates, and DLC must come from the user's own local sources and be identified/validated by the appropriate game module.
 
 ---
 
-# Module ecosystem
+## Module architecture
 
-A Xenon game is represented by an independently developed **module**, rather than game-specific logic being compiled into the generic runtime.
-
-A module may provide:
-
-- generated recompiled code;
-- supported game IDs and versions;
-- symbol maps;
-- hooks and patches;
-- manifest metadata;
-- launcher artwork;
-- module-specific settings;
-- DLC definitions;
-- game compatibility state;
-- title-specific service adapters;
-- genuinely unavoidable title-specific renderer patches.
-
-## Public module catalog
-
-The repository now contains:
+The long-term runtime is intended to remain split into reusable layers. Names may evolve, but the dependency direction is intentionally similar to:
 
 ```text
-catalog/modules.json
-```
-
-This is a **discovery catalog**, not the runtime module manifest.
-
-It tells Xenon Launcher where an open-source module is published and which package belongs to a supported host platform.
-
-Runtime capabilities, game IDs, settings, DLC definitions and game-specific behaviour remain inside the installed module.
-
-## GitHub Releases
-
-Launcher and module updates are intentionally independent.
-
-```text
-Xenon Launcher
-    |
-    +--> Xenon-Recomp GitHub Releases
-    |
-    +--> Module Catalog
+Game module / recompilation project
              |
              v
-       Module repository
+        Xenon Core
+             |
+   +---------+----------+
+   |         |          |
+   v         v          v
+  CPU      Memory    Runtime services
              |
              v
-        GitHub Releases
+          Graphics
+             |
+       +-----+-----+
+       |           |
+       v           v
+    Vulkan       D3D12
+
+Host platform services sit below the reusable runtime layers.
 ```
 
-This lets each module release on its own schedule.
+Planned or emerging areas include:
 
-Current module update infrastructure supports:
+- `xenon-core`
+- `xenon-cpu`
+- `xenon-memory`
+- `xenon-graphics`
+- `xenon-graphics-vulkan`
+- `xenon-graphics-d3d12`
+- `xenon-kernel`
+- `xenon-xbox`
+- `xenon-filesystem`
+- `xenon-audio`
+- `xenon-input`
+- `xenon-network`
+- host platform modules
+- launcher/module registry services
 
-- semantic-version releases;
-- stable/prerelease channels;
-- platform-specific release assets;
-- staged package installation;
-- SHA-256 release-asset digest verification;
-- independently versioned game modules.
-
-The central catalog **never distributes commercial game data**.
-
-See:
-
-- [`catalog/README.md`](catalog/README.md)
-- [`docs/modules/GITHUB_MODULE_RELEASES.md`](docs/modules/GITHUB_MODULE_RELEASES.md)
-
----
-
-# Updates and release infrastructure
-
-The repository now includes GitHub Actions workflows for:
-
-- launcher release packaging;
-- module-catalog validation.
-
-Launcher updates come from Xenon-Recomp releases.
-
-Game-module updates come from the GitHub repository associated with that module in the public catalog.
-
-This separation is intentional and prevents the Xenon repository from becoming a distribution point for game-specific packages or commercial content.
+See [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md).
 
 ---
 
-# Game-specific behaviour
+## Game-specific behavior
 
-The generic Xenon runtime must not accumulate checks such as:
+The generic runtime must not grow title checks such as:
 
 ```cpp
 if (game == ACE_COMBAT_6) {
-    // title-specific behaviour
+    // game-specific behavior
 }
 ```
 
-The correct rule is:
+A game project/module should instead provide its own:
 
-> If behaviour represents Xbox 360 hardware or runtime semantics, implement it in Xenon.  
-> If behaviour exists only because of one game, implement it in that game's module.
+- executable/version definitions;
+- symbol maps;
+- static recompilation output;
+- hooks and patches;
+- game-specific content metadata;
+- module manifests;
+- artwork/launcher metadata;
+- compatibility overrides where genuinely unavoidable;
+- title-specific networking/service adapters;
+- title-specific renderer patches only when they cannot be generalized into correct Xbox 360 behavior.
 
-This boundary is what allows Xenon to support multiple independently developed recompilation projects through one shared runtime and launcher.
+If behavior is genuinely part of Xbox 360/Xenos hardware or runtime semantics, it belongs in Xenon. If it exists only for one title, it belongs in that title's project.
 
 ---
 
-# Xbox runtime services
+## Xbox-facing services
 
-The next major framework layers include Xbox-facing facilities such as:
+Higher runtime layers are planned to cover Xbox-facing facilities such as:
 
-- kernel objects;
-- handles;
-- threads;
-- synchronization;
-- events;
-- timers;
-- Xbox kernel exports;
-- XAM;
-- XAPI;
-- profiles/sign-in;
-- storage/content;
+- profiles and sign-in state;
+- storage and content mounting;
 - saves;
 - achievements;
+- presence and friends;
+- sessions and matchmaking;
+- filesystem services;
 - input;
 - audio;
-- networking;
-- presence;
-- friends;
-- sessions and matchmaking.
+- networking abstractions.
 
-Filesystem V1 now provides the host-independent VFS required by the later Xbox file APIs, but guest structure marshalling and kernel handle semantics intentionally remain above that layer.
-
-Future online functionality should remain modular and should not require CPU, memory or graphics code to understand a specific online service.
+Future online support should be modular rather than being tightly coupled to the original Xbox Live infrastructure. A replacement service can be explored later by game projects/runtime services without changing the CPU, memory, or native graphics architecture.
 
 ---
 
-# Host architectures and platforms
+## Host architectures and platforms
 
-## CPU architectures
+### Host CPU
 
-Current:
+Current focus:
 
 - x86-64
 
@@ -675,46 +363,46 @@ Planned:
 
 - ARM64
 
-## Host platforms
+The IR and module boundaries should avoid unnecessary assumptions about x86-64 so ARM64 does not require rewriting game-specific recompilation logic.
 
-Current/planned:
+### Host platforms
+
+Current/planned targets include:
 
 - Windows
 - Linux
 - Android
 
-Vulkan is intended to provide the common graphics path where practical.
-
-Direct3D 12 is the native Windows alternative.
+Vulkan is intended to be the common graphics path where practical. Direct3D 12 is the native Windows alternative.
 
 ---
 
-# Building
+## Building
 
-## Requirements
+### Requirements
 
-Core:
+Core requirements:
 
 - CMake 3.25+
 - C++20 compiler
 - Ninja or another supported CMake generator
 
-Graphics development:
+Optional graphics/development requirements:
 
-- Vulkan SDK for Vulkan
-- Windows SDK for D3D12
-- DXC for shader compilation
+- Vulkan SDK for the Vulkan development target
+- Windows SDK for Direct3D 12
+- DXC for shader compilation to DXIL/SPIR-V
 
-Launcher:
+Optional launcher requirements:
 
 - Qt 6.6+
 - Qt Quick
 - Qt Quick Controls 2
 - Qt Quick Dialogs 2
 
-## CMake presets
+### CMake presets
 
-Current presets include:
+The repository currently provides presets for:
 
 ```text
 linux-x64-debug
@@ -731,110 +419,130 @@ cmake --build build/windows-x64-debug
 ctest --test-dir build/windows-x64-debug --output-on-failure
 ```
 
-## Launcher build
+For a launcher-focused Windows build, Qt can be supplied through `CMAKE_PREFIX_PATH` and the launcher enabled with `XENON_BUILD_LAUNCHER=ON` in source trees containing the launcher frontend.
 
-The launcher can be enabled with:
-
-```text
--DXENON_BUILD_LAUNCHER=ON
-```
-
-For Windows launcher development, the provided helper can perform configuration, build, Qt deployment and execution:
+Example:
 
 ```powershell
-.\launcher\scripts\build-launcher.ps1 -TestMode -Clean -Deploy -Run
+cmake -S . -B build\launcher-ui -G Ninja `
+  -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_PREFIX_PATH="C:\Qt\6.x.x\msvc2022_64" `
+  -DXENON_BUILD_LAUNCHER=ON `
+  -DXENON_BUILD_TESTS=OFF
+
+cmake --build build\launcher-ui --target xenon_launcher
 ```
 
-Omit `-TestMode` for normal production behaviour.
+Build options are intentionally modular. Check the root `CMakeLists.txt` for the authoritative set of options available in the current tree.
 
 ---
 
-# Repository layout
+## Repository layout
 
 ```text
 Xenon-Recomp/
-├─ .github/
-│  └─ workflows/           Release and catalog validation automation
-│
-├─ catalog/
-│  ├─ modules.json         Public Xenon module discovery catalog
-│  └─ README.md
-│
-├─ cmake/                  Build/platform helpers
-├─ docs/                   Architecture and validation documentation
-│
-├─ include/xenon/
+├─ cmake/                  CMake helpers and platform/compiler configuration
+├─ docs/                   Architecture, validation, graphics and research notes
+├─ include/xenon/          Public/runtime interfaces
 │  ├─ core/
 │  ├─ cpu/
 │  ├─ memory/
-│  ├─ filesystem/
 │  └─ gpu/
-│
 ├─ src/
 │  ├─ core/
 │  ├─ cpu/
 │  ├─ memory/
-│  ├─ filesystem/
 │  └─ graphics/
-│     ├─ xenos/
-│     ├─ dxc/
-│     ├─ vulkan/
-│     └─ d3d12/
-│
-├─ launcher/
-│  ├─ qml/
-│  ├─ resources/
-│  ├─ scripts/
-│  └─ src/
-│     ├─ frontend_backend/
-│     └─ services/
-│
-├─ tests/
-│  ├─ cpu/
-│  ├─ memory/
-│  ├─ filesystem/
-│  └─ graphics/
-│
-├─ tools/
+│     ├─ xenos/            Common Xbox 360 graphics behavior / normalized frontend
+│     ├─ dxc/              Shader compiler boundary
+│     ├─ vulkan/           Native Vulkan backend
+│     └─ d3d12/            Native Direct3D 12 backend
+├─ launcher/               Generic launcher frontend and launcher integration
+├─ tests/                  CPU, memory, graphics and native-backend validation
+├─ tools/                  Development/build tools
 ├─ CMakeLists.txt
 └─ CMakePresets.json
 ```
 
 ---
 
-# Research, references and acknowledgements
+## Research, references, and acknowledgements
 
-Xenon benefits heavily from the Xbox 360 emulation, recompilation and hardware-research communities.
+Xenon has progressed much faster because the Xbox 360 emulation/recompilation community and hardware-research community have already published a large amount of valuable work.
 
-The project does not present this research as if it was discovered independently.
+**This project should not present that research as if it was discovered in isolation.** Public documentation and open-source projects have been used as research references, behavioral cross-checks, architecture comparisons, and bring-up references while Xenon develops its own runtime, IR, memory implementation, and native graphics architecture.
 
-Public documentation and open-source projects are used as behavioural references, architecture comparisons and validation sources while Xenon maintains its own runtime architecture and implementation.
+Important references used during development include:
 
-Important development references include:
+- **Xenia** (`xenia-project/xenia`) — a major public reference for Xbox 360 architecture, Xenon PPC/VMX128 behavior, Xenos registers/packets, memory behavior, texture formats, EDRAM semantics, shader behavior, and correctness cross-checking.
+- **ReXGlue / rexglue-sdk** — a useful Xbox 360 recompilation/runtime reference and source of practical lessons from existing recompilation projects.
+- **AC6_recomp** (`sal063/AC6_recomp`) — used as a title-specific static-recompilation and Ace Combat 6 bring-up reference for the future Project Gracemeria integration.
+- **UnleashedRecomp** (`hedge-dev/UnleashedRecomp`) — an important public example of a purpose-built native Xbox 360 recompilation renderer using modern Vulkan/D3D12 techniques.
+- **XenosRecomp** (`hedge-dev/XenosRecomp` and related public work/forks) — consulted for Xenos shader decoding/recompilation approaches and the practical DXC/HLSL boundary.
+- Other public **ReXGlue-based recompilation projects**, including Project8Recomp, The Simpsons Game Recompiled, reDAHM, GTA IV recompilation work, and related community projects, as compatibility and implementation references.
+- IBM / PowerPC architectural documentation.
+- The AltiVec Technology Programming Environments Manual.
+- Public VMX128 reverse-engineering documentation.
+- Public AMD/ATI R400/R500-era, AddrLib, Yamato/Adreno A2xx and related graphics research where relevant to Xenos behavior.
+- Khronos Vulkan specifications and documentation.
+- Microsoft Direct3D 12 / DXGI / DXC documentation.
 
-- **Xenia** — Xbox 360 architecture, Xenon PPC/VMX128 behaviour, memory semantics, Xenos registers/packets, shader behaviour, texture formats, EDRAM and runtime research.
-- **ReXGlue / rexglue-sdk** — practical static-recompilation runtime and VFS architecture reference.
-- **UnleashedRecomp** — major reference for modern native Xbox 360 recompilation rendering and Vulkan/D3D12 architecture.
-- **XenosRecomp** — shader decoding/recompilation and HLSL/DXC implementation reference.
-- **AC6_recomp** — Ace Combat 6-specific bring-up and recompilation reference for Project Gracemeria.
-- Other public ReXGlue/static recompilation projects used as comparative implementation references.
+These references are used to understand **guest-visible hardware/runtime behavior and proven translation techniques**. Xenon's design goal is to keep its generic implementation independent and reusable rather than reproducing another project's emulator architecture or importing title-specific assumptions into the runtime.
 
-See:
+No acknowledgement above transfers ownership of those projects to Xenon. Their code, documentation, trademarks, licenses, and copyrights remain with their respective authors and rights holders. Where any third-party code is incorporated in the future rather than merely studied or compared, its original license and required attribution must be preserved.
 
-[`docs/development/RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md)
-
-Xenon's implementation is independently structured around its own CPU IR, memory subsystem, graphics abstraction, launcher architecture and module boundaries.
+More detailed research provenance is recorded in [`docs/development/RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md).
 
 ---
 
-# Legal
+## Development principles
+
+- **Generalize hardware behavior.** Fix Xenos/Xenon behavior in the shared layer when it is genuinely architectural.
+- **Keep title-specific behavior outside Xenon.** Game projects should not leak into the generic runtime.
+- **Prefer one memory truth.** CPU, GPU, DMA and future devices must agree on physical ownership and coherency.
+- **Keep native backends native.** Vulkan and D3D12 should consume normalized Xenon state instead of each inventing different Xbox semantics.
+- **Fail loudly on unsupported behavior.** An actionable error is preferable to silently rendering or executing incorrect state.
+- **Validate continuously.** CPU, memory and graphics work should keep earlier regression suites passing.
+- **Document research provenance.** External research that materially informs Xenon should be credited rather than obscured.
+- **Do not distribute proprietary content.** Xenon is infrastructure, not a source for commercial Xbox 360 software.
+
+---
+
+## Roadmap
+
+Near-term priorities are:
+
+1. Finish the remaining native GPU/EDRAM resolve and depth ownership work.
+2. Complete primitive expansion and fixed-function parity required for real title command streams.
+3. Introduce mature frame contexts, resource lifetime management, and presentation/swapchains.
+4. Continue strengthening CPU, memory, and CPU↔GPU coherency rather than allowing backend-specific semantics to diverge.
+5. Capture and replay real command streams for regression testing.
+6. Bring Project Gracemeria to first-frame, then multi-frame, then playable validation against Xenon.
+7. Connect the launcher to real module discovery, local content validation, profiles, saves, and runtime lifecycle services.
+8. Build higher Xbox kernel/runtime services needed by additional games.
+9. Add further game modules without adding game-specific behavior to Xenon itself.
+10. Expand host/platform support after the x86-64 desktop path is stable.
+
+The project is intentionally being developed in layers: a working first title is important, but the framework should remain reusable enough that the next title does not require rebuilding the console from scratch again.
+
+---
+
+## Legal
 
 Xenon Recomp is an independent open-source development project.
 
-It is not affiliated with, endorsed by, or sponsored by Microsoft, Xbox Game Studios, Bandai Namco, Project Aces, Epic Games, or other game publishers/developers whose software may eventually be supported by independent modules.
+It is not affiliated with, endorsed by, sponsored by, or approved by Microsoft, Xbox, Bandai Namco, Project Aces, or any other game/platform rights holder.
 
-Xbox, Xbox 360, Xbox Live and related names are trademarks of Microsoft Corporation.
+Xbox, Xbox 360, Xbox Live, Direct3D, and related names and marks belong to their respective owners. Game names and assets belong to their respective owners.
 
-No proprietary Xbox 360 firmware, executable, copyrighted game data, title updates, DLC, encryption keys or Microsoft-owned software are distributed with this repository.
+This repository does not include proprietary Xbox 360 firmware, console operating-system files, game executables, copyrighted game data, title updates, DLC, encryption keys, or Microsoft-owned software.
 
-Users and module developers are responsible for complying with applicable laws and licences when supplying game content to Xenon-compatible projects.
+Users are responsible for complying with the laws and licenses that apply to any software or content they use with Xenon.
+
+---
+
+## License
+
+Xenon Recomp is released under the **MIT License**. See [`LICENSE`](LICENSE).
+
+Third-party projects and research referenced by Xenon remain subject to their own licenses and copyright terms.

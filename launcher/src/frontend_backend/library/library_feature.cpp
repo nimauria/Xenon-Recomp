@@ -1,12 +1,41 @@
 #include "library_feature.hpp"
 
+#include "actions/library_action_catalog.hpp"
+
 #include "../settings/settings_feature.hpp"
 #include "../modules/modules_feature.hpp"
 
 #include <QFileInfo>
+#include <QStringList>
 #include <utility>
 
 namespace xenon::launcher::frontend_backend {
+namespace {
+QString joined(const QVariant& value, const QString& separator = QStringLiteral(" • ")) {
+  QStringList parts;
+  for (const auto& item : value.toList()) {
+    const auto text = item.toString().trimmed();
+    if (!text.isEmpty()) parts.append(text);
+  }
+  if (parts.isEmpty()) {
+    const auto text = value.toString().trimmed();
+    if (!text.isEmpty()) parts.append(text);
+  }
+  return parts.join(separator);
+}
+
+QString titleCaseWords(QString value) {
+  value = value.trimmed();
+  if (value.isEmpty()) return value;
+  const auto words = value.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+  QStringList result;
+  for (auto word : words) {
+    if (!word.isEmpty()) word[0] = word[0].toUpper();
+    result.append(word);
+  }
+  return result.join(QLatin1Char(' '));
+}
+}  // namespace
 
 LibraryFeature::LibraryFeature(LibraryService& library, ModulesFeature& modules,
                                SettingsFeature& settings, bool test_mode, QObject* parent)
@@ -93,7 +122,77 @@ void LibraryFeature::rebuildFixtures() {
       QStringLiteral("Test Fixture|Content Validation"), QStringLiteral("0.2-test")));
 }
 
+QVariantMap LibraryFeature::withCatalogPresentation(QVariantMap item) const {
+  const auto module_id = item.value(QStringLiteral("moduleId")).toString();
+  if (module_id.isEmpty()) return item;
+
+  const auto catalog = modules_.catalogEntryData(module_id);
+  if (catalog.isEmpty()) {
+    item.insert(QStringLiteral("metadataAvailable"), false);
+    return item;
+  }
+
+  const auto launcher = catalog.value(QStringLiteral("launcher")).toMap();
+  const auto game = catalog.value(QStringLiteral("game")).toMap();
+  const auto compatibility = launcher.value(QStringLiteral("compatibility")).toMap();
+
+  const auto title = launcher.value(QStringLiteral("gameTitle"), game.value(QStringLiteral("title"))).toString().trimmed();
+  if (!title.isEmpty()) item.insert(QStringLiteral("title"), title);
+  const auto module_name = launcher.value(QStringLiteral("moduleName"), catalog.value(QStringLiteral("moduleName"))).toString().trimmed();
+  if (!module_name.isEmpty()) item.insert(QStringLiteral("moduleName"), module_name);
+  const auto description = launcher.value(QStringLiteral("description")).toString().trimmed();
+  if (!description.isEmpty()) item.insert(QStringLiteral("description"), description);
+  const auto renderer = launcher.value(QStringLiteral("renderer")).toString().trimmed();
+  if (!renderer.isEmpty()) item.insert(QStringLiteral("renderer"), renderer);
+  const auto mode = launcher.value(QStringLiteral("mode")).toString().trimmed();
+  if (!mode.isEmpty()) item.insert(QStringLiteral("mode"), mode);
+
+  auto regions = joined(launcher.value(QStringLiteral("regions")));
+  if (regions.isEmpty()) regions = joined(game.value(QStringLiteral("supportedRegions")));
+  if (!regions.isEmpty()) item.insert(QStringLiteral("regions"), regions);
+
+  const auto content_state = launcher.value(QStringLiteral("contentStateLabel")).toString().trimmed();
+  if (!content_state.isEmpty()) item.insert(QStringLiteral("contentState"), content_state);
+
+  const auto tile = launcher.value(QStringLiteral("tileArtLocalUrl")).toString().trimmed();
+  const auto hero = launcher.value(QStringLiteral("heroArtLocalUrl")).toString().trimmed();
+  if (!tile.isEmpty()) item.insert(QStringLiteral("tileArt"), tile);
+  if (!hero.isEmpty()) item.insert(QStringLiteral("heroArt"), hero);
+
+  QStringList tags;
+  for (const auto& genre : game.value(QStringLiteral("genres")).toList()) {
+    const auto text = titleCaseWords(genre.toString());
+    if (!text.isEmpty() && !tags.contains(text)) tags.append(text);
+  }
+  if (!module_name.isEmpty() && !tags.contains(module_name)) tags.append(module_name);
+  if (!tags.isEmpty()) item.insert(QStringLiteral("tags"), tags.join(QLatin1Char('|')));
+
+  const auto registry_title_id = game.value(QStringLiteral("titleId")).toString().trimmed();
+  if (item.value(QStringLiteral("titleId")).toString().trimmed().isEmpty() &&
+      !registry_title_id.isEmpty()) {
+    item.insert(QStringLiteral("titleId"), registry_title_id);
+  }
+  item.insert(QStringLiteral("gameDeveloper"), game.value(QStringLiteral("developer")));
+  item.insert(QStringLiteral("gamePublisher"), game.value(QStringLiteral("publisher")));
+  item.insert(QStringLiteral("gamePlatform"), game.value(QStringLiteral("platform")));
+  item.insert(QStringLiteral("releaseYear"), game.value(QStringLiteral("releaseYear")));
+  item.insert(QStringLiteral("compatibilityStatus"), compatibility.value(QStringLiteral("status")));
+  item.insert(QStringLiteral("compatibilityLabel"), compatibility.value(QStringLiteral("label")));
+  item.insert(QStringLiteral("compatibilitySummary"), compatibility.value(QStringLiteral("summary")));
+  item.insert(QStringLiteral("metadataAvailable"), true);
+  item.insert(QStringLiteral("metadataSource"), QStringLiteral("Official Xenon Modules registry"));
+  item.insert(QStringLiteral("metadataEntryUrl"), catalog.value(QStringLiteral("registryEntryUrl")));
+  item.insert(QStringLiteral("metadataRepository"), catalog.value(QStringLiteral("repository")));
+  const auto catalog_state = modules_.catalogState();
+  item.insert(QStringLiteral("metadataStatus"), catalog_state.value(QStringLiteral("status")));
+  item.insert(QStringLiteral("metadataStatusMessage"), catalog_state.value(QStringLiteral("message")));
+  item.insert(QStringLiteral("metadataLastCheckedAt"), catalog_state.value(QStringLiteral("lastCheckedAt")));
+  item.insert(QStringLiteral("metadataAssetState"), launcher.value(QStringLiteral("assetCacheState")));
+  return item;
+}
+
 QVariantMap LibraryFeature::projected(QVariantMap item) const {
+  item = withCatalogPresentation(std::move(item));
   const auto module_id = item.value(QStringLiteral("moduleId")).toString();
   const auto module = modules_.module(module_id);
   const auto module_installed = !module.isEmpty();
@@ -127,7 +226,7 @@ QVariantList LibraryFeature::entries() const {
   QVariantList result;
   if (test_mode_) {
     for (const auto& value : fixture_entries_) {
-      auto item = value.toMap();
+      auto item = withCatalogPresentation(value.toMap());
       const auto module_id = item.value(QStringLiteral("moduleId")).toString();
       const auto module = modules_.module(module_id);
       const auto module_installed = !module.isEmpty();
@@ -157,6 +256,18 @@ QVariantMap LibraryFeature::entry(const QString& game_id) const {
     if (item.value(QStringLiteral("gameId")).toString() == game_id) return item;
   }
   return {};
+}
+
+QVariantList LibraryFeature::actions(const QString& game_id) const {
+  return LibraryActionCatalog::gameActions(entry(game_id), test_mode_);
+}
+
+QVariantList LibraryFeature::manageActions(const QString& game_id) const {
+  return LibraryActionCatalog::manageActions(entry(game_id), test_mode_);
+}
+
+QVariantList LibraryFeature::backgroundActions() const {
+  return LibraryActionCatalog::backgroundActions();
 }
 
 ServiceResult LibraryFeature::remove(const QString& game_id) {
@@ -197,6 +308,20 @@ ServiceResult LibraryFeature::verify(const QString& game_id) const {
   return ServiceResult::success(
       QStringLiteral("Library entry verified"),
       QStringLiteral("The registered content path and selected module manifest are both available. Full Xbox 360 content validation will run through the framework content probe once connected."));
+}
+
+ServiceResult LibraryFeature::refreshMetadata(const QString& game_id) {
+  const auto game = entry(game_id);
+  if (game.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Game metadata refresh"),
+                                  QStringLiteral("The selected library entry no longer exists."));
+  }
+  const auto module_id = game.value(QStringLiteral("moduleId")).toString();
+  if (module_id.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Game metadata refresh"),
+                                  QStringLiteral("The selected game does not have an assigned module."));
+  }
+  return modules_.refreshPresentationMetadata(module_id);
 }
 
 QString LibraryFeature::contentPath(const QString& game_id) const {

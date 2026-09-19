@@ -135,7 +135,8 @@ struct DecodedTexture {
 
 [[nodiscard]] DecodedTexture decode_texture(
     const TextureDescriptor& descriptor,
-    std::span<const std::byte> physical_memory);
+    std::span<const std::byte> physical_memory,
+    std::uint32_t physical_base = 0u);
 
 // Inverse of decode_texture, used by EDRAM resolves and CPU-visible readbacks.
 // The source is tightly packed in the same subresource order as

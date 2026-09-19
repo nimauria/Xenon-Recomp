@@ -15,6 +15,124 @@
 
 namespace xenon::cpu::aot {
 
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_logic(const Vector128& a,
+                                            const Vector128& b) noexcept {
+  constexpr bool is_and = S == VectorSemantic::vand || S == VectorSemantic::vand128;
+  constexpr bool is_andc = S == VectorSemantic::vandc || S == VectorSemantic::vandc128;
+  constexpr bool is_or = S == VectorSemantic::vor || S == VectorSemantic::vor128;
+  constexpr bool is_xor = S == VectorSemantic::vxor || S == VectorSemantic::vxor128;
+  constexpr bool is_nor = S == VectorSemantic::vnor || S == VectorSemantic::vnor128;
+  static_assert(is_and || is_andc || is_or || is_xor || is_nor);
+  const auto lhs = std::bit_cast<std::array<std::uint64_t, 2>>(a);
+  const auto rhs = std::bit_cast<std::array<std::uint64_t, 2>>(b);
+  std::array<std::uint64_t, 2> result{};
+  for (unsigned lane = 0; lane < 2; ++lane) {
+    if constexpr (is_and) result[lane] = lhs[lane] & rhs[lane];
+    else if constexpr (is_andc) result[lane] = lhs[lane] & ~rhs[lane];
+    else if constexpr (is_or) result[lane] = lhs[lane] | rhs[lane];
+    else if constexpr (is_xor) result[lane] = lhs[lane] ^ rhs[lane];
+    else result[lane] = ~(lhs[lane] | rhs[lane]);
+  }
+  return std::bit_cast<Vector128>(result);
+}
+
+[[nodiscard]] inline Vector128 vector_select(const Vector128& a,
+                                              const Vector128& b,
+                                              const Vector128& mask) noexcept {
+  const auto lhs = std::bit_cast<std::array<std::uint64_t, 2>>(a);
+  const auto rhs = std::bit_cast<std::array<std::uint64_t, 2>>(b);
+  const auto bits = std::bit_cast<std::array<std::uint64_t, 2>>(mask);
+  std::array<std::uint64_t, 2> result{};
+  for (unsigned lane = 0; lane < 2; ++lane)
+    result[lane] = (lhs[lane] & ~bits[lane]) | (rhs[lane] & bits[lane]);
+  return std::bit_cast<Vector128>(result);
+}
+
+// Common vector splat operations - inline rather than runtime dispatch
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_byte(const Vector128& src, unsigned imm) noexcept {
+  Vector128 r{};
+  const std::uint8_t value = src.bytes[imm & 15u];
+  std::fill(r.bytes.begin(), r.bytes.end(), value);
+  return r;
+}
+
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_halfword(const Vector128& src, unsigned imm) noexcept {
+  Vector128 r{};
+  const std::uint16_t value = src.u16_be(imm & 7u);
+  for (unsigned i = 0; i < 8; ++i) r.set_u16_be(i, value);
+  return r;
+}
+
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_word(const Vector128& src, unsigned imm) noexcept {
+  Vector128 r{};
+  const std::uint32_t value = src.u32_be(imm & 3u);
+  for (unsigned i = 0; i < 4; ++i) r.set_u32_be(i, value);
+  return r;
+}
+
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_immediate_byte(unsigned imm) noexcept {
+  Vector128 r{};
+  const auto value = static_cast<std::uint8_t>(static_cast<std::int8_t>((imm & 31u) << 3) >> 3);
+  std::fill(r.bytes.begin(), r.bytes.end(), value);
+  return r;
+}
+
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_immediate_halfword(unsigned imm) noexcept {
+  Vector128 r{};
+  const auto value = static_cast<std::uint16_t>(static_cast<std::int16_t>((imm & 31u) << 11) >> 11);
+  for (unsigned i = 0; i < 8; ++i) r.set_u16_be(i, value);
+  return r;
+}
+
+template <VectorSemantic S>
+[[nodiscard]] inline Vector128 vector_splat_immediate_word(unsigned imm) noexcept {
+  Vector128 r{};
+  const auto value = static_cast<std::uint32_t>(static_cast<std::int32_t>((imm & 31u) << 27) >> 27);
+  for (unsigned i = 0; i < 4; ++i) r.set_u32_be(i, value);
+  return r;
+}
+
+// Modular integer lane arithmetic - inline per-lane ops
+template <typename T>
+[[nodiscard]] inline Vector128 vector_add_modular(const Vector128& a, const Vector128& b) noexcept {
+  Vector128 r{};
+  constexpr unsigned n = 16u / sizeof(T);
+  for (unsigned i = 0; i < n; ++i) {
+    T x, y;
+    if constexpr (sizeof(T) == 1) { x = a.bytes[i]; y = b.bytes[i]; }
+    else if constexpr (sizeof(T) == 2) { x = std::bit_cast<T>(a.u16_be(i)); y = std::bit_cast<T>(b.u16_be(i)); }
+    else { x = std::bit_cast<T>(a.u32_be(i)); y = std::bit_cast<T>(b.u32_be(i)); }
+    const T result = static_cast<T>(x + y);
+    if constexpr (sizeof(T) == 1) r.bytes[i] = result;
+    else if constexpr (sizeof(T) == 2) r.set_u16_be(i, std::bit_cast<std::uint16_t>(result));
+    else r.set_u32_be(i, std::bit_cast<std::uint32_t>(result));
+  }
+  return r;
+}
+
+template <typename T>
+[[nodiscard]] inline Vector128 vector_sub_modular(const Vector128& a, const Vector128& b) noexcept {
+  Vector128 r{};
+  constexpr unsigned n = 16u / sizeof(T);
+  for (unsigned i = 0; i < n; ++i) {
+    T x, y;
+    if constexpr (sizeof(T) == 1) { x = a.bytes[i]; y = b.bytes[i]; }
+    else if constexpr (sizeof(T) == 2) { x = std::bit_cast<T>(a.u16_be(i)); y = std::bit_cast<T>(b.u16_be(i)); }
+    else { x = std::bit_cast<T>(a.u32_be(i)); y = std::bit_cast<T>(b.u32_be(i)); }
+    const T result = static_cast<T>(x - y);
+    if constexpr (sizeof(T) == 1) r.bytes[i] = result;
+    else if constexpr (sizeof(T) == 2) r.set_u16_be(i, std::bit_cast<std::uint16_t>(result));
+    else r.set_u32_be(i, std::bit_cast<std::uint32_t>(result));
+  }
+  return r;
+}
+
 template <typename T>
 [[nodiscard]] constexpr T add_wrap(T a, T b) noexcept {
   using U = std::make_unsigned_t<T>;
@@ -227,23 +345,23 @@ inline thread_local std::uint32_t last_fp_invalid_detail = 0;
 inline thread_local bool last_fp_result_incremented = false;
 inline thread_local fenv_t saved_host_fp_environment{};
 inline thread_local bool saved_host_fp_environment_valid = false;
+inline thread_local FpRoundingMode cached_rounding_mode = FpRoundingMode::Nearest;
 
-// Guest floating-point operations must not leak their rounding mode or exception
-// flags into Xenon's host process. Capture the host environment, install the
-// guest FPSCR rounding mode, and restore the host environment after collecting
-// the guest-visible exception flags.
 inline void begin_fp_operation(CpuState& state) noexcept {
   last_fp_exceptions = 0;
   last_fp_invalid_detail = 0;
   last_fp_result_incremented = false;
   saved_host_fp_environment_valid = std::fegetenv(&saved_host_fp_environment) == 0;
   std::feclearexcept(FE_ALL_EXCEPT);
-  std::fesetround(host_rounding(state.fp_rounding_mode()));
+  const auto mode = state.fp_rounding_mode();
+  if (cached_rounding_mode != mode) {
+    std::fesetround(host_rounding(mode));
+    cached_rounding_mode = mode;
+  }
 }
 
 inline void finish_fp_operation() noexcept {
-  last_fp_exceptions = std::fetestexcept(
-      FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT);
+  last_fp_exceptions = std::fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW | FE_INEXACT);
   if (saved_host_fp_environment_valid) {
     std::fesetenv(&saved_host_fp_environment);
     saved_host_fp_environment_valid = false;

@@ -37,9 +37,6 @@ class IContentProbe {
       const QVariantMap& identification) const = 0;
 };
 
-// Current default until the Xenon filesystem/content subsystem exposes its
-// probing API. Keeping this as a real implementation means the UI and launcher
-// services already exercise the final dependency direction.
 class UnavailableContentProbe final : public IContentProbe {
  public:
   [[nodiscard]] bool available() const noexcept override { return false; }
@@ -53,5 +50,27 @@ class UnavailableContentProbe final : public IContentProbe {
       const QUrl& source, const QString& destination,
       const QVariantMap& identification) const override;
 };
+
+#if defined(XENON_LAUNCHER_HAS_FILESYSTEM)
+// Thin Qt adapter over Xenon::Filesystem's host-neutral content probe. Module
+// matching remains a launcher responsibility because installed manifests are
+// launcher state, while XEX parsing and source classification remain in Xenon.
+class XenonContentProbe final : public IContentProbe {
+ public:
+  [[nodiscard]] bool available() const noexcept override { return true; }
+  [[nodiscard]] QString status() const override;
+  [[nodiscard]] ServiceResult identifyGame(
+      const QUrl& source, const QVariantList& module_candidates) const override;
+  [[nodiscard]] ServiceResult identifyDlc(
+      const QUrl& source, const QString& game_id,
+      const QVariantList& catalogue) const override;
+  [[nodiscard]] ServiceResult materializeDlc(
+      const QUrl& source, const QString& destination,
+      const QVariantMap& identification) const override;
+};
+using DefaultContentProbe = XenonContentProbe;
+#else
+using DefaultContentProbe = UnavailableContentProbe;
+#endif
 
 }  // namespace xenon::launcher

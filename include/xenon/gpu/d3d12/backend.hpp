@@ -25,6 +25,7 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool make_guest_memory_cpu_visible(
       std::uint32_t physical_address, std::uint32_t size) override;
   [[nodiscard]] bool make_edram_canonical() override;
+  [[nodiscard]] bool invalidate_edram_native_state() override;
   [[nodiscard]] PresentStatus present(const PresentationFrame& frame) override;
   [[nodiscard]] bool resize_presentation(std::uint32_t width,
                                          std::uint32_t height) override;

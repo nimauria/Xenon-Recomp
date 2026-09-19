@@ -195,7 +195,7 @@ bool convert_pixel(TextureHostFormat format, const std::byte* source,
 PreparedPresentationFrame prepare_presentation_frame(
     const PresentationFrame& frame, std::span<const std::byte> physical_memory,
     std::uint32_t target_width, std::uint32_t target_height,
-    bool preserve_aspect_ratio) {
+    bool preserve_aspect_ratio, std::uint32_t physical_base) {
   PreparedPresentationFrame output{};
   if (!frame.texture.valid || !target_width || !target_height) {
     output.error = "presentation requires a valid texture and non-zero host extent";
@@ -211,7 +211,8 @@ PreparedPresentationFrame prepare_presentation_frame(
   source_descriptor.mip_min_level = 0;
   source_descriptor.mip_max_level = 0;
   source_descriptor.packed_mips = false;
-  const auto decoded = decode_texture(source_descriptor, physical_memory);
+  const auto decoded =
+      decode_texture(source_descriptor, physical_memory, physical_base);
   if (!decoded.valid || decoded.layout.subresources.empty()) {
     output.error = decoded.error.empty() ? "scanout texture decode failed" : decoded.error;
     return output;

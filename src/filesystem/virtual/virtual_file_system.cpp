@@ -263,6 +263,17 @@ FsError VirtualFileSystem::query_directory(
                                           out_entries);
 }
 
+FsError VirtualFileSystem::open_directory_cursor(
+    std::string_view guest_path, const DirectoryQuery& query,
+    std::unique_ptr<DirectoryCursor>& out_cursor) const {
+  out_cursor.reset();
+  ResolvedPath resolved;
+  const auto error = resolve(guest_path, resolved);
+  if (error != FsError::None) return error;
+  return resolved.device->open_directory_cursor(resolved.relative_path, query,
+                                                out_cursor);
+}
+
 FsError VirtualFileSystem::create_directory(std::string_view guest_path,
                                             bool recursive) const {
   ResolvedPath resolved;
@@ -290,6 +301,24 @@ FsError VirtualFileSystem::rename(std::string_view old_guest_path,
   if (source.device.get() != destination.device.get()) return FsError::CrossDevice;
   return source.device->rename(source.relative_path, destination.relative_path,
                                replace_existing);
+}
+
+FsError VirtualFileSystem::set_attributes(
+    std::string_view guest_path, const FileAttributeUpdate& update) const {
+  ResolvedPath resolved;
+  const auto error = resolve(guest_path, resolved);
+  if (error != FsError::None) return error;
+  return resolved.device->set_attributes(resolved.relative_path, update);
+}
+
+FsError VirtualFileSystem::set_last_write_time(
+    std::string_view guest_path,
+    std::filesystem::file_time_type last_write_time) const {
+  ResolvedPath resolved;
+  const auto error = resolve(guest_path, resolved);
+  if (error != FsError::None) return error;
+  return resolved.device->set_last_write_time(resolved.relative_path,
+                                              last_write_time);
 }
 
 FsError VirtualFileSystem::disk_space(std::string_view guest_path,

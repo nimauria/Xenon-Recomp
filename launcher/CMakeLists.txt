@@ -148,6 +148,8 @@ qt_add_library(xenon_launcher_core STATIC
   src/services/path_service.hpp
   src/services/profile_service.cpp
   src/services/profile_service.hpp
+  src/services/recovery_service.cpp
+  src/services/recovery_service.hpp
   src/services/package_service.cpp
   src/services/package_service.hpp
   src/services/library_service.cpp
@@ -162,6 +164,8 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/frontend_backend.hpp
   src/frontend_backend/application/application_feature.cpp
   src/frontend_backend/application/application_feature.hpp
+  src/frontend_backend/application/recovery/recovery_feature.cpp
+  src/frontend_backend/application/recovery/recovery_feature.hpp
   src/frontend_backend/branding/branding_feature.cpp
   src/frontend_backend/branding/branding_feature.hpp
   src/frontend_backend/community/community_feature.cpp
@@ -172,18 +176,28 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/community/discord/discord_presence_provider.hpp
   src/frontend_backend/diagnostics/diagnostics_feature.cpp
   src/frontend_backend/diagnostics/diagnostics_feature.hpp
+  src/frontend_backend/diagnostics/support/support_bundle_service.cpp
+  src/frontend_backend/diagnostics/support/support_bundle_service.hpp
   src/frontend_backend/filesystem/filesystem_feature.cpp
   src/frontend_backend/filesystem/filesystem_feature.hpp
+  src/frontend_backend/home/home_feature.cpp
+  src/frontend_backend/home/home_feature.hpp
   src/frontend_backend/import_export/import_export_feature.cpp
   src/frontend_backend/import_export/import_export_feature.hpp
+  src/frontend_backend/input/input_feature.cpp
+  src/frontend_backend/input/input_feature.hpp
   src/frontend_backend/launch/launch_feature.cpp
   src/frontend_backend/launch/launch_feature.hpp
   src/frontend_backend/launch/session/session_controller.cpp
   src/frontend_backend/launch/session/session_controller.hpp
   src/frontend_backend/library/library_feature.cpp
   src/frontend_backend/library/library_feature.hpp
+  src/frontend_backend/library/actions/library_action_catalog.cpp
+  src/frontend_backend/library/actions/library_action_catalog.hpp
   src/frontend_backend/library/dlc/dlc_feature.cpp
   src/frontend_backend/library/dlc/dlc_feature.hpp
+  src/frontend_backend/library/dlc/actions/dlc_action_catalog.cpp
+  src/frontend_backend/library/dlc/actions/dlc_action_catalog.hpp
   src/frontend_backend/library/properties/game_properties_feature.cpp
   src/frontend_backend/library/properties/game_properties_feature.hpp
   src/frontend_backend/modules/modules_feature.cpp
@@ -192,12 +206,18 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/modules/actions/module_action_catalog.hpp
   src/frontend_backend/modules/catalog/github_module_catalog_provider.cpp
   src/frontend_backend/modules/catalog/github_module_catalog_provider.hpp
+  src/frontend_backend/modules/catalog/assets/module_catalog_asset_cache.cpp
+  src/frontend_backend/modules/catalog/assets/module_catalog_asset_cache.hpp
   src/frontend_backend/modules/import/module_import_service.cpp
   src/frontend_backend/modules/import/module_import_service.hpp
   src/frontend_backend/modules/updates/module_update_service.cpp
   src/frontend_backend/modules/updates/module_update_service.hpp
+  src/frontend_backend/modules/updates/history/module_update_history_store.cpp
+  src/frontend_backend/modules/updates/history/module_update_history_store.hpp
   src/frontend_backend/modules/package/module_package_installer.cpp
   src/frontend_backend/modules/package/module_package_installer.hpp
+  src/frontend_backend/notifications/notification_center_feature.cpp
+  src/frontend_backend/notifications/notification_center_feature.hpp
   src/frontend_backend/paths/paths_feature.cpp
   src/frontend_backend/paths/paths_feature.hpp
   src/frontend_backend/profiles/profiles_feature.cpp
@@ -208,6 +228,8 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/profiles/runtime/profile_runtime_catalog.hpp
   src/frontend_backend/runtime/runtime_feature.cpp
   src/frontend_backend/runtime/runtime_feature.hpp
+  src/frontend_backend/search/command_palette_feature.cpp
+  src/frontend_backend/search/command_palette_feature.hpp
   src/frontend_backend/settings/settings_feature.cpp
   src/frontend_backend/settings/settings_feature.hpp
   src/frontend_backend/settings/schema/settings_catalog.cpp
@@ -228,6 +250,9 @@ qt_add_library(xenon_launcher_core STATIC
 )
 target_include_directories(xenon_launcher_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(xenon_launcher_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network Xenon::Core)
+if(TARGET xenon_input)
+  target_link_libraries(xenon_launcher_core PRIVATE Xenon::Input)
+endif()
 target_compile_features(xenon_launcher_core PUBLIC cxx_std_20)
 
 set(XENON_LAUNCHER_HAS_DISCORD_SOCIAL_SDK OFF)
@@ -345,6 +370,9 @@ qt_add_qml_module(xenon_launcher
     qml/ProfileStore.qml
     qml/ProfileMenu.qml
     qml/TopBar.qml
+    qml/CommandPalette.qml
+    qml/NotificationCenter.qml
+    qml/HomePage.qml
     qml/Sidebar.qml
     qml/FooterBar.qml
     qml/XPanel.qml
@@ -357,6 +385,7 @@ qt_add_qml_module(xenon_launcher
     qml/GamePropertiesDialog.qml
     qml/ModuleCatalogDialog.qml
     qml/HelpPopover.qml
+    qml/RecoveryDialog.qml
     qml/XNavButton.qml
     qml/XIcon.qml
     qml/XTextField.qml

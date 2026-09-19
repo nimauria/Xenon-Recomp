@@ -4,7 +4,7 @@ This document records the reasoning behind the launcher UI so the front-end can 
 
 ## Product principles
 
-1. **Library first.** Library, Modules, Profiles, and Settings are the only primary destinations. Rare actions stay contextual rather than becoming permanent navigation items.
+1. **Activity first, Library close behind.** Home earns a primary destination by aggregating real launcher/session history; Library, Modules, Profiles, and Settings remain the operational destinations. Rare actions stay contextual rather than becoming permanent navigation items.
 2. **Local content only.** Xenon does not present commercial games or DLC as downloadable content. Games and game-owned content enter through local import; modules identify and validate them.
 3. **Module-driven presentation.** Game title, description, tile art, hero art, DLC catalogue, supported IDs/regions, and game-specific compatibility data are module-provided metadata.
 4. **Front-end remains useful before the backend exists.** Unsupported actions explain what service is missing instead of silently failing. Test mode uses explicitly fictional fixtures.
@@ -26,7 +26,8 @@ This document records the reasoning behind the launcher UI so the front-end can 
 
 ## Interaction rules
 
-- `Ctrl+K` / `Ctrl+F`: focus context search where available.
+- `Ctrl+K` / `Ctrl+F`: open/focus the launcher-wide command palette.
+- `Ctrl+H`: Home.
 - `Ctrl+1`: Library.
 - `Ctrl+2`: Modules.
 - `Ctrl+3`: Profiles.
@@ -65,7 +66,7 @@ Global paths and profile overrides are intentionally separate:
 
 ## V7 interaction/responsive decisions
 
-- Top-bar search is contextual and drives the current page. Settings search filters categories and automatically selects the first matching category when the current category no longer matches.
+- Top-bar search is launcher-wide and routes directly to games, modules, profiles, settings categories, and launcher commands.
 - Profile IDs are generated, immutable internal identities. The editor exposes user-owned profile fields, optional avatars, and optional path overrides instead.
 - Profile editor path overrides are collapsed unless explicitly enabled or the user chooses Edit Paths. Outside click/Escape closes a clean editor but asks before discarding dirty state.
 - DLC is a bounded nested scrolling surface. Wheel/touchpad input is consumed by the DLC list when it can scroll, preventing the outer game-detail page from moving simultaneously.

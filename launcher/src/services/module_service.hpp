@@ -20,13 +20,17 @@ class ModuleService final : public QObject {
   [[nodiscard]] QVariantList modules() const;
   [[nodiscard]] QVariantMap module(const QString& module_id) const;
   [[nodiscard]] QVariantMap manifest(const QString& module_id) const;
+  [[nodiscard]] QVariantMap runtimeApiRequirements(const QString& module_id) const;
   [[nodiscard]] QVariantList dlcCatalog(const QString& module_id) const;
   [[nodiscard]] ServiceResult refresh();
   [[nodiscard]] ServiceResult setEnabled(const QString& module_id, bool enabled);
   [[nodiscard]] ServiceResult remove(const QString& module_id);
   [[nodiscard]] ServiceResult installFromDirectory(const QString& expected_module_id,
                                                    const QString& source_directory,
-                                                   bool replace_existing = true);
+                                                   bool replace_existing = true,
+                                                   bool retain_rollback = false);
+  [[nodiscard]] QVariantMap latestRollback(const QString& module_id) const;
+  [[nodiscard]] ServiceResult restoreLatestRollback(const QString& module_id);
   [[nodiscard]] QVariantMap inspectDirectory(const QString& module_dir) const;
   [[nodiscard]] ServiceResult verify(const QString& module_id) const;
   [[nodiscard]] QString modulePath(const QString& module_id) const;
@@ -43,6 +47,8 @@ class ModuleService final : public QObject {
   [[nodiscard]] QVariantMap manifestToUi(const QVariantMap& manifest,
                                          const QString& module_dir) const;
   [[nodiscard]] bool copyDirectory(const QString& source, const QString& destination) const;
+  [[nodiscard]] QString rollbackRoot(const QString& module_id) const;
+  void pruneRollbacks(const QString& module_id, int keep = 3) const;
 
   SettingsService& settings_;
   PathService& paths_;

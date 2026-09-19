@@ -10,10 +10,10 @@ constexpr auto kProjectUrl = "https://github.com/nimauria/Xenon-Recomp";
 
 CommunityFeature::CommunityFeature(SettingsFeature& settings, SessionController& session,
                                    FilesystemFeature& filesystem, QString discord_application_id,
-                                   QObject* parent)
+                                   bool suppress_presence, QObject* parent)
     : QObject(parent),
       filesystem_(filesystem),
-      discord_presence_(settings, session, std::move(discord_application_id), this) {
+      discord_presence_(settings, session, std::move(discord_application_id), suppress_presence, this) {
   connect(&discord_presence_, &DiscordPresenceFeature::changed, this, &CommunityFeature::changed);
 }
 

@@ -64,6 +64,14 @@ void test_tiled_decode_and_endian() {
   }
   const auto decoded = decode_texture(descriptor, memory);
   assert(decoded.valid && decoded.linear_data.size() == 32u * 32u * 4u);
+  const auto snapshot_size = static_cast<std::size_t>(layout.base_extent_bytes);
+  const auto decoded_snapshot = decode_texture(
+      descriptor,
+      std::span<const std::byte>(memory).subspan(descriptor.base_address,
+                                                snapshot_size),
+      descriptor.base_address);
+  assert(decoded_snapshot.valid);
+  assert(decoded_snapshot.linear_data == decoded.linear_data);
   std::uint32_t first{};
   std::memcpy(&first, decoded.linear_data.data(), 4);
   assert(first == gpu_swap(0x00010203u, Endian::Swap8In32));

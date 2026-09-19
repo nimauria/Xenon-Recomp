@@ -23,15 +23,17 @@ class GuestMemoryMirror {
   // Uploads only bytes that are newer on the CPU. GPU-owned memexport ranges
   // are never overwritten by a wider page upload.
   [[nodiscard]] bool synchronize();
-  [[nodiscard]] bool synchronize_range(std::uint32_t address,
-                                       std::uint32_t width);
+  [[nodiscard]] bool synchronize_range(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::Generic);
   // Records a range that a shader may have modified through memexport.
   void mark_gpu_write(std::uint32_t address, std::uint32_t width);
   // Performs an on-demand GPU -> CPU download for the GPU-owned portion of the
   // requested range. This is intentionally explicit so normal memexport stays
   // GPU-resident; Memory v2 can call it when a guest CPU access needs visibility.
-  [[nodiscard]] bool make_cpu_visible(std::uint32_t address,
-                                      std::uint32_t width);
+  [[nodiscard]] bool make_cpu_visible(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::RenderReadback);
   [[nodiscard]] bool has_gpu_dirty(std::uint32_t address,
                                    std::uint32_t width) const;
   [[nodiscard]] bool device_range_valid(std::uint32_t address,

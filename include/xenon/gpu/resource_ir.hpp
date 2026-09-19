@@ -365,11 +365,13 @@ struct ColorTargetPlan {
 // expands it to the hardware's 8x8 resolve granularity.
 [[nodiscard]] ResolveRectangle decode_resolve_rectangle(
     const DrawResourceState& state,
-    std::span<const std::byte> physical_memory) noexcept;
+    std::span<const std::byte> physical_memory,
+    std::uint32_t physical_base = 0u) noexcept;
 
 [[nodiscard]] ResolvePlan plan_resolve(
     const DrawResourceState& state,
-    std::span<const std::byte> physical_memory);
+    std::span<const std::byte> physical_memory,
+    std::uint32_t physical_base = 0u);
 
 class ResourceStateTracker {
  public:

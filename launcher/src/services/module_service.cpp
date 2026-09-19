@@ -88,6 +88,18 @@ QVariantList manifestSettings(const QVariantMap& manifest) {
   if (raw.isEmpty()) raw = manifest.value(QStringLiteral("launcherSettings")).toList();
   return raw;
 }
+
+QVariantMap manifestRuntimeApis(const QVariantMap& manifest) {
+  auto apis = manifest.value(QStringLiteral("runtimeApis")).toMap();
+  if (apis.isEmpty()) apis = manifest.value(QStringLiteral("runtime_apis")).toMap();
+  if (apis.isEmpty()) {
+    const auto runtime = manifest.value(QStringLiteral("runtime")).toMap();
+    apis = runtime.value(QStringLiteral("apis")).toMap();
+  }
+  return apis;
+}
+
+constexpr int kSupportedInputApiVersion = 1;
 }
 
 ModuleService::ModuleService(SettingsService& settings, PathService& paths, QObject* parent)
@@ -109,6 +121,10 @@ QVariantMap ModuleService::manifest(const QString& module_id) const {
   const auto item = module(module_id);
   if (item.isEmpty()) return {};
   return readManifest(item.value(QStringLiteral("path")).toString());
+}
+
+QVariantMap ModuleService::runtimeApiRequirements(const QString& module_id) const {
+  return manifestRuntimeApis(manifest(module_id));
 }
 
 QVariantList ModuleService::dlcCatalog(const QString& module_id) const {
@@ -204,6 +220,10 @@ ServiceResult ModuleService::remove(const QString& module_id) {
                                   QStringLiteral("Xenon could not remove the module directory."));
   }
   settings_.remove(QStringLiteral("modules/enabled/") + module_id);
+  const auto rollback_root = rollbackRoot(module_id);
+  if (!rollback_root.isEmpty() && QFileInfo::exists(rollback_root)) {
+    QDir{rollback_root}.removeRecursively();
+  }
   (void)refresh();
   return ServiceResult::success(
       QStringLiteral("Module removed"),
@@ -217,7 +237,8 @@ QVariantMap ModuleService::inspectDirectory(const QString& module_dir) const {
 
 ServiceResult ModuleService::installFromDirectory(const QString& expected_module_id,
                                                   const QString& source_directory,
-                                                  bool replace_existing) {
+                                                  bool replace_existing,
+                                                  bool retain_rollback) {
   if (!safeModuleId(expected_module_id)) {
     return ServiceResult::failure(QStringLiteral("Module install"),
                                   QStringLiteral("The expected module identifier is invalid."));
@@ -289,10 +310,114 @@ ServiceResult ModuleService::installFromDirectory(const QString& expected_module
                                   QStringLiteral("The replacement module failed validation. The previous installation was restored."));
   }
 
-  if (!backup.isEmpty() && QFileInfo::exists(backup)) QDir{backup}.removeRecursively();
+  QVariantMap install_metadata;
+  install_metadata.insert(QStringLiteral("installedVersion"),
+                          installed.value(QStringLiteral("version")).toString());
+  install_metadata.insert(QStringLiteral("rollbackAvailable"), false);
+
+  if (!backup.isEmpty() && QFileInfo::exists(backup)) {
+    if (retain_rollback) {
+      const auto previous_manifest = readManifest(backup);
+      const auto previous_version = firstString(previous_manifest, {"version"}, QStringLiteral("Unknown"));
+      const auto rollback_root = rollbackRoot(expected_module_id);
+      if (paths_.ensureDirectory(rollback_root)) {
+        auto version_token = previous_version;
+        version_token.replace(QRegularExpression{QStringLiteral("[^A-Za-z0-9._-]+")}, QStringLiteral("_"));
+        if (version_token.isEmpty()) version_token = QStringLiteral("unknown");
+        const auto rollback_path = QDir{rollback_root}.filePath(
+            QStringLiteral("%1-%2")
+                .arg(QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMddHHmmsszzz")),
+                     version_token.left(64)));
+        if (QDir{}.rename(backup, rollback_path)) {
+          install_metadata.insert(QStringLiteral("rollbackAvailable"), true);
+          install_metadata.insert(QStringLiteral("rollbackPath"), rollback_path);
+          install_metadata.insert(QStringLiteral("rollbackVersion"), previous_version);
+          install_metadata.insert(QStringLiteral("rollbackCreatedAt"),
+                                  QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+          pruneRollbacks(expected_module_id);
+        } else {
+          QDir{backup}.removeRecursively();
+        }
+      } else {
+        QDir{backup}.removeRecursively();
+      }
+    } else {
+      QDir{backup}.removeRecursively();
+    }
+  }
+
   return ServiceResult::success(QStringLiteral("Module installed"),
                                 QStringLiteral("%1 was installed successfully.")
-                                    .arg(installed.value(QStringLiteral("moduleName")).toString()));
+                                    .arg(installed.value(QStringLiteral("moduleName")).toString()),
+                                install_metadata);
+}
+
+QString ModuleService::rollbackRoot(const QString& module_id) const {
+  if (!safeModuleId(module_id)) return {};
+  const auto root = paths_.configuredPath(QStringLiteral("modules"));
+  return QDir{root}.filePath(QStringLiteral(".xenon-rollbacks/%1").arg(module_id));
+}
+
+QVariantMap ModuleService::latestRollback(const QString& module_id) const {
+  if (!safeModuleId(module_id)) return {};
+  const auto root_path = rollbackRoot(module_id);
+  QDir root{root_path};
+  if (!root.exists()) return {};
+
+  const auto candidates = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot,
+                                              QDir::Time | QDir::Reversed);
+  QVariantMap latest;
+  QDateTime latest_time;
+  for (const auto& candidate : candidates) {
+    if (candidate.isSymLink()) continue;
+    const auto manifest = readManifest(candidate.absoluteFilePath());
+    if (manifest.isEmpty()) continue;
+    const auto id = firstString(manifest, {"id", "moduleId", "module_id"});
+    if (id != module_id) continue;
+    const auto modified = candidate.lastModified().toUTC();
+    if (!latest.isEmpty() && modified <= latest_time) continue;
+    latest_time = modified;
+    latest.insert(QStringLiteral("available"), true);
+    latest.insert(QStringLiteral("moduleId"), module_id);
+    latest.insert(QStringLiteral("path"), candidate.absoluteFilePath());
+    latest.insert(QStringLiteral("version"), firstString(manifest, {"version"}, QStringLiteral("Unknown")));
+    latest.insert(QStringLiteral("createdAt"), modified.toString(Qt::ISODateWithMs));
+  }
+  return latest;
+}
+
+void ModuleService::pruneRollbacks(const QString& module_id, int keep) const {
+  if (keep < 1 || !safeModuleId(module_id)) return;
+  QDir root{rollbackRoot(module_id)};
+  if (!root.exists()) return;
+  const auto candidates = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+  for (int index = keep; index < candidates.size(); ++index) {
+    const auto& candidate = candidates.at(index);
+    if (!candidate.isSymLink()) QDir{candidate.absoluteFilePath()}.removeRecursively();
+  }
+}
+
+ServiceResult ModuleService::restoreLatestRollback(const QString& module_id) {
+  const auto rollback = latestRollback(module_id);
+  if (rollback.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Module rollback"),
+                                  QStringLiteral("There is no retained rollback snapshot for this module."));
+  }
+  const auto source = rollback.value(QStringLiteral("path")).toString();
+  auto result = installFromDirectory(module_id, source, true, true);
+  if (!result.ok) return result;
+
+  if (QFileInfo::exists(source)) QDir{source}.removeRecursively();
+  pruneRollbacks(module_id);
+  auto metadata = result.data.toMap();
+  metadata.insert(QStringLiteral("restoredVersion"),
+                  module(module_id).value(QStringLiteral("version")).toString());
+  result.title = QStringLiteral("Module rolled back");
+  result.message = QStringLiteral("%1 was restored to version %2.")
+                       .arg(module(module_id).value(QStringLiteral("moduleName")).toString(),
+                            metadata.value(QStringLiteral("restoredVersion")).toString());
+  result.data = metadata;
+  return result;
 }
 
 ServiceResult ModuleService::verify(const QString& module_id) const {
@@ -302,12 +427,25 @@ ServiceResult ModuleService::verify(const QString& module_id) const {
                                   QStringLiteral("The selected module is no longer installed."));
   }
   const auto path = item.value(QStringLiteral("path")).toString();
-  if (readManifest(path).isEmpty()) {
+  const auto manifest = readManifest(path);
+  if (manifest.isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Module verification"),
                                   QStringLiteral("The module manifest is missing or invalid."));
   }
+  const auto apis = manifestRuntimeApis(manifest);
+  const auto input = apis.value(QStringLiteral("input")).toMap();
+  if (!input.isEmpty()) {
+    const auto required = input.value(QStringLiteral("required"), true).toBool();
+    const auto version = input.value(QStringLiteral("version"), 1).toInt();
+    if (required && (version <= 0 || version > kSupportedInputApiVersion)) {
+      return ServiceResult::failure(
+          QStringLiteral("Module API incompatible"),
+          QStringLiteral("This module requires Xenon Input API v%1, but this runtime provides v%2.")
+              .arg(version).arg(kSupportedInputApiVersion));
+    }
+  }
   return ServiceResult::success(QStringLiteral("Module verified"),
-                                QStringLiteral("The module manifest is readable. Runtime/API compatibility checks will run when the module ABI is connected."));
+                                QStringLiteral("The module manifest and declared runtime API requirements are compatible."));
 }
 
 QString ModuleService::modulePath(const QString& module_id) const {
@@ -452,6 +590,10 @@ QVariantMap ModuleService::manifestToUi(const QVariantMap& manifest,
   item.insert(QStringLiteral("renderer"), firstString(manifest, {"renderer"}, QStringLiteral("Automatic")));
   item.insert(QStringLiteral("artwork"), firstString(manifest, {"artwork", "icon"}));
   item.insert(QStringLiteral("capabilities"), joinedValue(manifest.value(QStringLiteral("capabilities"))));
+  const auto runtime_apis = manifestRuntimeApis(manifest);
+  item.insert(QStringLiteral("runtimeApis"), runtime_apis);
+  const auto input_api = runtime_apis.value(QStringLiteral("input")).toMap();
+  item.insert(QStringLiteral("inputApiVersion"), input_api.value(QStringLiteral("version"), 0));
   item.insert(QStringLiteral("linkedGame"), QString{});
   item.insert(QStringLiteral("path"), module_dir);
   item.insert(QStringLiteral("manifestPath"), manifest.value(QStringLiteral("_manifestPath")));

@@ -34,7 +34,7 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   }
   memory_ = &memory;
   queue_ = &queue;
-  coherency_.reset(memory::kPhysicalMemorySize, true);
+  coherency_.reset(memory::kPhysicalMemorySize, false);
   return true;
 }
 
@@ -50,17 +50,19 @@ void GuestMemoryMirror::reset() noexcept {
 }
 
 bool GuestMemoryMirror::synchronize() {
-  return synchronize_range(0u, memory::kPhysicalMemorySize);
+  return synchronize_range(0u, memory::kPhysicalMemorySize,
+                           memory::GpuRangeUsage::Unrestricted);
 }
 
-bool GuestMemoryMirror::synchronize_range(std::uint32_t address,
-                                          std::uint32_t width) {
+bool GuestMemoryMirror::synchronize_range(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
   const auto plan = coherency_.plan_upload(memory_->coherency(), address, width,
-                                            kTransferSize);
+                                            kTransferSize, usage);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> upload_bytes;
@@ -132,13 +134,15 @@ bool GuestMemoryMirror::has_gpu_dirty(std::uint32_t address,
   return coherency_.has_gpu_dirty(address, width);
 }
 
-bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
-                                         std::uint32_t width) {
+bool GuestMemoryMirror::make_cpu_visible(
+    std::uint32_t address, std::uint32_t width,
+    memory::GpuRangeUsage usage) {
   if (!memory_ || !queue_) {
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
-  const auto plan = coherency_.plan_readback(address, width, kTransferSize);
+  const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
+                                             kTransferSize, usage);
   if (plan.ranges.empty()) return true;
 
   std::span<std::byte> readback_bytes;
@@ -195,16 +199,32 @@ bool GuestMemoryMirror::make_cpu_visible(std::uint32_t address,
       shader_read_state_ = false;
       shader_write_state_ = false;
 
-      std::uint64_t publication_epoch = 0u;
-      if (!memory_->write_physical(
-              chunk_address, readback_bytes.first(chunk_size),
-              &publication_epoch)) {
-        error_ = "Vulkan guest-memory readback destination is outside physical RAM";
+      // The native copy is complete, but CPU threads may have written the same
+      // Xbox bytes while it was in flight. Xenon Memory briefly quiesces
+      // physical writers, re-ingests those CPU publications and applies only
+      // the subranges still owned by this exact GPU generation.
+      auto write_window = memory_->physical_write_window();
+      if (!write_window) {
+        error_ = "failed to acquire Vulkan guest-memory readback window";
         return false;
       }
-      (void)coherency_.commit_gpu_download(
-          memory_->coherency(), plan, chunk_address, chunk_size,
-          publication_epoch);
+      const auto safe_ranges = coherency_.prepare_gpu_download(
+          memory_->coherency(), range, kTransferSize);
+      for (const auto& safe : safe_ranges) {
+        const auto offset = safe.address - chunk_address;
+        std::uint64_t publication_epoch = 0u;
+        if (!write_window.write(
+                safe.address,
+                readback_bytes.subspan(offset, safe.size),
+                &publication_epoch)) {
+          error_ =
+              "Vulkan guest-memory readback destination is outside physical RAM";
+          return false;
+        }
+        (void)coherency_.commit_gpu_download(
+            memory_->coherency(), safe, safe.address, safe.size,
+            publication_epoch);
+      }
   }
   return true;
 }

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "xenon/filesystem/device.hpp"
+#include "xenon/filesystem/directory_cursor.hpp"
 
 namespace xenon::filesystem {
 
@@ -55,12 +56,20 @@ class VirtualFileSystem {
   [[nodiscard]] FsError query_directory(
       std::string_view guest_path, const DirectoryQuery& query,
       std::vector<DirectoryEntry>& out_entries) const;
+  [[nodiscard]] FsError open_directory_cursor(
+      std::string_view guest_path, const DirectoryQuery& query,
+      std::unique_ptr<DirectoryCursor>& out_cursor) const;
   [[nodiscard]] FsError create_directory(std::string_view guest_path,
                                          bool recursive = false) const;
   [[nodiscard]] FsError remove(std::string_view guest_path) const;
   [[nodiscard]] FsError rename(std::string_view old_guest_path,
                                std::string_view new_guest_path,
                                bool replace_existing = false) const;
+  [[nodiscard]] FsError set_attributes(
+      std::string_view guest_path, const FileAttributeUpdate& update) const;
+  [[nodiscard]] FsError set_last_write_time(
+      std::string_view guest_path,
+      std::filesystem::file_time_type last_write_time) const;
   [[nodiscard]] FsError disk_space(std::string_view guest_path,
                                    DiskSpace& out_space) const;
 

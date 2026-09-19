@@ -112,7 +112,7 @@ bool Lifter::lift_vector(const DecodedInstruction& i, ir::Builder& b) const {
   if(starts(m,"vand"))  { vwrite(b,d,binary(b,Op::VAnd,i,va(i),vb(i))); return true; }
   if(starts(m,"vor"))   { vwrite(b,d,binary(b,Op::VOr,i,va(i),vb(i))); return true; }
   if(starts(m,"vxor"))  { vwrite(b,d,binary(b,Op::VXor,i,va(i),vb(i))); return true; }
-  if(starts(m,"vnor"))  { auto x=binary(b,Op::VOr,i,va(i),vb(i)); const ValueId a[]={x}; vwrite(b,d,b.emit(Op::VNot,Type::V128,a,vector_tag(m),0,&i)); return true; }
+  if(starts(m,"vnor"))  { vwrite(b,d,binary(b,Op::VNot,i,va(i),vb(i))); return true; }
   if(starts(m,"vsel")) {
     ValueId r{};
     if(i.info->format==InstructionFormat::VA) r=ternary(b,Op::VSelect,i,va(i),vb(i),vc(i));

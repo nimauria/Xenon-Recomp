@@ -508,7 +508,7 @@ Popup {
                             Text { text: "Startup page"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                             XComboBox {
                                 Layout.fillWidth: true
-                                model: ["Launcher default", "Library", "Modules", "Profiles", "Settings"]
+                                model: ["Launcher default", "Home", "Library", "Modules", "Profiles", "Settings"]
                                 currentIndex: Math.max(0, model.indexOf(root.startupPage))
                                 onActivated: function(index) { root.startupPage = model[index] }
                             }

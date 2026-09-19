@@ -391,3 +391,286 @@ Validation on this completion checkpoint:
 The larger all-in-one `xenon_memory_tests` TSan executable remains slow enough to exceed
 this environment's command execution window; that timeout produced no TSan race report
 and is not substituted for the dedicated ordering TSan result.
+
+
+### Phase 14 shared CPU/GPU coherency completion
+
+Brief Phase 14 is closed around a single backend-neutral ownership model in Xenon Memory.
+Validation covers:
+
+- exact CPU/DMA write epoch ingestion before upload and readback planning;
+- per-range GPU generations so unrelated writes remain independently committable;
+- newer overlapping GPU writes surviving an older readback commit;
+- CPU writes between readback planning and physical commit winning deterministically via
+  the short physical-write quiescence window;
+- source-aware acknowledgement of the mirror's own readback publication without dropping
+  unrelated CPU/DMA dirt;
+- discrete `Copy` and shared-host-visible `VisibilityOnly` synchronization actions;
+- Vulkan and D3D12 mirror code consuming the same shared upload/readback plans.
+
+Completion validation:
+
+- GCC Linux x86-64 Release full matrix: **29/29 passed**;
+- Debug ASan+UBSan targeted matrix: **6/6 passed**;
+- Clang Release targeted matrix: **3/3 passed**;
+- GCC TSan `xenon_gpu_coherency_tests`: **passed with no reported race**;
+- the broader TSan `xenon_memory_tests` exceeded the available execution window and is
+  not counted as a completed TSan pass.
+
+
+### Phase 15 lazy/range-driven GPU synchronization completion
+
+Brief Phase 15 is closed around request-driven guest-memory synchronization. Validation
+confirms:
+
+- untouched device-invalid ranges initialize lazily on their exact first request;
+- already device-valid clean ranges generate no repeat transfer;
+- adjacent CPU dirty writes and page dirty ranges coalesce;
+- requested ranges and page-aligned touched physical ranges are tracked independently of
+  dirty ownership;
+- production Vulkan/D3D12 source paths no longer synchronize the full physical aperture at
+  submission start;
+- active vertex buffers and statically known memexport targets request exact upload spans;
+- textures, index data, resolve/command streams and presentation/readback request exact
+  CPU-visible spans;
+- dynamic-address memexport is the explicit full-range fallback;
+- the shared planner exposes Texture, VertexBuffer, IndexBuffer, Shader, CommandData,
+  MemoryExport, RenderReadback and Unrestricted request classes.
+
+Completion validation:
+
+- GCC Linux x86-64 Release full matrix: **29/29 passed**;
+- Debug ASan+UBSan targeted GPU/coherency/resource/texture/CPU-memory matrix: **5/5
+  passed**, plus standalone `xenon_memory_tests` pass;
+- Clang Release selected matrix: **4/4 passed**;
+- GCC TSan `xenon_gpu_coherency_tests` and `xenon_resource_ir_tests`: **2/2 passed**
+  with no reported race.
+
+
+### Phase 16 memory types
+
+Phase 16 closes observable Xbox memory-type behavior in the Memory V2 layer. Validation
+now covers canonical NormalCached / WriteCombined / CacheInhibited / Device classification,
+mutually exclusive NoCache+WriteCombine rejection, query-visible protection flags, WC/CI
+exclusion from the direct aperture, executable memory as an orthogonal property, MMIO as
+Device memory, cache-domain publication through the CPU fast path, domain-preserving GPU
+upload planning and rollback, conservative CacheInhibited fallback after exact-journal
+overflow, and Device-domain controlled physical writes.
+
+Validation results for the completion checkpoint:
+
+- GCC Linux x86-64 Release full matrix: **30/30 passed**;
+- Debug ASan+UBSan targeted memory/type/coherency/CPU-memory/host-VM matrix: **5/5 passed**;
+- Clang Release memory/type/coherency/CPU-memory matrix: **4/4 passed**;
+- GCC TSan `xenon_memory_type_tests` and `xenon_gpu_coherency_tests`: **2/2 passed** with no reported race.
+
+Native host WC/uncached page attributes are intentionally not forced onto individual aliases
+of Xenon's shared physical backing on general hosts. The tested policy is semantic
+translation (ordering/coherency/access-path policy) until a host backend can provide an
+alias-safe native cache-attribute mechanism.
+
+
+### Phase 17 MMIO fast/slow split
+
+Phase 17 closes the MMIO isolation requirements. Validation now covers hot-page slow-bit
+publication, sorted non-overlapping interval registration, logarithmic cold device lookup,
+partial-page overlays, adjacent sub-page devices, handler lifetime across catalogue clear,
+and byte-visible range fallback without holding the AddressSpace management mutex across
+device callbacks.
+
+A dedicated concurrency regression deliberately blocks inside an MMIO callback while a
+second thread commits a normal RAM page. The management operation completes before the
+handler is released, demonstrating that arbitrary device code no longer executes under the
+global memory-management lock. A separate self-clearing handler removes its own catalogue
+during dispatch and safely returns through shared snapshot ownership.
+
+Validation results for the completion checkpoint:
+
+- GCC Linux x86-64 Release full matrix: **31/31 passed**;
+- Debug ASan+UBSan targeted MMIO/type/coherency/ordering/CPU-memory matrix: **5/5 passed**;
+- Clang Release MMIO/type/ordering matrix: **3/3 passed**;
+- GCC TSan `xenon_mmio_tests` and `xenon_memory_type_tests`: **2/2 passed** with no
+  reported race;
+- Release microbenchmark: `load_store_32_be` ~327.6 ns/op and
+  `normal_ram_with_256_mmio_devices` ~316.4 ns/op in the same run, while the final cold
+  catalogue device dispatched at ~968.0 ns/op. The measurement is not treated as an
+  absolute performance guarantee, but it confirms the device catalogue is absent from the
+  ordinary RAM path.
+
+
+### Phase 18 structured fault/protection completion
+
+Phase 18 closes the exception-ready guest fault model. `MemoryFaultInfo` now records the
+original request and exact faulting address, access width/kind/reason, region kind, page
+state, mapped/committed status, allocation/current protection, physical backing, MMIO
+classification and canonical memory type/host policy. Existing `MemoryFault` accessors remain
+compatible while `info()` exposes the full structured payload.
+
+New regressions cover free versus reserved/uncommitted pages, read/write/execute protection
+faults, cross-page scalar failures preserving the original 4-byte request while naming the
+second page that faulted, 32-bit guest-address wrap rejection before memory is touched,
+dedicated MMIO without a handler, and partial MMIO scalar accesses producing `MmioWidth`
+instead of falling through to RAM. Host page-protection implementation remains isolated in
+the host-VM layer.
+
+Validation results for the completion checkpoint:
+
+- GCC Linux x86-64 Release full matrix: **32/32 passed**;
+- Debug ASan+UBSan memory/fault/MMIO/CPU-memory matrix: **4/4 passed**;
+- Clang Release memory/fault/MMIO/CPU-memory matrix: **4/4 passed**;
+- GCC TSan `xenon_memory_fault_tests` and `xenon_mmio_tests`: **2/2 passed** with no
+  reported race;
+- `git diff --check`: clean.
+
+
+### Phase 19 executable/self-modifying-code completion
+
+Phase 19 closes native generated-code ownership around the executable-page generation
+model. `ExecutableCodeCache` stores source snapshots containing physical-page identity and
+executable generation for every page covered by a native translation. Dispatch lookup
+returns a native entry only while every stamp still matches, and stale entries are lazily
+evicted without adding synchronous callbacks to ordinary stores.
+
+Regressions cover CPU self-modifying writes, physical aliases, XEX 0x8/0x9 aliases,
+controlled DMA/GPU writes, `icbi`, Execute->NX->Execute transitions, decommit/recommit
+and reset epoch boundaries, multi-page translations, race-safe dynamic recompilation
+snapshot rejection, Execute-aware instruction fetch, explicit module-range invalidation
+and six concurrent lookup threads racing repeated writes/registration.
+
+Completion validation:
+
+- GCC Linux x86-64 Release full matrix: **33/33 passed**;
+- ASan+UBSan: `xenon_executable_code_cache_tests`, `xenon_memory_tests` and
+  `xenon_memory_cpu_integration` passed in the Phase 19 hardening build;
+- Clang Release: the same three Phase 19/memory integration suites passed;
+- GCC TSan `xenon_executable_code_cache_tests`: **passed with no reported race**;
+- `git diff --check`: clean at packaging.
+
+
+## Memory V2 Phase 20/21 closure — 2026-09-19
+
+The original Memory V2 roadmap is now closed at **21/21 phases**. Phase 20 extends
+`xenon_memory_v2_benchmarks` with allocation/free, fragmentation, fixed physical aliases,
+explicit block copy, CPU→GPU synchronization planning and discrete-mirror upload staging
+bandwidth. Reports can be emitted as CSV, JSON (`xenon-memory-v2-benchmark-v1`) or a
+human-readable table with platform/architecture/compiler/build/translation metadata. The
+format is intentionally shared by Windows x86-64, Linux x86-64, Linux ARM64 and Android
+ARM64.
+
+Phase 21 adds `xenon_memory_hardening_tests`, a dedicated randomized/model-based harness
+covering fixed A/C/E/7F aliases, dynamic physical ownership/refcounts/reverse mappings,
+release/reuse reachability, protection transitions, XEX executable generations, dirty
+journal exactness + wrap fallback, LR/SC invalidation, controlled external writes and
+six-thread CPU + DMA concurrency. `XENON_MEMORY_FUZZ_SEED` makes failures reproducible;
+`XENON_MEMORY_FUZZ_SCALE` allows expensive stress loops to be reduced for sanitizer jobs
+without changing the test model.
+
+Closure validation performed on Linux x86-64:
+
+- GCC Release generic test matrix: **34/34 passed** across the initial 1-16 segment and
+  resumed 17-34 segment;
+- Phase 21 full-scale default seed passed, plus alternate seeds `0x12345678` and
+  `0xCAFEBABE`;
+- Debug GCC ASan+UBSan: core `xenon_memory_tests` passed full-scale; the hardening target
+  passed at 10% sanitizer scale; executable-code-cache and GPU-coherency tests passed;
+- Clang 17 Release: hardening, core memory, executable-code-cache and GPU-coherency tests
+  passed, and the benchmark executable built and ran;
+- GCC TSan: hardening passed at 10% sanitizer scale with `halt_on_error=1` and no reported
+  race.
+
+The portable benchmark's `gpu_upload_snapshot_bandwidth_4m` measures the canonical Xenon
+Memory side of a discrete upload: exact-range planning plus the safe physical snapshot into
+the backend upload staging buffer. Native Vulkan/D3D12 queue-copy timing remains a graphics
+backend/hardware performance concern and does not alter Memory V2 semantics.
+
+
+## Xbox/XDK compatibility closure — 2026-09-19
+
+After the 21-phase Memory V2 roadmap was closed, the complete memory implementation was
+audited again against current Xenia memory research, public NT/XDK-shaped memory semantics
+and successful Xbox 360 recompilation runtimes. This pass did not replace the V2
+architecture; it tightened observable allocation/query/protection behavior before more
+runtime systems are built on top of it.
+
+Regression coverage added by this closure verifies:
+
+- the low 64 KiB virtual range is committed but no-access and faults as protection, not as
+  an ordinary uncommitted allocation;
+- the final 64 KiB of physical RAM can never be returned by the physical allocator and its
+  direct alias is no-access;
+- default 4 KiB physical allocations cannot escape the E-view into the `0xFFD00000+` MMIO
+  window, while 64 KiB A-view allocations may use the higher valid physical range;
+- 4 KiB, 64 KiB and 16 MiB physical page classes round and align allocations correctly;
+- physical minimum/maximum address bounds are honored;
+- physical allocation size, original protection and current protection are queryable;
+- read-only/cache-inhibited and write-combined physical policy is observed consistently by
+  the A/C/E aliases;
+- physical protection changes invalidate executable generations across all aliases;
+- freeing by the caller's original unrounded byte count releases the complete page-class
+  allocation;
+- reserve-only non-fixed virtual allocation can later be committed;
+- MEM_NOZERO-style reuse preserves prior contents while ordinary allocation still zeroes;
+- adjacent independent allocations with identical state/protection remain separate query
+  regions;
+- an unaligned two-byte decommit crossing a 4 KiB boundary decommits both touched pages.
+
+The canonical range allocator, compact hot-page table, six-thread reservation monitor,
+coherency service and generated PPC fast path remain unchanged in architectural role. The
+new Xbox-facing policy is cold metadata and management logic.
+
+Validation after the closure:
+
+- GCC Linux x86-64 Release: complete repository build succeeded and **34/34 CTest suites passed**;
+- GCC Debug ASan+UBSan: core memory, structured fault model, executable-code cache and
+  GPU coherency targets passed **4/4** with leak detection and halt-on-error enabled;
+- Clang Release: core memory, structured fault model, executable-code cache, host-VM and
+  generated CPU->Memory integration passed **5/5**.
+
+The optional direct-aperture host abstraction was also tightened in this closure. POSIX
+reuses the existing fixed `mmap` implementation. Modern Windows now reserves the aperture
+with `VirtualAlloc2(MEM_RESERVE_PLACEHOLDER)` and replaces exact page-sized placeholder
+slices with `MapViewOfFile3(MEM_REPLACE_PLACEHOLDER)`, restoring them through
+`UnmapViewOfFile2(MEM_PRESERVE_PLACEHOLDER)`. Permanent 0x7F/A/C/E physical aliases remain
+on compact translation in Windows placeholder mode so the runtime does not create one
+section view per 4 KiB alias page. The common host-VM regression uses the fixed-region API
+and the Linux fixed-mapping path was rerun successfully. A native Windows runtime was not
+available in this Linux validation environment, so the Windows-specific branch is source-
+and API-validated here and is designed to fall back to compact translation automatically
+if the placeholder API is unavailable or initialization fails.
+
+## Final adversarial memory audit closure — 2026-09-19
+
+A final comparison against current Xenia/ReXGlue behavior and the production graphics callers
+found four additional edge cases. Regression coverage now verifies:
+
+- a one-byte `protect` or `decommit` request in the 64 KiB virtual heap affects the complete
+  architectural 64 KiB page, while the hot table remains internally 4 KiB;
+- the 0x800 XEX view receives the same 64 KiB management normalization and its 0x900 backing alias
+  observes the resulting state;
+- protection cannot span adjacent independent virtual reservations;
+- physical protection is normalized to the allocation's 4 KiB/64 KiB/16 MiB page class and cannot
+  cross the allocation identity boundary;
+- free-region queries report a non-zero run up to the next occupied page/heap boundary;
+- `copy_physical_range` races aligned CPU stores under the Phase-21 hardening harness without a
+  TSan report;
+- common GPU helpers accept range snapshots with non-zero physical bases, so backends no longer
+  need a direct 512 MiB physical pointer for resolve geometry, indices, textures or presentation.
+
+Production `physical_data()` usage in `src/graphics` is now zero. The Xenos command processor,
+indirect shader/constant loads, raw resolve RMW path, Vulkan backend and D3D12 backend all consume
+atomic physical snapshots. `physical_data()` remains available only as a read-only diagnostic/
+quiescent view for tests and tooling.
+
+Validation after the final closure:
+
+- GCC Linux x86-64 Release: **34/34 CTest suites passed**;
+- GCC ASan+UBSan: core memory, hardening at sanitizer scale, fault model, executable cache, GPU
+  frontend, resource IR, texture, primitive processing and presentation passed with halt-on-error;
+- GCC TSan: Phase-21 hardening (including concurrent CPU store vs physical snapshot) and GPU
+  frontend passed with halt-on-error;
+- Clang 17 Release: the same focused memory/graphics set passed.
+
+The 0x340000-byte no-access 64 KiB physical reservation still present in Xenia/ReXGlue was also
+researched. Upstream continues to mark it as unknown (`// ?`), and no public Xbox/XDK contract was
+found that establishes ownership or observable semantics. It is intentionally **not** copied into
+Xenon without evidence.
