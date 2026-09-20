@@ -74,3 +74,5 @@ CLAUDE.md
 !third_party/xenon-ffmpeg/
 !third_party/xenon-ffmpeg/**
 !third_party/xenon-ffmpeg/**/*.lib
+
+.vscode/
