@@ -1,44 +1,3 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
 # Build directories
 build/
 Build/
@@ -52,18 +11,66 @@ Makefile
 install_manifest.txt
 compile_commands.json
 
+# Compiled object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger files
+*.pdb
+*.dwo
+
+# Compiled static libraries
+*.a
+*.la
+*.lai
+*.lib
+
+# Compiled dynamic libraries
+*.dll
+*.dylib
+*.so
+*.so.*
+
+# Executables
+*.app
+*.exe
+*.out
+
+# Fortran module files
+*.mod
+*.smod
+
+# Prerequisites
+*.d
+
 # Temporary files
-*.tmp
-*.log
 *.bak
+*.log
 *.swp
+*.tmp
+
+# Test output & cache
+.cache/
+Testing/
 
 # vcpkg
 vcpkg_installed/
 
-# debug information files
-*.dwo
+# Local editor / tooling
+.vscode/
 
-# test output & cache
-Testing/
-.cache/
+# Local Claude Code instructions
+CLAUDE.md
+# Xenon-owned prebuilt dependencies that are intentionally versioned
+!third_party/xenon-ffmpeg/
+!third_party/xenon-ffmpeg/**
+!third_party/xenon-ffmpeg/**/*.lib

@@ -32,7 +32,9 @@ option(XENON_ENABLE_GRAPHICS "Build the Xenos graphics frontend" ON)
 option(XENON_ENABLE_VULKAN "Build the Vulkan backend when the SDK is available" ON)
 option(XENON_ENABLE_D3D12 "Build the Direct3D 12 backend on Windows" ON)
 option(XENON_ENABLE_DXC "Build the HLSL/DXC shader compiler when DXC is available" ON)
-option(XENON_ENABLE_AUDIO "Enable audio subsystem" OFF)
+option(XENON_ENABLE_AUDIO "Build the production Xbox audio translation subsystem" ON)
+set(XENON_AUDIO_FFMPEG_ROOT "" CACHE PATH
+  "Optional FFmpeg root exposing AV_CODEC_ID_XMAFRAMES; Windows x64 uses Xenon's bundled dependency by default")
 option(XENON_ENABLE_INPUT "Enable input subsystem" ON)
 option(XENON_INPUT_ENABLE_SDL2 "Enable SDL2 controller backend when SDL2 is available" ON)
 option(XENON_INPUT_ENABLE_SDL3 "Enable SDL3 controller backend when SDL3 is available" ON)
@@ -47,15 +49,45 @@ endif()
 if(XENON_ENABLE_KERNEL AND NOT XENON_ENABLE_FILESYSTEM)
   message(FATAL_ERROR "XENON_ENABLE_KERNEL currently requires XENON_ENABLE_FILESYSTEM")
 endif()
+if(XENON_ENABLE_AUDIO AND NOT XENON_ENABLE_MEMORY)
+  message(FATAL_ERROR "XENON_ENABLE_AUDIO requires XENON_ENABLE_MEMORY")
+endif()
 
 # -----------------------------------------------------------------------------
 # Core runtime
 add_library(xenon_core STATIC
   src/core/runtime.cpp
+  src/core/session.cpp
+  src/core/export_registry.cpp
+  src/core/call_bridge.cpp
+  src/xam/user_manager.cpp
+  src/xam/locale_manager.cpp
+  src/xam/content_manager.cpp
+  src/xam/content_graph.cpp
+  src/xam/title_update_manager.cpp
+  src/xam/dlc_manager.cpp
+  src/xam/save_manager.cpp
+  src/xam/notification_manager.cpp
+  src/xam/achievement_manager.cpp
+  src/xam/xam_session.cpp
+  src/xam/xam_user_exports.cpp
+  src/xam/xam_locale_exports.cpp
+  src/xam/xam_content_exports.cpp
+  src/xam/xam_notification_exports.cpp
+  src/xam/xam_achievement_exports.cpp
 )
 target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(xenon_core PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_core)
+# Session depends on all major subsystems, but none of those subsystem
+# targets (xenon_memory, xenon_cpu, xenon_filesystem, xenon_kernel,
+# xenon_input, xenon_graphics, xenon_xbox_kernel_io) exist yet at this point
+# in the file - add_library() for each of them runs further down. The actual
+# `if(TARGET ...)`-guarded target_link_libraries(xenon_core ...) calls live
+# after "Core runtime dependencies" below (right before the Tests section),
+# once every optional subsystem has had a chance to be defined; putting them
+# here would make every `if(TARGET ...)` check evaluate false and silently
+# leave xenon_core without any of its real dependencies.
 add_library(Xenon::Core ALIAS xenon_core)
 
 # -----------------------------------------------------------------------------
@@ -95,12 +127,29 @@ if(XENON_ENABLE_KERNEL)
     src/kernel/xboxkrnl/xbox_io.cpp
     src/kernel/synchronization/completion_port.cpp
     src/kernel/synchronization/event.cpp
+    src/kernel/synchronization/semaphore.cpp
+    src/kernel/synchronization/mutant.cpp
+    src/kernel/synchronization/timer.cpp
+    src/kernel/synchronization/wait.cpp
+    src/kernel/threading/thread.cpp
+    src/kernel/timing/time.cpp
+    src/kernel/module/module.cpp
+    src/kernel/exception/exception.cpp
   )
   target_link_libraries(xenon_kernel PUBLIC xenon_filesystem)
   target_include_directories(xenon_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_compile_features(xenon_kernel PUBLIC cxx_std_20)
   xenon_enable_warnings(xenon_kernel)
   add_library(Xenon::Kernel ALIAS xenon_kernel)
+
+  # Kernel memory integration requires Memory V2
+  if(XENON_ENABLE_MEMORY)
+    target_sources(xenon_kernel PRIVATE
+      src/kernel/memory/memory.cpp
+      src/kernel/process/process.cpp
+    )
+    target_link_libraries(xenon_kernel PUBLIC xenon_memory)
+  endif()
 endif()
 
 # -----------------------------------------------------------------------------
@@ -131,7 +180,30 @@ target_include_directories(xenon_cpu
 target_compile_features(xenon_cpu PUBLIC cxx_std_20)
 xenon_enable_guest_fp_semantics(xenon_cpu PUBLIC)
 xenon_enable_warnings(xenon_cpu)
+if(MSVC)
+  # decoder.cpp builds its opcode dispatch table via a consteval bucket-sort
+  # over the full PPC opcode catalog; this legitimately exceeds MSVC's
+  # default constexpr evaluation step budget (1,048,576).
+  target_compile_options(xenon_cpu PRIVATE /constexpr:steps100000000)
+endif()
 add_library(Xenon::CPU ALIAS xenon_cpu)
+
+# Whole-game static recompilation driver and its diagnostic utilities.
+add_library(xenon_recomp STATIC
+  src/recomp/driver.cpp
+)
+target_include_directories(xenon_recomp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io)
+target_compile_features(xenon_recomp PUBLIC cxx_std_20)
+xenon_enable_warnings(xenon_recomp)
+add_library(Xenon::Recomp ALIAS xenon_recomp)
+
+foreach(xenon_tool recomp-driver ppc-disasm ir-dump import-scanner module-inspector)
+  add_executable(${xenon_tool} tools/recomp_tools.cpp)
+  target_compile_definitions(${xenon_tool} PRIVATE XENON_TOOL_NAME="${xenon_tool}")
+  target_link_libraries(${xenon_tool} PRIVATE xenon_recomp)
+  xenon_enable_warnings(${xenon_tool})
+endforeach()
 
 # -----------------------------------------------------------------------------
 # Production guest memory. FlatMemory above remains a CPU test fixture only.
@@ -157,6 +229,82 @@ if(XENON_ENABLE_MEMORY)
 endif()
 
 # -----------------------------------------------------------------------------
+# Audio: Xbox render-driver/XMA semantics -> bounded Xenon mixer -> SDL2 host.
+# FFmpeg supplies the legally redistributable XMAFRAMES decoder API; Xenon does
+# not vendor an XMA codec or substitute a silent/null production backend.
+if(XENON_ENABLE_AUDIO)
+  xenon_resolve_sdl2(XENON_AUDIO_SDL_TARGET)
+  xenon_resolve_audio_ffmpeg(
+    XENON_AUDIO_FFMPEG_TARGET
+    XENON_AUDIO_AVCODEC_INCLUDE_DIR
+    XENON_AUDIO_USING_BUNDLED_FFMPEG)
+
+  if(NOT XENON_AUDIO_SDL_TARGET)
+    message(FATAL_ERROR
+      "Audio V1 requires SDL2. Leave XENON_FETCH_MISSING_DEPS=ON to fetch Xenon's pinned SDL2 revision, install SDL2 development files, or configure -DXENON_ENABLE_AUDIO=OFF explicitly.")
+  endif()
+  if(NOT XENON_AUDIO_FFMPEG_TARGET)
+    message(FATAL_ERROR
+      "Audio V1 requires FFmpeg libavcodec/libavutil with AV_CODEC_ID_XMAFRAMES. Windows x64 checkouts include a vetted Xenon bundle; other platforms may provide XENON_AUDIO_FFMPEG_ROOT or a compatible system package.")
+  endif()
+
+  include(CheckCXXSourceCompiles)
+  # Header/API capability probes. Static-library try-compiles avoid attempting
+  # to execute target binaries and work with prebuilt Windows archives.
+  set(_xenon_audio_saved_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+  set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+  set(CMAKE_REQUIRED_INCLUDES "${XENON_AUDIO_AVCODEC_INCLUDE_DIR}")
+  check_cxx_source_compiles([=[
+    extern "C" {
+      #include <libavcodec/avcodec.h>
+    }
+    int main() { auto id = AV_CODEC_ID_XMAFRAMES; return static_cast<int>(id == AV_CODEC_ID_NONE); }
+  ]=] XENON_AUDIO_FFMPEG_HAS_XMAFRAMES)
+  if(NOT XENON_AUDIO_FFMPEG_HAS_XMAFRAMES)
+    message(FATAL_ERROR
+      "The selected FFmpeg does not expose AV_CODEC_ID_XMAFRAMES. Use Xenon's bundled Windows x64 dependency or provide a compatible build with XENON_AUDIO_FFMPEG_ROOT.")
+  endif()
+
+  check_cxx_source_compiles([=[
+    extern "C" {
+      #include <libavcodec/avcodec.h>
+      #include <libavutil/channel_layout.h>
+    }
+    int main() { AVCodecContext* c = nullptr; av_channel_layout_default(&c->ch_layout, 2); return 0; }
+  ]=] XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT)
+  if(_xenon_audio_saved_try_compile_target_type)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_xenon_audio_saved_try_compile_target_type}")
+  else()
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+  endif()
+  unset(CMAKE_REQUIRED_INCLUDES)
+  unset(_xenon_audio_saved_try_compile_target_type)
+
+  add_library(xenon_audio STATIC
+    src/audio/backend_sdl.cpp
+    src/audio/mixer.cpp
+    src/audio/system.cpp
+    src/audio/xma.cpp
+  )
+  target_include_directories(xenon_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(xenon_audio
+    PUBLIC xenon_memory
+    PRIVATE ${XENON_AUDIO_SDL_TARGET} ${XENON_AUDIO_FFMPEG_TARGET})
+  target_compile_features(xenon_audio PUBLIC cxx_std_20)
+  if(XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT)
+    target_compile_definitions(xenon_audio PRIVATE XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT=1)
+  endif()
+  if(XENON_AUDIO_USING_BUNDLED_FFMPEG)
+    target_compile_definitions(xenon_audio PRIVATE XENON_AUDIO_BUNDLED_FFMPEG=1)
+  endif()
+  xenon_enable_warnings(xenon_audio)
+  add_library(Xenon::Audio ALIAS xenon_audio)
+
+  target_sources(xenon_core PRIVATE src/audio/exports.cpp)
+  target_compile_definitions(xenon_core PUBLIC XENON_HAS_AUDIO=1)
+endif()
+
+# -----------------------------------------------------------------------------
 # Input: host-neutral Xbox controller model. Platform backends are optional.
 add_library(xenon_input_api INTERFACE)
 target_include_directories(xenon_input_api INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -165,6 +313,7 @@ add_library(Xenon::InputAPI ALIAS xenon_input_api)
 
 if(XENON_ENABLE_INPUT)
   add_library(xenon_input STATIC
+    src/input/action_router.cpp
     src/input/system.cpp
     src/input/module_api.cpp
     src/input/state_merge.cpp
@@ -197,21 +346,7 @@ if(XENON_ENABLE_INPUT)
   endif()
 
   if(XENON_INPUT_ENABLE_SDL2)
-    find_package(SDL2 2.0.9 QUIET CONFIG)
-    if(NOT TARGET SDL2::SDL2)
-      find_package(SDL2 2.0.9 QUIET)
-    endif()
-    set(XENON_SDL2_TARGET "")
-    if(TARGET SDL2::SDL2)
-      set(XENON_SDL2_TARGET SDL2::SDL2)
-    elseif(TARGET SDL2::SDL2-static)
-      set(XENON_SDL2_TARGET SDL2::SDL2-static)
-    elseif(SDL2_FOUND AND SDL2_LIBRARIES)
-      add_library(xenon_sdl2_external INTERFACE)
-      target_include_directories(xenon_sdl2_external INTERFACE ${SDL2_INCLUDE_DIRS})
-      target_link_libraries(xenon_sdl2_external INTERFACE ${SDL2_LIBRARIES})
-      set(XENON_SDL2_TARGET xenon_sdl2_external)
-    endif()
+    xenon_resolve_sdl2(XENON_SDL2_TARGET)
     if(XENON_SDL2_TARGET)
       target_sources(xenon_input PRIVATE src/input/sdl/sdl2_host.cpp)
       target_link_libraries(xenon_input PRIVATE ${XENON_SDL2_TARGET})
@@ -236,6 +371,9 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/kernel/xboxkrnl/xbox_io_guest.cpp
     src/xbox/imports/import_registry.cpp
     src/xbox/exports/xboxkrnl_io_exports.cpp
+    src/xbox/xex/xex_loader.cpp
+    src/xbox/xex/xex_crypto.cpp
+    src/xbox/xex/xex_lzx.cpp
   )
   target_link_libraries(xenon_xbox_kernel_io PUBLIC xenon_kernel xenon_memory)
   target_include_directories(xenon_xbox_kernel_io PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -376,9 +514,76 @@ if(XENON_ENABLE_GRAPHICS)
 endif()
 
 # -----------------------------------------------------------------------------
+# xenon_core's real subsystem links. Every subsystem target xenon_core's own
+# source (XenonSession, in particular) actually calls into now exists above
+# this point, so these if(TARGET ...) checks are meaningful here (see the
+# comment left where this used to live, right after add_library(xenon_core
+# ...): placed there, every check saw the target as not-yet-defined and
+# silently linked nothing.
+if(TARGET xenon_memory)
+  target_link_libraries(xenon_core PUBLIC xenon_memory)
+endif()
+if(TARGET xenon_cpu)
+  target_link_libraries(xenon_core PUBLIC xenon_cpu)
+endif()
+if(TARGET xenon_filesystem)
+  target_link_libraries(xenon_core PUBLIC xenon_filesystem)
+endif()
+if(TARGET xenon_kernel)
+  target_link_libraries(xenon_core PUBLIC xenon_kernel)
+endif()
+if(TARGET xenon_input)
+  target_link_libraries(xenon_core PUBLIC xenon_input)
+endif()
+if(TARGET xenon_graphics)
+  target_link_libraries(xenon_core PUBLIC xenon_graphics)
+endif()
+if(TARGET xenon_audio)
+  target_link_libraries(xenon_core PUBLIC xenon_audio)
+endif()
+# XenonSession loads XEX images and dynamically loads native module
+# extensions directly (see include/xenon/core/session.hpp), so it needs the
+# guest-facing XEX loader/import registry regardless of the host-side
+# xboxkrnl I/O export wiring living in the same target.
+if(TARGET xenon_xbox_kernel_io)
+  target_link_libraries(xenon_core PUBLIC xenon_xbox_kernel_io)
+endif()
+
+# -----------------------------------------------------------------------------
 # Tests
 if(XENON_BUILD_TESTS)
   enable_testing()
+
+  # Core session tests
+  add_executable(xenon_session_tests tests/core/session_tests.cpp)
+  target_link_libraries(xenon_session_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_session_tests)
+  add_test(NAME xenon_session_tests COMMAND xenon_session_tests)
+
+  if(TARGET xenon_audio)
+    add_executable(xenon_audio_mixer_tests tests/audio/mixer_tests.cpp)
+    target_link_libraries(xenon_audio_mixer_tests PRIVATE xenon_audio)
+    xenon_enable_test_asserts(xenon_audio_mixer_tests)
+    add_test(NAME xenon_audio_mixer_tests COMMAND xenon_audio_mixer_tests)
+
+    add_executable(xenon_audio_xma_tests tests/audio/xma_tests.cpp)
+    target_link_libraries(xenon_audio_xma_tests PRIVATE xenon_audio)
+    xenon_enable_test_asserts(xenon_audio_xma_tests)
+    add_test(NAME xenon_audio_xma_tests COMMAND xenon_audio_xma_tests)
+
+    add_executable(xenon_audio_system_tests tests/audio/system_tests.cpp)
+    target_link_libraries(xenon_audio_system_tests PRIVATE xenon_audio)
+    xenon_enable_test_asserts(xenon_audio_system_tests)
+    add_test(NAME xenon_audio_system_tests COMMAND xenon_audio_system_tests)
+
+    # src/audio/exports.cpp is already compiled into xenon_core when Audio V1
+    # is enabled; do not add it here again or static links gain duplicate
+    # export-registration symbols.
+    add_executable(xenon_audio_export_tests tests/audio/export_tests.cpp)
+    target_link_libraries(xenon_audio_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_audio_export_tests)
+    add_test(NAME xenon_audio_export_tests COMMAND xenon_audio_export_tests)
+  endif()
 
   if(XENON_ENABLE_FILESYSTEM)
     add_executable(xenon_filesystem_tests tests/filesystem/filesystem_tests.cpp)
@@ -406,7 +611,29 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_xbox_import_tests PRIVATE xenon_xbox_kernel_io)
     xenon_enable_test_asserts(xenon_xbox_import_tests)
     add_test(NAME xenon_xbox_import_tests COMMAND xenon_xbox_import_tests)
+
+    add_executable(xenon_xex_loader_tests tests/xbox/xex_loader_tests.cpp)
+    target_link_libraries(xenon_xex_loader_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_xex_loader_tests)
+    add_test(NAME xenon_xex_loader_tests COMMAND xenon_xex_loader_tests)
+
+    add_executable(xenon_xex_crypto_tests tests/xbox/xex_crypto_tests.cpp)
+    target_link_libraries(xenon_xex_crypto_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_xex_crypto_tests)
+    add_test(NAME xenon_xex_crypto_tests COMMAND xenon_xex_crypto_tests)
+
+    add_executable(xenon_xex_lzx_tests tests/xbox/xex_lzx_tests.cpp)
+    target_link_libraries(xenon_xex_lzx_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_xex_lzx_tests)
+    add_test(NAME xenon_xex_lzx_tests COMMAND xenon_xex_lzx_tests)
   endif()
+
+  add_executable(xenon_recomp_driver_tests tests/recomp/recomp_driver_tests.cpp)
+  target_link_libraries(xenon_recomp_driver_tests PRIVATE xenon_recomp)
+  target_compile_definitions(xenon_recomp_driver_tests PRIVATE
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+  xenon_enable_test_asserts(xenon_recomp_driver_tests)
+  add_test(NAME xenon_recomp_driver_tests COMMAND xenon_recomp_driver_tests)
 
   add_executable(xenon_cpu_tests tests/cpu/ppc/cpu_tests.cpp)
   target_link_libraries(xenon_cpu_tests PRIVATE xenon_cpu)
@@ -489,6 +716,12 @@ if(XENON_BUILD_TESTS)
   xenon_add_generated_cpu_test(indirect_branch codegen_indirect_branch.cpp indirect_branch.cpp)
   xenon_add_generated_cpu_test(scalar_memory codegen_scalar_memory.cpp scalar_memory.cpp)
   xenon_add_generated_cpu_test(integer_edges codegen_integer_edges.cpp integer_edges.cpp)
+
+  # XAM tests
+  add_executable(xenon_xam_user_manager_tests tests/xam/user_manager_tests.cpp)
+  target_link_libraries(xenon_xam_user_manager_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_xam_user_manager_tests)
+  add_test(NAME xenon_xam_user_manager_tests COMMAND xenon_xam_user_manager_tests)
 
   if(XENON_ENABLE_INPUT)
     add_executable(xenon_input_tests tests/input/input_tests.cpp)
@@ -732,8 +965,45 @@ if(XENON_BUILD_TESTS)
   endif()
 endif()
 # -----------------------------------------------------------------------------
+# Generic runtime/game-host process. The launcher spawns this to actually run
+# a game; it never executes guest code itself. See runtime_host/CMakeLists.txt
+# and docs/RUNTIME_HOST.md.
+add_subdirectory(runtime_host)
+
+if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
+  # LaunchConfig parsing/validation, isolated from process-spawning and Qt
+  # (see launcher/tests/runtime/runtime_bridge_tests.cpp for the IPC-lifecycle
+  # side of the same contract).
+  add_executable(xenon_runtime_host_tests
+    tests/runtime_host/launch_config_tests.cpp
+    runtime_host/src/launch_config.cpp
+    runtime_host/src/launch_config.hpp
+  )
+  target_include_directories(xenon_runtime_host_tests PRIVATE runtime_host/src)
+  target_link_libraries(xenon_runtime_host_tests PRIVATE xenon_core)
+  target_compile_features(xenon_runtime_host_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_runtime_host_tests)
+  add_test(NAME xenon_runtime_host_tests COMMAND xenon_runtime_host_tests)
+endif()
+
+# -----------------------------------------------------------------------------
 # Launcher UI. Kept isolated from the runtime so Qt does not leak into Xenon
 # core, CPU, memory, graphics, or game-module interfaces.
 if(XENON_BUILD_LAUNCHER)
   add_subdirectory(launcher)
 endif()
+
+# RuntimeBridge locates xenon_runtime_host next to the launcher executable at
+# runtime (see docs/RUNTIME_HOST.md). Pin the host's output directory to the
+# launcher's own so this holds for a plain dev build, not only after
+# `cmake --install` places both under the same bin/. xenon_launcher's own
+# output directory is left untouched (scripts such as
+# launcher/scripts/build-launcher.ps1 expect it at build/<preset>/launcher/).
+if(TARGET xenon_runtime_host AND TARGET xenon_launcher)
+  set_target_properties(xenon_runtime_host PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
+endif()
+# RuntimeBridge tests (xenon_runtime_host_fixture, xenon_runtime_bridge_tests)
+# are declared inside launcher/CMakeLists.txt itself, in the same directory
+# scope find_package(Qt6 ...) ran in - Qt6::Core etc. are imported targets
+# only visible within that subdirectory's scope tree, not back up here.
