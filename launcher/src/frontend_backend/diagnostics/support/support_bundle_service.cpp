@@ -340,6 +340,16 @@ ServiceResult SupportBundleService::create(const QString& user_summary,
       {QStringLiteral("cpuArchitecture"), QSysInfo::currentCpuArchitecture()}});
   root.insert(QStringLiteral("runtimeStatus"), runtime_.status());
   root.insert(QStringLiteral("runtimeCapabilities"), runtime_.capabilities());
+  const auto game_status = runtime_.gameStatus();
+  if (game_status.value(QStringLiteral("available"), false).toBool()) {
+    // Selected fields only: status.json (docs/RUNTIME_HOST.md) can include
+    // absolute paths and titles the rest of this bundle deliberately omits.
+    root.insert(QStringLiteral("gameStatus"),
+               selectedFields(game_status, {QStringLiteral("stateName"), QStringLiteral("initialized"),
+                                            QStringLiteral("running"), QStringLiteral("executionActive"),
+                                            QStringLiteral("nativeExtension"), QStringLiteral("unresolvedImports"),
+                                            QStringLiteral("subsystems"), QStringLiteral("requestedRenderer")}));
+  }
   root.insert(QStringLiteral("settings"), settingsSnapshot());
   root.insert(QStringLiteral("library"), librarySnapshot());
   root.insert(QStringLiteral("modules"), moduleSnapshot());
@@ -369,6 +379,9 @@ ServiceResult SupportBundleService::create(const QString& user_summary,
   const auto startup_log = sanitizedLog(startupLogPath(), 192 * 1024);
   const auto recovery_log = sanitizedLog(latestRecoveryLogPath(), 192 * 1024);
   const auto update_log = sanitizedLog(safeLogPath(QStringLiteral("update-install.log")), 96 * 1024);
+  // Tail of the current/last runtime host's log.txt (docs/RUNTIME_HOST.md) -
+  // covers crash output and missing-export diagnostics from guest execution.
+  const auto runtime_host_log = redactText(runtime_.runtimeLog()).toUtf8();
 
   const QByteArray privacy = QByteArrayLiteral(
       "Project Xenon support bundle\n\n"
@@ -387,6 +400,8 @@ ServiceResult SupportBundleService::create(const QString& user_summary,
     entries.append(ZipEntry{QByteArrayLiteral("logs/launcher-startup.log"), startup_log});
   if (!recovery_log.isEmpty())
     entries.append(ZipEntry{QByteArrayLiteral("logs/last-unclean-startup.log"), recovery_log});
+  if (!runtime_host_log.isEmpty())
+    entries.append(ZipEntry{QByteArrayLiteral("logs/runtime-host.log"), runtime_host_log});
   if (!update_log.isEmpty())
     entries.append(ZipEntry{QByteArrayLiteral("logs/update-install.log"), update_log});
 

@@ -254,6 +254,11 @@ int main() {
     assert(read_edram_sample(edram, clear_layout, 3, 2, sample)[0] !=
            0xCAFEBABEu);
   }
+    std::vector<std::byte> guarded(16, std::byte{0xCD});
+    assert(!resolve_edram_raw(edram, resolve_layout, UINT32_MAX, 0, 1, 1, 0,
+                              guarded, 4));
+    assert(!store_edram_raw(edram, resolve_layout, UINT32_MAX, 0, 1, 1, 0,
+                            guarded, 4));
 
   std::cout << "xenon_edram_surface_tests: ok\n";
 }

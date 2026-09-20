@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "xenon/input/driver.hpp"
+#include "xenon/input/action_router.hpp"
 #include "xenon/input/profile.hpp"
 
 namespace xenon::input {
@@ -70,6 +71,15 @@ class InputSystem {
   [[nodiscard]] Result set_player_indicator(std::uint32_t user_index,
                                             std::uint8_t player_index);
   [[nodiscard]] InputDiagnostics diagnostics() const;
+
+  // Shared frontend action routing lives beside the device core so all host
+  // input forms can feed the same action queue before a UI consumes it.
+  [[nodiscard]] FrontendInputRouter& frontend_router() noexcept {
+    return frontend_router_;
+  }
+  [[nodiscard]] const FrontendInputRouter& frontend_router() const noexcept {
+    return frontend_router_;
+  }
 
   [[nodiscard]] ProfileStore& profiles() noexcept { return profiles_; }
   [[nodiscard]] const ProfileStore& profiles() const noexcept { return profiles_; }
@@ -141,6 +151,7 @@ class InputSystem {
   bool focused_{true};
   BackgroundInputPolicy background_policy_{BackgroundInputPolicy::ForegroundOnly};
   ProfileStore profiles_{};
+  FrontendInputRouter frontend_router_{};
 };
 
 }  // namespace xenon::input

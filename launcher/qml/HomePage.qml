@@ -47,6 +47,21 @@ Item {
         launcherBridge.executeCommandPaletteAction("navigate.game", String(gameId || ""), "")
     }
 
+    function runPageAction(actionId) {
+        if (actionId === "refresh")
+            root.refresh()
+        else if (actionId === "library")
+            launcherBridge.executeCommandPaletteAction("navigate.library", "", "")
+        else if (actionId === "modules")
+            launcherBridge.executeCommandPaletteAction("navigate.modules", "", "")
+        else if (actionId === "settings")
+            launcherBridge.executeCommandPaletteAction("navigate.settings", "", "")
+        else if (actionId === "scrollTop")
+            homeScroll.contentItem.contentY = 0
+        else if (actionId === "scrollBottom")
+            homeScroll.contentItem.contentY = Math.max(0, homeScroll.contentItem.contentHeight - homeScroll.contentItem.height)
+    }
+
     Connections {
         target: launcherBridge
         function onHomeChanged() { root.refresh() }
@@ -55,6 +70,7 @@ Item {
     Component.onCompleted: refresh()
 
     ScrollView {
+        id: homeScroll
         anchors.fill: parent
         clip: true
 
@@ -370,5 +386,29 @@ Item {
 
             Item { Layout.preferredHeight: Theme.spaceLg }
         }
+    }
+
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        preventStealing: true
+        z: 1000
+        onClicked: function(mouse) { homeContextMenu.openAt(root, mouse.x, mouse.y) }
+    }
+
+    XActionMenu {
+        id: homeContextMenu
+        parent: root
+        z: 1001
+        menuWidth: 240
+        actions: [
+            { id: "refresh", label: "Refresh home", icon: "↻" },
+            { id: "scrollTop", label: "Scroll to top", icon: "↑" },
+            { id: "scrollBottom", label: "Scroll to bottom", icon: "↓" },
+            { id: "library", label: "Open Library", icon: "▣", separatorBefore: true },
+            { id: "modules", label: "Open Modules", icon: "◆" },
+            { id: "settings", label: "Open Settings", icon: "⚙" }
+        ]
+        onActionTriggered: function(actionId) { root.runPageAction(actionId) }
     }
 }

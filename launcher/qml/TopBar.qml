@@ -13,6 +13,16 @@ Rectangle {
     signal minimizeRequested()
     signal maximizeRequested()
     signal closeRequested()
+    signal quickCenterRequested()
+
+    function toggleQuickCenter() {
+        if (quickCenter.visible) quickCenter.close()
+        else quickCenter.open()
+    }
+
+    function closeQuickCenter() { quickCenter.close() }
+    function focusSearch() { searchField.forceActiveFocus() }
+    function quickCenterVisible() { return quickCenter.visible }
 
     readonly property int chromeHeight: 36
     readonly property int toolbarHeight: Math.max(60, Theme.controlHeight + 16)
@@ -245,6 +255,23 @@ Rectangle {
                 id: helpPopup
                 x: helpButton.width - width
                 y: helpButton.height + Theme.spaceXs
+            }
+        }
+
+        XIconButton {
+            id: quickCenterButton
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
+            iconName: "menu"
+            tooltip: "Quick Center"
+            variant: quickCenter.visible ? "filled" : "ghost"
+            onClicked: root.toggleQuickCenter()
+
+            QuickCenter {
+                id: quickCenter
+                parent: quickCenterButton
+                x: quickCenterButton.width - width
+                y: quickCenterButton.height + Theme.spaceXs
             }
         }
 

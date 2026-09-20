@@ -86,7 +86,8 @@ ApplicationWindow {
         Theme.setAccessibility(
             launcherBridge.numberSetting("accessibility/textScale", 1.0),
             root.settingBool("accessibility/highContrast", false),
-            root.settingBool("accessibility/enhancedFocus", false))
+            root.settingBool("accessibility/enhancedFocus", false),
+            root.settingBool("accessibility/reduceMotion", false))
         Theme.setAdvancedAppearance(
             launcherBridge.safeMode ? "Minimal" : launcherBridge.stringSetting("appearance/decorLevel", "Balanced"),
             launcherBridge.safeMode ? 1.0 : launcherBridge.numberSetting("appearance/panelOpacity", 0.94))
@@ -94,11 +95,56 @@ ApplicationWindow {
         root.backdropSettingsRevision += 1
     }
 
+    function updateHandheldLayout() {
+        Theme.handheld = root.width <= 1280
+    }
+
     function toggleMaximize() {
         root.visibility = root.visibility === Window.Maximized
             ? Window.Windowed
             : Window.Maximized
         Qt.callLater(function() { root.requestActivate() })
+    }
+
+    function handleFrontendAction(action) {
+        if (action === "quickCenter" || action === "menu") {
+            topBar.toggleQuickCenter()
+        } else if (action === "search") {
+            topBar.focusSearch()
+        } else if (action === "up" || action === "down") {
+            root.moveFocusedControl(action === "down")
+        } else if (action === "confirm") {
+            root.activateFocusedControl()
+        } else if (action === "pageBack" || action === "left") {
+            root.currentPage = Math.max(0, root.currentPage - 1)
+        } else if (action === "pageForward" || action === "right") {
+            root.currentPage = Math.min(4, root.currentPage + 1)
+        } else if (action === "cancel") {
+            topBar.closeQuickCenter()
+        }
+    }
+
+    function moveFocusedControl(forward) {
+        var focused = root.activeFocusItem
+        if (!focused) {
+            root.forceActiveFocus()
+            return
+        }
+        var next = focused.nextItemInFocusChain(forward)
+        if (next)
+            next.forceActiveFocus()
+    }
+
+    function activateFocusedControl() {
+        var focused = root.activeFocusItem
+        if (!focused)
+            return
+        if (typeof focused.click === "function")
+            focused.click()
+        else if (typeof focused.clicked === "function")
+            focused.clicked()
+        else if (typeof focused.trigger === "function")
+            focused.trigger()
     }
 
     function markPageLoaded(page) {
@@ -176,6 +222,7 @@ ApplicationWindow {
 
     Component.onCompleted: {
         ProfileStore.reset(launcherBridge.profileName, launcherBridge.testMode)
+        root.updateHandheldLayout()
         root.applyThemeFromBackend()
 
         currentPage = launcherBridge.initialPage()
@@ -199,7 +246,10 @@ ApplicationWindow {
 
     onXChanged: scheduleWindowStateSave()
     onYChanged: scheduleWindowStateSave()
-    onWidthChanged: scheduleWindowStateSave()
+    onWidthChanged: {
+        scheduleWindowStateSave()
+        root.updateHandheldLayout()
+    }
     onHeightChanged: scheduleWindowStateSave()
     onVisibilityChanged: {
         if (visibility === Window.Maximized) root.lastWindowMaximized = true
@@ -228,6 +278,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+2"; onActivated: root.currentPage = 1 }
     Shortcut { sequence: "Ctrl+3"; onActivated: root.currentPage = 2 }
     Shortcut { sequence: "Ctrl+,"; onActivated: root.currentPage = 3 }
+    Shortcut { sequence: "Ctrl+J"; onActivated: topBar.toggleQuickCenter() }
 
     Connections {
         target: launcherBridge
@@ -237,6 +288,7 @@ ApplicationWindow {
         function onCornerStyleChanged() { root.applyThemeFromBackend() }
         function onSystemAppearanceChanged() { root.applyThemeFromBackend() }
         function onNotificationRequested(title, message) { toast.show(title, message) }
+        function onFrontendAction(action) { root.handleFrontendAction(action) }
         function onNavigationRequested(pageIndex, targetId, sectionId) {
             root.requestCommandNavigation(pageIndex, targetId, sectionId)
         }
@@ -257,11 +309,13 @@ ApplicationWindow {
                 Theme.setAdvancedAppearance(
                     launcherBridge.stringSetting("appearance/decorLevel", "Balanced"),
                     launcherBridge.numberSetting("appearance/panelOpacity", 0.94))
-            else if (key === "accessibility/textScale" || key === "accessibility/highContrast" || key === "accessibility/enhancedFocus")
+            else if (key === "accessibility/textScale" || key === "accessibility/highContrast"
+                     || key === "accessibility/enhancedFocus" || key === "accessibility/reduceMotion")
                 Theme.setAccessibility(
                     launcherBridge.numberSetting("accessibility/textScale", 1.0),
                     root.settingBool("accessibility/highContrast", false),
-                    root.settingBool("accessibility/enhancedFocus", false))
+                    root.settingBool("accessibility/enhancedFocus", false),
+                    root.settingBool("accessibility/reduceMotion", false))
         }
     }
 

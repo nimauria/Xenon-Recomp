@@ -11,6 +11,7 @@ QVariantMap LaunchConfiguration::toVariantMap() const {
   result.insert(QStringLiteral("moduleName"), module_name);
   result.insert(QStringLiteral("modulePath"), module_path);
   result.insert(QStringLiteral("moduleVersion"), module_version);
+  result.insert(QStringLiteral("nativeExtensionPath"), native_extension_path);
   result.insert(QStringLiteral("moduleSettings"), module_settings);
   result.insert(QStringLiteral("runtimeApiRequirements"), runtime_api_requirements);
   result.insert(QStringLiteral("profileId"), profile_id);

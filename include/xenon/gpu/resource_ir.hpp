@@ -350,8 +350,8 @@ struct ColorTargetPlan {
 [[nodiscard]] CopySampleSelect sanitize_copy_sample_select(
     CopySampleSelect selection, MsaaSamples samples, bool depth) noexcept;
 
-// Native image resolve operations average every color sample. This identifies
-// the Xenos selections that are bit-for-bit representable by that operation.
+// Identifies selections that cover every physical color sample. Backends must
+// still use the shared Xenon averaging codec for deterministic results.
 [[nodiscard]] bool is_full_color_resolve(CopySampleSelect selection,
                                          MsaaSamples samples) noexcept;
 

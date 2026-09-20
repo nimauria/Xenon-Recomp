@@ -52,6 +52,11 @@ bool convert_topology(PrimitiveType type, std::span<const std::uint32_t> input,
       output.assign(input.begin(), input.begin() + input.size() / 3u * 3u);
       return true;
     case PrimitiveType::RectangleList:
+    case PrimitiveType::CopyRectList0:
+    case PrimitiveType::CopyRectList1:
+    case PrimitiveType::CopyRectList2:
+    case PrimitiveType::CopyRectList3:
+    case PrimitiveType::FillRectList:
       result.topology = HostPrimitiveTopology::TriangleList;
       result.requires_rectangle_expansion = true;
       output.assign(input.begin(), input.begin() + input.size() / 3u * 3u);

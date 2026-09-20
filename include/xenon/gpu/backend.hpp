@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <variant>
+
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/presentation.hpp"
@@ -7,6 +10,19 @@
 #include "xenon/memory/address_space.hpp"
 
 namespace xenon::gpu {
+
+struct GpuPerformanceCounters {
+  std::uint64_t submissions{};
+  std::uint64_t commands{};
+  std::uint64_t draws{};
+  std::uint64_t shader_cache_misses{};
+  std::uint64_t pipeline_cache_misses{};
+  std::uint64_t resolve_operations{};
+  std::uint64_t edram_transfers{};
+  std::uint64_t staging_transfers{};
+  std::uint64_t queue_submissions{};
+  std::uint64_t submission_time_ns{};
+};
 
 // Host graphics backends consume Xenon graphics IR, never PM4 directly. Vulkan
 // and D3D12 implementations therefore remain replaceable without changing the
@@ -38,14 +54,22 @@ class Backend {
   [[nodiscard]] virtual bool resize_presentation(std::uint32_t width,
                                                  std::uint32_t height) = 0;
   [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;
+  [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
+    return {};
+  }
 };
 
 class NullBackend final : public Backend {
  public:
   void begin_submission(memory::AddressSpace&, Edram&) override {
     command_count_ = 0;
+    ++counters_.submissions;
   }
-  void consume(const ir::Command&) override { ++command_count_; }
+  void consume(const ir::Command& command) override {
+    ++command_count_;
+    ++counters_.commands;
+    if (std::holds_alternative<ir::DrawPacket>(command)) ++counters_.draws;
+  }
   void end_submission() override {}
   [[nodiscard]] bool make_guest_memory_cpu_visible(
       std::uint32_t, std::uint32_t) override {
@@ -60,10 +84,14 @@ class NullBackend final : public Backend {
     return false;
   }
   [[nodiscard]] bool presentation_ready() const noexcept override { return false; }
+  [[nodiscard]] GpuPerformanceCounters performance_counters() const noexcept override {
+    return counters_;
+  }
   [[nodiscard]] std::size_t command_count() const noexcept { return command_count_; }
 
  private:
   std::size_t command_count_{};
+  GpuPerformanceCounters counters_{};
 };
 
 }  // namespace xenon::gpu

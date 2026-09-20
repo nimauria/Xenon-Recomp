@@ -73,6 +73,7 @@ bool ApplicationFeature::featureEnabled(const QString& feature) const noexcept {
   if (feature == QStringLiteral("settings.input")) return f.settings_input;
   if (feature == QStringLiteral("settings.audio")) return f.settings_audio;
   if (feature == QStringLiteral("settings.network")) return f.settings_network;
+  if (feature == QStringLiteral("settings.filesystem")) return f.settings_filesystem;
   if (feature == QStringLiteral("settings.updates")) return f.settings_updates;
   if (feature == QStringLiteral("settings.community")) return f.settings_community;
   if (feature == QStringLiteral("settings.accessibility")) return f.settings_accessibility;

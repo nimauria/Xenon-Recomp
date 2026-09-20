@@ -112,6 +112,14 @@ LauncherBridge::LauncherBridge(QObject* parent)
                              game_id.isEmpty() ? QStringLiteral("navigate.library") : QStringLiteral("navigate.game"),
                              game_id, {}, QStringLiteral("Open Library"));
           });
+  connect(&session, &xenon::launcher::frontend_backend::SessionController::launcherActionRequested,
+          this, [this](const QString& action) {
+            if (action == QStringLiteral("minimize")) {
+              emit windowMinimizeRequested();
+            } else if (action == QStringLiteral("close")) {
+              QCoreApplication::quit();
+            }
+          });
   connect(&community, &xenon::launcher::frontend_backend::CommunityFeature::changed,
           this, &LauncherBridge::communityChanged);
   connect(&command_palette, &xenon::launcher::frontend_backend::CommandPaletteFeature::changed,
@@ -127,11 +135,18 @@ LauncherBridge::LauncherBridge(QObject* parent)
   connect(&input, &xenon::launcher::frontend_backend::InputFeature::changed,
           this, &LauncherBridge::inputChanged);
 
+  frontendInputTimer_.setInterval(16);
+  connect(&frontendInputTimer_, &QTimer::timeout, this, [this]() {
+    const auto actions = backend_->input().frontendActions();
+    for (const auto& action : actions) emit frontendAction(action.toString());
+  });
+
   const auto initialization = backend_->initialize();
   if (!initialization.ok) {
     qWarning().noquote() << "Xenon launcher frontend backend initialization failed:"
                          << initialization.title << '-' << initialization.message;
   }
+  frontendInputTimer_.start();
 }
 
 LauncherBridge::~LauncherBridge() = default;
@@ -146,6 +161,8 @@ QVariantMap LauncherBridge::runtimeCapabilities() const { return backend_->runti
 bool LauncherBridge::runtimeCapability(const QString& capability) const {
   return backend_->runtime().capability(capability);
 }
+QVariantMap LauncherBridge::gameStatus() const { return backend_->runtime().gameStatus(); }
+QString LauncherBridge::runtimeLogTail() const { return backend_->runtime().runtimeLog(); }
 
 QString LauncherBridge::themeId() const { return backend_->appearance().themeId(); }
 void LauncherBridge::setThemeId(const QString& theme_id) {
@@ -419,6 +436,9 @@ QVariantList LauncherBridge::inputDevices() const { return backend_->input().dev
 QVariantList LauncherBridge::inputUsers() const { return backend_->input().users(); }
 QVariantList LauncherBridge::inputProfiles() const { return backend_->input().profiles(); }
 QVariantMap LauncherBridge::inputDiagnostics() const { return backend_->input().diagnostics(); }
+QVariantList LauncherBridge::pollFrontendActions() {
+  return backend_->input().frontendActions();
+}
 QVariantMap LauncherBridge::inputModuleApiInfo() const { return backend_->input().moduleApiInfo(); }
 QString LauncherBridge::inputProfileStorePath() const { return backend_->input().profileStorePath(); }
 void LauncherBridge::refreshInputDevices() { notifyResult(backend_->input().refresh(), false); }
@@ -777,4 +797,12 @@ QString LauncherBridge::importProfileAvatar(const QString& profile_id, const QUr
 }
 bool LauncherBridge::removeProfileAvatar(const QString& profile_id) {
   return backend_->importExport().removeProfileAvatar(profile_id);
+}
+
+void LauncherBridge::handleExternalArguments(const QStringList& arguments) {
+  if (!backend_) return;
+  const auto result = backend_->systemIntegration().handleArguments(arguments);
+  if (!result.ok) {
+    notifyResult(result, false);
+  }
 }

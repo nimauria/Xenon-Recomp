@@ -509,10 +509,6 @@ Item {
                             variant: "primary"
                             onClicked: moduleDialog.open()
                         }
-                        XButton {
-                            text: "Folder"
-                            onClicked: moduleFolderDialog.open()
-                        }
                         XIconButton {
                             glyph: "↻"
                             tooltip: "Refresh installed modules"

@@ -12,6 +12,9 @@ bool RuntimeFeature::capability(const QString& id) const {
   return runtime_.capabilities().value(id).toBool();
 }
 
+QVariantMap RuntimeFeature::gameStatus() const { return runtime_.sessionStatus(); }
+QString RuntimeFeature::runtimeLog() const { return runtime_.runtimeLog(); }
+
 QStringList RuntimeFeature::availableGraphicsBackends(bool test_mode) const {
   QStringList backends{QStringLiteral("Automatic")};
   const auto caps = runtime_.capabilities();

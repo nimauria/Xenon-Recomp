@@ -33,6 +33,7 @@ class InputFeature final : public QObject {
   [[nodiscard]] QVariantList profiles() const;
   [[nodiscard]] QVariantMap diagnostics() const;
   [[nodiscard]] QVariantMap moduleApiInfo() const;
+  [[nodiscard]] QVariantList frontendActions();
   [[nodiscard]] QString profileStorePath() const;
 
   [[nodiscard]] ServiceResult refresh();

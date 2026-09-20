@@ -179,6 +179,13 @@ void SessionController::startPhase(quint64 generation) {
   elapsed_.restart();
   tick_timer_.start();
   setState(SessionState::Running);
+
+  const auto behavior = launch_.afterLaunchBehavior();
+  if (behavior == QStringLiteral("Minimize launcher")) {
+    emit launcherActionRequested(QStringLiteral("minimize"));
+  } else if (behavior == QStringLiteral("Close launcher")) {
+    emit launcherActionRequested(QStringLiteral("close"));
+  }
 }
 
 void SessionController::finishCancellation(quint64 generation) {

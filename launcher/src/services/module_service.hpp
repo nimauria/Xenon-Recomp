@@ -34,6 +34,12 @@ class ModuleService final : public QObject {
   [[nodiscard]] QVariantMap inspectDirectory(const QString& module_dir) const;
   [[nodiscard]] ServiceResult verify(const QString& module_id) const;
   [[nodiscard]] QString modulePath(const QString& module_id) const;
+  // Absolute path to the module's compiled-code native extension library for
+  // this host platform (see docs/RUNTIME_HOST.md), or empty if the manifest
+  // declares none for this platform. The manifest's "nativeExtension" field
+  // may be a single path (applied to any platform) or an object keyed by
+  // platform id ("windows-x64", "linux-x64", ...).
+  [[nodiscard]] QString nativeExtensionPath(const QString& module_id) const;
   [[nodiscard]] QVariantList settingsSchema(const QString& module_id) const;
   [[nodiscard]] QVariantMap settingsValues(const QString& module_id) const;
   [[nodiscard]] ServiceResult setSetting(const QString& module_id, const QString& setting_id,

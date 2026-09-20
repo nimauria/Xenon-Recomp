@@ -38,6 +38,12 @@ class SessionController final : public QObject {
   void changed();
   void historyChanged();
   void notificationRequested(const QString& title, const QString& message);
+  // Emitted once a session reaches Running, carrying the user's
+  // "runtime/afterLaunch" preference ("minimize" or "close"; "keep-open"
+  // never emits since there is nothing for the window to do). LauncherBridge
+  // turns this into an actual window action - SessionController has no
+  // window/application handle of its own.
+  void launcherActionRequested(const QString& action);
 
  private:
   void setState(SessionState state);

@@ -16,6 +16,12 @@ enum class ObjectType : std::uint8_t {
   File,
   Event,
   IoCompletionPort,
+  Thread,
+  Semaphore,
+  Mutant,
+  Timer,
+  Process,
+  Module,
 };
 
 enum class HandleFlags : std::uint8_t {

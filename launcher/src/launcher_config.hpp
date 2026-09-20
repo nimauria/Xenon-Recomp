@@ -27,6 +27,7 @@ struct UiFeatures {
   bool settings_input = true;
   bool settings_audio = true;
   bool settings_network = false;
+  bool settings_filesystem = true;
   bool settings_updates = true;
   bool settings_community = true;
   bool settings_accessibility = true;

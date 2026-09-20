@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <limits>
 #include <unordered_map>
 
@@ -139,11 +140,11 @@ void replay_shader_preamble(Backend& backend,
 
 bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
                             Backend& backend,
-                            FrontendSubmissionCapture frontend,
+                            FrontendSubmissionCapture&& frontend,
                             PortableSubmissionCapture& out,
                             std::string* error) {
-  PortableSubmissionCapture capture{};
-  capture.frontend = std::move(frontend);
+  auto capture = std::make_unique<PortableSubmissionCapture>();
+  capture->frontend = std::move(frontend);
 
   // Bind the backend to the canonical objects before asking it to expose any
   // native-authored memory. No IR is consumed by this maintenance submission.
@@ -156,7 +157,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
   }
 
   std::vector<PendingRange> ranges;
-  const auto& frontend_capture = capture.frontend;
+  const auto& frontend_capture = capture->frontend;
   if (frontend_capture.source == FrontendSubmissionCapture::Source::Buffer) {
     if (!add_range(ranges, frontend_capture.physical_address,
                    std::uint64_t(frontend_capture.dword_count) * 4u,
@@ -187,8 +188,8 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
     }
   }
 
-  ResourceStateTracker tracker;
-  seed_resource_state(tracker, frontend_capture.initial_registers);
+  auto tracker = std::make_unique<ResourceStateTracker>();
+  seed_resource_state(*tracker, frontend_capture.initial_registers);
   std::unordered_map<std::uint64_t, DecodedShader> shaders;
   add_program(shaders, frontend_capture.initial_vertex_program);
   add_program(shaders, frontend_capture.initial_pixel_program);
@@ -197,7 +198,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
 
   for (const auto& command : frontend_capture.commands) {
     if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
-      tracker.apply(*write);
+      tracker->apply(*write);
       continue;
     }
     if (const auto* write = std::get_if<ir::PhysicalMemoryWrite>(&command)) {
@@ -276,7 +277,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
     const auto* draw = std::get_if<ir::DrawPacket>(&command);
     if (!draw) continue;
 
-    const auto state = tracker.snapshot();
+    const auto state = tracker->snapshot();
     if (draw->index_buffer.valid && draw->index_buffer.length_bytes) {
       if (!add_range(ranges, draw->index_buffer.physical_address,
                      draw->index_buffer.length_bytes,
@@ -306,8 +307,8 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
     mark_texture_usage(draw->pixel_shader);
     if (!reflection_known) {
       used_textures.fill(true);
-      capture.complete = false;
-      capture.diagnostics.emplace_back(
+      capture->complete = false;
+      capture->diagnostics.emplace_back(
           "A draw referenced a shader without captured reflection; all active texture slots were snapshotted conservatively.");
     }
     for (std::uint32_t slot = 0; slot < used_textures.size(); ++slot) {
@@ -339,15 +340,15 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
       if (found == shaders.end() || !found->second.reflection.memory_exports) {
         return true;
       }
-      const auto plan = tracker.plan_memexport(found->second);
+      const auto plan = tracker->plan_memexport(found->second);
       if (!plan.valid) {
         set_error(error, "portable GPU capture could not plan shader memory export: " +
                              plan.error);
         return false;
       }
       if (plan.requires_dynamic_address_analysis) {
-        capture.complete = false;
-        capture.diagnostics.emplace_back(
+        capture->complete = false;
+        capture->diagnostics.emplace_back(
             "A shader uses a dynamically addressed memory export; statically known export ranges were captured, but arbitrary export targets cannot be proven complete.");
       }
       for (const auto& range : plan.ranges) {
@@ -367,8 +368,8 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
     if (state.edram_mode == EdramMode::Copy) {
       const auto& vertices = state.vertex_buffers[0][0];
       if (!vertices || !vertices->valid || vertices->size_dwords < 6u) {
-        capture.complete = false;
-        capture.diagnostics.emplace_back(
+        capture->complete = false;
+        capture->diagnostics.emplace_back(
             "A resolve draw lacks the conventional six-dword vertex stream; its destination footprint could not be proven.");
         continue;
       }
@@ -389,8 +390,8 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
       const auto plan = plan_resolve(state, vertex_snapshot,
                                      vertices->physical_address);
       if (!plan.valid) {
-        capture.complete = false;
-        capture.diagnostics.emplace_back(
+        capture->complete = false;
+        capture->diagnostics.emplace_back(
             "A resolve destination could not be planned: " + plan.error);
       } else if (!add_resolve_destination_range(
                      ranges, state, plan.rectangle, plan.depth, error)) {
@@ -401,7 +402,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
   }
 
   auto merged = merge_ranges(std::move(ranges));
-  capture.physical_ranges.reserve(merged.size());
+  capture->physical_ranges.reserve(merged.size());
   for (const auto& range : merged) {
     const auto size = range.end - range.begin;
     if (!backend.make_guest_memory_cpu_visible(range.begin, size)) {
@@ -419,12 +420,12 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
       set_error(error, "portable GPU capture failed to snapshot a guest resource range");
       return false;
     }
-    capture.physical_ranges.push_back(std::move(snapshot));
+    capture->physical_ranges.push_back(std::move(snapshot));
   }
-  capture.edram.assign(edram.bytes().begin(), edram.bytes().end());
-  capture.memory_epoch = memory.coherency().current_epoch();
+  capture->edram.assign(edram.bytes().begin(), edram.bytes().end());
+  capture->memory_epoch = memory.coherency().current_epoch();
   finish_backend();
-  out = std::move(capture);
+  out = std::move(*capture);
   return true;
 }
 
@@ -453,47 +454,48 @@ std::uint32_t GraphicsSystem::submit_ring(std::uint32_t physical_address,
 
 FrontendSubmissionCapture GraphicsSystem::capture_buffer(
     std::uint32_t physical_address, std::uint32_t dword_count) {
-  FrontendSubmissionCapture capture{};
-  capture.source = FrontendSubmissionCapture::Source::Buffer;
-  capture.physical_address = physical_address;
-  capture.dword_count = dword_count;
-  capture.initial_registers = registers_.snapshot();
-  capture.initial_vertex_program = command_processor_.active_vertex_program();
-  capture.initial_pixel_program = command_processor_.active_pixel_program();
+  auto capture = std::make_unique<FrontendSubmissionCapture>();
+  capture->source = FrontendSubmissionCapture::Source::Buffer;
+  capture->physical_address = physical_address;
+  capture->dword_count = dword_count;
+  capture->initial_registers = registers_.snapshot();
+  capture->initial_vertex_program = command_processor_.active_vertex_program();
+  capture->initial_pixel_program = command_processor_.active_pixel_program();
   const auto command_begin = stream_.size();
   command_processor_.execute_buffer(physical_address, dword_count);
-  capture.final_registers = registers_.snapshot();
+  capture->final_registers = registers_.snapshot();
   const auto& commands = stream_.commands();
-  capture.commands.assign(commands.begin() + command_begin, commands.end());
-  return capture;
+  capture->commands.assign(commands.begin() + command_begin, commands.end());
+  return std::move(*capture);
 }
 
 FrontendSubmissionCapture GraphicsSystem::capture_ring(
     std::uint32_t physical_address, std::uint32_t capacity_dwords,
     std::uint32_t read_index, std::uint32_t write_index) {
-  FrontendSubmissionCapture capture{};
-  capture.source = FrontendSubmissionCapture::Source::Ring;
-  capture.physical_address = physical_address;
-  capture.capacity_dwords = capacity_dwords;
-  capture.read_index = read_index;
-  capture.write_index = write_index;
-  capture.initial_registers = registers_.snapshot();
-  capture.initial_vertex_program = command_processor_.active_vertex_program();
-  capture.initial_pixel_program = command_processor_.active_pixel_program();
+  auto capture = std::make_unique<FrontendSubmissionCapture>();
+  capture->source = FrontendSubmissionCapture::Source::Ring;
+  capture->physical_address = physical_address;
+  capture->capacity_dwords = capacity_dwords;
+  capture->read_index = read_index;
+  capture->write_index = write_index;
+  capture->initial_registers = registers_.snapshot();
+  capture->initial_vertex_program = command_processor_.active_vertex_program();
+  capture->initial_pixel_program = command_processor_.active_pixel_program();
   const auto command_begin = stream_.size();
-  capture.resulting_read_index = command_processor_.execute_ring(
+  capture->resulting_read_index = command_processor_.execute_ring(
       physical_address, capacity_dwords, read_index, write_index);
-  capture.final_registers = registers_.snapshot();
+  capture->final_registers = registers_.snapshot();
   const auto& commands = stream_.commands();
-  capture.commands.assign(commands.begin() + command_begin, commands.end());
-  return capture;
+  capture->commands.assign(commands.begin() + command_begin, commands.end());
+  return std::move(*capture);
 }
 
 bool GraphicsSystem::capture_portable_buffer(
     Backend& backend, std::uint32_t physical_address, std::uint32_t dword_count,
     PortableSubmissionCapture& out, std::string* error) {
+  auto frontend = capture_buffer(physical_address, dword_count);
   return build_portable_capture(memory_, edram_, backend,
-                                capture_buffer(physical_address, dword_count),
+                                std::move(frontend),
                                 out, error);
 }
 

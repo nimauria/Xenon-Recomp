@@ -655,8 +655,9 @@ bool resolve_edram_raw(const Edram& edram, const EdramSurfaceLayout& layout,
                        std::uint32_t sample, std::span<std::byte> destination,
                        std::uint32_t destination_pitch) noexcept {
   const auto pixel_bytes = layout.is_64bpp ? 8u : 4u;
-  if (!width || !height || left + width > layout.pitch_pixels ||
-      top + height > layout.height_pixels ||
+  if (!width || !height ||
+      std::uint64_t(left) + width > layout.pitch_pixels ||
+      std::uint64_t(top) + height > layout.height_pixels ||
       destination_pitch < width * pixel_bytes ||
       std::uint64_t(destination_pitch) * height > destination.size()) return false;
   for (std::uint32_t y = 0; y < height; ++y) {
@@ -678,8 +679,9 @@ bool store_edram_raw(Edram& edram, const EdramSurfaceLayout& layout,
                      std::span<const std::byte> source,
                      std::uint32_t source_pitch) noexcept {
   const auto pixel_bytes = layout.is_64bpp ? 8u : 4u;
-  if (!width || !height || left + width > layout.pitch_pixels ||
-      top + height > layout.height_pixels ||
+  if (!width || !height ||
+      std::uint64_t(left) + width > layout.pitch_pixels ||
+      std::uint64_t(top) + height > layout.height_pixels ||
       source_pitch < width * pixel_bytes ||
       std::uint64_t(source_pitch) * height > source.size()) return false;
   for (std::uint32_t y = 0; y < height; ++y) {

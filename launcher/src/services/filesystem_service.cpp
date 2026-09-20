@@ -16,7 +16,7 @@ namespace {
 
 std::string toStdPath(const QString& path) {
 #if defined(Q_OS_WIN)
-  return path.toStdWString();
+  return path.toStdString();
 #else
   return path.toStdString();
 #endif
@@ -41,9 +41,8 @@ QString errorMessage(xenon::filesystem::FsError error) {
     case FsError::InvalidArgument: return QStringLiteral("Invalid argument");
     case FsError::IsDirectory: return QStringLiteral("Is a directory");
     case FsError::NotDirectory: return QStringLiteral("Not a directory");
-    case FsError::NotEmpty: return QStringLiteral("Directory not empty");
+    case FsError::DirectoryNotEmpty: return QStringLiteral("Directory not empty");
     case FsError::ReadOnly: return QStringLiteral("Read-only filesystem");
-    case FsError::DiskFull: return QStringLiteral("Disk full");
     case FsError::SharingViolation: return QStringLiteral("Sharing violation");
     case FsError::CrossDevice: return QStringLiteral("Cross-device operation");
     case FsError::TooManyLinks: return QStringLiteral("Too many symbolic links");
@@ -129,8 +128,10 @@ ServiceResult FilesystemService::mountHostPath(const QString& mount_point,
                                       .arg(clean_path));
   }
 
+  xenon::filesystem::HostPathDeviceOptions options;
+  options.read_only = read_only;
   auto device = std::make_shared<xenon::filesystem::HostPathDevice>(
-      toStdPath(mount_point), toStdPath(clean_path), read_only);
+      toStdPath(mount_point), toStdPath(clean_path), options);
 
   const auto error = vfs_->register_device(std::move(device));
   if (error != xenon::filesystem::FsError::None) {

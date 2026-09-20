@@ -29,6 +29,8 @@ QtObject {
     property bool systemHighContrast: false
     property bool userHighContrast: false
     property bool enhancedFocus: false
+    property bool reduceMotion: false
+    property bool handheld: false
     property real textScale: 1.0
     property real panelOpacity: 0.94
 
@@ -76,8 +78,8 @@ QtObject {
     readonly property real headingScale: 1.0 + Math.max(0, textScale - 1.0) * 0.38
     readonly property real displayScale: 1.0 + Math.max(0, textScale - 1.0) * 0.28
 
-    readonly property int controlHeight: Math.round(40 + Math.max(0, bodyScale - 1.0) * 18)
-    readonly property int controlHeightLarge: Math.round(48 + Math.max(0, bodyScale - 1.0) * 22)
+    readonly property int controlHeight: Math.round((handheld ? 46 : 40) + Math.max(0, bodyScale - 1.0) * 18)
+    readonly property int controlHeightLarge: Math.round((handheld ? 54 : 48) + Math.max(0, bodyScale - 1.0) * 22)
     readonly property int pageMargin: textScale >= 1.75 ? 18 : 20
     readonly property int contentMaxWidth: textScale >= 1.75 ? 1180 : 1080
     readonly property int sidebarWidth: Math.round(184 + Math.max(0, bodyScale - 1.0) * 22)
@@ -95,7 +97,7 @@ QtObject {
     readonly property real controlRadius: cornerStyle === "square" ? 4
                                               : cornerStyle === "soft" ? 7 : 9
     readonly property real borderWidth: highContrast ? 2 : 1
-    readonly property real focusWidth: (highContrast || enhancedFocus) ? 3 : 2
+    readonly property real focusWidth: highContrast ? 3 : enhancedFocus ? 4 : 2
 
     function applyAppearance(themeId, resolvedThemeId, themeDefinition, accentId, accentDefinition) {
         current = themeId || "system"
@@ -116,10 +118,11 @@ QtObject {
         systemHighContrast = Boolean(highContrast)
     }
 
-    function setAccessibility(scale, highContrastOverride, enhancedFocusOverride) {
+    function setAccessibility(scale, highContrastOverride, enhancedFocusOverride, reduceMotionOverride) {
         textScale = Math.max(1.0, Math.min(Number(scale), 2.0))
         userHighContrast = Boolean(highContrastOverride)
         enhancedFocus = Boolean(enhancedFocusOverride)
+        reduceMotion = Boolean(reduceMotionOverride)
     }
 
     function setAdvancedAppearance(level, opacity) {

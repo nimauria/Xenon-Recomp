@@ -15,6 +15,7 @@ FrontendBackend::FrontendBackend(QObject* parent)
       appearance_(core_.settings(), settings_, nullptr),
       paths_(core_.paths(), settings_),
       application_(core_.settings(), nullptr),
+      system_integration_(core_.settings(), core_.recovery().safeMode(), nullptr),
       recovery_(core_.recovery(), nullptr),
       runtime_(core_.runtime()),
       input_(settings_, core_.paths(), kTestMode, nullptr),

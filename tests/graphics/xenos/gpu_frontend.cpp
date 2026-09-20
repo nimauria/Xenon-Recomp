@@ -938,6 +938,10 @@ void test_graphics_system_backend(AddressSpace& memory) {
   graphics.execute_ir(backend);
   assert(backend.command_count() == pending);
   assert(backend.command_count() == 3);
+  const auto counters = backend.performance_counters();
+  assert(counters.submissions == 1);
+  assert(counters.commands == 3);
+  assert(counters.draws == 1);
   assert(graphics.stream().size() == 0);
   assert(graphics.registers().read(0x44) == 0x12345678);
 }

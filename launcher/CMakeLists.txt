@@ -160,10 +160,16 @@ qt_add_library(xenon_launcher_core STATIC
   src/services/module_service.hpp
   src/services/launch_service.cpp
   src/services/launch_service.hpp
+  src/services/filesystem_service.cpp
+  src/services/filesystem_service.hpp
+  src/services/single_instance_service.cpp
+  src/services/single_instance_service.hpp
   src/frontend_backend/frontend_backend.cpp
   src/frontend_backend/frontend_backend.hpp
   src/frontend_backend/application/application_feature.cpp
   src/frontend_backend/application/application_feature.hpp
+  src/frontend_backend/application/system/system_integration_feature.cpp
+  src/frontend_backend/application/system/system_integration_feature.hpp
   src/frontend_backend/application/recovery/recovery_feature.cpp
   src/frontend_backend/application/recovery/recovery_feature.hpp
   src/frontend_backend/branding/branding_feature.cpp
@@ -250,6 +256,9 @@ qt_add_library(xenon_launcher_core STATIC
 )
 target_include_directories(xenon_launcher_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(xenon_launcher_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network Xenon::Core)
+if(TARGET xenon_filesystem)
+  target_link_libraries(xenon_launcher_core PRIVATE xenon_filesystem)
+endif()
 if(TARGET xenon_input)
   target_link_libraries(xenon_launcher_core PRIVATE Xenon::Input)
 endif()
@@ -409,7 +418,9 @@ qt_add_qml_module(xenon_launcher
     qml/LibraryPage.qml
     qml/ModulesPage.qml
     qml/ProfilesPage.qml
+    qml/QuickCenter.qml
     qml/SettingsPage.qml
+    qml/FilesystemPage.qml
 )
 
 
@@ -511,3 +522,33 @@ install(TARGETS xenon_launcher
   BUNDLE DESTINATION .
   RUNTIME DESTINATION bin
 )
+
+# -----------------------------------------------------------------------------
+# RuntimeBridge tests: exercise the launcher-side half of the runtime-host IPC
+# contract (docs/RUNTIME_HOST.md) against a lightweight test double instead of
+# the real xenon_runtime_host, so no game module/native extension/CPU V2
+# compiled code is required. See RuntimeBridge::connect()'s
+# XENON_RUNTIME_HOST_PATH override and tests/fixtures/runtime_host_fixture.cpp.
+if(XENON_BUILD_TESTS)
+  add_executable(xenon_runtime_host_fixture
+    tests/fixtures/runtime_host_fixture.cpp
+  )
+  target_include_directories(xenon_runtime_host_fixture PRIVATE "${CMAKE_SOURCE_DIR}/include")
+  target_compile_features(xenon_runtime_host_fixture PRIVATE cxx_std_20)
+  xenon_enable_warnings(xenon_runtime_host_fixture)
+
+  qt_add_executable(xenon_runtime_bridge_tests
+    tests/runtime/runtime_bridge_tests.cpp
+  )
+  target_link_libraries(xenon_runtime_bridge_tests PRIVATE Xenon::LauncherCore Qt6::Core)
+  target_compile_features(xenon_runtime_bridge_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_runtime_bridge_tests)
+
+  # The test locates the fixture next to its own executable at runtime (see
+  # runtime_bridge_tests.cpp) - pin both to the same output directory
+  # regardless of generator/config subdirectory layout.
+  set_target_properties(xenon_runtime_host_fixture PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_runtime_bridge_tests>")
+
+  add_test(NAME xenon_runtime_bridge_tests COMMAND xenon_runtime_bridge_tests)
+endif()

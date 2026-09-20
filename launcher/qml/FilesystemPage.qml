@@ -2,77 +2,76 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-XPanel {
+XSettingsPage {
     id: root
 
     title: "Filesystem & Mounts"
-    subtitle: "VFS configuration and mounted devices"
+    description: "VFS configuration and mounted devices"
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Theme.spacing300
-        spacing: Theme.spacing300
+        spacing: Theme.spaceMd
 
         // Status Section
         XSectionHeader {
-            text: "Filesystem Status"
+            title: "Filesystem Status"
             Layout.fillWidth: true
         }
 
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: childrenRect.height + Theme.spacing200 * 2
-            color: Theme.surfaceElevated
-            radius: Theme.radius100
+            Layout.preferredHeight: 148
+            color: Theme.surfaceRaised
+            radius: Theme.panelRadius
             border.width: 1
             border.color: Theme.border
 
             GridLayout {
                 anchors.fill: parent
-                anchors.margins: Theme.spacing200
+                anchors.margins: Theme.spaceMd
                 columns: 2
-                columnSpacing: Theme.spacing200
-                rowSpacing: Theme.spacing100
+                columnSpacing: Theme.spaceMd
+                rowSpacing: Theme.spaceSm
 
                 Text {
                     text: "VFS Initialized:"
-                    color: Theme.textNormal
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                 }
                 Text {
                     text: root.filesystemStatus().initialized ? "Yes" : "No"
-                    color: root.filesystemStatus().initialized ? Theme.success : Theme.error
+                    color: root.filesystemStatus().initialized ? Theme.success : Theme.danger
                     font.pixelSize: Theme.typeBody
                     font.weight: Font.DemiBold
                 }
 
                 Text {
                     text: "Mounted Devices:"
-                    color: Theme.textNormal
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                 }
                 Text {
                     text: String(root.filesystemStatus().mountCount || 0)
-                    color: Theme.textBright
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                     font.weight: Font.DemiBold
                 }
 
                 Text {
                     text: "Symbolic Links:"
-                    color: Theme.textNormal
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                 }
                 Text {
                     text: String(root.filesystemStatus().symbolicLinkCount || 0)
-                    color: Theme.textBright
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                     font.weight: Font.DemiBold
                 }
 
                 Text {
                     text: "Working Directory:"
-                    color: Theme.textNormal
+                    color: Theme.text
                     font.pixelSize: Theme.typeBody
                 }
                 Text {
@@ -87,17 +86,19 @@ XPanel {
         }
 
         // Mounts Section
-        XSectionHeader {
-            text: "Mounted Devices"
-            subtitle: "Active VFS mounts (game:, d:, cache:, etc.)"
-            Layout.fillWidth: true
-        }
+XSectionHeader {
+    title: "Mounted Devices"
+    description: "Active VFS mounts (game:, d:, cache:, etc.)"
+    Layout.fillWidth: true
+    visible: root.getMounts().length > 0
+}
 
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 200
+            visible: root.getMounts().length > 0
             color: Theme.surface
-            radius: Theme.radius100
+            radius: Theme.panelRadius
             border.width: 1
             border.color: Theme.border
 
@@ -110,21 +111,22 @@ XPanel {
                     id: mountsList
                     model: root.getMounts()
                     spacing: 1
+                    boundsBehavior: Flickable.StopAtBounds
 
                     delegate: Rectangle {
                         width: mountsList.width
                         height: 40
-                        color: index % 2 === 0 ? Theme.surfaceElevated : Theme.surface
+                        color: index % 2 === 0 ? Theme.surfaceRaised : Theme.surface
 
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: Theme.spacing200
-                            anchors.rightMargin: Theme.spacing200
-                            spacing: Theme.spacing200
+                            anchors.leftMargin: Theme.spaceMd
+                            anchors.rightMargin: Theme.spaceMd
+                            spacing: Theme.spaceMd
 
                             Text {
                                 text: modelData.mountPoint || ""
-                                color: Theme.accentPrimary
+                                color: Theme.accent
                                 font.pixelSize: Theme.typeBody
                                 font.family: "Consolas"
                                 font.weight: Font.DemiBold
@@ -132,21 +134,28 @@ XPanel {
                             }
 
                             StatusPill {
-                                text: modelData.readOnly ? "Read-Only" : "Read-Write"
-                                color: modelData.readOnly ? Theme.warning : Theme.success
+                                label: modelData.readOnly ? "Read-Only" : "Read-Write"
+                                tone: modelData.readOnly ? Theme.warning : Theme.success
                             }
 
                             Item { Layout.fillWidth: true }
 
                             XButton {
                                 text: "Unmount"
-                                compact: true
-                                secondary: true
+                                variant: "ghost"
                                 onClicked: {
                                     var result = launcherBridge.filesystemUnmount(modelData.mountPoint)
                                     if (!result.success) {
                                         launcherBridge.showToast(result.title, result.message, "error")
                                     }
+                                }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: mountsList.count === 0
+                                    text: "No VFS mounts are active."
+                                    color: Theme.textMuted
+                                    font.pixelSize: Theme.typeBody
                                 }
                             }
                         }
@@ -157,16 +166,18 @@ XPanel {
 
         // Symbolic Links Section
         XSectionHeader {
-            text: "Symbolic Links"
-            subtitle: "Xbox path aliases (game: -> actual mount)"
+            title: "Symbolic Links"
+            description: "Xbox path aliases (game: -> actual mount)"
             Layout.fillWidth: true
+            visible: root.getSymbolicLinks().length > 0
         }
 
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 150
+            visible: root.getSymbolicLinks().length > 0
             color: Theme.surface
-            radius: Theme.radius100
+            radius: Theme.panelRadius
             border.width: 1
             border.color: Theme.border
 
@@ -179,21 +190,22 @@ XPanel {
                     id: linksList
                     model: root.getSymbolicLinks()
                     spacing: 1
+                    boundsBehavior: Flickable.StopAtBounds
 
                     delegate: Rectangle {
                         width: linksList.width
                         height: 36
-                        color: index % 2 === 0 ? Theme.surfaceElevated : Theme.surface
+                        color: index % 2 === 0 ? Theme.surfaceRaised : Theme.surface
 
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: Theme.spacing200
-                            anchors.rightMargin: Theme.spacing200
-                            spacing: Theme.spacing150
+                            anchors.leftMargin: Theme.spaceMd
+                            anchors.rightMargin: Theme.spaceMd
+                            spacing: Theme.spaceSm
 
                             Text {
                                 text: modelData.alias || ""
-                                color: Theme.accentSecondary
+                                color: Theme.accent
                                 font.pixelSize: Theme.typeBody
                                 font.family: "Consolas"
                                 font.weight: Font.DemiBold
@@ -208,7 +220,7 @@ XPanel {
 
                             Text {
                                 text: modelData.target || ""
-                                color: Theme.textNormal
+                                color: Theme.text
                                 font.pixelSize: Theme.typeBody
                                 font.family: "Consolas"
                                 elide: Text.ElideMiddle
@@ -217,13 +229,20 @@ XPanel {
 
                             XButton {
                                 text: "Remove"
-                                compact: true
-                                secondary: true
+                                variant: "ghost"
                                 onClicked: {
                                     var result = launcherBridge.filesystemUnregisterSymbolicLink(modelData.alias)
                                     if (!result.success) {
                                         launcherBridge.showToast(result.title, result.message, "error")
                                     }
+                                }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: linksList.count === 0
+                                    text: "No symbolic links are registered."
+                                    color: Theme.textMuted
+                                    font.pixelSize: Theme.typeBody
                                 }
                             }
                         }
@@ -234,32 +253,29 @@ XPanel {
 
         // Quick Actions
         XSectionHeader {
-            text: "Quick Actions"
+            title: "Quick Actions"
             Layout.fillWidth: true
         }
 
         RowLayout {
-            spacing: Theme.spacing200
+            spacing: Theme.spaceMd
             Layout.fillWidth: true
 
             XButton {
                 text: "Mount Host Folder"
-                icon: "📁"
                 onClicked: mountHostDialog.open()
                 Layout.fillWidth: true
             }
 
             XButton {
                 text: "Mount GDFX Image"
-                icon: "💿"
                 onClicked: mountGdfxDialog.open()
                 Layout.fillWidth: true
             }
 
             XButton {
                 text: "Test Path"
-                icon: "🔍"
-                secondary: true
+                variant: "ghost"
                 onClicked: testPathDialog.open()
                 Layout.fillWidth: true
             }
@@ -309,24 +325,23 @@ XPanel {
 
         ColumnLayout {
             anchors.fill: parent
-            spacing: Theme.spacing200
+            spacing: Theme.spaceMd
 
             XTextField {
                 id: hostMountPoint
-                label: "Mount Point (e.g., game:, cache:)"
-                placeholderText: "game:"
+                placeholderText: "Mount Point (e.g., game:, cache:)"
                 Layout.fillWidth: true
             }
 
             XPathField {
                 id: hostPath
-                label: "Host Folder Path"
+                placeholderText: "Host Folder Path"
                 mode: "directory"
                 Layout.fillWidth: true
             }
 
             Row {
-                spacing: Theme.spacing150
+                spacing: Theme.spaceSm
                 XSwitch {
                     id: hostReadOnly
                     text: "Read-Only"
@@ -338,7 +353,7 @@ XPanel {
         footer: DialogButtonBox {
             XButton {
                 text: "Cancel"
-                secondary: true
+                variant: "ghost"
                 onClicked: mountHostDialog.close()
             }
             XButton {
@@ -369,19 +384,18 @@ XPanel {
 
         ColumnLayout {
             anchors.fill: parent
-            spacing: Theme.spacing200
+            spacing: Theme.spaceMd
 
             XTextField {
                 id: gdfxMountPoint
-                label: "Mount Point"
-                placeholderText: "game:"
+                placeholderText: "Mount Point (game:)"
                 text: "game:"
                 Layout.fillWidth: true
             }
 
             XPathField {
                 id: gdfxPath
-                label: "GDFX Image Path (.iso, .xgd)"
+                placeholderText: "GDFX Image Path (.iso, .xgd)"
                 mode: "file"
                 filters: ["Disc Images (*.iso *.xgd)", "All Files (*)"]
                 Layout.fillWidth: true
@@ -391,7 +405,7 @@ XPanel {
         footer: DialogButtonBox {
             XButton {
                 text: "Cancel"
-                secondary: true
+                variant: "ghost"
                 onClicked: mountGdfxDialog.close()
             }
             XButton {
@@ -421,19 +435,18 @@ XPanel {
 
         ColumnLayout {
             anchors.fill: parent
-            spacing: Theme.spacing200
+            spacing: Theme.spaceMd
 
             XTextField {
                 id: testGuestPath
-                label: "Guest Path to Test"
-                placeholderText: "game:\\default.xex"
+                placeholderText: "Guest Path to Test (e.g., game:\\default.xex)"
                 Layout.fillWidth: true
             }
 
             Text {
                 id: testResult
                 text: ""
-                color: Theme.textNormal
+                color: Theme.text
                 font.pixelSize: Theme.typeBody
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
@@ -443,7 +456,7 @@ XPanel {
         footer: DialogButtonBox {
             XButton {
                 text: "Close"
-                secondary: true
+                variant: "ghost"
                 onClicked: testPathDialog.close()
             }
             XButton {
@@ -457,7 +470,7 @@ XPanel {
                         testResult.color = Theme.success
                     } else {
                         testResult.text = "✗ " + result.message
-                        testResult.color = Theme.error
+                        testResult.color = Theme.danger
                     }
                 }
             }

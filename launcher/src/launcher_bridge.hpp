@@ -7,6 +7,7 @@
 #include <QVariant>
 #include <QVariantList>
 #include <QVariantMap>
+#include <QTimer>
 
 #include <memory>
 
@@ -65,6 +66,10 @@ class LauncherBridge final : public QObject {
   [[nodiscard]] QVariantMap recoveryState() const;
   Q_INVOKABLE QVariantMap runtimeCapabilities() const;
   Q_INVOKABLE bool runtimeCapability(const QString& capability) const;
+  // Live game/runtime-host status (module, recompilation state, renderer,
+  // subsystems, compatibility warnings) for a "now playing" status panel.
+  Q_INVOKABLE QVariantMap gameStatus() const;
+  Q_INVOKABLE QString runtimeLogTail() const;
 
   [[nodiscard]] QString themeId() const;
   void setThemeId(const QString& theme_id);
@@ -161,6 +166,7 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE QVariantList inputUsers() const;
   Q_INVOKABLE QVariantList inputProfiles() const;
   Q_INVOKABLE QVariantMap inputDiagnostics() const;
+  Q_INVOKABLE QVariantList pollFrontendActions();
   Q_INVOKABLE QVariantMap inputModuleApiInfo() const;
   Q_INVOKABLE QString inputProfileStorePath() const;
   Q_INVOKABLE void refreshInputDevices();
@@ -268,6 +274,9 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE QString importProfileAvatar(const QString& profile_id, const QUrl& source_url);
   Q_INVOKABLE bool removeProfileAvatar(const QString& profile_id);
 
+ public slots:
+  void handleExternalArguments(const QStringList& arguments);
+
  signals:
   void themeIdChanged();
   void accentIdChanged();
@@ -292,9 +301,16 @@ class LauncherBridge final : public QObject {
   void notificationsChanged();
   void homeChanged();
   void inputChanged();
+  void frontendAction(const QString& action);
   void navigationRequested(int page_index, const QString& target_id, const QString& section_id);
   void notificationRequested(const QString& title, const QString& message);
   void settingChanged(const QString& key, const QVariant& value);
+  // Requested by the "runtime/afterLaunch" = "Minimize launcher" preference
+  // once a game session starts running (see SessionController). Main.qml
+  // handles this by minimizing the launcher window; "Close launcher" quits
+  // the application directly in C++ instead, since that needs no window
+  // access.
+  void windowMinimizeRequested();
 
  private:
   void pushNotification(const QString& title, const QString& message, const QString& severity = QStringLiteral("info"),
@@ -308,4 +324,5 @@ class LauncherBridge final : public QObject {
                     const QString& section_id = {}, const QString& action_label = {});
 
   std::unique_ptr<xenon::launcher::frontend_backend::FrontendBackend> backend_;
+  QTimer frontendInputTimer_;
 };

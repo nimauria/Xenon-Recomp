@@ -14,12 +14,27 @@ ColumnLayout {
     property string helperText: ""
     property string editingText: pathValue
 
+    // Picker behaviour. Existing settings/profile uses remain directory pickers,
+    // while callers such as FilesystemPage can explicitly request a file.
+    property string mode: "directory" // "directory" or "file"
+    property var filters: []
+
+    // Compatibility/readback surface for callers that treat XPathField like a
+    // regular text field (for example FilesystemPage when invoking the bridge).
+    readonly property string text: editingText
+
     signal pathEdited(string path)
 
     onPathValueChanged: editingText = pathValue
 
     Layout.fillWidth: true
     spacing: Theme.spaceXs
+
+    function commitSelectedUrl(url) {
+        var nativePath = launcherBridge.toLocalPath(url)
+        root.editingText = nativePath
+        root.pathEdited(nativePath)
+    }
 
     Text {
         text: root.label
@@ -54,7 +69,12 @@ ColumnLayout {
             text: "Browse…"
             implicitWidth: 108
             enabled: !root.readOnly
-            onClicked: folderDialog.open()
+            onClicked: {
+                if (root.mode === "file")
+                    fileDialog.open()
+                else
+                    folderDialog.open()
+            }
         }
 
         XButton {
@@ -83,10 +103,14 @@ ColumnLayout {
     FolderDialog {
         id: folderDialog
         title: "Select " + root.label
-        onAccepted: {
-            var nativePath = launcherBridge.toLocalPath(selectedFolder)
-            root.editingText = nativePath
-            root.pathEdited(nativePath)
-        }
+        onAccepted: root.commitSelectedUrl(selectedFolder)
+    }
+
+    FileDialog {
+        id: fileDialog
+        title: "Select " + root.label
+        fileMode: FileDialog.OpenFile
+        nameFilters: root.filters.length > 0 ? root.filters : ["All files (*)"]
+        onAccepted: root.commitSelectedUrl(selectedFile)
     }
 }

@@ -27,7 +27,8 @@ Item {
         { id: "general", name: "General", categories: ["general", "system"] },
         { id: "interface", name: "Interface", categories: ["appearance", "accessibility"] },
         { id: "library", name: "Library", categories: ["library", "paths"] },
-        { id: "runtime", name: "Runtime", categories: ["runtime", "graphics", "input", "audio", "network", "filesystem"] },
+        { id: "runtime", name: "Runtime", categories: ["runtime", "graphics", "input", "audio", "network"] },
+        { id: "filesystem", name: "Filesystem", categories: ["filesystem"] },
         { id: "services", name: "Services", categories: ["updates", "community"] },
         { id: "advanced", name: "Advanced", categories: ["developer", "about"] }
     ]
@@ -39,6 +40,18 @@ Item {
     readonly property var accentEntries: launcherBridge.accentCatalog()
     readonly property var cornerEntries: launcherBridge.cornerStyleCatalog()
     readonly property var backgroundEntries: launcherBridge.themeBackgroundVariants(Theme.effectiveThemeId)
+
+    function normalizeCategorySelection() {
+        if (root.visibleCategories.length === 0)
+            return
+        for (var i = 0; i < root.visibleCategories.length; ++i) {
+            if (Number(root.visibleCategories[i].page) === Number(root.categoryIndex))
+                return
+        }
+        root.categoryIndex = Number(root.visibleCategories[0].page)
+    }
+
+    onVisibleCategoriesChanged: normalizeCategorySelection()
 
     function labels(entries) {
         var result = []
@@ -159,6 +172,13 @@ Item {
     function save(key, value) { launcherBridge.setSettingValue(key, value) }
 
     function inputDevices() { var r = inputRevision; return launcherBridge.inputDevices() }
+    function connectedInputDevices() {
+        var devices = root.inputDevices()
+        var result = []
+        for (var i = 0; i < devices.length; ++i)
+            if (Boolean(devices[i].connected)) result.push(devices[i])
+        return result
+    }
     function inputUsers() { var r = inputRevision; return launcherBridge.inputUsers() }
     function inputProfiles() { var r = inputRevision; return launcherBridge.inputProfiles() }
     function inputDeviceLabels() {
@@ -648,6 +668,16 @@ Item {
                         XSwitch { checked: root.getBool("runtime/offline", true); onUserToggled: function(value) { root.save("runtime/offline", value) } }
                     }
                     XSettingsCard {
+                        title: "After launching a game"
+                        description: "The game keeps running in its own process even if the launcher closes or is minimized."
+                        XComboBox {
+                            Layout.fillWidth: true
+                            model: root.optionLabels("runtime/afterLaunch")
+                            currentIndex: root.optionIndex("runtime/afterLaunch")
+                            onActivated: function(index) { root.saveOption("runtime/afterLaunch", index) }
+                        }
+                    }
+                    XSettingsCard {
                         title: "Runtime connection"
                         description: "Launcher Core is isolated from runtime implementation details through RuntimeBridge."
                         StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Disconnected"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
@@ -720,7 +750,7 @@ Item {
                         ColumnLayout {
                             Layout.fillWidth: true
                             Repeater {
-                                model: root.inputDevices()
+                                model: root.connectedInputDevices()
                                 delegate: RowLayout {
                                     required property var modelData
                                     Layout.fillWidth: true
@@ -729,30 +759,32 @@ Item {
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         spacing: 1
-                                        Text { Layout.fillWidth: true; text: String(modelData.name); color: Theme.textPrimary; font.pixelSize: Theme.typeBody; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; text: String(modelData.name); color: Theme.text; font.pixelSize: Theme.typeBody; elide: Text.ElideRight }
                                         Text { Layout.fillWidth: true; text: String(modelData.subtype) + " • " + String(modelData.connection) + " • " + String(modelData.driver); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
                                     }
                                     Text { visible: Number(modelData.batteryPercent) >= 0; text: String(modelData.batteryPercent) + "%"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                                 }
                             }
-                            Text { visible: root.inputDevices().length === 0; text: "No controller backend currently reports a connected device."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                            Text { visible: root.connectedInputDevices().length === 0; text: "No controller backend currently reports a connected device."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                         }
                     }
                     XSettingsCard {
+                        visible: root.connectedInputDevices().length > 0
                         title: "Xbox user routing"
                         description: "Assign a primary device and optional extra input sources to each Xbox user. Multiple sources merge buttons/triggers/sticks through Xenon Input."
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: Theme.spaceMd
+                            visible: root.connectedInputDevices().length > 0
                             Repeater {
-                                model: 4
+                                model: Math.min(4, root.connectedInputDevices().length)
                                 delegate: ColumnLayout {
                                     required property int index
                                     property int xboxUserIndex: index
                                     Layout.fillWidth: true
                                     spacing: Theme.spaceXs
                                     property var userInfo: root.inputUser(index)
-                                    Text { text: "Xbox User " + String(index + 1); color: Theme.textPrimary; font.pixelSize: Theme.typeBody; font.bold: true }
+                                    Text { text: "Xbox User " + String(index + 1); color: Theme.text; font.pixelSize: Theme.typeBody; font.bold: true }
                                     RowLayout {
                                         Layout.fillWidth: true
                                         XComboBox {
@@ -783,7 +815,7 @@ Item {
                                     }
                                     RowLayout {
                                         Layout.fillWidth: true
-                                        visible: root.inputDevices().length > 1
+                                        visible: root.connectedInputDevices().length > 1
                                         Text { text: "Add source"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                                         XComboBox { id: extraSource; Layout.fillWidth: true; model: root.inputDeviceLabels(); currentIndex: 0 }
                                         XButton {
@@ -828,16 +860,6 @@ Item {
                         title: "Controller rumble"
                         description: "Allow vibration when supported by the selected controller and game module."
                         XSwitch { checked: root.getBool("input/rumble", true); onUserToggled: function(value) { root.save("input/rumble", value) } }
-                    }
-                    XSettingsCard {
-                        title: "Game-module Input API"
-                        description: "Future game modules such as Project Gracemeria can declare runtimeApis.input version 1 and consume the stable Xenon Input function table without depending on launcher or private InputSystem classes."
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Text { text: "Header: " + String(launcherBridge.inputModuleApiInfo().header || ""); color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption }
-                            Text { text: "CMake target: " + String(launcherBridge.inputModuleApiInfo().cmakeTarget || ""); color: Theme.textMuted; font.family: "monospace"; font.pixelSize: Theme.typeCaption }
-                            Text { text: "Profiles: " + launcherBridge.inputProfileStorePath(); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
-                        }
                     }
                     XSettingsCard {
                         title: "Reset input preferences"

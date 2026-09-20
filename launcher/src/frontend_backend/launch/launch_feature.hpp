@@ -24,6 +24,11 @@ class LaunchFeature final {
   [[nodiscard]] ServiceResult startValidated(const QString& game_id);
   [[nodiscard]] ServiceResult launch(const QString& game_id);
   [[nodiscard]] ServiceResult stop();
+  // "Keep launcher open" / "Minimize launcher" / "Close launcher" - see
+  // settings_catalog.cpp's "runtime/afterLaunch" entry. A UI-only preference:
+  // it never reaches RuntimeBridge/LaunchConfiguration since the game process
+  // is independent of the launcher window regardless of this choice.
+  [[nodiscard]] QString afterLaunchBehavior() const;
 
  private:
   LaunchService& launch_;

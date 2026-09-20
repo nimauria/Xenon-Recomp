@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QTimer>
 
+#include <array>
 #include <algorithm>
 #include <filesystem>
 
@@ -71,6 +72,8 @@ class InputFeature::Impl {
 #if XENON_LAUNCHER_RUNTIME_INPUT
   std::unique_ptr<xenon::input::InputSystem> system{};
   std::unique_ptr<xenon::input::module_api::Provider> module_api{};
+  std::array<xenon::input::GamepadState, xenon::input::kMaxUsers> frontend_previous_states{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_has_previous{};
 
   QString storePath() const {
     return QDir{paths.configuredPath(QStringLiteral("profiles"))}
@@ -179,6 +182,28 @@ class InputFeature::Impl {
     module_api = std::make_unique<xenon::input::module_api::Provider>(*system);
     return true;
   }
+
+  void configureFrontendRouter() {
+    if (!system) return;
+    using namespace xenon::input;
+    auto& router = system->frontend_router();
+    router.clear();
+    const FrontendInputSource source = FrontendInputSource::Gamepad;
+    router.bind({source, GamepadButton::DpadUp, FrontendInputAction::Up});
+    router.bind({source, GamepadButton::DpadDown, FrontendInputAction::Down});
+    router.bind({source, GamepadButton::DpadLeft, FrontendInputAction::Left});
+    router.bind({source, GamepadButton::DpadRight, FrontendInputAction::Right});
+    router.bind({source, GamepadButton::A, FrontendInputAction::Confirm});
+    router.bind({source, GamepadButton::B, FrontendInputAction::Cancel});
+    router.bind({source, GamepadButton::X, FrontendInputAction::Menu});
+    router.bind({source, GamepadButton::Y, FrontendInputAction::Search});
+    router.bind({source, GamepadButton::Guide, FrontendInputAction::QuickCenter});
+    router.bind({source, GamepadButton::LeftShoulder, FrontendInputAction::PageBack});
+    router.bind({source, GamepadButton::RightShoulder, FrontendInputAction::PageForward});
+    router.bind({source, GamepadButton::Start, FrontendInputAction::QuickCenter});
+    frontend_previous_states.fill({});
+    frontend_has_previous.fill(false);
+  }
 #endif
 };
 
@@ -198,6 +223,7 @@ ServiceResult InputFeature::initialize() {
   }
 
   impl_->applyProfileDefaults();
+  impl_->configureFrontendRouter();
   const auto store = impl_->storePath();
   const QFileInfo info{store};
   if (info.exists()) {
@@ -206,6 +232,7 @@ ServiceResult InputFeature::initialize() {
     QDir{}.mkpath(info.absolutePath());
     static_cast<void>(impl_->system->profiles().save(std::filesystem::path(store.toStdString())));
   }
+
   impl_->restoreAssignments();
   impl_->last_status = QStringLiteral("Input v1 connected");
   emit changed();
@@ -218,8 +245,63 @@ ServiceResult InputFeature::initialize() {
 #endif
 }
 
+QVariantList InputFeature::frontendActions() {
+  QVariantList result;
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return result;
+  using namespace xenon::input;
+  for (std::uint32_t user = 0; user < kMaxUsers; ++user) {
+    State state{};
+    if (impl_->system->get_state(user, state) != Result::Success) continue;
+    const auto previous = impl_->frontend_previous_states[user];
+    const bool had_previous = impl_->frontend_has_previous[user];
+    impl_->frontend_previous_states[user] = state.gamepad;
+    impl_->frontend_has_previous[user] = true;
+    if (!had_previous) continue;
+
+    constexpr std::uint16_t buttons[] = {
+        GamepadButton::DpadUp, GamepadButton::DpadDown,
+        GamepadButton::DpadLeft, GamepadButton::DpadRight,
+        GamepadButton::A, GamepadButton::B, GamepadButton::X,
+        GamepadButton::Y, GamepadButton::Guide,
+        GamepadButton::LeftShoulder, GamepadButton::RightShoulder,
+        GamepadButton::Start};
+    for (const auto button : buttons) {
+      const bool was_down = (previous.buttons & button) != 0;
+      const bool is_down = (state.gamepad.buttons & button) != 0;
+      if (!was_down && is_down) {
+        impl_->system->frontend_router().dispatch(
+            FrontendInputSource::Gamepad, button, true, false);
+      }
+    }
+    FrontendInputEvent event{};
+    while (impl_->system->frontend_router().poll(event)) {
+      QString action;
+      switch (event.action) {
+        case FrontendInputAction::Up: action = QStringLiteral("up"); break;
+        case FrontendInputAction::Down: action = QStringLiteral("down"); break;
+        case FrontendInputAction::Left: action = QStringLiteral("left"); break;
+        case FrontendInputAction::Right: action = QStringLiteral("right"); break;
+        case FrontendInputAction::Confirm: action = QStringLiteral("confirm"); break;
+        case FrontendInputAction::Cancel: action = QStringLiteral("cancel"); break;
+        case FrontendInputAction::Menu: action = QStringLiteral("menu"); break;
+        case FrontendInputAction::QuickCenter: action = QStringLiteral("quickCenter"); break;
+        case FrontendInputAction::PageBack: action = QStringLiteral("pageBack"); break;
+        case FrontendInputAction::PageForward: action = QStringLiteral("pageForward"); break;
+        case FrontendInputAction::Search: action = QStringLiteral("search"); break;
+        default: break;
+      }
+      if (!action.isEmpty()) result.append(action);
+    }
+  }
+#endif
+  return result;
+}
+
 void InputFeature::shutdown() noexcept {
 #if XENON_LAUNCHER_RUNTIME_INPUT
+  impl_->frontend_previous_states.fill({});
+  impl_->frontend_has_previous.fill(false);
   if (impl_->system) {
     const auto store = impl_->storePath();
     const QFileInfo info{store};
@@ -370,6 +452,8 @@ ServiceResult InputFeature::refresh() {
 #if XENON_LAUNCHER_RUNTIME_INPUT
   if (!impl_->system) return ServiceResult::failure(QStringLiteral("Input unavailable"), impl_->last_status);
   impl_->system->refresh_devices();
+  impl_->frontend_previous_states.fill({});
+  impl_->frontend_has_previous.fill(false);
   impl_->restoreAssignments();
   emit changed();
   return ServiceResult::success(QStringLiteral("Input refreshed"), QStringLiteral("Connected input devices were rescanned."));

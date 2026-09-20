@@ -2,6 +2,7 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <deque>
@@ -68,6 +69,8 @@ class Backend::Impl {
   std::size_t command_count{};
   std::size_t draw_count{};
   std::size_t compiled_shader_count{};
+  GpuPerformanceCounters performance{};
+  std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
   void collect_retired_resources() {
@@ -386,6 +389,8 @@ bool Backend::configure_presentation(void* native_window,
 }
 
 void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
+  impl_->submission_started = std::chrono::steady_clock::now();
+  ++impl_->performance.submissions;
   impl_->command_count = 0;
   impl_->draw_count = 0;
   impl_->compiled_shader_count = 0;
@@ -432,24 +437,29 @@ void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
 void Backend::consume(const ir::Command& command) {
   impl_->collect_retired_resources();
   ++impl_->command_count;
+  ++impl_->performance.commands;
   if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
     impl_->resource_state.apply(*write);
   }
   if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) {
     ++impl_->draw_count;
+    ++impl_->performance.draws;
     const auto state = impl_->resource_state.snapshot();
     if (state.edram_mode == EdramMode::Copy) {
       if (!impl_->memory) {
         impl_->error = "D3D12 Xenos resolve has no bound guest memory";
         return;
       }
+      const auto& resolve_vertices = state.vertex_buffers[0][0];
+      if (!resolve_vertices || !resolve_vertices->valid ||
+          resolve_vertices->size_dwords != 6u) {
+        impl_->error = "D3D12 Xenos resolve has no valid rectangle vertices";
+        return;
+      }
       // Resolve rectangles are read by the CPU-side common planner from the
       // conventional six-dword vertex stream. If that stream was produced by
       // an earlier memexport, download only those bytes before decoding it.
-      if (const auto& resolve_vertices = state.vertex_buffers[0][0];
-          resolve_vertices && resolve_vertices->valid &&
-          resolve_vertices->size_dwords == 6u &&
-          !impl_->mirror.make_cpu_visible(
+      if (!impl_->mirror.make_cpu_visible(
               resolve_vertices->physical_address, 6u * sizeof(std::uint32_t),
               memory::GpuRangeUsage::CommandData)) {
         impl_->error = impl_->mirror.error();
@@ -580,12 +590,11 @@ void Backend::consume(const ir::Command& command) {
           return;
         }
       } else {
-        std::array<std::uint32_t, 2> selected_samples{};
+        std::array<std::uint32_t, 4> selected_samples{};
         std::uint32_t selected_count{};
         for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
           if (resolve_plan.guest_sample_mask & (1u << guest_sample)) {
-            if (selected_count < selected_samples.size())
-              selected_samples[selected_count] = guest_sample;
+            selected_samples[selected_count] = guest_sample;
             ++selected_count;
           }
         }
@@ -597,7 +606,7 @@ void Backend::consume(const ir::Command& command) {
             impl_->error = source->error();
             return;
           }
-        } else if (selected_count == 2) {
+        } else if (selected_count == 2 || selected_count == 4) {
           std::vector<std::byte> first;
           std::vector<std::byte> second;
           std::uint32_t first_pitch{};
@@ -622,6 +631,37 @@ void Backend::consume(const ir::Command& command) {
                                           readback, row_pitch)) {
             impl_->error = "D3D12 Xenos selected-sample resolve averaging failed";
             return;
+          }
+          if (selected_count == 4) {
+            std::vector<std::byte> third;
+            std::vector<std::byte> fourth;
+            std::vector<std::byte> second_average;
+            std::vector<std::byte> all_average;
+            std::uint32_t third_pitch{};
+            std::uint32_t fourth_pitch{};
+            std::uint32_t second_average_pitch{};
+            std::uint32_t all_average_pitch{};
+            if (!source->readback_sample(
+                    impl_->queue, selected_samples[2], rectangle.left,
+                    rectangle.top, rectangle.right, rectangle.bottom, third,
+                    third_pitch) ||
+                !source->readback_sample(
+                    impl_->queue, selected_samples[3], rectangle.left,
+                    rectangle.top, rectangle.right, rectangle.bottom, fourth,
+                    fourth_pitch) ||
+                !average_host_color_samples(
+                    format, width, height, third, third_pitch, fourth,
+                    fourth_pitch, second_average, second_average_pitch) ||
+                !average_host_color_samples(
+                    format, width, height, readback, row_pitch,
+                    second_average, second_average_pitch, all_average,
+                    all_average_pitch)) {
+              impl_->error =
+                  "D3D12 Xenos four-sample resolve averaging failed";
+              return;
+            }
+            readback = std::move(all_average);
+            row_pitch = all_average_pitch;
           }
         } else {
           impl_->error = "D3D12 Xenos resolve selected an unsupported sample set";
@@ -851,8 +891,8 @@ void Backend::consume(const ir::Command& command) {
           std::uint64_t texture_snapshot_end = 0u;
           for (const auto& subresource : source_layout.subresources) {
             texture_snapshot_base =
-                std::min(texture_snapshot_base, subresource.guest_address);
-            texture_snapshot_end = std::max(
+                (std::min)(texture_snapshot_base, subresource.guest_address);
+            texture_snapshot_end = (std::max)(
                 texture_snapshot_end,
                 std::uint64_t{subresource.guest_address} +
                     subresource.guest_size_bytes);
@@ -1062,7 +1102,7 @@ void Backend::consume(const ir::Command& command) {
       if (draw->source == DrawSource::Dma) {
         const auto bytes_per_index =
             draw->index_buffer.format == IndexFormat::UInt32 ? 4u : 2u;
-        const auto index_bytes = std::uint64_t{std::min(
+        const auto index_bytes = std::uint64_t{(std::min)(
             draw->index_count,
             draw->index_buffer.length_bytes / bytes_per_index)} *
                                  bytes_per_index;
@@ -1327,6 +1367,9 @@ void Backend::consume(const ir::Command& command) {
 }
 
 void Backend::end_submission() {
+  impl_->performance.submission_time_ns += static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - impl_->submission_started).count());
   if (!impl_->ready) return;
   if (!impl_->queue.flush()) {
     impl_->error = impl_->queue.error();
@@ -1393,8 +1436,8 @@ PresentStatus Backend::present(const PresentationFrame& frame) {
   std::uint64_t presentation_snapshot_end = 0u;
   for (const auto& subresource : layout.subresources) {
     presentation_snapshot_base =
-        std::min(presentation_snapshot_base, subresource.guest_address);
-    presentation_snapshot_end = std::max(
+        (std::min)(presentation_snapshot_base, subresource.guest_address);
+    presentation_snapshot_end = (std::max)(
         presentation_snapshot_end,
         std::uint64_t{subresource.guest_address} +
             subresource.guest_size_bytes);
@@ -1438,6 +1481,12 @@ bool Backend::resize_presentation(std::uint32_t width, std::uint32_t height) {
 
 bool Backend::presentation_ready() const noexcept {
   return impl_->presentation.ready();
+}
+GpuPerformanceCounters Backend::performance_counters() const noexcept {
+  auto result = impl_->performance;
+  result.shader_cache_misses = impl_->compiled_shader_count;
+  result.pipeline_cache_misses = impl_->pipeline_states.size();
+  return result;
 }
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }

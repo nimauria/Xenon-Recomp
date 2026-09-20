@@ -14,9 +14,10 @@ namespace xenon::launcher {
 
 LaunchService::LaunchService(SettingsService& settings, PathService& paths,
                              ProfileService& profiles, LibraryService& library,
-                             ModuleService& modules, DlcService& dlc, IRuntimeBridge& runtime)
+                             ModuleService& modules, DlcService& dlc,
+                             FilesystemService& filesystem, IRuntimeBridge& runtime)
     : settings_(settings), paths_(paths), profiles_(profiles), library_(library),
-      modules_(modules), dlc_(dlc), runtime_(runtime) {}
+      modules_(modules), dlc_(dlc), filesystem_(filesystem), runtime_(runtime) {}
 
 std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString& game_id) const {
   const auto game = library_.entry(game_id);
@@ -40,6 +41,7 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   config.module_version = module.value(QStringLiteral("version")).toString();
   config.module_settings = modules_.settingsValues(module_id);
   config.runtime_api_requirements = modules_.runtimeApiRequirements(module_id);
+  config.native_extension_path = modules_.nativeExtensionPath(module_id);
   config.profile_id = profile.value(QStringLiteral("profileId")).toString();
   config.profile_name = profile.value(QStringLiteral("profileName")).toString();
   config.region = profile.value(QStringLiteral("region"), QStringLiteral("Auto (Global)")).toString();

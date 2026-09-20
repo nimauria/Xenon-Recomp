@@ -30,6 +30,7 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool resize_presentation(std::uint32_t width,
                                          std::uint32_t height) override;
   [[nodiscard]] bool presentation_ready() const noexcept override;
+  [[nodiscard]] GpuPerformanceCounters performance_counters() const noexcept override;
 
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::size_t command_count() const noexcept;

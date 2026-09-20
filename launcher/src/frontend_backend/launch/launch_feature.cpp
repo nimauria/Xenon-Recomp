@@ -115,4 +115,8 @@ ServiceResult LaunchFeature::stop() {
   return ServiceResult::success(QStringLiteral("Fixture session stopped"));
 }
 
+QString LaunchFeature::afterLaunchBehavior() const {
+  return settings_.stringValue(QStringLiteral("runtime/afterLaunch"), QStringLiteral("Keep launcher open"));
+}
+
 }  // namespace xenon::launcher::frontend_backend

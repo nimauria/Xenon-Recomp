@@ -395,7 +395,7 @@ Popup {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: Theme.spaceSm
-                            Text { text: "Profile image"; color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+                            Text { text: "Gamerpic"; color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
                             Text {
                                 Layout.fillWidth: true
                                 text: "Stored locally with this profile. PNG, JPEG and WebP are supported."
@@ -425,11 +425,11 @@ Popup {
                         visible: root.editSection !== "paths" && root.editSection !== "runtime"
                         Layout.fillWidth: true
                         spacing: Theme.spaceXs
-                        Text { text: "Display name"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                        Text { text: "Gamertag / display name"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                         XTextField {
                             id: nameField
                             Layout.fillWidth: true
-                            placeholderText: "Profile name"
+                            placeholderText: "Choose a gamertag"
                             accessibleName: "Profile name"
                             automationId: "profile-name"
                             maximumLength: ProfileStore.profileNameLimit

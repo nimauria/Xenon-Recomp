@@ -373,7 +373,10 @@ std::uint64_t GuestIoBridge::xbox_time(
   if (value == std::filesystem::file_time_type{}) return 0;
   const auto file_now = std::filesystem::file_time_type::clock::now();
   const auto sys_now = std::chrono::system_clock::now();
-  const auto sys_value = sys_now + (value - file_now);
+  const auto sys_delta =
+      std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          value - file_now);
+  const auto sys_value = sys_now + sys_delta;
   const auto since_unix = std::chrono::duration_cast<std::chrono::nanoseconds>(
       sys_value.time_since_epoch());
   const auto unix_100ns = since_unix.count() / 100;
@@ -390,13 +393,17 @@ std::filesystem::file_time_type GuestIoBridge::host_time(
       static_cast<std::int64_t>(kWindowsEpochToUnixSeconds * kTicksPerSecond);
   const auto ticks = static_cast<std::int64_t>(value);
   const auto unix_100ns = ticks - epoch_100ns;
-  const auto sys_value = std::chrono::system_clock::time_point(
-      std::chrono::nanoseconds(unix_100ns * 100));
+  const auto sys_duration =
+      std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          std::chrono::nanoseconds(unix_100ns * 100));
+  const auto sys_value =
+      std::chrono::system_clock::time_point(sys_duration);
   const auto file_now = std::filesystem::file_time_type::clock::now();
   const auto sys_now = std::chrono::system_clock::now();
-  return file_now +
-         std::chrono::duration_cast<std::filesystem::file_time_type::duration>(
-             sys_value - sys_now);
+  const auto file_delta =
+      std::chrono::duration_cast<std::filesystem::file_time_type::duration>(
+          sys_value - sys_now);
+  return file_now + file_delta;
 }
 
 Status GuestIoBridge::nt_query_directory_file(

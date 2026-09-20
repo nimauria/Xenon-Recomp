@@ -175,6 +175,7 @@ Item {
                             else
                                 root.openBackgroundContext(profileList, mouse.x, mouse.y)
                         }
+
                     }
 
                     delegate: Button {
@@ -256,6 +257,16 @@ Item {
 
                         Keys.onReturnPressed: ProfileStore.selectedIndex = index
                         Keys.onSpacePressed: ProfileStore.selectedIndex = index
+                    }
+
+                    Text {
+                        anchors.centerIn: profileList
+                        visible: ProfileStore.profiles.length === 0
+                        text: "No local profiles yet.\nCreate one to manage your gamertag, gamerpic and game preferences."
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.typeBody
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
                     }
                 }
             }

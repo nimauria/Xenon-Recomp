@@ -599,7 +599,7 @@ void test_copy_resolve_state() {
   assert(resolve_plan.host_sample_for_guest[3] == 3);
   plan_state.copy.sample_select = CopySampleSelect::Samples0123;
   resolve_plan = plan_resolve(plan_state, memory);
-  assert(resolve_plan.valid && resolve_plan.native_color_average);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
   assert(resolve_plan.guest_sample_mask == 0xF);
 
   // Depth resolves never average. Pair/full selections sanitize to one guest

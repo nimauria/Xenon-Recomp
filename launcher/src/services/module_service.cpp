@@ -452,6 +452,34 @@ QString ModuleService::modulePath(const QString& module_id) const {
   return module(module_id).value(QStringLiteral("path")).toString();
 }
 
+QString ModuleService::nativeExtensionPath(const QString& module_id) const {
+  const auto module_dir = modulePath(module_id);
+  if (module_dir.isEmpty()) return {};
+  const auto manifest = readManifest(module_dir);
+  const auto declared = manifest.value(QStringLiteral("nativeExtension"));
+  QString relative_path;
+  if (declared.typeId() == QMetaType::QVariantMap) {
+#if defined(Q_OS_WIN)
+    static const QStringList platform_keys{QStringLiteral("windows-x64"), QStringLiteral("windows")};
+#elif defined(Q_OS_MAC)
+    static const QStringList platform_keys{QStringLiteral("macos-x64"), QStringLiteral("macos")};
+#else
+    static const QStringList platform_keys{QStringLiteral("linux-x64"), QStringLiteral("linux")};
+#endif
+    const auto map = declared.toMap();
+    for (const auto& key : platform_keys) {
+      if (map.contains(key)) {
+        relative_path = map.value(key).toString();
+        break;
+      }
+    }
+  } else {
+    relative_path = declared.toString();
+  }
+  if (relative_path.trimmed().isEmpty()) return {};
+  return QDir(module_dir).filePath(relative_path);
+}
+
 QVariantList ModuleService::settingsSchema(const QString& module_id) const {
   const auto item = module(module_id);
   if (item.isEmpty()) return {};
