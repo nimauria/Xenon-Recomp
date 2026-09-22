@@ -12,7 +12,7 @@ XEX file
  -> base header + optional headers + security info + page descriptors
  -> AES-128-CBC decryption (if encrypted)
  -> decompression (None / Basic / Normal-LZX / Delta-LZX)
- -> effective image (a real PE file, starting at offset 0)
+ -> effective image (a loaded-image/RVA-addressed PE image, starting at offset 0)
  -> PE sections / imports / exports / TLS / relocations / exception metadata
  -> Memory V2 mapping with real per-page R/W/X protection
  -> structured import/export metadata for Runtime/ExportRegistry
@@ -268,6 +268,13 @@ this to the rest of Xenon without introducing a second XEXP implementation:
 
 ## Imports / exports / TLS / relocations
 
+After decryption/decompression, the effective image uses loaded-image semantics:
+the byte at image offset `N` is the byte at guest `image_base + N`. PE
+`PointerToRawData` values are retained only as section metadata and are never
+used to translate an RVA. Section payloads and all PE data directories
+(including import-by-name records, TLS, exception metadata, and relocations) are
+read by direct, bounds-checked RVA-to-image-offset access.
+
 - **Imports**: `XEX_HEADER_IMPORT_LIBRARIES` (the XEX-native mechanism title EXEs
   actually use) is parsed first: library string table, each `xex2_import_library`
   record, and its `import_table[]` guest-address entries. Each entry's target 32-bit
@@ -280,7 +287,9 @@ this to the rest of Xenon without introducing a second XEXP implementation:
 - **Exports**: standard PE export directory (name/ordinal/address).
 - **TLS**: the native `XEX_HEADER_TLS_INFO` descriptor is preferred; a PE TLS directory
   is parsed as a fallback when no native TLS header is present.
-- **Relocations**: standard PE base-relocation blocks.
+- **Relocations**: standard PE base-relocation blocks. Each block's entries are
+  read inline after its 8-byte header; `XexRelocation::virtual_address` remains
+  the target page RVA.
 - **Function/exception metadata**: the PE exception-directory-shaped table of
   `(begin, end, unwind_data)` triples used for static-recompilation function
   boundaries.

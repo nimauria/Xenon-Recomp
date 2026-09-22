@@ -719,6 +719,102 @@ void test_pe_section_virtual_size_uses_field_after_full_eight_byte_name() {
   assert(image.sections.front().virtual_size != 0x4549564Fu);
 }
 
+void test_loaded_image_rva_semantics_ignore_raw_pointer() {
+  auto pe = build_pe_body(kImageBase, /*with_export=*/true);
+  constexpr std::uint32_t kSectionRva = 0x00090000u;
+  constexpr std::uint32_t kRawPointer = 0x0008C800u;
+  constexpr std::uint32_t kEntryRva = 0x001F5ED0u;
+  constexpr std::uint32_t kVirtualSize = 0x00340C6Cu;
+  constexpr std::uint32_t kRawSize = 0x00340E00u;
+  constexpr std::size_t kFirstSectionHeaderOffset = 0x178u;
+  constexpr std::size_t kAddressOfEntryPointOffset = 0xA8u;
+
+  pe.bytes.resize(0x00400000u, std::byte{0});
+  const auto put_le32 = [&](std::size_t offset, std::uint32_t value) {
+    pe.bytes[offset + 0u] = static_cast<std::byte>(value & 0xFFu);
+    pe.bytes[offset + 1u] = static_cast<std::byte>((value >> 8u) & 0xFFu);
+    pe.bytes[offset + 2u] = static_cast<std::byte>((value >> 16u) & 0xFFu);
+    pe.bytes[offset + 3u] = static_cast<std::byte>((value >> 24u) & 0xFFu);
+  };
+  put_le32(kFirstSectionHeaderOffset + 0x08u, kVirtualSize);
+  put_le32(kFirstSectionHeaderOffset + 0x0Cu, kSectionRva);
+  put_le32(kFirstSectionHeaderOffset + 0x10u, kRawSize);
+  put_le32(kFirstSectionHeaderOffset + 0x14u, kRawPointer);
+  put_le32(kAddressOfEntryPointOffset, kEntryRva);
+  pe.entry_point_rva = kEntryRva;
+
+  const auto put_be32 = [&](std::size_t offset, std::uint32_t value) {
+    pe.bytes[offset + 0u] = static_cast<std::byte>((value >> 24u) & 0xFFu);
+    pe.bytes[offset + 1u] = static_cast<std::byte>((value >> 16u) & 0xFFu);
+    pe.bytes[offset + 2u] = static_cast<std::byte>((value >> 8u) & 0xFFu);
+    pe.bytes[offset + 3u] = static_cast<std::byte>(value & 0xFFu);
+  };
+  const auto entry_raw_offset = static_cast<std::size_t>(kRawPointer) +
+                                (kEntryRva - kSectionRva);
+  put_be32(entry_raw_offset, 0x7C003C0Eu);
+  put_be32(kEntryRva, 0x7D8802A6u);
+
+  XexBuildOptions opts{};
+  opts.with_import_libraries = false;
+  auto fixture = build_base_xex(pe, opts);
+
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  assert(image.entry_point == kImageBase + kEntryRva);
+  assert(std::to_integer<unsigned char>(image.effective_image[entry_raw_offset]) == 0x7C);
+  assert(std::to_integer<unsigned char>(image.effective_image[entry_raw_offset + 1u]) == 0x00);
+  assert(std::to_integer<unsigned char>(image.effective_image[entry_raw_offset + 2u]) == 0x3C);
+  assert(std::to_integer<unsigned char>(image.effective_image[entry_raw_offset + 3u]) == 0x0E);
+  assert(image.effective_image[kEntryRva] == std::byte{0x7D});
+  assert(image.sections.front().raw_pointer == kRawPointer);
+  const auto entry_delta = static_cast<std::size_t>(kEntryRva - kSectionRva);
+  assert(image.sections.front().bytes.size() > entry_delta + 3u);
+  assert(std::to_integer<unsigned char>(image.sections.front().bytes[entry_delta]) == 0x7D);
+  assert(std::to_integer<unsigned char>(image.sections.front().bytes[entry_delta + 1u]) == 0x88);
+  assert(std::to_integer<unsigned char>(image.sections.front().bytes[entry_delta + 2u]) == 0x02);
+  assert(std::to_integer<unsigned char>(image.sections.front().bytes[entry_delta + 3u]) == 0xA6);
+  assert(std::to_integer<unsigned char>(image.effective_image[kEntryRva]) == 0x7D);
+  assert(std::to_integer<unsigned char>(image.effective_image[kEntryRva + 1u]) == 0x88);
+  assert(std::to_integer<unsigned char>(image.effective_image[kEntryRva + 2u]) == 0x02);
+  assert(std::to_integer<unsigned char>(image.effective_image[kEntryRva + 3u]) == 0xA6);
+}
+
+void test_relocation_entries_are_inline_in_directory() {
+  auto pe = build_pe_body(kImageBase, /*with_export=*/false);
+  constexpr std::uint32_t kRelocationRva = 0x00050000u;
+  constexpr std::uint32_t kTargetPageRva = 0x00090000u;
+  pe.bytes.resize(0x00060000u, std::byte{0});
+  const auto put_le32 = [&](std::size_t offset, std::uint32_t value) {
+    pe.bytes[offset + 0u] = static_cast<std::byte>(value & 0xFFu);
+    pe.bytes[offset + 1u] = static_cast<std::byte>((value >> 8u) & 0xFFu);
+    pe.bytes[offset + 2u] = static_cast<std::byte>((value >> 16u) & 0xFFu);
+    pe.bytes[offset + 3u] = static_cast<std::byte>((value >> 24u) & 0xFFu);
+  };
+  const auto put_le16 = [&](std::size_t offset, std::uint16_t value) {
+    pe.bytes[offset + 0u] = static_cast<std::byte>(value & 0xFFu);
+    pe.bytes[offset + 1u] = static_cast<std::byte>((value >> 8u) & 0xFFu);
+  };
+  constexpr std::size_t kDataDirectoryOffset = 0xF8u;
+  put_le32(kDataDirectoryOffset + 5u * 8u, kRelocationRva);
+  put_le32(kDataDirectoryOffset + 5u * 8u + 4u, 12u);
+  put_le32(kRelocationRva + 0u, kTargetPageRva);
+  put_le32(kRelocationRva + 4u, 12u);
+  put_le16(kRelocationRva + 8u, 0x3123u);
+  put_le16(kRelocationRva + 10u, 0u);
+
+  XexBuildOptions opts{};
+  opts.with_import_libraries = false;
+  auto fixture = build_base_xex(pe, opts);
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  assert(image.relocations.size() == 1u);
+  assert(image.relocations.front().virtual_address == kTargetPageRva);
+  assert(image.relocations.front().entries.size() == 1u);
+  assert(image.relocations.front().entries.front() == 0x30123u);
+}
+
 void test_parse_and_load_uncompressed_unencrypted() {
   auto fixture = make_uncompressed_fixture();
 
@@ -2086,6 +2182,8 @@ int main() {
   test_invalid_header_size();
   test_missing_security_info_rejected();
   test_pe_section_virtual_size_uses_field_after_full_eight_byte_name();
+  test_loaded_image_rva_semantics_ignore_raw_pointer();
+  test_relocation_entries_are_inline_in_directory();
   test_parse_and_load_uncompressed_unencrypted();
   test_native_function_import_pair_is_classified_without_rewriting_address_slot();
   test_map_xex_image_rounds_section_size_up_to_memory_page();

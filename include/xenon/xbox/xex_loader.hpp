@@ -113,6 +113,8 @@ struct XexTls {
 };
 
 struct XexRelocation {
+  // IMAGE_BASE_RELOCATION::VirtualAddress is the target page RVA, not the
+  // image offset of the relocation block. It remains an RVA in this model.
   std::uint32_t virtual_address{};
   std::uint32_t size{};
   std::uint16_t type{};

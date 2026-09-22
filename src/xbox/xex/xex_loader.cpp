@@ -794,27 +794,20 @@ memory::Protect pe_section_protect(std::uint32_t characteristics) {
   return protect;
 }
 
-std::optional<std::size_t> rva_to_file_offset(const std::vector<XexSection>& sections,
-                                              std::uint32_t image_base, std::uint32_t rva) {
-  for (const auto& section : sections) {
-    const auto section_rva_base = static_cast<std::uint32_t>(section.virtual_address) - image_base;
-    if (rva < section_rva_base) continue;
-    const auto section_end = section_rva_base + std::max(section.virtual_size, section.raw_size);
-    if (rva >= section_end) continue;
-    const auto delta = rva - section_rva_base;
-    return static_cast<std::size_t>(section.raw_pointer) + static_cast<std::size_t>(delta);
-  }
-  return std::nullopt;
+std::optional<std::size_t> rva_to_image_offset(std::span<const std::byte> image,
+                                               std::uint32_t rva,
+                                               std::size_t length = 1u) {
+  const auto offset = static_cast<std::size_t>(rva);
+  if (!range_valid(offset, length, image.size())) return std::nullopt;
+  return offset;
 }
 
-void parse_export_directory(std::span<const std::byte> bytes, const std::vector<XexSection>& sections,
-                           std::uint32_t image_base, std::uint32_t rva,
+void parse_export_directory(std::span<const std::byte> bytes, std::uint32_t rva,
                            std::vector<XexExport>& exports) {
   if (rva == 0u) return;
-  const auto export_offset = rva_to_file_offset(sections, image_base, rva);
+  const auto export_offset = rva_to_image_offset(bytes, rva, 0x28u);
   if (!export_offset) return;
   const auto export_dir = bytes.subspan(*export_offset);
-  if (export_dir.size() < 0x28u) return;
   const auto number_of_functions = read_le32(export_dir, 0x14u);
   const auto number_of_names = read_le32(export_dir, 0x18u);
   const auto address_of_functions = read_le32(export_dir, 0x1Cu);
@@ -823,9 +816,12 @@ void parse_export_directory(std::span<const std::byte> bytes, const std::vector<
   const auto ordinal_base = read_le32(export_dir, 0x10u);
   if (number_of_functions == 0u || address_of_functions == 0u) return;
 
-  const auto functions_offset = rva_to_file_offset(sections, image_base, address_of_functions);
-  const auto names_offset = rva_to_file_offset(sections, image_base, address_of_names);
-  const auto ordinals_offset = rva_to_file_offset(sections, image_base, address_of_name_ordinals);
+  const auto functions_offset =
+      rva_to_image_offset(bytes, address_of_functions, static_cast<std::size_t>(number_of_functions) * 4u);
+  const auto names_offset =
+      rva_to_image_offset(bytes, address_of_names, static_cast<std::size_t>(number_of_names) * 4u);
+  const auto ordinals_offset =
+      rva_to_image_offset(bytes, address_of_name_ordinals, static_cast<std::size_t>(number_of_names) * 2u);
   if (!functions_offset || (!names_offset && number_of_names != 0u) ||
       (!ordinals_offset && number_of_names != 0u)) {
     return;
@@ -833,9 +829,10 @@ void parse_export_directory(std::span<const std::byte> bytes, const std::vector<
 
   for (std::uint32_t i = 0u; i < number_of_functions && i < number_of_names; ++i) {
     const auto name_rva = read_le32(bytes.subspan(*names_offset), i * 4u);
-    const auto name_offset = rva_to_file_offset(sections, image_base, name_rva);
+    const auto name_offset = rva_to_image_offset(bytes, name_rva);
     if (!name_offset) continue;
     const auto ordinal_index = read_le16(bytes.subspan(*ordinals_offset), i * 2u);
+    if (ordinal_index >= number_of_functions) continue;
     const auto function_rva = read_le32(bytes.subspan(*functions_offset), ordinal_index * 4u);
     if (function_rva == 0u) continue;
     XexExport export_entry{};
@@ -846,27 +843,30 @@ void parse_export_directory(std::span<const std::byte> bytes, const std::vector<
   }
 }
 
-void parse_pe_import_directory(std::span<const std::byte> bytes, const std::vector<XexSection>& sections,
-                              std::uint32_t image_base, std::uint32_t rva,
+void parse_pe_import_directory(std::span<const std::byte> bytes, std::uint32_t image_base,
+                              std::uint32_t rva,
                               std::vector<XexImport>& imports) {
   if (rva == 0u) return;
-  const auto import_desc_offset = rva_to_file_offset(sections, image_base, rva);
+  const auto import_desc_offset = rva_to_image_offset(bytes, rva, 20u);
   if (!import_desc_offset) return;
 
   for (std::size_t descriptor_index = 0u;; ++descriptor_index) {
-    const auto descriptor_span = bytes.subspan(*import_desc_offset + descriptor_index * 20u, 20u);
-    if (descriptor_span.size() < 20u) break;
+    const auto descriptor_offset = *import_desc_offset + descriptor_index * 20u;
+    if (!range_valid(descriptor_offset, 20u, bytes.size())) break;
+    const auto descriptor_span = bytes.subspan(descriptor_offset, 20u);
     const auto original_first_thunk = read_le32(descriptor_span, 0u);
     const auto name_rva = read_le32(descriptor_span, 0x0Cu);
     const auto first_thunk = read_le32(descriptor_span, 0x10u);
     if (original_first_thunk == 0u && name_rva == 0u && first_thunk == 0u) break;
     if (name_rva == 0u) continue;
-    const auto name_offset = rva_to_file_offset(sections, image_base, name_rva);
+    const auto name_offset = rva_to_image_offset(bytes, name_rva);
     if (!name_offset) continue;
     const auto module_name = read_string(bytes.subspan(*name_offset), 0u);
-    const auto thunk_offset = rva_to_file_offset(sections, image_base, original_first_thunk);
+    const auto thunk_rva = original_first_thunk != 0u ? original_first_thunk : first_thunk;
+    const auto thunk_offset = rva_to_image_offset(bytes, thunk_rva, 4u);
     if (!thunk_offset) continue;
     for (std::size_t i = 0u;; ++i) {
+      if ((i + 1u) * 4u > bytes.size() - *thunk_offset) break;
       const auto entry = read_le32(bytes.subspan(*thunk_offset), i * 4u);
       if (entry == 0u) break;
       XexImport import{};
@@ -882,7 +882,7 @@ void parse_pe_import_directory(std::span<const std::byte> bytes, const std::vect
         import.ordinal = static_cast<std::uint16_t>(entry & 0xFFFFu);
       } else {
         const auto by_name_rva = static_cast<std::uint32_t>(entry & 0x7FFFFFFFu);
-        const auto by_name_offset = rva_to_file_offset(sections, image_base, by_name_rva);
+        const auto by_name_offset = rva_to_image_offset(bytes, by_name_rva, 2u);
         if (by_name_offset) {
           const auto hint = read_le16(bytes.subspan(*by_name_offset), 0u);
           import.ordinal = hint;
@@ -894,12 +894,11 @@ void parse_pe_import_directory(std::span<const std::byte> bytes, const std::vect
   }
 }
 
-void parse_pe_tls_directory(std::span<const std::byte> bytes, const std::vector<XexSection>& sections,
-                           std::uint32_t image_base, std::uint32_t rva,
+void parse_pe_tls_directory(std::span<const std::byte> bytes, std::uint32_t rva,
                            std::optional<XexTls>& tls) {
   if (rva == 0u || tls.has_value()) return;  // Native TLS header, if present, wins.
-  const auto tls_offset = rva_to_file_offset(sections, image_base, rva);
-  if (!tls_offset || bytes.subspan(*tls_offset).size() < 0x18u) return;
+  const auto tls_offset = rva_to_image_offset(bytes, rva, 0x18u);
+  if (!tls_offset) return;
   XexTls result{};
   result.raw_data_start = read_le32(bytes.subspan(*tls_offset), 0x00u);
   result.raw_data_size = read_le32(bytes.subspan(*tls_offset), 0x04u);
@@ -909,25 +908,22 @@ void parse_pe_tls_directory(std::span<const std::byte> bytes, const std::vector<
   tls = result;
 }
 
-void parse_relocation_directory(std::span<const std::byte> bytes, const std::vector<XexSection>& sections,
-                               std::uint32_t image_base, std::uint32_t rva, std::uint32_t size,
+void parse_relocation_directory(std::span<const std::byte> bytes, std::uint32_t rva, std::uint32_t size,
                                std::vector<XexRelocation>& relocations) {
   if (rva == 0u || size == 0u) return;
-  const auto dir_offset = rva_to_file_offset(sections, image_base, rva);
+  const auto dir_offset = rva_to_image_offset(bytes, rva, size);
   if (!dir_offset) return;
 
   auto cursor = *dir_offset;
-  const auto limit = std::min<std::size_t>(bytes.size(), cursor + size);
+  const auto limit = cursor + static_cast<std::size_t>(size);
   while (cursor + 8u <= limit) {
     const auto block_rva = read_le32(bytes, cursor + 0u);
     const auto block_size = read_le32(bytes, cursor + 4u);
-    if (block_rva == 0u || block_size < 8u) break;
+    if (block_size < 8u || block_size > limit - cursor) break;
+    if (((block_size - 8u) & 1u) != 0u) break;
 
-    const auto block_data_offset = rva_to_file_offset(sections, image_base, block_rva);
-    if (!block_data_offset) break;
-
-    const auto block_data_end = std::min<std::size_t>(bytes.size(), *block_data_offset + block_size);
-    auto entry_offset = *block_data_offset + 8u;
+    const auto block_data_end = cursor + static_cast<std::size_t>(block_size);
+    auto entry_offset = cursor + 8u;
     XexRelocation relocation{};
     relocation.virtual_address = block_rva;
     relocation.size = block_size;
@@ -943,19 +939,17 @@ void parse_relocation_directory(std::span<const std::byte> bytes, const std::vec
       entry_offset += 2u;
     }
     if (!relocation.entries.empty()) relocations.push_back(relocation);
-    cursor += 8u;
-    if (cursor >= limit) break;
+    cursor += block_size;
   }
 }
 
 void parse_function_metadata_directory(std::span<const std::byte> bytes,
-                                      const std::vector<XexSection>& sections,
                                       std::uint32_t image_base, std::uint32_t rva, std::uint32_t size,
                                       std::vector<XexFunctionMetadata>& output) {
   if (rva == 0u || size < 12u) return;
-  const auto file_offset = rva_to_file_offset(sections, image_base, rva);
-  if (!file_offset || *file_offset >= bytes.size()) return;
-  const auto available = std::min<std::size_t>(size, bytes.size() - *file_offset);
+  const auto file_offset = rva_to_image_offset(bytes, rva, size);
+  if (!file_offset) return;
+  const auto available = static_cast<std::size_t>(size);
   if (available % 12u != 0u) return;
   for (std::size_t offset = 0u; offset < available; offset += 12u) {
     const auto begin = read_le32(bytes, *file_offset + offset);
@@ -1141,8 +1135,12 @@ bool try_parse_pe_sections(std::span<const std::byte> effective_image, std::uint
     section.writable = (section.characteristics & 0x80000000u) != 0u;
     section.readable = (section.characteristics & 0x40000000u) != 0u;
     if (section.virtual_size == 0u && section.raw_size != 0u) section.virtual_size = section.raw_size;
-    if (section.raw_size != 0u && range_valid(section.raw_pointer, section.raw_size, effective_image.size())) {
-      const auto span = effective_image.subspan(section.raw_pointer, section.raw_size);
+    const auto section_rva = read_le32(effective_image, section_offset + 0x0Cu);
+    const auto section_length = std::max(section.virtual_size, section.raw_size);
+    if (section_length != 0u && section_rva < effective_image.size()) {
+      const auto copied_length =
+          std::min<std::size_t>(section_length, effective_image.size() - section_rva);
+      const auto span = effective_image.subspan(section_rva, copied_length);
       section.bytes.assign(span.begin(), span.end());
     }
     out_sections.push_back(section);
@@ -1406,22 +1404,20 @@ bool parse_xex_image(std::span<const std::byte> bytes, XexImage& out_image, std:
   const auto exception_rva = read_le32(out_image.effective_image, data_directory_offset + 3u * 8u);
   const auto exception_size = read_le32(out_image.effective_image, data_directory_offset + 3u * 8u + 4u);
 
-  parse_export_directory(out_image.effective_image, out_image.sections, out_image.image_base, export_rva,
-                        out_image.exports);
+  parse_export_directory(out_image.effective_image, export_rva, out_image.exports);
 
   parse_native_import_libraries(bytes, header_size, entries, out_image.effective_image,
                                out_image.image_base, out_image.imports);
   if (out_image.imports.empty()) {
-    parse_pe_import_directory(out_image.effective_image, out_image.sections, out_image.image_base,
-                             import_rva, out_image.imports);
+    parse_pe_import_directory(out_image.effective_image, out_image.image_base, import_rva,
+                              out_image.imports);
   }
 
-  parse_pe_tls_directory(out_image.effective_image, out_image.sections, out_image.image_base, tls_rva,
-                        out_image.tls);
-  parse_relocation_directory(out_image.effective_image, out_image.sections, out_image.image_base,
-                            relocation_rva, relocation_size, out_image.relocations);
-  parse_function_metadata_directory(out_image.effective_image, out_image.sections, out_image.image_base,
-                                   exception_rva, exception_size, out_image.function_metadata);
+  parse_pe_tls_directory(out_image.effective_image, tls_rva, out_image.tls);
+  parse_relocation_directory(out_image.effective_image, relocation_rva, relocation_size,
+                             out_image.relocations);
+  parse_function_metadata_directory(out_image.effective_image, out_image.image_base, exception_rva,
+                                    exception_size, out_image.function_metadata);
 
   return true;
 }
