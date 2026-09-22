@@ -32,7 +32,7 @@
 
 ## Documentation
 
-- `docs/KERNEL_V1.md` - Comprehensive architecture and API reference
+- `docs/kernel/KERNEL_V1.md` - Comprehensive architecture and API reference
 - `docs/kernel/KERNEL_V1_SUMMARY.md` - This summary
 
 ## Next Steps

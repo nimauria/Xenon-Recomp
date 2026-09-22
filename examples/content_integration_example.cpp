@@ -1,1 +1,1 @@
-// See docs/CONTENT_SERVICES.md for complete integration example
+// See docs/modules/CONTENT_SERVICES.md for complete integration example

@@ -10,6 +10,7 @@
 #include "../services/module_service.hpp"
 #include "../services/package_service.hpp"
 #include "../services/path_service.hpp"
+#include "../services/preparation_service.hpp"
 #include "../services/profile_service.hpp"
 #include "../services/recovery_service.hpp"
 #include "../services/settings_service.hpp"
@@ -48,6 +49,7 @@ class LauncherCore final : public QObject {
   [[nodiscard]] RuntimeBridge& runtime() noexcept { return runtime_; }
   [[nodiscard]] const RuntimeBridge& runtime() const noexcept { return runtime_; }
   [[nodiscard]] LaunchService& launch() noexcept { return launch_; }
+  [[nodiscard]] PreparationService& preparation() noexcept { return preparation_; }
 
  private:
   SettingsService settings_;
@@ -62,6 +64,7 @@ class LauncherCore final : public QObject {
   DefaultContentProbe content_probe_;
   ContentImportService content_import_;
   RuntimeBridge runtime_;
+  PreparationService preparation_;
   LaunchService launch_;
 };
 

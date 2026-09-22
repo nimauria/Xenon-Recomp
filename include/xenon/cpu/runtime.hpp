@@ -6,6 +6,8 @@
 #include "xenon/cpu/memory_port.hpp"
 #include "xenon/cpu/state.hpp"
 
+namespace xenon::kernel { class KernelProcess; }
+
 namespace xenon::cpu {
 
 enum class FlowReason : std::uint8_t {
@@ -15,6 +17,10 @@ enum class FlowReason : std::uint8_t {
   Trap,
   Syscall,
   Halt,
+  // Explicit guest non-local transfer used by the Xenon setjmp/longjmp
+  // helpers. This propagates through generated guest-call frames until the
+  // compiled function that contains next_address resumes at that local block.
+  LongJump,
 };
 
 struct ExecutionResult {
@@ -54,6 +60,12 @@ class RuntimeServices {
   // clock directly. Keeping this at the runtime boundary also makes tests and
   // deterministic replay possible without changing CPU IR.
   virtual std::uint64_t read_time_base(const CpuState& state) = 0;
+
+  // Returns the process that owns the currently executing guest thread when
+  // the runtime has one. CPU code only observes the opaque pointer; kernel-
+  // owned native helpers use it for process-lifetime services such as the
+  // guest heap. Test/minimal runtimes may leave this null.
+  virtual xenon::kernel::KernelProcess* current_process() noexcept { return nullptr; }
 
   // CPU-v1 compatibility hook for imported platform calls. CPU v2 may replace
   // how imports reach this boundary, but subsystem handlers remain unchanged.

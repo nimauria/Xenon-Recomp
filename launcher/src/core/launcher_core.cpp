@@ -16,7 +16,9 @@ LauncherCore::LauncherCore(QObject* parent)
       content_probe_(),
       content_import_(library_, modules_, dlc_, content_probe_),
       runtime_(),
-      launch_(settings_, paths_, profiles_, library_, modules_, dlc_, filesystem_, runtime_) {}
+      preparation_(paths_, modules_, library_, nullptr),
+      launch_(settings_, paths_, profiles_, library_, modules_, dlc_, filesystem_, runtime_,
+             preparation_, content_import_) {}
 
 ServiceResult LauncherCore::initialize(bool load_launcher_state, bool connect_runtime) {
   if (!paths_.ensureLauncherDirectories()) {

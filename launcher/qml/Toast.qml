@@ -23,9 +23,6 @@ Popup {
         closeTimer.restart()
     }
 
-    Accessible.role: Accessible.AlertMessage
-    Accessible.name: titleText + ". " + messageText
-
     background: Rectangle {
         radius: Theme.panelRadius
         color: Theme.surfaceRaised
@@ -34,6 +31,13 @@ Popup {
     }
 
     contentItem: Item {
+        // Popup itself is not an Item (it wraps one), so the Accessible
+        // attached property belongs here, on the actual Item, rather than on
+        // the Popup - attaching it to the Popup produced a real (if benign)
+        // "must be attached to an object deriving from Item or Action"
+        // warning on every launch.
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: root.titleText + ". " + root.messageText
         implicitHeight: column.implicitHeight + Theme.spaceXl
 
         ColumnLayout {

@@ -29,6 +29,17 @@ class ReadOnlyContentSource {
   [[nodiscard]] virtual FsError disk_space(DiskSpace& out_space) const = 0;
 };
 
+// Reads the entire file at `relative_path` out of `source` into `out_bytes`,
+// without ever writing anything to a temporary host file. This is the
+// primitive that lets a caller (title-update application, the recompilation
+// pipeline) obtain a full in-memory `default.xex`/patch file straight out of
+// a mounted disc image or package - `XEX Loader V2` only ever consumes
+// `std::span<const std::byte>`, so this is the sole piece needed to bridge
+// "file lives inside an ISO/STFS container" to "bytes XEX Loader V2 accepts".
+[[nodiscard]] FsError read_all(const ReadOnlyContentSource& source,
+                               std::string_view relative_path,
+                               std::vector<std::byte>& out_bytes);
+
 class ReadOnlyContentDevice final : public Device {
  public:
   ReadOnlyContentDevice(std::string mount_point,

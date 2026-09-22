@@ -92,7 +92,7 @@ Popup {
             Layout.fillHeight: true
             contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
             Item {
                 width: parent.width

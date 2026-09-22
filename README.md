@@ -66,7 +66,7 @@ Title-specific symbols, patches, hooks, workarounds, artwork, manifests, compati
 
 ## Current state
 
-This README reflects the source tree in the repository snapshot dated **20 September 2026**.
+This README reflects the source tree in the repository snapshot dated **22 September 2026**.
 
 | Area | Status | Current state |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ The recompilation driver can analyse executable ranges, discover functions, buil
 
 Module hints are deliberately narrow. They can supply game knowledge such as function boundaries, known symbols, ignored/data regions, hooks, and patches, but they do **not** replace Xbox CPU semantics.
 
-See [`docs/RECOMPILATION_PIPELINE.md`](docs/RECOMPILATION_PIPELINE.md).
+See [`docs/recomp/RECOMPILATION_PIPELINE.md`](docs/recomp/RECOMPILATION_PIPELINE.md).
 
 ---
 
@@ -166,7 +166,7 @@ Memory V2 mapping with guest protections
 
 The loader also exposes structured information to the runtime and recompilation tools rather than forcing game modules to reimplement XEX parsing.
 
-See [`docs/XEX_LOADER_V2.md`](docs/XEX_LOADER_V2.md).
+See [`docs/xbox/XEX_LOADER_V2.md`](docs/xbox/XEX_LOADER_V2.md).
 
 ---
 
@@ -187,7 +187,7 @@ The CPU subsystem currently contains:
 
 The current production focus is **x86-64 first**. Direct x86-64 and future ARM64 backend directories exist as architectural boundaries, but the current native AOT path is C++-based.
 
-See [`docs/CPU_V2_DESIGN.md`](docs/CPU_V2_DESIGN.md) and [`docs/cpu/VALIDATION.md`](docs/cpu/VALIDATION.md).
+See [`docs/cpu/CPU_V2_DESIGN.md`](docs/cpu/CPU_V2_DESIGN.md) and [`docs/cpu/VALIDATION.md`](docs/cpu/VALIDATION.md).
 
 ---
 
@@ -214,7 +214,7 @@ Implemented foundations include:
 
 A core rule is that the CPU, GPU, kernel, XEX loader, and future devices must agree on **one guest memory truth**.
 
-See [`docs/MEMORY_V2.md`](docs/MEMORY_V2.md).
+See [`docs/memory/MEMORY_V2.md`](docs/memory/MEMORY_V2.md).
 
 ---
 
@@ -271,7 +271,7 @@ The D3D12 backend contains the corresponding Windows-native device, queue, resou
 
 Xenon owns a common shader path that lowers Xenos shader state into host shader source and uses **DXC** where available to produce DXIL and SPIR-V.
 
-See [`docs/GPU_V1.md`](docs/GPU_V1.md) and the documents under [`docs/graphics/`](docs/graphics/).
+See [`docs/graphics/GPU_V1.md`](docs/graphics/GPU_V1.md) and the documents under [`docs/graphics/`](docs/graphics/).
 
 ---
 
@@ -304,7 +304,7 @@ Xenon VFS
 
 The content layer includes probing/materialization, package sources, title metadata, title-update/DLC foundations, and launcher integration points.
 
-See [`docs/filesystem/FILESYSTEM_V1.md`](docs/filesystem/FILESYSTEM_V1.md) and [`docs/CONTENT_SERVICES.md`](docs/CONTENT_SERVICES.md).
+See [`docs/filesystem/FILESYSTEM_V1.md`](docs/filesystem/FILESYSTEM_V1.md) and [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md).
 
 ---
 
@@ -340,7 +340,7 @@ The XAM layer currently provides foundations for:
 
 The design favours useful offline/native behaviour and explicit unsupported states rather than silently pretending unimplemented dashboard or network functionality succeeded.
 
-See [`docs/KERNEL_V1.md`](docs/KERNEL_V1.md), [`docs/XAM_V1.md`](docs/XAM_V1.md), and [`docs/CONTENT_SERVICES.md`](docs/CONTENT_SERVICES.md).
+See [`docs/kernel/KERNEL_V1.md`](docs/kernel/KERNEL_V1.md), [`docs/xam/XAM_V1.md`](docs/xam/XAM_V1.md), and [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md).
 
 ---
 
@@ -398,7 +398,7 @@ A game module supplies a native compiled-code extension exporting the Xenon comp
 
 Current runtime-session gaps include further renderer/window wiring, cooperative stop/pause checkpoints in generated code, TLS completion, broader export coverage, and multi-threaded real-title execution qualification.
 
-See [`docs/RUNTIME_SESSION.md`](docs/RUNTIME_SESSION.md) and [`docs/RUNTIME_HOST.md`](docs/RUNTIME_HOST.md).
+See [`docs/runtime/RUNTIME_SESSION.md`](docs/runtime/RUNTIME_SESSION.md) and [`docs/runtime/RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md).
 
 ---
 
@@ -469,17 +469,27 @@ Core requirements:
 
 Optional components:
 
-- Vulkan SDK for the Vulkan backend
+- Vulkan SDK for developer/system-dependency builds (production presets provision pinned Vulkan headers/loader)
 - Windows SDK for Direct3D 12
-- DXC for shader compilation
+- DXC for developer/system-dependency builds (production presets provision pinned DXC)
 - Qt 6 for the launcher
 - SDL3 for the optional SDL3 input backend
 
-SDL2 is resolved automatically: Xenon first uses an installed SDL2 and, when
-`XENON_FETCH_MISSING_DEPS=ON` (the default), can fetch a pinned upstream SDL2
-revision. Windows x64 also includes Xenon's vetted FFmpeg/XMAFRAMES dependency
-under `third_party/xenon-ffmpeg`, so neither Xenia nor a separate FFmpeg install
-is required for normal Windows builds.
+Native Audio/Input dependencies are resolved through Xenon's managed dependency
+layer. Development builds use `AUTO` mode by default: explicit or already-managed
+dependencies are preferred, compatible system packages may be used, and missing
+pinned dependencies can be provisioned automatically. Windows x64 `AUTO` builds
+may also use the committed vetted FFmpeg/XMAFRAMES developer bundle under
+`third_party/xenon-ffmpeg`.
+
+Release presets use `MANAGED` mode. SDL2 is built static, while the pinned
+Xenia-maintained FFmpeg fork is built shared and staged beside the runtime so a
+published build does not depend on the user's local packages. Vulkan headers,
+the Vulkan loader and DXC are pinned for the same production path. Normal
+development builds do **not** enable installer packaging; `XENON_BUILD_INSTALLER`
+remains `OFF` unless a release preset is selected. See
+[`docs/development/DEPENDENCIES.md`](docs/development/DEPENDENCIES.md) and
+[`docs/development/RELEASE_PACKAGING.md`](docs/development/RELEASE_PACKAGING.md).
 
 ### Supplied CMake presets
 
@@ -506,6 +516,19 @@ cmake --build build/linux-x64-debug
 ctest --test-dir build/linux-x64-debug --output-on-failure
 ```
 
+### Future production build
+
+The installer pipeline is present now for release engineering, but it is not part of ordinary development builds. When Xenon is ready for a public release, use the production presets:
+
+```text
+windows-x64-release -> full runtime + launcher -> NSIS installer + portable ZIP
+linux-x64-release   -> full runtime + launcher -> Debian package + portable TGZ
+```
+
+Those presets force managed/pinned dependencies and enable the release verifier. End users receive the redistributable runtime libraries inside the installer/package; they are not expected to install Qt, SDL2, FFmpeg, DXC or the Vulkan SDK manually. A supported GPU driver remains a host requirement.
+
+While Xenon remains under active development, tag-triggered publication is gated by the GitHub repository variable `XENON_PRODUCTION_RELEASES_ENABLED`. Leave it unset/false during development. Manual workflow runs can still validate installer generation. When Xenon is ready to ship, set it to `true` and a `vX.Y.Z` tag will use the same validated production pipeline.
+
 ### Major build options
 
 The authoritative list is in the root [`CMakeLists.txt`](CMakeLists.txt). Current major options include:
@@ -514,6 +537,7 @@ The authoritative list is in the root [`CMakeLists.txt`](CMakeLists.txt). Curren
 XENON_BUILD_TESTS
 XENON_BUILD_BENCHMARKS
 XENON_BUILD_LAUNCHER
+XENON_BUILD_INSTALLER
 XENON_ENABLE_MEMORY
 XENON_MEMORY_DEFAULT_DIRECT_APERTURE
 XENON_ENABLE_GRAPHICS
@@ -521,8 +545,13 @@ XENON_ENABLE_VULKAN
 XENON_ENABLE_D3D12
 XENON_ENABLE_DXC
 XENON_ENABLE_AUDIO
-XENON_AUDIO_FFMPEG_ROOT
+XENON_DEPENDENCY_MODE
+XENON_AUTO_BOOTSTRAP_DEPS
 XENON_FETCH_MISSING_DEPS
+XENON_MANAGED_DEPS_ROOT
+XENON_SDL2_ROOT
+XENON_AUDIO_FFMPEG_ROOT
+XENON_PREFER_BUNDLED_FFMPEG
 XENON_ENABLE_INPUT
 XENON_INPUT_ENABLE_SDL2
 XENON_INPUT_ENABLE_SDL3
@@ -594,17 +623,18 @@ Xenon-Recomp/
 Useful starting points:
 
 - [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) — dependency and ownership rules
-- [`docs/RECOMPILATION_PIPELINE.md`](docs/RECOMPILATION_PIPELINE.md) — static recompilation pipeline
-- [`docs/XEX_LOADER_V2.md`](docs/XEX_LOADER_V2.md) — retail XEX loading pipeline
-- [`docs/RUNTIME_SESSION.md`](docs/RUNTIME_SESSION.md) — unified runtime lifecycle
-- [`docs/RUNTIME_HOST.md`](docs/RUNTIME_HOST.md) — launcher/runtime process contract
-- [`docs/CPU_V2_DESIGN.md`](docs/CPU_V2_DESIGN.md) — CPU architecture
-- [`docs/MEMORY_V2.md`](docs/MEMORY_V2.md) — production memory architecture
-- [`docs/GPU_V1.md`](docs/GPU_V1.md) — graphics completion/qualification state
+- [`docs/recomp/RECOMPILATION_PIPELINE.md`](docs/recomp/RECOMPILATION_PIPELINE.md) — static recompilation pipeline
+- [`docs/xbox/XEX_LOADER_V2.md`](docs/xbox/XEX_LOADER_V2.md) — retail XEX loading pipeline
+- [`docs/runtime/RUNTIME_SESSION.md`](docs/runtime/RUNTIME_SESSION.md) — unified runtime lifecycle
+- [`docs/runtime/RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md) — launcher/runtime process contract
+- [`docs/development/DEPENDENCIES.md`](docs/development/DEPENDENCIES.md) — pinned native dependency/bootstrap and release packaging
+- [`docs/cpu/CPU_V2_DESIGN.md`](docs/cpu/CPU_V2_DESIGN.md) — CPU architecture
+- [`docs/memory/MEMORY_V2.md`](docs/memory/MEMORY_V2.md) — production memory architecture
+- [`docs/graphics/GPU_V1.md`](docs/graphics/GPU_V1.md) — graphics completion/qualification state
 - [`docs/filesystem/FILESYSTEM_V1.md`](docs/filesystem/FILESYSTEM_V1.md) — filesystem architecture
-- [`docs/KERNEL_V1.md`](docs/KERNEL_V1.md) — kernel execution environment
-- [`docs/XAM_V1.md`](docs/XAM_V1.md) — XAM services
-- [`docs/CONTENT_SERVICES.md`](docs/CONTENT_SERVICES.md) — title update, DLC and save/content architecture
+- [`docs/kernel/KERNEL_V1.md`](docs/kernel/KERNEL_V1.md) — kernel execution environment
+- [`docs/xam/XAM_V1.md`](docs/xam/XAM_V1.md) — XAM services
+- [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md) — title update, DLC and save/content architecture
 - [`docs/input/INPUT_V1.md`](docs/input/INPUT_V1.md) — input architecture
 - [`launcher/README.md`](launcher/README.md) — launcher frontend/backend state
 - [`docs/development/RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md) — research references and provenance

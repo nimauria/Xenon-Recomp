@@ -18,17 +18,15 @@ Item {
         return Theme.decorAsset(asset)
     }
 
-    Image {
+    CoverImage {
         id: rasterBackdrop
         anchors.fill: parent
         source: root.source
         visible: source.toString().length > 0
-        fillMode: Image.PreserveAspectCrop
-        horizontalAlignment: Image.AlignLeft
-        verticalAlignment: Image.AlignVCenter
-        asynchronous: true
-        cache: true
-        smooth: true
+        fitMode: "cover"
+        focalX: 0.0
+        focalY: 0.5
+        decodeHeadroom: 1.35
         opacity: root.strength * (root.subtle ? 0.28 : 0.72)
     }
 
@@ -188,13 +186,20 @@ Item {
             }
         }
 
-        onWidthChanged: requestPaint()
-        onHeightChanged: requestPaint()
+        onWidthChanged: canvasPaintThrottle.restart()
+        onHeightChanged: canvasPaintThrottle.restart()
+    }
+
+    Timer {
+        id: canvasPaintThrottle
+        interval: 55
+        repeat: false
+        onTriggered: accentCanvas.requestPaint()
     }
 
     Connections {
         target: Theme
-        function onEffectiveThemeIdChanged() { accentCanvas.requestPaint() }
-        function onAccentChanged() { accentCanvas.requestPaint() }
+        function onEffectiveThemeIdChanged() { canvasPaintThrottle.restart() }
+        function onAccentChanged() { canvasPaintThrottle.restart() }
     }
 }

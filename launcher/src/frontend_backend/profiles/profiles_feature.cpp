@@ -261,8 +261,10 @@ ServiceResult ProfilesFeature::normalizeProfileData(QVariantMap& data) const {
   static const QStringList regions{QStringLiteral("Auto (Global)"), QStringLiteral("NTSC-U"),
                                    QStringLiteral("PAL"), QStringLiteral("NTSC-J")};
   static const QStringList pages{QStringLiteral("Launcher default"), QStringLiteral("Home"),
-                                 QStringLiteral("Library"), QStringLiteral("Modules"),
-                                 QStringLiteral("Profiles"), QStringLiteral("Settings")};
+                                 QStringLiteral("Library"), QStringLiteral("Downloads"),
+                                 QStringLiteral("Modules"), QStringLiteral("Profiles"),
+                                 QStringLiteral("Captures"), QStringLiteral("Network"),
+                                 QStringLiteral("Support"), QStringLiteral("Settings")};
 
   auto region = data.value(QStringLiteral("region"), QStringLiteral("Auto (Global)")).toString().trimmed();
   if (!containsValue(regions, region)) region = QStringLiteral("Auto (Global)");

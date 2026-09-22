@@ -44,7 +44,7 @@ QVariantList stringOptions(std::initializer_list<const char*> values) {
 const QList<Definition>& definitions() {
   static const QList<Definition> values{
       {"general/startupPage", "general", "enum", QStringLiteral("Library"),
-       stringOptions({"Home", "Library", "Modules", "Profiles", "Settings"})},
+       stringOptions({"Home", "Library", "Downloads", "Modules", "Profiles", "Captures", "Network", "Support", "Settings"})},
       {"general/sidebarMode", "general", "enum", QStringLiteral("Auto"),
        stringOptions({"Auto", "Expanded", "Compact"})},
       {"general/restoreLastPage", "general", "bool", false, {}},
@@ -70,6 +70,22 @@ const QList<Definition>& definitions() {
       {"library/showCompatibility", "library", "bool", true, {}},
       {"library/missingContent", "library", "enum", QStringLiteral("Show in catalogue"),
        stringOptions({"Show in catalogue", "Hide missing content"})},
+      {"library/filter", "library", "enum", QStringLiteral("All Games"),
+       stringOptions({"All Games", "Installed", "Ready to Play", "Needs Attention", "Module Disabled", "Update Available", "Favorites"})},
+      {"library/sort", "library", "enum", QStringLiteral("Recently Played"),
+       stringOptions({"Recently Played", "Recently Added", "A-Z", "Z-A", "Playtime: High to Low", "Playtime: Low to High", "Favorites First", "Updates First"})},
+      {"library/viewMode", "library", "enum", QStringLiteral("Focused"),
+       stringOptions({"Focused", "Carousel", "Grid"})},
+      {"library/gridDensity", "library", "enum", QStringLiteral("Auto"),
+       stringOptions({"Auto", "3", "6"})},
+      {"library/wrapNavigation", "library", "bool", true, {}},
+      {"library/rememberSelection", "library", "bool", true, {}},
+      // UI state keys are registered so they still pass through the settings
+      // validation layer, but use an internal category so Settings does not
+      // expose implementation-detail controls to users.
+      {"library/lastSelectedGameId", "internal", "string", QString{}, {}},
+      {"downloads/viewMode", "internal", "enum", QStringLiteral("Overview"),
+       stringOptions({"Overview", "Active", "Ready", "Issues", "History"})},
 
       {"runtime/graphicsBackend", "runtime", "enum", QStringLiteral("Automatic"),
        stringOptions({"Automatic", "Vulkan", "Direct3D 12"})},
@@ -125,6 +141,12 @@ const QList<Definition>& definitions() {
         option(QStringLiteral("Generic Xenon UI"), QStringLiteral("generic")),
         option(QStringLiteral("Project Gracemeria UI Preview"), QStringLiteral("gracemeria"))}},
       {"developer/verboseLogging", "developer", "bool", false, {}},
+
+      // Registered under "about" (not "developer") because the toggle for
+      // it lives in Settings > About, not the hidden/kTestMode-only
+      // Developer category - this is a normal user-facing feature, not an
+      // internal QA tool. It gates the Developer sidebar page/entry itself.
+      {"developer/modeEnabled", "about", "bool", false, {}},
   };
   return values;
 }

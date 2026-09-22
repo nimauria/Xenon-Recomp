@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Flickable {
+ScrollView {
     id: root
 
     property string title: ""
@@ -11,69 +11,44 @@ Flickable {
 
     function runPageAction(actionId) {
         if (actionId === "scrollTop")
-            root.contentY = 0
+            root.contentItem.contentY = 0
         else if (actionId === "scrollBottom")
-            root.contentY = Math.max(0, root.contentHeight - root.height)
+            root.contentItem.contentY = Math.max(0, root.contentItem.contentHeight - root.height)
     }
 
     clip: true
-    contentWidth: width
-    contentHeight: pageContent.implicitHeight
-    boundsBehavior: Flickable.StopAtBounds
+    contentWidth: availableWidth
     ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+    ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
-    Item {
-        id: pageContent
-        width: root.width
-        implicitHeight: pageColumn.implicitHeight + Theme.spaceXl * 2
+    ColumnLayout {
+        // x/width are both plain functions of root.availableWidth only - no
+        // anchors.horizontalCenter against the ScrollView's internal
+        // Flickable contentItem, which was creating a layout feedback loop
+        // (the content settling over a few frames instead of landing
+        // immediately, visible as pages "bouncing" into place).
+        x: Math.max(0, (root.availableWidth - width) / 2)
+        width: Math.min(root.availableWidth, Theme.contentMaxWidth)
+        spacing: Theme.spaceMd
+
+        XSectionHeader {
+            Layout.fillWidth: true
+            title: root.title
+            description: root.description
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            color: Theme.divider
+        }
 
         ColumnLayout {
-            id: pageColumn
-            width: Math.min(parent.width, Theme.contentMaxWidth)
-            anchors.top: parent.top
-            anchors.topMargin: Theme.spaceSm
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Theme.spaceMd
-
-            XSectionHeader {
-                title: root.title
-                description: root.description
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
-                color: Theme.divider
-            }
-
-            ColumnLayout {
-                id: body
-                Layout.fillWidth: true
-                spacing: Theme.spaceSm
-            }
-
-            Item { Layout.preferredHeight: Theme.spaceLg }
+            id: body
+            Layout.fillWidth: true
+            spacing: Theme.spaceSm
         }
-    }
 
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.RightButton
-        preventStealing: true
-        z: 1000
-        onClicked: function(mouse) { pageContextMenu.openAt(root, mouse.x, mouse.y) }
-    }
-
-    XActionMenu {
-        id: pageContextMenu
-        parent: root
-        z: 1001
-        menuWidth: 220
-        actions: [
-            { id: "scrollTop", label: "Scroll to top", icon: "↑" },
-            { id: "scrollBottom", label: "Scroll to bottom", icon: "↓" }
-        ]
-        onActionTriggered: function(actionId) { root.runPageAction(actionId) }
+        Item { Layout.preferredHeight: Theme.spaceLg }
     }
 }

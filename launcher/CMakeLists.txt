@@ -11,6 +11,39 @@ if(QT_KNOWN_POLICY_QTP0004)
   qt_policy(SET QTP0004 NEW)
 endif()
 
+# Qt's own shared libraries (Qt6Core.dll etc.) are not on a fresh developer's
+# PATH by default - only find_package(Qt6 ...) above knows where this Qt
+# installation actually lives. Derive its bin/ directory from Qt6_DIR (set by
+# find_package, normally <qt-root>/lib/cmake/Qt6 on Windows - same derivation
+# cmake/Packaging.cmake already uses for the installer) once, here, so any
+# ctest target that links a Qt runtime library can prepend it to its own test
+# process's PATH via xenon_launcher_test_environment() below, instead of every
+# developer/CI invocation needing to export PATH manually before running
+# ctest. This never bundles Qt into the repository - it only tells already-
+# built test binaries where the Qt this machine has installed can be found at
+# test-run time.
+set(XENON_LAUNCHER_QT_RUNTIME_DIR "")
+if(WIN32 AND DEFINED Qt6_DIR AND NOT Qt6_DIR STREQUAL "")
+  get_filename_component(_xenon_qt_root "${Qt6_DIR}/../../.." ABSOLUTE)
+  if(EXISTS "${_xenon_qt_root}/bin")
+    set(XENON_LAUNCHER_QT_RUNTIME_DIR "${_xenon_qt_root}/bin")
+  endif()
+  unset(_xenon_qt_root)
+endif()
+
+# Prepends Qt's own runtime directory (if this platform needs one - Windows
+# only; Linux/macOS Qt builds normally carry an rpath back to their own lib/
+# directory already) to a ctest target's PATH, so `ctest` alone finds Qt's
+# DLLs without any manual environment setup. A no-op wherever
+# XENON_LAUNCHER_QT_RUNTIME_DIR could not be determined (e.g. a non-Windows
+# Qt install, or Qt6_DIR unset), rather than failing the configure.
+function(xenon_launcher_test_environment test_name)
+  if(XENON_LAUNCHER_QT_RUNTIME_DIR)
+    set_property(TEST ${test_name} PROPERTY ENVIRONMENT_MODIFICATION
+      "PATH=path_list_prepend:${XENON_LAUNCHER_QT_RUNTIME_DIR}")
+  endif()
+endfunction()
+
 option(XENON_LAUNCHER_TEST_MODE
   "Populate the Xenon launcher with fictional front-end test data" OFF)
 option(XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE
@@ -160,6 +193,8 @@ qt_add_library(xenon_launcher_core STATIC
   src/services/module_service.hpp
   src/services/launch_service.cpp
   src/services/launch_service.hpp
+  src/services/preparation_service.cpp
+  src/services/preparation_service.hpp
   src/services/filesystem_service.cpp
   src/services/filesystem_service.hpp
   src/services/single_instance_service.cpp
@@ -367,6 +402,7 @@ endif()
 set_source_files_properties(
   qml/Theme.qml
   qml/ProfileStore.qml
+  qml/NavigationGuard.qml
   PROPERTIES QT_QML_SINGLETON_TYPE TRUE
 )
 
@@ -377,6 +413,7 @@ qt_add_qml_module(xenon_launcher
     qml/Main.qml
     qml/Theme.qml
     qml/ProfileStore.qml
+    qml/NavigationGuard.qml
     qml/ProfileMenu.qml
     qml/TopBar.qml
     qml/CommandPalette.qml
@@ -408,11 +445,13 @@ qt_add_qml_module(xenon_launcher
     qml/XSwitch.qml
     qml/XPathField.qml
     qml/StatusPill.qml
+    qml/CoverImage.qml
     qml/ArtworkFrame.qml
     qml/GameTile.qml
     qml/Toast.qml
     qml/EmptyState.qml
     qml/ProfileEditorDialog.qml
+    qml/AvatarCropEditor.qml
     qml/XConfirmDialog.qml
     qml/ThemeBackdrop.qml
     qml/LibraryPage.qml
@@ -421,6 +460,11 @@ qt_add_qml_module(xenon_launcher
     qml/QuickCenter.qml
     qml/SettingsPage.qml
     qml/FilesystemPage.qml
+    qml/DownloadsPage.qml
+    qml/CapturesPage.qml
+    qml/NetworkPage.qml
+    qml/SupportPage.qml
+    qml/DeveloperPage.qml
 )
 
 
@@ -506,6 +550,10 @@ target_link_libraries(xenon_launcher
     Xenon::LauncherCore
 )
 
+# Keep managed FFmpeg/DXC/Vulkan runtimes beside the launcher in developer and
+# packaged builds. The runtime host is staged independently as well.
+xenon_stage_runtime_dependencies(xenon_launcher)
+
 target_compile_features(xenon_launcher PRIVATE cxx_std_20)
 target_compile_definitions(xenon_launcher PRIVATE
   XENON_LAUNCHER_VERSION="${XENON_LAUNCHER_VERSION_VALUE}"
@@ -523,9 +571,27 @@ install(TARGETS xenon_launcher
   RUNTIME DESTINATION bin
 )
 
+# Public installers must contain the complete Qt/QML runtime. Do this from the
+# install graph rather than calling windeployqt manually in CI so local release
+# builds and GitHub releases produce the same payload.
+if(XENON_BUILD_INSTALLER)
+  if(COMMAND qt_generate_deploy_qml_app_script)
+    qt_generate_deploy_qml_app_script(
+      TARGET xenon_launcher
+      OUTPUT_SCRIPT xenon_qt_deploy_script
+      NO_TRANSLATIONS
+      NO_UNSUPPORTED_PLATFORM_ERROR
+      DEPLOY_USER_QML_MODULES_ON_UNSUPPORTED_PLATFORM)
+    install(SCRIPT ${xenon_qt_deploy_script})
+  else()
+    message(FATAL_ERROR
+      "Production packaging requires Qt's qt_generate_deploy_qml_app_script support")
+  endif()
+endif()
+
 # -----------------------------------------------------------------------------
 # RuntimeBridge tests: exercise the launcher-side half of the runtime-host IPC
-# contract (docs/RUNTIME_HOST.md) against a lightweight test double instead of
+# contract (docs/runtime/RUNTIME_HOST.md) against a lightweight test double instead of
 # the real xenon_runtime_host, so no game module/native extension/CPU V2
 # compiled code is required. See RuntimeBridge::connect()'s
 # XENON_RUNTIME_HOST_PATH override and tests/fixtures/runtime_host_fixture.cpp.
@@ -551,4 +617,5 @@ if(XENON_BUILD_TESTS)
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_runtime_bridge_tests>")
 
   add_test(NAME xenon_runtime_bridge_tests COMMAND xenon_runtime_bridge_tests)
+  xenon_launcher_test_environment(xenon_runtime_bridge_tests)
 endif()

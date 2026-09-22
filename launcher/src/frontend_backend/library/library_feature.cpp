@@ -69,6 +69,8 @@ QVariantMap LibraryFeature::gameFixture(QString title, QString module_name, QStr
   item.insert(QStringLiteral("status"), std::move(status));
   item.insert(QStringLiteral("ready"), ready);
   item.insert(QStringLiteral("installed"), true);
+  item.insert(QStringLiteral("contentExists"), ready);
+  item.insert(QStringLiteral("favorite"), false);
   item.insert(QStringLiteral("moduleInstalled"), true);
   item.insert(QStringLiteral("moduleActive"), true);
   item.insert(QStringLiteral("tileArt"), QString{});
@@ -206,6 +208,16 @@ QVariantMap LibraryFeature::projected(QVariantMap item) const {
   item.insert(QStringLiteral("installed"), module_installed);
   item.insert(QStringLiteral("contentExists"), content_exists);
 
+  const auto update_state = modules_.updateState(module_id);
+  const auto update_status = update_state.value(QStringLiteral("status"), QStringLiteral("idle")).toString();
+  item.insert(QStringLiteral("moduleUpdateStatus"), update_status);
+  item.insert(QStringLiteral("moduleUpdateAvailable"),
+              update_state.value(QStringLiteral("updateAvailable")).toBool() ||
+                  update_state.value(QStringLiteral("canDownload")).toBool() ||
+                  update_state.value(QStringLiteral("canInstall")).toBool() ||
+                  update_status == QStringLiteral("update-available") ||
+                  update_status == QStringLiteral("ready-to-install"));
+
   if (!identified) {
     item.insert(QStringLiteral("ready"), false);
     item.insert(QStringLiteral("status"), QStringLiteral("Module required"));
@@ -234,6 +246,15 @@ QVariantList LibraryFeature::entries() const {
       item.insert(QStringLiteral("moduleInstalled"), module_installed);
       item.insert(QStringLiteral("moduleActive"), module_active);
       item.insert(QStringLiteral("installed"), module_installed);
+      const auto update_state = modules_.updateState(module_id);
+      const auto update_status = update_state.value(QStringLiteral("status"), QStringLiteral("idle")).toString();
+      item.insert(QStringLiteral("moduleUpdateStatus"), update_status);
+      item.insert(QStringLiteral("moduleUpdateAvailable"),
+                  update_state.value(QStringLiteral("updateAvailable")).toBool() ||
+                      update_state.value(QStringLiteral("canDownload")).toBool() ||
+                      update_state.value(QStringLiteral("canInstall")).toBool() ||
+                      update_status == QStringLiteral("update-available") ||
+                      update_status == QStringLiteral("ready-to-install"));
       if (!module_installed) {
         item.insert(QStringLiteral("ready"), false);
         item.insert(QStringLiteral("status"), QStringLiteral("Module missing"));
@@ -282,6 +303,34 @@ ServiceResult LibraryFeature::remove(const QString& game_id) {
   }
   return ServiceResult::failure(QStringLiteral("Library entry"),
                                 QStringLiteral("The selected entry no longer exists."));
+}
+
+ServiceResult LibraryFeature::setFavorite(const QString& game_id, bool favorite) {
+  if (!test_mode_) return library_.setFavorite(game_id, favorite);
+  for (qsizetype i = 0; i < fixture_entries_.size(); ++i) {
+    auto item = fixture_entries_.at(i).toMap();
+    if (item.value(QStringLiteral("gameId")).toString() != game_id) continue;
+    item.insert(QStringLiteral("favorite"), favorite);
+    fixture_entries_[i] = item;
+    emit changed();
+    return ServiceResult::success(
+        favorite ? QStringLiteral("Added to favorites") : QStringLiteral("Removed from favorites"),
+        item.value(QStringLiteral("title"), QStringLiteral("Game")).toString());
+  }
+  return ServiceResult::failure(QStringLiteral("Favorite"),
+                                QStringLiteral("The selected fixture entry no longer exists."));
+}
+
+ServiceResult LibraryFeature::deleteManagedFiles(const QString& game_id) {
+  if (test_mode_) {
+    if (entry(game_id).isEmpty()) {
+      return ServiceResult::failure(QStringLiteral("Delete managed files"),
+                                    QStringLiteral("The selected fixture entry no longer exists."));
+    }
+    return ServiceResult::success(QStringLiteral("Managed files deleted"),
+                                  QStringLiteral("Fixture entries have no real managed files to delete."));
+  }
+  return library_.deleteManagedFiles(game_id);
 }
 
 ServiceResult LibraryFeature::verify(const QString& game_id) const {

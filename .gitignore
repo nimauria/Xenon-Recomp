@@ -2,6 +2,11 @@
 build/
 Build/
 build-*/
+out/
+
+# Ninja
+*.ninja_log
+.ninja_deps
 
 # CMake generated files
 CMakeFiles/
@@ -56,23 +61,70 @@ compile_commands.json
 *.bak
 *.log
 *.swp
+*.swo
+*~
+*.orig
 *.tmp
+
+# Crash dumps
+*.dmp
+*.stackdump
+
+# Coverage output
+*.gcda
+*.gcno
+*.gcov
+coverage/
 
 # Test output & cache
 .cache/
 Testing/
+
+# Xenon managed dependency/cache state
+.xenon/
 
 # vcpkg
 vcpkg_installed/
 
 # Local editor / tooling
 .vscode/
+.vs/
+.idea/
+*.user
+*.suo
+CMakeUserPresets.json
+
+# Python build artifacts (tools/deps, tools/release helper scripts)
+__pycache__/
+*.pyc
+
+# OS-generated files
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local secrets/environment
+.env
+.env.*
+
+# Code-signing material (installer/release signing) - never commit private keys
+*.pfx
+*.p12
+*.pem
+*.key
+
+# User-supplied Xbox 360 content - Xenon does not distribute or version any of
+# this; keeps a locally imported/tested game from ever being committed by accident
+*.xex
+*.iso
+*.stfs
+*.xcontent
 
 # Local Claude Code instructions
 CLAUDE.md
+.claude/
+
 # Xenon-owned prebuilt dependencies that are intentionally versioned
 !third_party/xenon-ffmpeg/
 !third_party/xenon-ffmpeg/**
 !third_party/xenon-ffmpeg/**/*.lib
-
-.vscode/

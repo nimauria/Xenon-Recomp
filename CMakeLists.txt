@@ -20,6 +20,7 @@ include(Dependencies)
 option(XENON_BUILD_TESTS "Build Xenon Recomp tests" ON)
 option(XENON_BUILD_BENCHMARKS "Build Xenon Memory V2 benchmarks" ON)
 option(XENON_BUILD_LAUNCHER "Build the Xenon launcher UI when Qt 6 is available" ON)
+option(XENON_BUILD_INSTALLER "Configure production installer/package generation" OFF)
 option(XENON_ENABLE_MEMORY "Build the production Xenon memory subsystem" ON)
 set(XENON_MEMORY_DIRECT_APERTURE_QUALIFIED_DEFAULT OFF)
 # Phase 6 keeps compact translation as Auto/default. Repeated paired Release
@@ -34,7 +35,7 @@ option(XENON_ENABLE_D3D12 "Build the Direct3D 12 backend on Windows" ON)
 option(XENON_ENABLE_DXC "Build the HLSL/DXC shader compiler when DXC is available" ON)
 option(XENON_ENABLE_AUDIO "Build the production Xbox audio translation subsystem" ON)
 set(XENON_AUDIO_FFMPEG_ROOT "" CACHE PATH
-  "Optional FFmpeg root exposing AV_CODEC_ID_XMAFRAMES; Windows x64 uses Xenon's bundled dependency by default")
+  "Optional FFmpeg root exposing AV_CODEC_ID_XMAFRAMES; overrides Xenon managed/bundled discovery")
 option(XENON_ENABLE_INPUT "Enable input subsystem" ON)
 option(XENON_INPUT_ENABLE_SDL2 "Enable SDL2 controller backend when SDL2 is available" ON)
 option(XENON_INPUT_ENABLE_SDL3 "Enable SDL3 controller backend when SDL3 is available" ON)
@@ -58,6 +59,7 @@ endif()
 add_library(xenon_core STATIC
   src/core/runtime.cpp
   src/core/session.cpp
+  src/core/guest_thread_context.cpp
   src/core/export_registry.cpp
   src/core/call_bridge.cpp
   src/xam/user_manager.cpp
@@ -146,6 +148,7 @@ if(XENON_ENABLE_KERNEL)
   if(XENON_ENABLE_MEMORY)
     target_sources(xenon_kernel PRIVATE
       src/kernel/memory/memory.cpp
+      src/kernel/memory/heap.cpp
       src/kernel/process/process.cpp
     )
     target_link_libraries(xenon_kernel PUBLIC xenon_memory)
@@ -189,21 +192,57 @@ endif()
 add_library(Xenon::CPU ALIAS xenon_cpu)
 
 # Whole-game static recompilation driver and its diagnostic utilities.
+find_package(Threads REQUIRED)
+
 add_library(xenon_recomp STATIC
   src/recomp/driver.cpp
+  src/recomp/analysis_schema.cpp
+  src/recomp/analysis_schema_json.cpp
+  src/recomp/native_replacements.cpp
+  src/recomp/runtime_helpers.cpp
+  src/recomp/module_hint_provider.cpp
+  src/recomp/artifact_cache.cpp
+  src/recomp/worker_pool.cpp
 )
 target_include_directories(xenon_recomp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io)
+target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io Threads::Threads)
 target_compile_features(xenon_recomp PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_recomp)
 add_library(Xenon::Recomp ALIAS xenon_recomp)
 
-foreach(xenon_tool recomp-driver ppc-disasm ir-dump import-scanner module-inspector)
+foreach(xenon_tool recomp-driver ppc-disasm ir-dump module-inspector)
   add_executable(${xenon_tool} tools/recomp_tools.cpp)
   target_compile_definitions(${xenon_tool} PRIVATE XENON_TOOL_NAME="${xenon_tool}")
   target_link_libraries(${xenon_tool} PRIVATE xenon_recomp)
   xenon_enable_warnings(${xenon_tool})
 endforeach()
+
+# import-scanner additionally links xenon_core: for Project Gracemeria import
+# auditing (see docs/xam/XAM_V1.md), it cross-references every import against a
+# real, minimally-initialized XenonSession export_registry_ - the exact same
+# production registry XamSession::register_exports() populates - so its
+# "implemented/not implemented" verdicts reflect production resolution, not
+# a second, hand-maintained list. Deliberately game-agnostic: it inspects
+# whatever XEX is passed on the command line, never a hard-coded title.
+add_executable(import-scanner tools/recomp_tools.cpp)
+target_compile_definitions(import-scanner PRIVATE XENON_TOOL_NAME="import-scanner" XENON_TOOL_HAS_CORE=1)
+target_link_libraries(import-scanner PRIVATE xenon_recomp xenon_core)
+xenon_enable_warnings(import-scanner)
+
+# xenon-prepare: the out-of-process automatic game preparation worker (see
+# docs/development/GAME_PREPARATION.md). Reads default.xex directly out of a disc image/
+# directory (xenon_filesystem, transitively linked via xenon_recomp ->
+# xenon_xbox_kernel_io -> xenon_kernel -> xenon_filesystem), analyzes and
+# generates native source (xenon_recomp), then drives a nested CMake build
+# and promotes the result through the artifact cache. XENON_SOURCE_ROOT lets
+# it default --recomp-root to this checkout, matching xenon_recomp_driver_tests.
+add_executable(xenon-prepare tools/xenon_prepare.cpp)
+target_link_libraries(xenon-prepare PRIVATE xenon_recomp)
+target_compile_definitions(xenon-prepare PRIVATE XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+if(NOT WIN32)
+  target_link_libraries(xenon-prepare PRIVATE ${CMAKE_DL_LIBS})
+endif()
+xenon_enable_warnings(xenon-prepare)
 
 # -----------------------------------------------------------------------------
 # Production guest memory. FlatMemory above remains a CPU test fixture only.
@@ -240,12 +279,18 @@ if(XENON_ENABLE_AUDIO)
     XENON_AUDIO_USING_BUNDLED_FFMPEG)
 
   if(NOT XENON_AUDIO_SDL_TARGET)
+    xenon_dependency_help("sdl2")
     message(FATAL_ERROR
-      "Audio V1 requires SDL2. Leave XENON_FETCH_MISSING_DEPS=ON to fetch Xenon's pinned SDL2 revision, install SDL2 development files, or configure -DXENON_ENABLE_AUDIO=OFF explicitly.")
+      "Audio V1 requires SDL2. Xenon could not resolve or bootstrap the pinned dependency. "
+      "Use XENON_DEPENDENCY_MODE=SYSTEM for a host package, set XENON_SDL2_ROOT, "
+      "or provision the managed dependency with the command above.")
   endif()
   if(NOT XENON_AUDIO_FFMPEG_TARGET)
+    xenon_dependency_help("xenia-ffmpeg")
     message(FATAL_ERROR
-      "Audio V1 requires FFmpeg libavcodec/libavutil with AV_CODEC_ID_XMAFRAMES. Windows x64 checkouts include a vetted Xenon bundle; other platforms may provide XENON_AUDIO_FFMPEG_ROOT or a compatible system package.")
+      "Audio V1 requires libavcodec/libavutil with AV_CODEC_ID_XMAFRAMES. "
+      "Use Xenon's managed dependency bootstrap, the committed Windows x64 developer bundle, "
+      "or set XENON_AUDIO_FFMPEG_ROOT to a compatible xenia-project FFmpeg build.")
   endif()
 
   include(CheckCXXSourceCompiles)
@@ -262,7 +307,7 @@ if(XENON_ENABLE_AUDIO)
   ]=] XENON_AUDIO_FFMPEG_HAS_XMAFRAMES)
   if(NOT XENON_AUDIO_FFMPEG_HAS_XMAFRAMES)
     message(FATAL_ERROR
-      "The selected FFmpeg does not expose AV_CODEC_ID_XMAFRAMES. Use Xenon's bundled Windows x64 dependency or provide a compatible build with XENON_AUDIO_FFMPEG_ROOT.")
+      "The selected FFmpeg does not expose AV_CODEC_ID_XMAFRAMES. Mainline FFmpeg is not a substitute for Xenon's raw XMA hardware-frame path. Use the managed dependency bootstrap, the vetted Windows x64 developer bundle, or XENON_AUDIO_FFMPEG_ROOT.")
   endif()
 
   check_cxx_source_compiles([=[
@@ -391,6 +436,17 @@ if(XENON_BUILD_BENCHMARKS AND XENON_ENABLE_MEMORY)
   xenon_enable_test_asserts(xenon_memory_v2_benchmarks)
 endif()
 
+# Recomp Analysis V2 synthetic benchmark (Part 20): jobs=1 vs jobs=auto wall
+# time on a large synthetic independent-function workload, no copyrighted
+# content. Not registered as a ctest (it prints timing, not pass/fail) -
+# run manually, e.g. `xenon_recomp_analysis_benchmark 5000 24`.
+if(XENON_BUILD_BENCHMARKS)
+  add_executable(xenon_recomp_analysis_benchmark
+    tests/recomp/recomp_analysis_benchmark.cpp)
+  target_link_libraries(xenon_recomp_analysis_benchmark PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_recomp_analysis_benchmark)
+endif()
+
 # -----------------------------------------------------------------------------
 # Graphics: Xenos PM4/shader/EDRAM frontend. Vulkan and D3D12 remain backends.
 if(XENON_ENABLE_GRAPHICS)
@@ -427,40 +483,28 @@ if(XENON_ENABLE_GRAPHICS)
   # Compatibility with the phase-1 working tree target name.
   add_library(xenon_gpu ALIAS xenon_graphics)
 
-  if(WIN32 AND XENON_ENABLE_DXC)
-    # The Windows SDK DXC can emit DXIL only. Prefer the Vulkan SDK's matched
-    # headers/import library/runtime because that build includes SPIR-V codegen.
-    if(DEFINED ENV{VULKAN_SDK})
-      find_path(XENON_DXC_INCLUDE_DIR dxc/dxcapi.h
-        PATHS "$ENV{VULKAN_SDK}/Include" NO_DEFAULT_PATH)
-      find_library(XENON_DXC_LIBRARY NAMES dxcompiler
-        PATHS "$ENV{VULKAN_SDK}/Lib" NO_DEFAULT_PATH)
-      find_file(XENON_DXC_RUNTIME NAMES dxcompiler.dll
-        PATHS "$ENV{VULKAN_SDK}/Bin" NO_DEFAULT_PATH)
-    endif()
-    find_path(XENON_DXC_INCLUDE_DIR dxc/dxcapi.h)
-    find_library(XENON_DXC_LIBRARY NAMES dxcompiler)
-    find_file(XENON_DXC_RUNTIME NAMES dxcompiler.dll)
-    if(XENON_DXC_INCLUDE_DIR AND XENON_DXC_LIBRARY)
+  if(XENON_ENABLE_DXC)
+    xenon_resolve_dxc(XENON_DXC_TARGET XENON_DXC_INCLUDE_DIR)
+    if(XENON_DXC_TARGET AND XENON_DXC_INCLUDE_DIR)
       add_library(xenon_graphics_dxc STATIC
         src/graphics/dxc/shader_compiler.cpp)
       target_include_directories(xenon_graphics_dxc
         PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
         PRIVATE "${XENON_DXC_INCLUDE_DIR}")
       target_link_libraries(xenon_graphics_dxc PUBLIC xenon_graphics
-        PRIVATE "${XENON_DXC_LIBRARY}")
+        PRIVATE ${XENON_DXC_TARGET})
       target_compile_features(xenon_graphics_dxc PUBLIC cxx_std_20)
       xenon_enable_warnings(xenon_graphics_dxc)
       add_library(Xenon::GraphicsDXC ALIAS xenon_graphics_dxc)
-      message(STATUS "DXC shader compiler enabled: ${XENON_DXC_LIBRARY}")
+      message(STATUS "DXC shader compiler enabled through Xenon dependency resolver")
     else()
-      message(STATUS "DXC shader compiler disabled: dxcapi.h or dxcompiler library not found")
+      message(STATUS "DXC shader compiler disabled: compatible DXC runtime/development files not found")
     endif()
   endif()
 
   if(XENON_ENABLE_VULKAN)
-    find_package(Vulkan QUIET)
-    if(Vulkan_FOUND)
+    xenon_resolve_vulkan(XENON_VULKAN_TARGET)
+    if(XENON_VULKAN_TARGET)
       target_compile_definitions(xenon_graphics PRIVATE XENON_HAS_VULKAN_SDK=1)
       add_library(xenon_graphics_vulkan STATIC
         src/graphics/vulkan/context.cpp
@@ -475,7 +519,7 @@ if(XENON_ENABLE_GRAPHICS)
         src/graphics/vulkan/presentation.cpp
         src/graphics/vulkan/backend.cpp)
       target_include_directories(xenon_graphics_vulkan PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-      target_link_libraries(xenon_graphics_vulkan PUBLIC xenon_graphics Vulkan::Vulkan)
+      target_link_libraries(xenon_graphics_vulkan PUBLIC xenon_graphics ${XENON_VULKAN_TARGET})
       if(TARGET xenon_graphics_dxc)
         target_link_libraries(xenon_graphics_vulkan PRIVATE xenon_graphics_dxc)
         target_compile_definitions(xenon_graphics_vulkan PRIVATE XENON_HAS_DXC=1)
@@ -484,7 +528,7 @@ if(XENON_ENABLE_GRAPHICS)
       xenon_enable_warnings(xenon_graphics_vulkan)
       add_library(Xenon::GraphicsVulkan ALIAS xenon_graphics_vulkan)
     else()
-      message(STATUS "Vulkan runtime backend disabled: install the Vulkan SDK to build it")
+      message(STATUS "Vulkan runtime backend disabled: no compatible Vulkan loader/headers were resolved")
     endif()
   endif()
 
@@ -535,8 +579,25 @@ endif()
 if(TARGET xenon_input)
   target_link_libraries(xenon_core PUBLIC xenon_input)
 endif()
+# XenonSession::init_exports() registers input::xam::guest::GuestInputBridge's
+# dispatch() into the unified ExportRegistry (see src/core/session.cpp), so it
+# needs the guest ABI bridge linked in whenever it was built.
+if(TARGET xenon_input_guest)
+  target_link_libraries(xenon_core PUBLIC xenon_input_guest)
+endif()
 if(TARGET xenon_graphics)
   target_link_libraries(xenon_core PUBLIC xenon_graphics)
+endif()
+# XenonSession::init_gpu() selects and constructs the real native backend
+# directly (see src/core/session.cpp) rather than going through a separate
+# factory/plugin layer, so it needs these compiled in whenever they exist.
+if(TARGET xenon_graphics_vulkan)
+  target_link_libraries(xenon_core PUBLIC xenon_graphics_vulkan)
+  target_compile_definitions(xenon_core PUBLIC XENON_HAS_VULKAN=1)
+endif()
+if(TARGET xenon_graphics_d3d12)
+  target_link_libraries(xenon_core PUBLIC xenon_graphics_d3d12)
+  target_compile_definitions(xenon_core PUBLIC XENON_HAS_D3D12=1)
 endif()
 if(TARGET xenon_audio)
   target_link_libraries(xenon_core PUBLIC xenon_audio)
@@ -554,6 +615,20 @@ endif()
 if(XENON_BUILD_TESTS)
   enable_testing()
 
+  find_package(Python3 3.9 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/deps/bootstrap_tests.py")
+    add_test(NAME xenon_dependency_bootstrap_tests
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/deps/bootstrap_tests.py")
+    set_tests_properties(xenon_dependency_bootstrap_tests PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
+  if(Python3_Interpreter_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/release/verify_install_tests.py")
+    add_test(NAME xenon_release_verify_install_tests
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/release/verify_install_tests.py")
+    set_tests_properties(xenon_release_verify_install_tests PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
+
   # Core session tests
   add_executable(xenon_session_tests tests/core/session_tests.cpp)
   target_link_libraries(xenon_session_tests PRIVATE xenon_core)
@@ -564,16 +639,19 @@ if(XENON_BUILD_TESTS)
     add_executable(xenon_audio_mixer_tests tests/audio/mixer_tests.cpp)
     target_link_libraries(xenon_audio_mixer_tests PRIVATE xenon_audio)
     xenon_enable_test_asserts(xenon_audio_mixer_tests)
+    xenon_stage_runtime_dependencies(xenon_audio_mixer_tests)
     add_test(NAME xenon_audio_mixer_tests COMMAND xenon_audio_mixer_tests)
 
     add_executable(xenon_audio_xma_tests tests/audio/xma_tests.cpp)
     target_link_libraries(xenon_audio_xma_tests PRIVATE xenon_audio)
     xenon_enable_test_asserts(xenon_audio_xma_tests)
+    xenon_stage_runtime_dependencies(xenon_audio_xma_tests)
     add_test(NAME xenon_audio_xma_tests COMMAND xenon_audio_xma_tests)
 
     add_executable(xenon_audio_system_tests tests/audio/system_tests.cpp)
     target_link_libraries(xenon_audio_system_tests PRIVATE xenon_audio)
     xenon_enable_test_asserts(xenon_audio_system_tests)
+    xenon_stage_runtime_dependencies(xenon_audio_system_tests)
     add_test(NAME xenon_audio_system_tests COMMAND xenon_audio_system_tests)
 
     # src/audio/exports.cpp is already compiled into xenon_core when Audio V1
@@ -582,6 +660,7 @@ if(XENON_BUILD_TESTS)
     add_executable(xenon_audio_export_tests tests/audio/export_tests.cpp)
     target_link_libraries(xenon_audio_export_tests PRIVATE xenon_core)
     xenon_enable_test_asserts(xenon_audio_export_tests)
+    xenon_stage_runtime_dependencies(xenon_audio_export_tests)
     add_test(NAME xenon_audio_export_tests COMMAND xenon_audio_export_tests)
   endif()
 
@@ -593,6 +672,13 @@ if(XENON_BUILD_TESTS)
   endif()
 
   if(XENON_ENABLE_KERNEL)
+    if(XENON_ENABLE_MEMORY)
+      add_executable(xenon_guest_heap_tests tests/kernel/guest_heap_tests.cpp)
+      target_link_libraries(xenon_guest_heap_tests PRIVATE xenon_kernel)
+      xenon_enable_test_asserts(xenon_guest_heap_tests)
+      add_test(NAME xenon_guest_heap_tests COMMAND xenon_guest_heap_tests)
+    endif()
+
     add_executable(xenon_kernel_io_tests tests/kernel/kernel_io_tests.cpp)
     target_link_libraries(xenon_kernel_io_tests PRIVATE xenon_kernel)
     xenon_enable_test_asserts(xenon_kernel_io_tests)
@@ -634,6 +720,175 @@ if(XENON_BUILD_TESTS)
     XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
   xenon_enable_test_asserts(xenon_recomp_driver_tests)
   add_test(NAME xenon_recomp_driver_tests COMMAND xenon_recomp_driver_tests)
+
+  # Generic worker pool (Part 3 of the Recomp Analysis V2 pass): correctness
+  # of parallel_for() itself (every index run exactly once, result ordering
+  # independent of completion order, exception propagation, no races under
+  # repeated stress runs), independent of the Recomp Driver that consumes it.
+  add_executable(xenon_worker_pool_tests tests/recomp/worker_pool_tests.cpp)
+  target_link_libraries(xenon_worker_pool_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_worker_pool_tests)
+  add_test(NAME xenon_worker_pool_tests COMMAND xenon_worker_pool_tests)
+
+  # Parallel analysis determinism (Part 4/21): jobs=1 vs jobs=N produce
+  # byte-identical deterministic AnalysisReport content on a synthetic
+  # multi-function fixture, and discovery waves converge correctly.
+  add_executable(xenon_recomp_parallel_analysis_tests tests/recomp/parallel_analysis_tests.cpp)
+  target_link_libraries(xenon_recomp_parallel_analysis_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_recomp_parallel_analysis_tests)
+  add_test(NAME xenon_recomp_parallel_analysis_tests COMMAND xenon_recomp_parallel_analysis_tests)
+
+  # Recomp Analysis V3 (discovery-quality pass): provenance/evidence
+  # combination, confidence, generic TLS-callback seeding, bounded CTR
+  # dataflow resolution, invalid-vs-unsupported PPC classification, the
+  # conservative prologue heuristic, validated tail calls, and
+  # switch/jump-table bounds-check gating.
+  add_executable(xenon_discovery_quality_tests tests/recomp/discovery_quality_tests.cpp)
+  target_link_libraries(xenon_discovery_quality_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_discovery_quality_tests)
+  add_test(NAME xenon_discovery_quality_tests COMMAND xenon_discovery_quality_tests)
+
+  # Prepared native-module artifact cache (automatic game preparation
+  # pipeline): digest/invalidation semantics and real stage->validate->
+  # atomic-promote/rollback behaviour, including a real compiled-and-loaded
+  # shared library check (not a stubbed file-existence check).
+  add_executable(xenon_artifact_cache_tests tests/recomp/artifact_cache_tests.cpp)
+  target_link_libraries(xenon_artifact_cache_tests PRIVATE xenon_recomp)
+  if(NOT WIN32)
+    target_link_libraries(xenon_artifact_cache_tests PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  xenon_enable_test_asserts(xenon_artifact_cache_tests)
+  add_test(NAME xenon_artifact_cache_tests COMMAND xenon_artifact_cache_tests)
+
+  # End-to-end xenon-prepare worker tests: drives the real xenon-prepare
+  # binary as a subprocess (first build, no-rebuild, hint-change rebuild,
+  # deterministic cancellation) - see tools/xenon_prepare.cpp and
+  # docs/development/GAME_PREPARATION.md.
+  add_executable(xenon_prepare_worker_tests tests/recomp/xenon_prepare_worker_tests.cpp)
+  target_link_libraries(xenon_prepare_worker_tests PRIVATE xenon_recomp)
+  target_compile_definitions(xenon_prepare_worker_tests PRIVATE
+    XENON_PREPARE_EXECUTABLE="$<TARGET_FILE:xenon-prepare>"
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+  add_dependencies(xenon_prepare_worker_tests xenon-prepare)
+  xenon_enable_test_asserts(xenon_prepare_worker_tests)
+  add_test(NAME xenon_prepare_worker_tests COMMAND xenon_prepare_worker_tests)
+
+  # Analysis Hint Schema V2 (Part 1/7 of the Gracemeria readiness pass):
+  # validate_hint_set()/hint_set_matches_identity()/JSON round trip, fully
+  # independent of any XEX/driver pipeline.
+  add_executable(xenon_analysis_schema_tests tests/recomp/analysis_schema_tests.cpp)
+  target_link_libraries(xenon_analysis_schema_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_analysis_schema_tests)
+  add_test(NAME xenon_analysis_schema_tests COMMAND xenon_analysis_schema_tests)
+
+  # Analysis Hint Schema V2 consumption: proves the Recomp Driver actually
+  # uses chunks/switch tables/known indirect calls/native replacements/
+  # regions during real analysis, not merely parses/stores them (Part 1.11).
+  add_executable(xenon_heap_native_replacement_tests
+    tests/recomp/heap_native_replacement_tests.cpp)
+  target_link_libraries(xenon_heap_native_replacement_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_heap_native_replacement_tests)
+  add_test(NAME xenon_heap_native_replacement_tests
+    COMMAND xenon_heap_native_replacement_tests)
+
+  add_executable(xenon_analysis_v2_consumption_tests tests/recomp/analysis_v2_consumption_tests.cpp)
+  target_link_libraries(xenon_analysis_v2_consumption_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_analysis_v2_consumption_tests)
+  add_test(NAME xenon_analysis_v2_consumption_tests COMMAND xenon_analysis_v2_consumption_tests)
+
+  # Generated-code deduplication / shard ownership fix: proves the actual
+  # production bug (byte-identical functions colliding in the codegen
+  # content-addressed cache, producing MSVC C2084 duplicate-body errors on a
+  # real title) stays fixed, plus the FunctionChunk/independent-FunctionHint
+  # mutual-exclusion fix, parallel codegen determinism, and the
+  # fail-fast symbol/address uniqueness validation added alongside it.
+  add_executable(xenon_codegen_ownership_tests tests/recomp/codegen_ownership_tests.cpp)
+  target_link_libraries(xenon_codegen_ownership_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_codegen_ownership_tests)
+  add_test(NAME xenon_codegen_ownership_tests COMMAND xenon_codegen_ownership_tests)
+
+  # Generated registry.cpp numeric-format state leak fix: proves
+  # generate_project()'s trailing kCompiledFunctionCount declaration is always
+  # emitted in decimal - never inheriting a std::hex formatting flag left
+  # active by the guest-address table emitted immediately before it (the
+  # real Ace Combat 6 build failure: kCompiledFunctionCount = 4b21; for a
+  # 19233-function module) - including the CRITICAL case where a leaked hex
+  # formatter would silently compile to a WRONG-but-valid decimal literal
+  # (16 == 0x10) instead of failing loudly.
+  add_executable(xenon_registry_numeric_format_tests tests/recomp/registry_numeric_format_tests.cpp)
+  target_link_libraries(xenon_registry_numeric_format_tests PRIVATE xenon_recomp)
+  target_compile_definitions(xenon_registry_numeric_format_tests PRIVATE
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+  xenon_enable_test_asserts(xenon_registry_numeric_format_tests)
+  add_test(NAME xenon_registry_numeric_format_tests COMMAND xenon_registry_numeric_format_tests)
+
+  # ModuleHintProvider production integration (Part 2/7): a synthetic
+  # two-revision module package, correct/incorrect revision selection, and
+  # proof the provider is actually consumed by load_and_analyze().
+  add_executable(xenon_module_hint_provider_tests tests/recomp/module_hint_provider_tests.cpp)
+  target_link_libraries(xenon_module_hint_provider_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_module_hint_provider_tests)
+  add_test(NAME xenon_module_hint_provider_tests COMMAND xenon_module_hint_provider_tests)
+
+  # Proves the real "recompiled PPC -> import call -> CPU V2 -> external-call
+  # bridge -> core::ExportRegistry -> active subsystem" path through the
+  # actual production pipeline (XEX Loader V2, Recomp Driver, a compiled and
+  # loaded native module, KernelProcess/KernelThread) - not a direct C++
+  # shortcut. See tests/core/guest_export_abi_tests.cpp's header comment.
+  add_executable(xenon_guest_export_abi_tests tests/core/guest_export_abi_tests.cpp)
+  target_link_libraries(xenon_guest_export_abi_tests PRIVATE xenon_core xenon_recomp)
+  target_compile_definitions(xenon_guest_export_abi_tests PRIVATE
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+  xenon_enable_test_asserts(xenon_guest_export_abi_tests)
+  add_test(NAME xenon_guest_export_abi_tests COMMAND xenon_guest_export_abi_tests)
+
+  # Part 4 (Gracemeria readiness pass): proves the audio render-driver guest
+  # callback runs with a real KernelProcess/KernelThread/KPCR/TLS identity
+  # (XenonSession::start_audio_guest_thread()/invoke_audio_callback()) rather
+  # than an isolated bare CpuState. See the file's header comment.
+  add_executable(xenon_audio_guest_callback_tests tests/core/audio_guest_callback_tests.cpp)
+  target_link_libraries(xenon_audio_guest_callback_tests PRIVATE xenon_core xenon_recomp)
+  target_compile_definitions(xenon_audio_guest_callback_tests PRIVATE
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+  xenon_enable_test_asserts(xenon_audio_guest_callback_tests)
+  add_test(NAME xenon_audio_guest_callback_tests COMMAND xenon_audio_guest_callback_tests)
+
+  # Negative-path coverage for the same import/export dispatch boundary:
+  # unknown library, known library/missing ordinal, a malformed native
+  # import table entry, a call target that is neither compiled code nor a
+  # known import, a missing/incompatible native module, an import-identity
+  # (ordinal-collision) regression, and a KernelProcess/KernelMemory/guest-
+  # stack rollback proof. See the file's header comment for why these use
+  # the production import-resolution boundary directly rather than a second
+  # full compiled-module build pipeline.
+  add_executable(xenon_guest_import_negative_tests tests/core/guest_import_negative_tests.cpp)
+  target_link_libraries(xenon_guest_import_negative_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_guest_import_negative_tests)
+  add_test(NAME xenon_guest_import_negative_tests COMMAND xenon_guest_import_negative_tests)
+
+  # Minimal native "game module" used only by
+  # tests/core/title_update_integration_tests.cpp to prove XenonSession's
+  # effective-executable-revision compatibility gating through the real
+  # LoadLibrary/dlopen native-extension path - see that fixture's own header
+  # comment. It exports no real compiled code (never bound to a running
+  # guest thread); it is not a game module and ships no game logic.
+  add_library(xenon_title_update_test_module SHARED tests/core/fixtures/title_update_test_module.cpp)
+  target_link_libraries(xenon_title_update_test_module PRIVATE xenon_cpu)
+
+  # Title Update Runtime Integration: proves a selected title update reaches
+  # XenonSession::load_game()'s real xbox::apply_title_update() call (not
+  # XEX Loader V2 called directly), that the effective (patched) image - not
+  # the base image - is what gets mapped/run, that malformed/incompatible
+  # updates fail explicitly with no partial guest-process state, and that a
+  # native extension's declared effective-executable-revision compatibility
+  # is actually enforced. See the file's header comment.
+  add_executable(xenon_title_update_integration_tests tests/core/title_update_integration_tests.cpp)
+  target_link_libraries(xenon_title_update_integration_tests PRIVATE xenon_core)
+  add_dependencies(xenon_title_update_integration_tests xenon_title_update_test_module)
+  target_compile_definitions(xenon_title_update_integration_tests PRIVATE
+    XENON_TITLE_UPDATE_TEST_MODULE_PATH="$<TARGET_FILE:xenon_title_update_test_module>")
+  xenon_enable_test_asserts(xenon_title_update_integration_tests)
+  add_test(NAME xenon_title_update_integration_tests COMMAND xenon_title_update_integration_tests)
 
   add_executable(xenon_cpu_tests tests/cpu/ppc/cpu_tests.cpp)
   target_link_libraries(xenon_cpu_tests PRIVATE xenon_cpu)
@@ -709,6 +964,29 @@ if(XENON_BUILD_TESTS)
     add_test(NAME xenon_cpu_${name} COMMAND xenon_cpu_${name})
   endfunction()
 
+  add_executable(xenon_cpu_codegen_setjmp_longjmp
+    tests/cpu/codegen/codegen_setjmp_longjmp.cpp)
+  target_link_libraries(xenon_cpu_codegen_setjmp_longjmp PRIVATE xenon_cpu)
+  set(XENON_GENERATED_SETJMP_LONGJMP
+    "${CMAKE_CURRENT_BINARY_DIR}/generated_setjmp_longjmp.cpp")
+  add_custom_command(
+    OUTPUT "${XENON_GENERATED_SETJMP_LONGJMP}"
+    COMMAND xenon_cpu_codegen_setjmp_longjmp "${XENON_GENERATED_SETJMP_LONGJMP}"
+    DEPENDS xenon_cpu_codegen_setjmp_longjmp
+    VERBATIM)
+  add_executable(xenon_cpu_setjmp_longjmp
+    tests/cpu/x86_64/setjmp_longjmp.cpp
+    "${XENON_GENERATED_SETJMP_LONGJMP}")
+  target_link_libraries(xenon_cpu_setjmp_longjmp PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_cpu_setjmp_longjmp)
+  add_test(NAME xenon_cpu_setjmp_longjmp COMMAND xenon_cpu_setjmp_longjmp)
+
+  add_executable(xenon_cpu_runtime_helpers_register_range
+    tests/cpu/x86_64/runtime_helpers_register_range.cpp)
+  target_link_libraries(xenon_cpu_runtime_helpers_register_range PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_cpu_runtime_helpers_register_range)
+  add_test(NAME xenon_cpu_runtime_helpers_register_range COMMAND xenon_cpu_runtime_helpers_register_range)
+
   xenon_add_generated_cpu_test(function_flow codegen_function_flow.cpp function_flow.cpp)
   xenon_add_generated_cpu_test(branch_matrix codegen_branch_matrix.cpp branch_matrix.cpp)
   xenon_add_generated_cpu_test(control_boundaries codegen_control_boundaries.cpp control_boundaries.cpp)
@@ -723,11 +1001,21 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_xam_user_manager_tests)
   add_test(NAME xenon_xam_user_manager_tests COMMAND xenon_xam_user_manager_tests)
 
+  add_executable(xenon_xam_export_ordinal_tests tests/xam/xam_export_ordinal_tests.cpp)
+  target_link_libraries(xenon_xam_export_ordinal_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_xam_export_ordinal_tests)
+  add_test(NAME xenon_xam_export_ordinal_tests COMMAND xenon_xam_export_ordinal_tests)
+
   if(XENON_ENABLE_INPUT)
     add_executable(xenon_input_tests tests/input/input_tests.cpp)
     target_link_libraries(xenon_input_tests PRIVATE xenon_input)
     xenon_enable_test_asserts(xenon_input_tests)
     add_test(NAME xenon_input_tests COMMAND xenon_input_tests)
+
+    add_executable(xenon_frontend_router_tests tests/input/frontend_router_tests.cpp)
+    target_link_libraries(xenon_frontend_router_tests PRIVATE xenon_input)
+    xenon_enable_test_asserts(xenon_frontend_router_tests)
+    add_test(NAME xenon_frontend_router_tests COMMAND xenon_frontend_router_tests)
 
     foreach(test_name IN ITEMS sdl_driver keyboard_mouse xam_facade profile advanced module_api)
       set(target "xenon_input_${test_name}_tests")
@@ -830,12 +1118,10 @@ if(XENON_BUILD_TESTS)
       target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics_vulkan)
       target_compile_definitions(xenon_backend_capability_tests PRIVATE XENON_TEST_VULKAN=1)
     endif()
-    if(TARGET xenon_graphics_dxc AND XENON_DXC_RUNTIME)
+    if(TARGET xenon_graphics_dxc)
       target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics_dxc)
       target_compile_definitions(xenon_backend_capability_tests PRIVATE XENON_TEST_DXC=1)
-      add_custom_command(TARGET xenon_backend_capability_tests POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          "${XENON_DXC_RUNTIME}" "$<TARGET_FILE_DIR:xenon_backend_capability_tests>")
+      xenon_stage_runtime_dependencies(xenon_backend_capability_tests)
     endif()
     xenon_enable_test_asserts(xenon_backend_capability_tests)
     add_test(NAME xenon_backend_capability_tests COMMAND xenon_backend_capability_tests)
@@ -859,6 +1145,16 @@ if(XENON_BUILD_TESTS)
       target_compile_definitions(xenon_backend_ownership_integration_tests
         PRIVATE XENON_TEST_VULKAN=1)
     endif()
+    if(TARGET xenon_graphics_dxc)
+      # The Vulkan/D3D12 backends this target links already depend on
+      # xenon_graphics_dxc transitively and compile real shaders through it
+      # at runtime (e.g. the depth-upload path exercised here) - missing this
+      # call (unlike xenon_backend_capability_tests just above, which already
+      # had it) left dxcompiler.dll unstaged next to this target's output,
+      # making every shader-compiling assertion fail with "SPIR-V CodeGen not
+      # available" despite a working DXC being found at configure time.
+      xenon_stage_runtime_dependencies(xenon_backend_ownership_integration_tests)
+    endif()
     xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
@@ -879,6 +1175,12 @@ if(XENON_BUILD_TESTS)
         PRIVATE xenon_graphics_vulkan)
       target_compile_definitions(xenon_cross_backend_canonical_tests
         PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      # Same missing-runtime-staging gap as xenon_backend_ownership_integration_tests
+      # above - this target's canonical color/depth handoff paths compile real
+      # shaders through the Vulkan backend's DXC dependency at runtime.
+      xenon_stage_runtime_dependencies(xenon_cross_backend_canonical_tests)
     endif()
     xenon_enable_test_asserts(xenon_cross_backend_canonical_tests)
     add_test(NAME xenon_cross_backend_canonical_tests
@@ -948,11 +1250,7 @@ if(XENON_BUILD_TESTS)
         OUTPUT_NAME xenon_shader_translation_gpu07_tests)
       target_link_libraries(xenon_shader_translation_tests PRIVATE xenon_graphics_dxc)
       xenon_enable_test_asserts(xenon_shader_translation_tests)
-      if(XENON_DXC_RUNTIME)
-        add_custom_command(TARGET xenon_shader_translation_tests POST_BUILD
-          COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${XENON_DXC_RUNTIME}" "$<TARGET_FILE_DIR:xenon_shader_translation_tests>")
-      endif()
+      xenon_stage_runtime_dependencies(xenon_shader_translation_tests)
       add_test(NAME xenon_shader_translation_tests COMMAND xenon_shader_translation_tests)
     endif()
 
@@ -967,7 +1265,7 @@ endif()
 # -----------------------------------------------------------------------------
 # Generic runtime/game-host process. The launcher spawns this to actually run
 # a game; it never executes guest code itself. See runtime_host/CMakeLists.txt
-# and docs/RUNTIME_HOST.md.
+# and docs/runtime/RUNTIME_HOST.md.
 add_subdirectory(runtime_host)
 
 if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
@@ -984,6 +1282,44 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
   target_compile_features(xenon_runtime_host_tests PRIVATE cxx_std_20)
   xenon_enable_test_asserts(xenon_runtime_host_tests)
   add_test(NAME xenon_runtime_host_tests COMMAND xenon_runtime_host_tests)
+
+  # Part 5.7 (Gracemeria readiness pass): structured launch-failure
+  # categories in status.json - see tests/runtime_host/status_writer_tests.cpp.
+  add_executable(xenon_status_writer_tests
+    tests/runtime_host/status_writer_tests.cpp
+    runtime_host/src/status_writer.cpp
+    runtime_host/src/status_writer.hpp
+    runtime_host/src/launch_config.cpp
+    runtime_host/src/launch_config.hpp
+  )
+  target_include_directories(xenon_status_writer_tests PRIVATE runtime_host/src)
+  target_link_libraries(xenon_status_writer_tests PRIVATE xenon_core)
+  target_compile_features(xenon_status_writer_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_status_writer_tests)
+  add_test(NAME xenon_status_writer_tests COMMAND xenon_status_writer_tests)
+
+  # Presentation window create()/destroy() rollback proof (item 6 of the
+  # XenonSession closure pass) - see tests/runtime_host/presentation_host_tests.cpp.
+  # This test's entire purpose is to exercise presentation_host.cpp for real,
+  # so - matching the lesson from this project's Vulkan/D3D12 feature-flag
+  # incident - a missing SDL2 must fail configuration loudly rather than
+  # silently produce a test binary that can no longer validate anything.
+  xenon_resolve_sdl2(XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET)
+  if(NOT XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET)
+    message(FATAL_ERROR
+      "xenon_presentation_host_tests requires SDL2 (needed by presentation_host.cpp) - "
+      "resolve an SDL2 dependency instead of silently skipping this test")
+  endif()
+  add_executable(xenon_presentation_host_tests
+    tests/runtime_host/presentation_host_tests.cpp
+    runtime_host/src/presentation_host.cpp
+    runtime_host/src/presentation_host.hpp
+  )
+  target_include_directories(xenon_presentation_host_tests PRIVATE runtime_host/src)
+  target_link_libraries(xenon_presentation_host_tests PRIVATE xenon_core ${XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET})
+  target_compile_features(xenon_presentation_host_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_presentation_host_tests)
+  add_test(NAME xenon_presentation_host_tests COMMAND xenon_presentation_host_tests)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -994,7 +1330,7 @@ if(XENON_BUILD_LAUNCHER)
 endif()
 
 # RuntimeBridge locates xenon_runtime_host next to the launcher executable at
-# runtime (see docs/RUNTIME_HOST.md). Pin the host's output directory to the
+# runtime (see docs/runtime/RUNTIME_HOST.md). Pin the host's output directory to the
 # launcher's own so this holds for a plain dev build, not only after
 # `cmake --install` places both under the same bin/. xenon_launcher's own
 # output directory is left untouched (scripts such as
@@ -1007,3 +1343,14 @@ endif()
 # are declared inside launcher/CMakeLists.txt itself, in the same directory
 # scope find_package(Qt6 ...) ran in - Qt6::Core etc. are imported targets
 # only visible within that subdirectory's scope tree, not back up here.
+
+# -----------------------------------------------------------------------------
+# Production installer/package generation. Kept last so every installable
+# target and dependency runtime has been resolved before CPack is configured.
+if(XENON_BUILD_INSTALLER)
+  if(NOT TARGET xenon_launcher)
+    message(FATAL_ERROR
+      "XENON_BUILD_INSTALLER requires Qt 6.6+ and a built xenon_launcher target")
+  endif()
+  include(Packaging)
+endif()

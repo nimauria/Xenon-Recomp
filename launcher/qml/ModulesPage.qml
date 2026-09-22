@@ -154,6 +154,22 @@ Item {
         selectedModuleId = String(modulesModel.get(index).moduleId)
     }
 
+    function openContextMenuForFocusedItem() {
+        if (root.selectedModuleIndex < 0 || root.selectedModuleIndex >= modulesModel.count)
+            return
+        moduleMoreMenu.actions = launcherBridge.moduleActions(root.selectedModule().moduleId)
+        moduleMoreMenu.open()
+    }
+
+    function movePage(forward) {
+        if (modulesModel.count === 0) return
+        var step = 5
+        var next = forward ? Math.min(modulesModel.count - 1, root.selectedModuleIndex + step)
+                           : Math.max(0, root.selectedModuleIndex - step)
+        root.selectIndex(next)
+        moduleList.positionViewAtIndex(next, ListView.Contain)
+    }
+
     function selectModuleById(moduleId) {
         var target = String(moduleId || "")
         if (target.length === 0) return false
@@ -368,6 +384,7 @@ Item {
                             color: Theme.text
                             font.pixelSize: Theme.typeBodyLarge
                             font.weight: Font.DemiBold
+                            elide: Text.ElideRight
                         }
                         Text { text: modulesModel.count.toString(); color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                     }
@@ -434,6 +451,7 @@ Item {
                                 Keys.onReturnPressed: root.selectIndex(index)
                                 Keys.onEnterPressed: root.selectIndex(index)
                                 Accessible.onPressAction: root.selectIndex(index)
+                                onActiveFocusChanged: if (activeFocus) root.selectIndex(index)
 
                                 RowLayout {
                                     anchors.fill: parent
@@ -500,16 +518,34 @@ Item {
                         }
                     }
 
-                    RowLayout {
+                    GridLayout {
+                        id: installedModulesActions
                         Layout.fillWidth: true
-                        spacing: Theme.spaceSm
+                        // Stack instead of squeezing "+ Import Package" down
+                        // to an unreadable width when the card is narrow
+                        // (matches XSettingsCard's own stacked threshold
+                        // pattern) rather than letting the row overflow the
+                        // card's bounds.
+                        readonly property bool stacked: width > 0 && width < 260
+                        columns: stacked ? 1 : 2
+                        columnSpacing: Theme.spaceSm
+                        rowSpacing: Theme.spaceSm
+
                         XButton {
+                            // Without an explicit floor, Layout.fillWidth items in
+                            // QtQuick.Layouts cannot shrink below their own implicitWidth
+                            // (see XSettingsCard's actionWidth row for the same fix) - that
+                            // left a band between the stacked threshold and comfortable width
+                            // where this row overflowed the card instead of compressing.
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: "+  Import Package"
                             variant: "primary"
                             onClicked: moduleDialog.open()
                         }
                         XIconButton {
+                            Layout.alignment: installedModulesActions.stacked ? Qt.AlignHCenter : Qt.AlignVCenter
+                            Layout.minimumWidth: 0
                             glyph: "↻"
                             tooltip: "Refresh installed modules"
                             variant: "filled"

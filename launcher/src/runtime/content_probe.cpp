@@ -189,6 +189,46 @@ QVariantMap bestModuleMatch(const QVariantList& candidates, const QString& title
   }
   return best;
 }
+
+// A module manifest may optionally pin which part of an artwork asset must
+// remain visible when the launcher crops it to fit a tile/hero frame (e.g.
+// `"heroArtFocal": {"x": 0.5, "y": 0.15}` to keep a logo near the top of a
+// wide hero image instead of the launcher's generic center/left-anchored
+// crop). Absent when the manifest declares none, so callers fall back to
+// each frame's own default alignment rather than silently assuming center.
+void insertFocalPoint(QVariantMap& fields, const QVariantMap& source,
+                      const QString& manifest_key, const QString& field_prefix) {
+  const auto focal = source.value(manifest_key).toMap();
+  if (!focal.contains(QStringLiteral("x")) || !focal.contains(QStringLiteral("y"))) return;
+  bool x_ok = false;
+  bool y_ok = false;
+  const auto x = focal.value(QStringLiteral("x")).toDouble(&x_ok);
+  const auto y = focal.value(QStringLiteral("y")).toDouble(&y_ok);
+  if (!x_ok || !y_ok) return;
+  fields.insert(field_prefix + QStringLiteral("FocalX"), qBound(0.0, x, 1.0));
+  fields.insert(field_prefix + QStringLiteral("FocalY"), qBound(0.0, y, 1.0));
+}
+
+QVariantMap moduleDisplayFields(const QVariantMap& module) {
+  const auto manifest = module.value(QStringLiteral("manifest")).toMap();
+  const auto launcher = manifest.value(QStringLiteral("launcher")).toMap();
+  QVariantMap fields;
+  fields.insert(QStringLiteral("moduleId"), module.value(QStringLiteral("moduleId")));
+  fields.insert(QStringLiteral("moduleName"), module.value(QStringLiteral("moduleName")));
+  fields.insert(QStringLiteral("moduleVersion"), module.value(QStringLiteral("version")));
+  fields.insert(QStringLiteral("title"), firstString(manifest, {"name", "title"},
+                                                      module.value(QStringLiteral("moduleName")).toString()));
+  fields.insert(QStringLiteral("description"), firstString(manifest, {"description", "summary"}));
+  fields.insert(QStringLiteral("renderer"), firstString(manifest, {"renderer"}, QStringLiteral("Automatic")));
+  fields.insert(QStringLiteral("regions"), module.value(QStringLiteral("regions")));
+  fields.insert(QStringLiteral("tileArt"),
+               firstString(launcher, {"tileArt", "artwork", "icon"},
+                          firstString(manifest, {"artwork", "icon"})));
+  fields.insert(QStringLiteral("heroArt"), firstString(launcher, {"heroArt", "hero"}));
+  insertFocalPoint(fields, launcher, QStringLiteral("tileArtFocal"), QStringLiteral("tileArt"));
+  insertFocalPoint(fields, launcher, QStringLiteral("heroArtFocal"), QStringLiteral("heroArt"));
+  return fields;
+}
 #endif
 }  // namespace
 
@@ -199,6 +239,11 @@ QString UnavailableContentProbe::status() const {
 ServiceResult UnavailableContentProbe::identifyGame(
     const QUrl&, const QVariantList&) const {
   return unavailable(QStringLiteral("Game import"));
+}
+
+ServiceResult UnavailableContentProbe::matchModule(
+    const QString&, const QString&, const QString&, int, const QVariantList&) const {
+  return unavailable(QStringLiteral("Module resolution"));
 }
 
 ServiceResult UnavailableContentProbe::identifyDlc(
@@ -239,13 +284,13 @@ ServiceResult XenonContentProbe::identifyGame(
   bool ambiguous = false;
   const auto module = bestModuleMatch(module_candidates, title_id, media_id, xex_version,
                                       execution.disc_number, ambiguous);
-  if (module.isEmpty()) {
-    return ServiceResult::failure(
-        QStringLiteral("Game identification"),
-        QStringLiteral("Xenon identified Xbox title %1 / media %2, but no installed module "
-                       "declares a matching title/content identity.")
-            .arg(title_id, media_id));
-  }
+  // Genuine ambiguity (more than one installed module claims this exact
+  // identity) is a hard failure - guessing between them would be wrong.
+  // Zero matches is NOT a failure: the disc's own identity is real and
+  // stable regardless of what happens to be installed right now, so the
+  // title/source is still identified and can be added to the library.
+  // Module resolution can happen later (installing a compatible module, or
+  // matchModule() re-run when the user presses Play).
   if (ambiguous) {
     return ServiceResult::failure(
         QStringLiteral("Game identification"),
@@ -253,19 +298,18 @@ ServiceResult XenonContentProbe::identifyGame(
                        "Tighten the modules' media/version identity rules before importing."));
   }
 
-  const auto manifest = module.value(QStringLiteral("manifest")).toMap();
-  const auto launcher = manifest.value(QStringLiteral("launcher")).toMap();
   QVariantMap identified;
-  identified.insert(QStringLiteral("moduleId"), module.value(QStringLiteral("moduleId")));
-  identified.insert(QStringLiteral("moduleName"), module.value(QStringLiteral("moduleName")));
-  identified.insert(QStringLiteral("moduleVersion"), module.value(QStringLiteral("version")));
-  identified.insert(QStringLiteral("title"), firstString(manifest, {"name", "title"},
-                                                           module.value(QStringLiteral("moduleName")).toString()));
-  identified.insert(QStringLiteral("description"),
-                    firstString(manifest, {"description", "summary"}));
-  identified.insert(QStringLiteral("renderer"),
-                    firstString(manifest, {"renderer"}, QStringLiteral("Automatic")));
-  identified.insert(QStringLiteral("regions"), module.value(QStringLiteral("regions")));
+  if (!module.isEmpty()) {
+    const auto fields = moduleDisplayFields(module);
+    for (auto it = fields.constBegin(); it != fields.constEnd(); ++it) identified.insert(it.key(), it.value());
+  } else {
+    identified.insert(QStringLiteral("moduleId"), QString{});
+    identified.insert(QStringLiteral("moduleName"), QString{});
+    identified.insert(QStringLiteral("moduleVersion"), QString{});
+    // Deliberately do NOT insert "title"/"description"/etc. here: leaving
+    // them absent lets LibraryService::makeEntry()'s own filename-derived
+    // defaults stand, rather than overwriting them with empty strings.
+  }
   identified.insert(QStringLiteral("titleId"), title_id);
   identified.insert(QStringLiteral("mediaId"), media_id);
   identified.insert(QStringLiteral("xexVersion"), xex_version);
@@ -284,21 +328,55 @@ ServiceResult XenonContentProbe::identifyGame(
     identified.insert(QStringLiteral("resolvedSourcePath"),
                       pathString(result.resolved_source_path));
   }
-  identified.insert(QStringLiteral("contentState"),
-                    result.source_type == xenon::filesystem::ContentSourceType::GdfxImage
-                        ? QStringLiteral("GDFX/XEX2 identified")
-                        : QStringLiteral("XEX2 identified"));
-  identified.insert(QStringLiteral("status"), QStringLiteral("Ready"));
-  identified.insert(QStringLiteral("ready"), true);
-  identified.insert(QStringLiteral("tileArt"),
-                    firstString(launcher, {"tileArt", "artwork", "icon"},
-                                firstString(manifest, {"artwork", "icon"})));
-  identified.insert(QStringLiteral("heroArt"), firstString(launcher, {"heroArt", "hero"}));
+  const bool module_matched = !module.isEmpty();
+  if (module_matched) {
+    identified.insert(QStringLiteral("contentState"),
+                      result.source_type == xenon::filesystem::ContentSourceType::GdfxImage
+                          ? QStringLiteral("GDFX/XEX2 identified")
+                          : QStringLiteral("XEX2 identified"));
+    identified.insert(QStringLiteral("status"), QStringLiteral("Ready"));
+  } else {
+    identified.insert(QStringLiteral("contentState"), QStringLiteral("Awaiting module installation"));
+    identified.insert(QStringLiteral("status"), QStringLiteral("Module required"));
+  }
+  identified.insert(QStringLiteral("ready"), module_matched);
+
   return ServiceResult::success(
       QStringLiteral("Game identified"),
-      QStringLiteral("Identified Xbox title %1 / media %2 and matched %3.")
-          .arg(title_id, media_id, identified.value(QStringLiteral("moduleName")).toString()),
+      module_matched
+          ? QStringLiteral("Identified Xbox title %1 / media %2 and matched %3.")
+                .arg(title_id, media_id, identified.value(QStringLiteral("moduleName")).toString())
+          : QStringLiteral("Identified Xbox title %1 / media %2. No installed module supports it "
+                           "yet - install a compatible module, then press Play to prepare and "
+                           "launch it.")
+                .arg(title_id, media_id),
       identified);
+}
+
+ServiceResult XenonContentProbe::matchModule(
+    const QString& title_id, const QString& media_id, const QString& xex_version,
+    int disc_number, const QVariantList& module_candidates) const {
+  bool ambiguous = false;
+  const auto module =
+      bestModuleMatch(module_candidates, title_id, media_id, xex_version, disc_number, ambiguous);
+  if (ambiguous) {
+    return ServiceResult::failure(
+        QStringLiteral("Module resolution"),
+        QStringLiteral("More than one installed module declares the same Xbox content identity. "
+                       "Tighten the modules' media/version identity rules."));
+  }
+  if (module.isEmpty()) {
+    return ServiceResult::failure(
+        QStringLiteral("Module resolution"),
+        QStringLiteral("No installed module declares a matching title/content identity for "
+                       "title %1 / media %2.")
+            .arg(title_id, media_id));
+  }
+  const auto fields = moduleDisplayFields(module);
+  return ServiceResult::success(
+      QStringLiteral("Module matched"),
+      QStringLiteral("Matched %1.").arg(fields.value(QStringLiteral("moduleName")).toString()),
+      fields);
 }
 
 ServiceResult XenonContentProbe::identifyDlc(

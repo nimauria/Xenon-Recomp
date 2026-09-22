@@ -6,6 +6,11 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <QFile>
+#include <QFileInfo>
+#include <QHash>
+#include <QtGlobal>
+#include <QNetworkInformation>
 
 #ifndef XENON_LAUNCHER_VERSION
 #define XENON_LAUNCHER_VERSION "0.0.0-dev"
@@ -78,6 +83,8 @@ LauncherBridge::LauncherBridge(QObject* parent)
           [this](const QString& game_id) { emit libraryDlcChanged(game_id); });
   connect(&modules, &xenon::launcher::frontend_backend::ModulesFeature::changed,
           this, &LauncherBridge::modulesChanged);
+  connect(&modules, &xenon::launcher::frontend_backend::ModulesFeature::changed,
+          this, &LauncherBridge::downloadActivityChanged);
   connect(&modules, &xenon::launcher::frontend_backend::ModulesFeature::catalogChanged,
           this, &LauncherBridge::moduleCatalogChanged);
   connect(&modules, &xenon::launcher::frontend_backend::ModulesFeature::updateStateChanged,
@@ -92,6 +99,8 @@ LauncherBridge::LauncherBridge(QObject* parent)
           });
   connect(&updates, &xenon::launcher::frontend_backend::UpdateFeature::changed,
           this, &LauncherBridge::updateStateChanged);
+  connect(&updates, &xenon::launcher::frontend_backend::UpdateFeature::changed,
+          this, &LauncherBridge::downloadActivityChanged);
   connect(&updates, &xenon::launcher::frontend_backend::UpdateFeature::notificationRequested,
           this, [this](const QString& title, const QString& message) {
             pushNotification(title, message, notificationSeverityFor(title, message),
@@ -102,6 +111,8 @@ LauncherBridge::LauncherBridge(QObject* parent)
           this, []() { QCoreApplication::quit(); }, Qt::QueuedConnection);
   connect(&session, &xenon::launcher::frontend_backend::SessionController::changed,
           this, &LauncherBridge::sessionChanged);
+  connect(&session, &xenon::launcher::frontend_backend::SessionController::changed,
+          this, &LauncherBridge::downloadActivityChanged);
   connect(&session, &xenon::launcher::frontend_backend::SessionController::historyChanged,
           this, &LauncherBridge::sessionHistoryChanged);
   connect(&session, &xenon::launcher::frontend_backend::SessionController::notificationRequested,
@@ -298,6 +309,10 @@ void LauncherBridge::markLauncherReady() {
   if (!result.ok) notifyResult(result, false);
 }
 
+void LauncherBridge::setLauncherForeground(bool active) {
+  backend_->input().setFrontendFocused(active);
+}
+
 void LauncherBridge::restartInSafeMode() {
   const auto result = backend_->recovery().restartInSafeMode();
   if (!result.ok) notifyResult(result);
@@ -339,6 +354,176 @@ void LauncherBridge::cancelLauncherUpdateDownload() {
 }
 
 QVariantMap LauncherBridge::launcherUpdateState() const { return backend_->updates().launcherState(); }
+
+QVariantMap LauncherBridge::downloadActivitySnapshot() const {
+  QVariantList jobs;
+
+  const auto launcher = backend_->updates().launcherState();
+  const auto launcher_status = launcher.value(QStringLiteral("status"), QStringLiteral("idle")).toString();
+  const bool launcher_active = launcher_status == QStringLiteral("checking") ||
+                               launcher_status == QStringLiteral("downloading") ||
+                               launcher_status == QStringLiteral("installing");
+  const bool launcher_failed = launcher_status == QStringLiteral("error");
+  const bool launcher_ready = launcher_status == QStringLiteral("update-available") ||
+                              launcher_status == QStringLiteral("ready-to-install") ||
+                              launcher.value(QStringLiteral("canDownload")).toBool() ||
+                              launcher.value(QStringLiteral("canInstall")).toBool();
+  if (launcher_active || launcher_failed || launcher_ready) {
+    QVariantMap job;
+    job.insert(QStringLiteral("id"), QStringLiteral("launcher:update"));
+    job.insert(QStringLiteral("kind"), QStringLiteral("launcher-update"));
+    job.insert(QStringLiteral("title"), QStringLiteral("Xenon Launcher"));
+    job.insert(QStringLiteral("subtitle"), launcher.value(QStringLiteral("availableVersion")));
+    job.insert(QStringLiteral("status"), launcher_status);
+    job.insert(QStringLiteral("message"), launcher.value(QStringLiteral("lastError")).toString().isEmpty()
+                                               ? launcher.value(QStringLiteral("statusMessage"))
+                                               : launcher.value(QStringLiteral("lastError")));
+    job.insert(QStringLiteral("progress"), launcher.value(QStringLiteral("downloadProgress"), 0.0));
+    job.insert(QStringLiteral("downloadedBytes"), launcher.value(QStringLiteral("downloadedBytes"), 0));
+    job.insert(QStringLiteral("downloadTotalBytes"), launcher.value(QStringLiteral("downloadTotalBytes"), 0));
+    job.insert(QStringLiteral("active"), launcher_active);
+    job.insert(QStringLiteral("failed"), launcher_failed);
+    job.insert(QStringLiteral("ready"), launcher_ready && !launcher_active && !launcher_failed);
+    job.insert(QStringLiteral("canCheck"), !launcher_active && !launcher_ready && !launcher_failed);
+    job.insert(QStringLiteral("canCancel"), launcher_status == QStringLiteral("downloading"));
+    job.insert(QStringLiteral("canDownload"), launcher.value(QStringLiteral("canDownload")).toBool());
+    job.insert(QStringLiteral("canInstall"), launcher.value(QStringLiteral("canInstall")).toBool());
+    job.insert(QStringLiteral("canRetry"), launcher_failed);
+    jobs.append(job);
+  }
+
+  const auto modules = backend_->modules().entries();
+  QHash<QString, QString> module_names;
+  for (const auto& value : modules) {
+    const auto module = value.toMap();
+    const auto module_id = module.value(QStringLiteral("moduleId")).toString();
+    if (module_id.isEmpty()) continue;
+    module_names.insert(module_id, module.value(QStringLiteral("moduleName"), module_id).toString());
+    const auto status = module.value(QStringLiteral("updateStatus"), QStringLiteral("idle")).toString();
+    const bool active = status == QStringLiteral("checking") || status == QStringLiteral("downloading") ||
+                        status == QStringLiteral("installing") || status == QStringLiteral("rolling-back");
+    const bool failed = status == QStringLiteral("error");
+    const bool ready = !active && !failed &&
+                       (module.value(QStringLiteral("updateAvailable")).toBool() ||
+                        module.value(QStringLiteral("canDownloadUpdate")).toBool() ||
+                        module.value(QStringLiteral("canInstallUpdate")).toBool());
+    if (!active && !failed && !ready) continue;
+
+    QVariantMap job;
+    job.insert(QStringLiteral("id"), QStringLiteral("module:") + module_id);
+    job.insert(QStringLiteral("kind"), QStringLiteral("module-update"));
+    job.insert(QStringLiteral("moduleId"), module_id);
+    job.insert(QStringLiteral("title"), module.value(QStringLiteral("moduleName"), module_id));
+    job.insert(QStringLiteral("subtitle"), module.value(QStringLiteral("availableVersion")));
+    job.insert(QStringLiteral("status"), status);
+    job.insert(QStringLiteral("message"), module.value(QStringLiteral("updateMessage")));
+    job.insert(QStringLiteral("progress"), module.value(QStringLiteral("downloadProgress"), 0.0));
+    job.insert(QStringLiteral("downloadedBytes"), module.value(QStringLiteral("downloadedBytes"), 0));
+    job.insert(QStringLiteral("downloadTotalBytes"), module.value(QStringLiteral("downloadTotalBytes"), 0));
+    job.insert(QStringLiteral("active"), active);
+    job.insert(QStringLiteral("failed"), failed);
+    job.insert(QStringLiteral("ready"), ready);
+    job.insert(QStringLiteral("canCheck"), !active && !ready && !failed);
+    job.insert(QStringLiteral("canCancel"), status == QStringLiteral("downloading"));
+    job.insert(QStringLiteral("canDownload"), module.value(QStringLiteral("canDownloadUpdate")).toBool());
+    job.insert(QStringLiteral("canInstall"), module.value(QStringLiteral("canInstallUpdate")).toBool());
+    job.insert(QStringLiteral("canRetry"), failed);
+    job.insert(QStringLiteral("canRollback"), module.value(QStringLiteral("rollbackAvailable")).toBool());
+    jobs.append(job);
+  }
+
+  const auto session = backend_->session().currentSession();
+  const auto session_state = session.value(QStringLiteral("state"), QStringLiteral("idle")).toString();
+  const bool preparation_active = session_state == QStringLiteral("preparing") ||
+                                  session_state == QStringLiteral("validating") ||
+                                  session_state == QStringLiteral("starting") ||
+                                  session_state == QStringLiteral("stopping");
+  const bool preparation_failed = session_state == QStringLiteral("failed");
+  if (preparation_active || preparation_failed) {
+    QVariantMap job;
+    const auto session_id = session.value(QStringLiteral("sessionId")).toString();
+    job.insert(QStringLiteral("id"), QStringLiteral("session:") + session_id);
+    job.insert(QStringLiteral("kind"), QStringLiteral("game-preparation"));
+    job.insert(QStringLiteral("gameId"), session.value(QStringLiteral("gameId")));
+    job.insert(QStringLiteral("title"), session.value(QStringLiteral("title")).toString().isEmpty()
+                                           ? QStringLiteral("Game preparation")
+                                           : session.value(QStringLiteral("title")));
+    job.insert(QStringLiteral("subtitle"), session.value(QStringLiteral("moduleName")));
+    job.insert(QStringLiteral("status"), session_state);
+    const auto progress_message = session.value(QStringLiteral("progressMessage")).toString();
+    job.insert(QStringLiteral("message"), progress_message.isEmpty()
+                                               ? session.value(QStringLiteral("stateLabel"))
+                                               : progress_message);
+    const auto percent = session.value(QStringLiteral("progressPercent"), -1).toInt();
+    job.insert(QStringLiteral("progress"), percent >= 0 ? qBound(0.0, percent / 100.0, 1.0) : -1.0);
+    job.insert(QStringLiteral("downloadedBytes"), 0);
+    job.insert(QStringLiteral("downloadTotalBytes"), 0);
+    job.insert(QStringLiteral("active"), preparation_active);
+    job.insert(QStringLiteral("failed"), preparation_failed);
+    job.insert(QStringLiteral("ready"), false);
+    job.insert(QStringLiteral("canCheck"), false);
+    job.insert(QStringLiteral("canCancel"), preparation_active && session_state != QStringLiteral("stopping"));
+    job.insert(QStringLiteral("canDownload"), false);
+    job.insert(QStringLiteral("canInstall"), false);
+    job.insert(QStringLiteral("canRetry"), false);
+    jobs.prepend(job);
+  }
+
+  int active_count = 0;
+  int ready_count = 0;
+  int failure_count = 0;
+  for (const auto& value : jobs) {
+    const auto job = value.toMap();
+    if (job.value(QStringLiteral("active")).toBool()) ++active_count;
+    if (job.value(QStringLiteral("ready")).toBool()) ++ready_count;
+    if (job.value(QStringLiteral("failed")).toBool()) ++failure_count;
+  }
+
+  const auto raw_history = backend_->modules().updateHistory({});
+  QVariantList history;
+  history.reserve(raw_history.size());
+  for (const auto& value : raw_history) {
+    auto item = value.toMap();
+    const auto module_id = item.value(QStringLiteral("moduleId")).toString();
+    if (!module_id.isEmpty())
+      item.insert(QStringLiteral("moduleName"), module_names.value(module_id, module_id));
+    history.append(item);
+  }
+
+  return {
+      {QStringLiteral("jobs"), jobs},
+      {QStringLiteral("history"), history},
+      {QStringLiteral("activeCount"), active_count},
+      {QStringLiteral("readyCount"), ready_count},
+      {QStringLiteral("failureCount"), failure_count},
+      {QStringLiteral("recentCount"), history.size()},
+      {QStringLiteral("hasActivity"), !jobs.isEmpty() || !history.isEmpty()},
+  };
+}
+
+void LauncherBridge::executeDownloadActivityAction(const QString& job_id, const QString& action_id) {
+  const auto id = job_id.trimmed();
+  const auto action = action_id.trimmed().toLower();
+  if (id == QStringLiteral("launcher:update")) {
+    if (action == QStringLiteral("check") || action == QStringLiteral("retry")) requestLauncherUpdateCheck();
+    else if (action == QStringLiteral("download")) requestLauncherUpdateDownload();
+    else if (action == QStringLiteral("install")) requestLauncherUpdateInstall();
+    else if (action == QStringLiteral("cancel")) cancelLauncherUpdateDownload();
+    return;
+  }
+  if (id.startsWith(QStringLiteral("module:"))) {
+    const auto module_id = id.mid(QStringLiteral("module:").size());
+    if (action == QStringLiteral("check") || action == QStringLiteral("retry")) requestModuleUpdateCheck(module_id);
+    else if (action == QStringLiteral("download")) requestModuleUpdateDownload(module_id);
+    else if (action == QStringLiteral("install")) requestModuleUpdateInstall(module_id);
+    else if (action == QStringLiteral("cancel")) cancelModuleUpdateDownload(module_id);
+    else if (action == QStringLiteral("rollback")) requestModuleRollback(module_id);
+    return;
+  }
+  if (id.startsWith(QStringLiteral("session:")) && action == QStringLiteral("cancel")) {
+    stopGame();
+  }
+}
 
 void LauncherBridge::requestModuleCatalogRefresh() {
   notifyResult(backend_->modules().refreshCatalog());
@@ -597,8 +782,8 @@ QVariantList LauncherBridge::libraryDlcBackgroundActions(const QString& game_id)
 QVariantMap LauncherBridge::libraryGameProperties(const QString& game_id) const {
   return backend_->gameProperties().properties(game_id);
 }
-bool LauncherBridge::importGameContent(const QList<QUrl>& sources) {
-  const auto result = backend_->importExport().importGameContent(sources);
+bool LauncherBridge::importGameContent(const QList<QUrl>& sources, bool moveIntoLibrary) {
+  const auto result = backend_->importExport().importGameContent(sources, moveIntoLibrary);
   notifyResult(result, true, QStringLiteral("library"), QStringLiteral("navigate.library"), {}, {},
                QStringLiteral("Open Library"));
   return result.ok;
@@ -617,8 +802,21 @@ bool LauncherBridge::importDlcContentForEntry(const QString& game_id, const QStr
                QStringLiteral("Open Game"));
   return result.ok;
 }
+bool LauncherBridge::setLibraryFavorite(const QString& game_id, bool favorite) {
+  const auto result = backend_->library().setFavorite(game_id, favorite);
+  notifyResult(result, false);
+  return result.ok;
+}
+
 bool LauncherBridge::removeLibraryEntry(const QString& game_id) {
   const auto result = backend_->library().remove(game_id);
+  notifyResult(result, true, QStringLiteral("library"), QStringLiteral("navigate.library"), {}, {},
+               QStringLiteral("Open Library"));
+  return result.ok;
+}
+bool LauncherBridge::deleteManagedGameFiles(const QString& game_id) {
+  const auto result = backend_->library().deleteManagedFiles(game_id);
+  // Note: uses the same notifyResult() pattern as removeLibraryEntry() above.
   notifyResult(result, true, QStringLiteral("library"), QStringLiteral("navigate.library"), {}, {},
                QStringLiteral("Open Library"));
   return result.ok;
@@ -768,6 +966,92 @@ bool LauncherBridge::openExternalUrl(const QString& url) {
   const auto result = backend_->filesystem().openExternalUrl(url);
   if (!result.ok) notifyResult(result);
   return result.ok;
+}
+void LauncherBridge::showToast(const QString& title, const QString& message, const QString& tone) {
+  pushNotification(title, message, tone);
+}
+
+namespace {
+QVariantMap toVariant(const xenon::launcher::ServiceResult& result) {
+  return QVariantMap{{QStringLiteral("success"), result.ok},
+                      {QStringLiteral("title"), result.title},
+                      {QStringLiteral("message"), result.message},
+                      {QStringLiteral("data"), result.data}};
+}
+}  // namespace
+
+QVariantList LauncherBridge::getFilesystemMounts() const { return backend_->filesystem().getMounts(); }
+QVariantList LauncherBridge::getFilesystemSymbolicLinks() const { return backend_->filesystem().getSymbolicLinks(); }
+QString LauncherBridge::getFilesystemWorkingDirectory() const { return backend_->filesystem().getWorkingDirectory(); }
+QVariantMap LauncherBridge::getFilesystemStatus() const { return backend_->filesystem().getFilesystemStatus(); }
+QVariantMap LauncherBridge::filesystemMountHostPath(const QString& mount_point, const QString& host_path,
+                                                     bool read_only) {
+  const auto result = backend_->filesystem().mountHostPath(mount_point, host_path, read_only);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemMountGdfxImage(const QString& mount_point, const QString& image_path) {
+  const auto result = backend_->filesystem().mountGdfxImage(mount_point, image_path);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemMountStfsPackage(const QString& mount_point, const QString& package_path) {
+  const auto result = backend_->filesystem().mountStfsPackage(mount_point, package_path);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemUnmount(const QString& mount_point) {
+  const auto result = backend_->filesystem().unmount(mount_point);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemRegisterSymbolicLink(const QString& alias, const QString& target) {
+  const auto result = backend_->filesystem().registerSymbolicLink(alias, target);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemUnregisterSymbolicLink(const QString& alias) {
+  const auto result = backend_->filesystem().unregisterSymbolicLink(alias);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemSetWorkingDirectory(const QString& guest_path) {
+  const auto result = backend_->filesystem().setWorkingDirectory(guest_path);
+  return toVariant(result);
+}
+QVariantMap LauncherBridge::filesystemTestPath(const QString& guest_path) {
+  const auto result = backend_->filesystem().testPath(guest_path);
+  return toVariant(result);
+}
+
+bool LauncherBridge::deleteCaptureFile(const QString& path) {
+  const QFileInfo target(path);
+  const QFileInfo capturesRoot(defaultScreenshotsPath());
+  const auto target_canonical = target.canonicalFilePath();
+  const auto root_canonical = capturesRoot.canonicalFilePath();
+  if (target_canonical.isEmpty() || root_canonical.isEmpty() ||
+      !target_canonical.startsWith(root_canonical + QLatin1Char('/'))) {
+    pushNotification(QStringLiteral("Capture not deleted"),
+                     QStringLiteral("That file is not inside the captures folder."),
+                     QStringLiteral("error"));
+    return false;
+  }
+  if (!target.isFile() || !QFile::remove(target_canonical)) {
+    pushNotification(QStringLiteral("Capture not deleted"),
+                     QStringLiteral("Xenon could not delete that file."), QStringLiteral("error"));
+    return false;
+  }
+  return true;
+}
+
+QString LauncherBridge::networkReachabilityStatus() const {
+  static const bool kBackendLoaded = QNetworkInformation::loadDefaultBackend();
+  auto* info = QNetworkInformation::instance();
+  if (!kBackendLoaded || !info) return QStringLiteral("unknown");
+  switch (info->reachability()) {
+    case QNetworkInformation::Reachability::Online:
+      return QStringLiteral("online");
+    case QNetworkInformation::Reachability::Site:
+    case QNetworkInformation::Reachability::Local:
+    case QNetworkInformation::Reachability::Disconnected:
+      return QStringLiteral("offline");
+    default:
+      return QStringLiteral("unknown");
+  }
 }
 QString LauncherBridge::developerDiagnostics() const { return backend_->diagnostics().developerDiagnostics(); }
 QString LauncherBridge::userDiagnostics() const { return backend_->diagnostics().userDiagnostics(); }

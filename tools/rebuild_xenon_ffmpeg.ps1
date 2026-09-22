@@ -156,6 +156,11 @@ $LicenseHash  licenses/LICENSE.md
 "@ | Set-Content (Join-Path $OutputRoot "SHA256SUMS.txt") -Encoding UTF8
     @"
 # Generated identity manifest for the vetted Xenon Windows x64 FFmpeg bundle.
+set(XENON_FFMPEG_BUNDLE_SCHEMA 2)
+set(XENON_FFMPEG_BUNDLE_XENIA_REVISION "$XeniaRevision")
+set(XENON_FFMPEG_BUNDLE_FFMPEG_REVISION "$FFmpegRevision")
+set(XENON_FFMPEG_BUNDLE_TRIPLET "windows-x64")
+set(XENON_FFMPEG_BUNDLE_LINKAGE "static")
 set(XENON_FFMPEG_BUNDLE_AVCODEC_SHA256 "$CodecHash")
 set(XENON_FFMPEG_BUNDLE_AVUTIL_SHA256 "$UtilHash")
 set(XENON_FFMPEG_BUNDLE_CODEC_ID_SHA256 "$CodecIdHash")

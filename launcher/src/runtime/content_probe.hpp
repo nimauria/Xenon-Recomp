@@ -21,9 +21,30 @@ class IContentProbe {
   [[nodiscard]] virtual bool available() const noexcept = 0;
   [[nodiscard]] virtual QString status() const = 0;
 
-  // data must be a QVariantMap containing at least "moduleId" when successful.
+  // Identifies the Xbox content itself (title/media identity, XEX version,
+  // disc info, source type/paths) from `source`. A compatible installed
+  // module is looked up as a best-effort convenience: when exactly one
+  // module matches, its "moduleId"/"moduleName"/"moduleVersion" and
+  // manifest-declared display fields are included; when zero modules match,
+  // identification still succeeds with those fields left empty ("moduleId"
+  // is empty, "ready" is false) so a legally-owned disc can be added to the
+  // library before its game module exists - module resolution can happen
+  // later (installing a module, or matchModule() re-run at Play time). Only
+  // genuine ambiguity (more than one installed module claims the same
+  // identity) is a hard failure, since guessing between them would be wrong.
   [[nodiscard]] virtual ServiceResult identifyGame(
       const QUrl& source, const QVariantList& module_candidates) const = 0;
+
+  // Re-runs installed-module matching for an ALREADY-known title/media
+  // identity (e.g. a library entry whose content was identified before any
+  // compatible module was installed) without touching the original content
+  // source again. On success, `data` is a QVariantMap with "moduleId",
+  // "moduleName", "moduleVersion" (and any manifest-declared display
+  // fields identifyGame() would have included). Fails when zero or more than
+  // one installed module matches.
+  [[nodiscard]] virtual ServiceResult matchModule(
+      const QString& title_id, const QString& media_id, const QString& xex_version,
+      int disc_number, const QVariantList& module_candidates) const = 0;
 
   // data must be a QVariantMap containing at least "dlcId" when successful.
   [[nodiscard]] virtual ServiceResult identifyDlc(
@@ -43,6 +64,9 @@ class UnavailableContentProbe final : public IContentProbe {
   [[nodiscard]] QString status() const override;
   [[nodiscard]] ServiceResult identifyGame(
       const QUrl& source, const QVariantList& module_candidates) const override;
+  [[nodiscard]] ServiceResult matchModule(
+      const QString& title_id, const QString& media_id, const QString& xex_version,
+      int disc_number, const QVariantList& module_candidates) const override;
   [[nodiscard]] ServiceResult identifyDlc(
       const QUrl& source, const QString& game_id,
       const QVariantList& catalogue) const override;
@@ -61,6 +85,9 @@ class XenonContentProbe final : public IContentProbe {
   [[nodiscard]] QString status() const override;
   [[nodiscard]] ServiceResult identifyGame(
       const QUrl& source, const QVariantList& module_candidates) const override;
+  [[nodiscard]] ServiceResult matchModule(
+      const QString& title_id, const QString& media_id, const QString& xex_version,
+      int disc_number, const QVariantList& module_candidates) const override;
   [[nodiscard]] ServiceResult identifyDlc(
       const QUrl& source, const QString& game_id,
       const QVariantList& catalogue) const override;

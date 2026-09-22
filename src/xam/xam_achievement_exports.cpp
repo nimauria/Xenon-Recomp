@@ -9,110 +9,28 @@ void write_u32_be(cpu::MemoryPort& memory, cpu::GuestAddress addr, std::uint32_t
   memory.write32_be(addr, value);
 }
 
-void write_u64_be(cpu::MemoryPort& memory, cpu::GuestAddress addr, std::uint64_t value) {
-  memory.write64_be(addr, value);
-}
-
-std::uint64_t read_u64_be(cpu::MemoryPort& memory, cpu::GuestAddress addr) {
-  return memory.read64_be(addr);
-}
-
 }  // namespace
 
+// XamUserWriteAchievements/XamUserReadStats/XamUserWriteStats were removed
+// from here: they were ordinals invented by earlier Xenon code with no
+// corresponding xam.xex export under any name (verified against both
+// xenia's src/xenia/kernel/xam/xam_table.inc and rexglue-sdk's
+// src/kernel/xam/export_table.inc - neither lists nor implements them). A
+// real retail title can never import a function by a name that does not
+// exist in xam.xex, so registering them under any ordinal would still leave
+// them permanently unreachable. On real hardware, achievement unlocks and
+// stat updates are written directly into the title's cached profile GPD via
+// the content APIs, not through a dedicated XAM ordinal call.
+// AchievementManager::unlock_achievement()/write_stat() remain available as
+// internal Xenon APIs (see XamSession::achievements()) for a future
+// GPD-backed write path; see xam_exports.hpp for the full rationale.
 bool register_achievement_exports(core::ExportRegistry& registry,
                                  AchievementManager& achievement_manager) {
   bool ok = true;
 
-  // XamUserWriteAchievements (0x0280)
-  {
-    core::ExportDescriptor desc{};
-    desc.library = "xam";
-    desc.name = "XamUserWriteAchievements";
-    desc.ordinal = ordinal::XamUserWriteAchievements;
-    desc.requirement = core::ExportRequirement::Required;
-    desc.handler = [&achievement_manager](core::ExportCallContext& ctx) -> bool {
-      const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
-      const auto title_id_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
-      const auto achievement_id = static_cast<std::uint32_t>(ctx.cpu.gpr[5]);
-
-      std::uint64_t title_id = 0;
-      if (title_id_ptr != 0) {
-        title_id = read_u64_be(ctx.memory, title_id_ptr);
-      }
-
-      const auto result = achievement_manager.unlock_achievement(
-          user_index, title_id, achievement_id);
-
-      ctx.cpu.gpr[3] = result;
-      return true;
-    };
-    ok = registry.register_export(std::move(desc)) && ok;
-  }
-
-  // XamUserReadStats (0x0281)
-  {
-    core::ExportDescriptor desc{};
-    desc.library = "xam";
-    desc.name = "XamUserReadStats";
-    desc.ordinal = ordinal::XamUserReadStats;
-    desc.requirement = core::ExportRequirement::Stubbed;
-    desc.handler = [&achievement_manager](core::ExportCallContext& ctx) -> bool {
-      const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
-      const auto title_id_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
-      const auto stat_id = static_cast<std::uint32_t>(ctx.cpu.gpr[6]);
-      const auto out_value_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
-
-      std::uint64_t title_id = 0;
-      if (title_id_ptr != 0) {
-        title_id = read_u64_be(ctx.memory, title_id_ptr);
-      }
-
-      auto stat_opt = achievement_manager.read_stat(user_index, title_id, stat_id);
-      
-      if (!stat_opt.has_value()) {
-        ctx.cpu.gpr[3] = result::Empty;
-        return true;
-      }
-
-      if (out_value_ptr != 0) {
-        write_u64_be(ctx.memory, out_value_ptr, 
-                     static_cast<std::uint64_t>(stat_opt->value));
-      }
-
-      ctx.cpu.gpr[3] = result::Success;
-      return true;
-    };
-    ok = registry.register_export(std::move(desc)) && ok;
-  }
-
-  // XamUserWriteStats (0x0282)
-  {
-    core::ExportDescriptor desc{};
-    desc.library = "xam";
-    desc.name = "XamUserWriteStats";
-    desc.ordinal = ordinal::XamUserWriteStats;
-    desc.requirement = core::ExportRequirement::Required;
-    desc.handler = [&achievement_manager](core::ExportCallContext& ctx) -> bool {
-      const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
-      const auto title_id_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
-      const auto stat_id = static_cast<std::uint32_t>(ctx.cpu.gpr[6]);
-      const auto value = static_cast<std::int64_t>(ctx.cpu.gpr[7]);
-
-      std::uint64_t title_id = 0;
-      if (title_id_ptr != 0) {
-        title_id = read_u64_be(ctx.memory, title_id_ptr);
-      }
-
-      const auto result = achievement_manager.write_stat(
-          user_index, title_id, stat_id, value);
-
-      ctx.cpu.gpr[3] = result;
-      return true;
-    };
-    ok = registry.register_export(std::move(desc)) && ok;
-  }
-
-  // XamUserCreateAchievementEnumerator (0x0284) - Stubbed
+  // XamUserCreateAchievementEnumerator (0x02EE) - Stubbed. Real xam.xex
+  // parameters are (title_id, user_index, flags, count_ptr, buffer_size_ptr,
+  // out_handle_ptr); only the output handle is currently marshalled.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -125,6 +43,32 @@ bool register_achievement_exports(core::ExportRegistry& registry,
       // Return stub handle
       if (out_handle_ptr != 0) {
         write_u32_be(ctx.memory, out_handle_ptr, 0xACE00001);
+      }
+
+      ctx.cpu.gpr[3] = result::Success;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamUserCreateStatsEnumerator (0x02F7) - Stubbed. Same parameter shape as
+  // the achievement enumerator above; AchievementManager already tracks
+  // per-title stats via write_stat()/enumerate_stats() for internal callers,
+  // but the enumerator handle returned here does not yet back a real
+  // walk-the-results XamEnumerate path (no generic enumerator/handle
+  // infrastructure exists in Xenon yet - out of scope for ordinal
+  // correctness).
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamUserCreateStatsEnumerator";
+    desc.ordinal = ordinal::XamUserCreateStatsEnumerator;
+    desc.requirement = core::ExportRequirement::Stubbed;
+    desc.handler = [](core::ExportCallContext& ctx) -> bool {
+      const auto out_handle_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
+
+      if (out_handle_ptr != 0) {
+        write_u32_be(ctx.memory, out_handle_ptr, 0xACE00002);
       }
 
       ctx.cpu.gpr[3] = result::Success;

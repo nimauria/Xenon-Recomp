@@ -31,7 +31,7 @@ void write_string(cpu::MemoryPort& memory, cpu::GuestAddress addr,
 bool register_user_exports(core::ExportRegistry& registry, UserManager& user_manager) {
   bool ok = true;
 
-  // XamUserGetXUID (0x0180)
+  // XamUserGetXUID (0x020A)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -58,7 +58,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamUserGetSigninState (0x0181)
+  // XamUserGetSigninState (0x0210)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -74,7 +74,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamUserGetName (0x0183)
+  // XamUserGetName (0x020E)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -102,7 +102,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamUserCheckPrivilege (0x0187) - Stubbed
+  // XamUserCheckPrivilege (0x0212) - Stubbed
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";

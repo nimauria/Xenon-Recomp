@@ -222,7 +222,26 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::CacheHint:o<<"  (void)"<<arg(i,0)<<";\n";break;
 
     case Op::Branch:o<<"  return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,0)<<"),0};\n";break;
-    case Op::Call:o<<"  { auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,0)<<"),state,memory); if(rr.terminal()) return rr; }\n";break;
+    // A direct `bl` target is a compile-time constant, so try the local CPU
+    // V2 compiled registry first - exactly the same "local lookup, else
+    // runtime.call() fallback" pattern already used below for
+    // CallIndirect/linked BranchIndirect. Without this, a `bl` to another
+    // function discovered/compiled in the SAME module always fell straight
+    // to runtime.call() (there is no CPU V1 code_cache_ registration for a
+    // native-extension-loaded title - see XenonSession::call()), which found
+    // nothing, wasn't a recognized import either, and used to return a
+    // non-terminal Branch that this call site's `if(rr.terminal())` check
+    // silently swallowed - i.e. every local guest-to-guest `bl` silently
+    // no-op'd instead of running the callee. This was a real, previously
+    // undetected defect: the two-import fixture that first proved the
+    // import-thunk bridge never happened to exercise a local-to-local call.
+    case Op::Call:{
+      o<<"  { const auto call_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
+       <<"if(auto* native=context.lookup_compiled(call_target,CompiledLookupKind::Call)) { "
+       <<"auto rr=native(context); if(rr.terminal()) return rr; } else { "
+       <<"auto rr=runtime.call(call_target,state,memory); if(rr.terminal()) return rr; } }\n";
+      break;
+    }
     case Op::BranchIf:{o<<"  if("<<arg(i,0)<<") { ";if(i.imm0)o<<"auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,1)<<"),state,memory); if(rr.terminal()) return rr;";else o<<"return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,1)<<"),0};";o<<" }\n";break;}
     case Op::BranchIndirect:{
       o<<"  if("<<arg(i,0)<<") { ";
@@ -374,11 +393,36 @@ const DirectCallBinding* find_direct_call(
   return nullptr;
 }
 
+void emit_longjump_dispatch(std::ostringstream& o, std::string_view rr,
+                            const std::unordered_set<GuestAddress>& local_targets,
+                            std::string_view indent = "  ") {
+  o << indent << "if(" << rr << ".reason==FlowReason::LongJump) { switch("
+    << rr << ".next_address) { ";
+  for (const auto target : local_targets) {
+    o << "case " << target << "u: state.cia=" << target
+      << "u; state.nia=" << static_cast<GuestAddress>(target + 4u)
+      << "u; goto " << local_label(target) << "; ";
+  }
+  o << "default: return " << rr << "; } }\n";
+}
+
+void emit_call_result_check(std::ostringstream& o, std::string_view rr,
+                            GuestAddress expected_return,
+                            const std::unordered_set<GuestAddress>& local_targets,
+                            std::string_view indent = "  ") {
+  emit_longjump_dispatch(o, rr, local_targets, indent);
+  o << indent << "if(" << rr << ".reason==FlowReason::Return) { if("
+    << rr << ".next_address!=" << expected_return << "u) return " << rr
+    << "; } else if(" << rr << ".reason!=FlowReason::Fallthrough) return "
+    << rr << ";\n";
+}
+
 std::string emit_one_in_function(const Instruction& i,
                                  const std::vector<Type>& value_types,
                                  const ir::Block& block,
                                  const std::unordered_set<GuestAddress>& local_targets,
-                                 std::span<const DirectCallBinding> direct_calls) {
+                                 std::span<const DirectCallBinding> direct_calls,
+                                 std::string_view local_dispatch_symbol) {
   std::ostringstream o;
   if (i.op == Op::Branch) {
     const auto target = i.args.empty() ? std::optional<std::uint64_t>{} : constant_value(block, i.args[0]);
@@ -393,32 +437,54 @@ std::string emit_one_in_function(const Instruction& i,
       return o.str();
     }
   }
+
   if (i.op == Op::Call && !i.args.empty()) {
     const auto target = constant_value(block, i.args[0]);
     if (target) {
       const auto guest_target = static_cast<GuestAddress>(*target);
-      if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
-        const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
-        o << "  { auto rr=" << binding->native_symbol
-          << "(context); if(rr.reason != FlowReason::Return || rr.next_address != "
-          << expected_return << "u) return rr; }\n";
+      const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
+      if (local_targets.contains(guest_target)) {
+        o << "  { auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
+        emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
+        o << "  }\n";
         return o.str();
       }
+      if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
+        o << "  { auto rr=" << binding->native_symbol << "(context);\n";
+        emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
+        o << "  }\n";
+        return o.str();
+      }
+      o << "  { ExecutionResult rr{}; if(auto* native=context.lookup_compiled("
+        << guest_target << "u,CompiledLookupKind::Call)) rr=native(context); "
+        << "else rr=runtime.call(" << guest_target << "u,state,memory);\n";
+      emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
+      o << "  }\n";
+      return o.str();
     }
   }
+
   if (i.op == Op::BranchIf && i.imm0 == 1 && i.args.size() >= 2) {
     const auto target = constant_value(block, i.args[1]);
     if (target) {
       const auto guest_target = static_cast<GuestAddress>(*target);
-      if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
-        const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
-        o << "  if(" << arg(i,0) << ") { auto rr=" << binding->native_symbol
-          << "(context); if(rr.reason != FlowReason::Return || rr.next_address != "
-          << expected_return << "u) return rr; }\n";
-        return o.str();
+      const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
+      o << "  if(" << arg(i,0) << ") {\n";
+      if (local_targets.contains(guest_target)) {
+        o << "    auto rr=" << local_dispatch_symbol << "(context," << guest_target << "u);\n";
+      } else if (const auto* binding = find_direct_call(guest_target, direct_calls)) {
+        o << "    auto rr=" << binding->native_symbol << "(context);\n";
+      } else {
+        o << "    ExecutionResult rr{}; if(auto* native=context.lookup_compiled("
+          << guest_target << "u,CompiledLookupKind::Call)) rr=native(context); "
+          << "else rr=runtime.call(" << guest_target << "u,state,memory);\n";
       }
+      emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
+      o << "  }\n";
+      return o.str();
     }
   }
+
   if (i.op == Op::BranchIf && i.imm0 == 0 && i.args.size() >= 2) {
     const auto target = constant_value(block, i.args[1]);
     if (target) {
@@ -432,6 +498,37 @@ std::string emit_one_in_function(const Instruction& i,
       return o.str();
     }
   }
+
+  if (i.op == Op::CallIndirect ||
+      (i.op == Op::BranchIndirect && i.imm0 != 0u)) {
+    const auto target_arg = i.op == Op::CallIndirect ? arg(i,0) : arg(i,1);
+    const auto condition = i.op == Op::CallIndirect ? std::string{} : arg(i,0);
+    const auto expected_return = static_cast<GuestAddress>(i.guest_address + 4u);
+    if (!condition.empty()) o << "  if(" << condition << ") {\n";
+    const auto indent = condition.empty() ? std::string("  ") : std::string("    ");
+    o << indent << "const auto raw_target=static_cast<GuestAddress>(" << target_arg << ");\n";
+    o << indent << "const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u);\n";
+    o << indent << "ExecutionResult rr{}; bool handled_local=false; switch(guest_target) { ";
+    for (const auto target : local_targets)
+      o << "case " << target << "u: rr=" << local_dispatch_symbol
+        << "(context,guest_target); handled_local=true; break; ";
+    o << "default: break; }\n";
+    o << indent << "if(!handled_local) { if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) rr=native(context); else rr=runtime.call(raw_target,state,memory); }\n";
+    emit_call_result_check(o, "rr", expected_return, local_targets, indent);
+    if (!condition.empty()) o << "  }\n";
+    return o.str();
+  }
+
+  if (i.op == Op::BranchIndirect && i.imm0 == 0u && i.imm1 != 1u) {
+    o << "  if(" << arg(i,0) << ") { const auto guest_target=static_cast<GuestAddress>("
+      << arg(i,1) << " & ~3ull); switch(guest_target) { ";
+    for (const auto target : local_targets)
+      o << "case " << target << "u: state.nia=" << target << "u; goto "
+        << local_label(target) << "; ";
+    o << "default: break; } if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) return native(context); return {FlowReason::Branch,guest_target,0}; }\n";
+    return o.str();
+  }
+
   return emit_one(i, value_types);
 }
 
@@ -496,12 +593,16 @@ std::string CppAotBackend::emit_function(
     if (declared_symbols.insert(binding.native_symbol).second)
       o << "ExecutionResult " << binding.native_symbol << "(ExecutionContext&);\n";
   }
-  o << "ExecutionResult " << name << "_v2([[maybe_unused]] ExecutionContext& context) {\n";
+  const std::string dispatch_symbol = std::string(name) + "_dispatch_v2";
+  o << "static ExecutionResult " << dispatch_symbol << "([[maybe_unused]] ExecutionContext& context, GuestAddress entry) {\n";
   o << "  auto& state = context.state;\n";
   o << "  auto& memory = context.memory;\n";
   o << "  auto& runtime = context.runtime;\n";
   o << "  auto& memory_access = context.memory_access;\n";
-  o << "  goto " << local_label(function.guest_address) << ";\n";
+  o << "  switch(entry) {\n";
+  for (const auto target : local_targets)
+    o << "    case " << target << "u: goto " << local_label(target) << ";\n";
+  o << "    default: return {FlowReason::Trap,entry,0x80000003u};\n  }\n";
 
   for (const auto& block : function.blocks) {
     o << local_label(block.guest_address) << ": {\n";
@@ -522,7 +623,7 @@ std::string CppAotBackend::emit_function(
     }
     for (const auto& i : block.instructions) {
       emit_guest_pc(o, i, current_guest, materialized_guest);
-      o << emit_one_in_function(i, value_types, block, local_targets, direct_calls);
+      o << emit_one_in_function(i, value_types, block, local_targets, direct_calls, dispatch_symbol);
     }
 
     if (!is_guaranteed_terminal(block)) {
@@ -551,6 +652,8 @@ std::string CppAotBackend::emit_function(
     o << "}\n";
   }
   o << "}\n";
+  o << "ExecutionResult " << name << "_v2([[maybe_unused]] ExecutionContext& context) {\n";
+  o << "  return " << dispatch_symbol << "(context," << function.guest_address << "u);\n}\n";
   o << "ExecutionResult " << name
     << "([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, "
        "[[maybe_unused]] RuntimeServices& runtime) {\n";

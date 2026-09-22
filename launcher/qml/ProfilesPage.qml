@@ -13,6 +13,25 @@ Item {
     readonly property bool testMode: launcherBridge.testMode
     readonly property var selected: ProfileStore.profile(ProfileStore.selectedIndex)
 
+    function openContextMenuForFocusedItem() {
+        if (ProfileStore.selectedIndex < 0 || ProfileStore.selectedIndex >= ProfileStore.profiles.length)
+            return
+        // profileActionsMenu.actions is a live binding to ProfileStore.selectedIndex
+        // already - opening it is enough, assigning actions here would permanently
+        // replace that binding with a static value.
+        profileActionsMenu.open()
+    }
+
+    function movePage(forward) {
+        var count = ProfileStore.profiles.length
+        if (count === 0) return
+        var step = 5
+        var next = forward ? Math.min(count - 1, ProfileStore.selectedIndex + step)
+                           : Math.max(0, ProfileStore.selectedIndex - step)
+        ProfileStore.selectedIndex = next
+        profileList.positionViewAtIndex(next, ListView.Contain)
+    }
+
     function selectProfileById(profileId) {
         var target = String(profileId || "")
         if (target.length === 0) return false
@@ -125,6 +144,7 @@ Item {
                         color: Theme.text
                         font.pixelSize: Theme.typeSubtitle
                         font.weight: Font.DemiBold
+                        elide: Text.ElideRight
                     }
                     StatusPill { visible: root.testMode; label: "TEST"; tone: Theme.warning }
                 }
@@ -154,7 +174,7 @@ Item {
                     spacing: Theme.spaceSm
                     model: ProfileStore.profiles
                     boundsBehavior: Flickable.StopAtBounds
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
 
                     // This must live on the ListView viewport, not its scrolling contentItem.
                     // That makes blank-space context menus work even when the list is shorter than
@@ -257,10 +277,15 @@ Item {
 
                         Keys.onReturnPressed: ProfileStore.selectedIndex = index
                         Keys.onSpacePressed: ProfileStore.selectedIndex = index
+                        onActiveFocusChanged: if (activeFocus) ProfileStore.selectedIndex = index
                     }
 
                     Text {
                         anchors.centerIn: profileList
+                        // wrapMode only takes effect when the Text has an explicit width -
+                        // without one it sizes to its unwrapped implicit width and
+                        // anchors.centerIn then overflows both edges of the panel.
+                        width: Math.min(implicitWidth, profileList.width - Theme.spaceLg * 2)
                         visible: ProfileStore.profiles.length === 0
                         text: "No local profiles yet.\nCreate one to manage your gamertag, gamerpic and game preferences."
                         color: Theme.textMuted
@@ -352,8 +377,10 @@ Item {
                         }
 
                         RowLayout {
-                            Layout.fillWidth: true
-                            Layout.minimumWidth: 500
+                            // No Layout.minimumWidth here - forcing a fixed floor wider
+                            // than the buttons' own natural size made this row overflow
+                            // whenever the window was narrower than that arbitrary
+                            // number, regardless of what space was actually available.
                             Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
                             spacing: Theme.spaceSm
 

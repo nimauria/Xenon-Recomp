@@ -18,6 +18,9 @@ namespace xenon::launcher {
 namespace {
 constexpr int kProfileNameLimit = 48;
 constexpr int kDescriptionLimit = 180;
+// The crop editor's own upper bound on how far a user may zoom in past the
+// minimum cover scale; kept in sync with AvatarCropEditor.qml's slider range.
+constexpr double kMaxAvatarZoom = 3.0;
 
 QString limited(QString value, int limit) {
   value = value.trimmed();
@@ -96,6 +99,12 @@ ServiceResult ProfileService::create(const QVariantMap& data) {
   auto item = defaultProfile(name, false, safeProfileId(requested_id) ? requested_id : newProfileId());
   item.insert(QStringLiteral("description"), limited(data.value(QStringLiteral("description"), QStringLiteral("Xenon launcher profile.")).toString(), kDescriptionLimit));
   item.insert(QStringLiteral("avatarPath"), data.value(QStringLiteral("avatarPath")).toString());
+  // The crop editor's position/zoom is metadata over the untouched original
+  // image (see importAvatar()) - never baked into the file - so it is always
+  // saved alongside avatarPath rather than destructively re-encoding it.
+  item.insert(QStringLiteral("avatarFocalX"), qBound(0.0, data.value(QStringLiteral("avatarFocalX"), 0.5).toDouble(), 1.0));
+  item.insert(QStringLiteral("avatarFocalY"), qBound(0.0, data.value(QStringLiteral("avatarFocalY"), 0.5).toDouble(), 1.0));
+  item.insert(QStringLiteral("avatarZoom"), qBound(1.0, data.value(QStringLiteral("avatarZoom"), 1.0).toDouble(), kMaxAvatarZoom));
   item.insert(QStringLiteral("gamePath"), data.value(QStringLiteral("gamePath")).toString());
   item.insert(QStringLiteral("savePath"), data.value(QStringLiteral("savePath")).toString());
   item.insert(QStringLiteral("screenshotPath"), data.value(QStringLiteral("screenshotPath")).toString());
@@ -130,6 +139,12 @@ ServiceResult ProfileService::update(int index, const QVariantMap& data) {
   item.insert(QStringLiteral("profileName"), name);
   item.insert(QStringLiteral("description"), limited(data.value(QStringLiteral("description")).toString(), kDescriptionLimit));
   if (data.contains(QStringLiteral("avatarPath"))) item.insert(QStringLiteral("avatarPath"), data.value(QStringLiteral("avatarPath")).toString());
+  if (data.contains(QStringLiteral("avatarFocalX")))
+    item.insert(QStringLiteral("avatarFocalX"), qBound(0.0, data.value(QStringLiteral("avatarFocalX")).toDouble(), 1.0));
+  if (data.contains(QStringLiteral("avatarFocalY")))
+    item.insert(QStringLiteral("avatarFocalY"), qBound(0.0, data.value(QStringLiteral("avatarFocalY")).toDouble(), 1.0));
+  if (data.contains(QStringLiteral("avatarZoom")))
+    item.insert(QStringLiteral("avatarZoom"), qBound(1.0, data.value(QStringLiteral("avatarZoom")).toDouble(), kMaxAvatarZoom));
   item.insert(QStringLiteral("gamePath"), data.value(QStringLiteral("gamePath")).toString());
   item.insert(QStringLiteral("savePath"), data.value(QStringLiteral("savePath")).toString());
   item.insert(QStringLiteral("screenshotPath"), data.value(QStringLiteral("screenshotPath")).toString());
@@ -415,6 +430,9 @@ QVariantMap ProfileService::defaultProfile(const QString& name, bool active,
   item.insert(QStringLiteral("active"), active);
   item.insert(QStringLiteral("games"), 0);
   item.insert(QStringLiteral("avatarPath"), QString{});
+  item.insert(QStringLiteral("avatarFocalX"), 0.5);
+  item.insert(QStringLiteral("avatarFocalY"), 0.5);
+  item.insert(QStringLiteral("avatarZoom"), 1.0);
   item.insert(QStringLiteral("modules"), 0);
   item.insert(QStringLiteral("saveSets"), 0);
   item.insert(QStringLiteral("gamePath"), QString{});
@@ -460,6 +478,8 @@ void ProfileService::normalizeLoadedProfiles(const QVariantList& parsed, const Q
             ? source.value(QStringLiteral("profileId")).toString()
             : QStringLiteral("profile-restored-%1").arg(i));
     for (const auto& key : {QStringLiteral("description"), QStringLiteral("avatarPath"),
+                            QStringLiteral("avatarFocalX"), QStringLiteral("avatarFocalY"),
+                            QStringLiteral("avatarZoom"),
                             QStringLiteral("gamePath"), QStringLiteral("savePath"),
                             QStringLiteral("screenshotPath"), QStringLiteral("region"),
                             QStringLiteral("startupPage"), QStringLiteral("createdAt"),

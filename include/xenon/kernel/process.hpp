@@ -4,6 +4,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+
+#include "xenon/kernel/heap.hpp"
 
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/module.hpp"
@@ -26,6 +29,9 @@ class KernelProcess final : public KernelObject {
   [[nodiscard]] KernelMemory& memory() { return *memory_; }
   [[nodiscard]] const KernelMemory& memory() const { return *memory_; }
 
+  [[nodiscard]] GuestHeapManager& guest_heap() noexcept { return guest_heap_; }
+  [[nodiscard]] const GuestHeapManager& guest_heap() const noexcept { return guest_heap_; }
+
   [[nodiscard]] std::shared_ptr<KernelThread> main_thread() const;
   void set_main_thread(std::shared_ptr<KernelThread> thread);
 
@@ -43,6 +49,7 @@ class KernelProcess final : public KernelObject {
   std::uint32_t process_id_;
   std::uint32_t exit_code_{0};
   std::shared_ptr<KernelMemory> memory_;
+  GuestHeapManager guest_heap_;
   ThreadManager thread_manager_;
   ModuleManager module_manager_;
   std::shared_ptr<KernelThread> main_thread_;

@@ -1,6 +1,7 @@
 #include "xenon/cpu/function_compiler.hpp"
 
 #include <algorithm>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -9,14 +10,6 @@
 
 namespace xenon::cpu {
 namespace {
-
-[[nodiscard]] bool in_function(GuestAddress base, std::size_t word_count,
-                               GuestAddress target) noexcept {
-  const auto begin = std::uint64_t{base};
-  const auto end = begin + word_count * 4ull;
-  return (target & 3u) == 0u && std::uint64_t{target} >= begin &&
-         std::uint64_t{target} < end;
-}
 
 [[nodiscard]] bool is_direct_branch(const DecodedInstruction& instruction) noexcept {
   if (!instruction.info || instruction.info->group != InstructionGroup::Branch)
@@ -45,8 +38,6 @@ namespace {
 }
 
 [[nodiscard]] bool is_instruction_sync(const DecodedInstruction& instruction) noexcept {
-  // isync is the only integer XL-form instruction in the current catalogue whose
-  // execution intentionally leaves the translation to revalidate executable code.
   return instruction.info && instruction.info->group == InstructionGroup::Integer &&
          instruction.info->format == InstructionFormat::XL &&
          instruction.mnemonic() == "isync";
@@ -57,18 +48,22 @@ namespace {
   if (instruction.info->format == InstructionFormat::I) return true;
   if (instruction.info->format == InstructionFormat::XL &&
       instruction.mnemonic() == "bcctrx") {
-    // bcctr does not decrement/test CTR; BO[0] controls whether CR is ignored.
     return (instruction.bo() & 0b10000u) != 0u;
   }
   if (instruction.info->format == InstructionFormat::B ||
       instruction.info->format == InstructionFormat::XL) {
-    // Ignore both CTR and CR tests.
     return (instruction.bo() & 0b10100u) == 0b10100u;
   }
   return false;
 }
 
 [[nodiscard]] bool ends_basic_block(const DecodedInstruction& instruction) noexcept {
+  // Calls are block boundaries too. This is semantically neutral for ordinary
+  // calls and guarantees a setjmp continuation has an explicit local label to
+  // which a propagated guest LongJump can return.
+  if (instruction.info && instruction.info->group == InstructionGroup::Branch &&
+      instruction.lk())
+    return true;
   if ((is_direct_branch(instruction) || is_indirect_branch(instruction)) &&
       !instruction.lk())
     return true;
@@ -90,92 +85,122 @@ void add_edge(ir::Block& block, GuestAddress target, ir::EdgeKind kind,
 
 FunctionCompileResult StaticFunctionCompiler::compile(
     GuestAddress base, std::span<const std::uint32_t> words) const {
+  const FunctionCodeRange range{base, words};
+  return compile_ranges(base, std::span<const FunctionCodeRange>(&range, 1u));
+}
+
+FunctionCompileResult StaticFunctionCompiler::compile_ranges(
+    GuestAddress entry, std::span<const FunctionCodeRange> ranges) const {
   FunctionCompileResult out{};
-  out.function.guest_address = base;
-  if (words.empty()) {
-    out.error_address = base;
+  out.function.guest_address = entry;
+  if (ranges.empty()) {
+    out.error_address = entry;
     out.error = "empty guest function";
     return out;
   }
 
-  // Decode once during recompilation. Runtime execution never performs guest
-  // opcode decoding.
-  std::vector<DecodedInstruction> decoded;
-  decoded.reserve(words.size());
-  for (std::size_t n = 0; n < words.size(); ++n) {
-    const auto address = static_cast<GuestAddress>(base + n * 4u);
-    const auto word = words[n];
-    auto instruction = decoder_.decode(address, word);
-    if (!instruction.valid()) {
-      out.error_address = address;
-      out.error_word = word;
-      out.error = "unknown Xenon/PPC instruction";
+  // Decode every declared range into one sparse address map. Duplicate or
+  // overlapping ranges are rejected here even though schema validation should
+  // normally catch them earlier; the compiler remains safe for direct callers.
+  std::map<GuestAddress, DecodedInstruction> decoded;
+  std::vector<GuestAddress> range_starts;
+  for (const auto& range : ranges) {
+    if (range.words.empty()) {
+      out.error_address = range.base;
+      out.error = "empty guest function range";
       return out;
     }
-    decoded.push_back(instruction);
-  }
-
-  // Discover real guest basic-block leaders before lifting. Function boundaries
-  // come from the analysis/game layer; this pass only partitions the supplied
-  // static function body.
-  std::vector<bool> leader(words.size(), false);
-  leader.front() = true;
-  for (std::size_t n = 0; n < decoded.size(); ++n) {
-    const auto& instruction = decoded[n];
-    if (is_direct_branch(instruction)) {
-      const auto target = instruction.direct_branch_target();
-      if (in_function(base, words.size(), target)) {
-        leader[(target - base) / 4u] = true;
+    if ((range.base & 3u) != 0u) {
+      out.error_address = range.base;
+      out.error = "unaligned guest function range";
+      return out;
+    }
+    range_starts.push_back(range.base);
+    for (std::size_t n = 0; n < range.words.size(); ++n) {
+      const auto address = static_cast<GuestAddress>(range.base + n * 4u);
+      const auto word = range.words[n];
+      auto instruction = decoder_.decode(address, word);
+      if (!instruction.valid()) {
+        out.error_address = address;
+        out.error_word = word;
+        out.error = "unknown Xenon/PPC instruction";
+        return out;
       }
-    }
-    if (ends_basic_block(instruction) && n + 1u < decoded.size()) {
-      leader[n + 1u] = true;
-    }
-  }
-
-  std::vector<std::size_t> starts;
-  starts.reserve(words.size());
-  for (std::size_t n = 0; n < leader.size(); ++n) {
-    if (leader[n]) starts.push_back(n);
-  }
-  out.function.blocks.reserve(starts.size());
-
-  for (std::size_t block_index = 0; block_index < starts.size(); ++block_index) {
-    const auto begin = starts[block_index];
-    const auto end = block_index + 1u < starts.size() ? starts[block_index + 1u]
-                                                      : decoded.size();
-    ir::Block block{};
-    block.guest_address = decoded[begin].address;
-    block.end_address = static_cast<GuestAddress>(base + end * 4u);
-    ir::Builder builder(block);
-
-    for (std::size_t n = begin; n < end; ++n) {
-      const auto before = block.instructions.size();
-      if (!lifter_.lift(decoded[n], builder) || block.instructions.size() == before) {
-        out.error_address = decoded[n].address;
-        out.error_word = decoded[n].word;
-        out.error = "recognized instruction has no Xenon IR lowering";
+      if (!decoded.emplace(address, instruction).second) {
+        out.error_address = address;
+        out.error_word = word;
+        out.error = "overlapping guest function ranges";
         return out;
       }
     }
+  }
+
+  if (!decoded.contains(entry)) {
+    out.error_address = entry;
+    out.error = "logical function entry is outside declared ranges";
+    return out;
+  }
+
+  std::map<GuestAddress, bool> leader;
+  leader[entry] = true;
+  for (const auto start : range_starts) leader[start] = true;
+
+  for (const auto& [address, instruction] : decoded) {
+    if (is_direct_branch(instruction)) {
+      const auto target = instruction.direct_branch_target();
+      if (decoded.contains(target)) leader[target] = true;
+    }
+    const auto next = static_cast<GuestAddress>(address + 4u);
+    if (ends_basic_block(instruction) && decoded.contains(next)) leader[next] = true;
+  }
+
+  // Partition the sparse address map into contiguous guest basic blocks. A
+  // discontinuity always starts a block even if no branch targets it.
+  auto it = decoded.begin();
+  while (it != decoded.end()) {
+    const auto block_start = it->first;
+    ir::Block block{};
+    block.guest_address = block_start;
+    ir::Builder builder(block);
+
+    auto current = it;
+    while (current != decoded.end()) {
+      const auto before = block.instructions.size();
+      if (!lifter_.lift(current->second, builder) ||
+          block.instructions.size() == before) {
+        out.error_address = current->first;
+        out.error_word = current->second.word;
+        out.error = "recognized instruction has no Xenon IR lowering";
+        return out;
+      }
+
+      const auto next_address = static_cast<GuestAddress>(current->first + 4u);
+      auto next = std::next(current);
+      const bool contiguous = next != decoded.end() && next->first == next_address;
+      const bool next_is_leader = contiguous && leader.contains(next->first);
+      current = next;
+      if (!contiguous || next_is_leader) break;
+    }
+
+    const auto last_address = static_cast<GuestAddress>(
+        block.instructions.empty() ? block_start :
+        block.instructions.back().guest_address);
+    block.end_address = last_address + 4u;
     out.function.blocks.push_back(std::move(block));
+    it = current;
   }
 
   std::unordered_map<GuestAddress, std::size_t> block_by_address;
   block_by_address.reserve(out.function.blocks.size());
-  for (std::size_t i = 0; i < out.function.blocks.size(); ++i) {
+  for (std::size_t i = 0; i < out.function.blocks.size(); ++i)
     block_by_address.emplace(out.function.blocks[i].guest_address, i);
-  }
 
-  // Populate explicit CFG metadata. Calls are recorded as call edges but are not
-  // successor/predecessor edges because the containing guest block continues on
-  // return. Direct call linking is a later CPU V2 phase.
   for (auto& block : out.function.blocks) {
-    const auto begin = (block.guest_address - base) / 4u;
-    const auto end = (block.end_address - base) / 4u;
-
-    for (std::size_t n = begin; n < end; ++n) {
-      const auto& instruction = decoded[n];
+    for (auto address = block.guest_address; address < block.end_address;
+         address += 4u) {
+      const auto decoded_it = decoded.find(address);
+      if (decoded_it == decoded.end()) break;
+      const auto& instruction = decoded_it->second;
       if (is_direct_branch(instruction) && instruction.lk()) {
         const auto target = instruction.direct_branch_target();
         add_edge(block, target, ir::EdgeKind::Call,
@@ -185,43 +210,38 @@ FunctionCompileResult StaticFunctionCompiler::compile(
       }
     }
 
-    const auto& last = decoded[end - 1u];
-    const auto next = end < decoded.size()
-                          ? decoded[end].address
-                          : static_cast<GuestAddress>(base + decoded.size() * 4u);
+    const auto last_address = static_cast<GuestAddress>(block.end_address - 4u);
+    const auto& last = decoded.at(last_address);
+    const auto next = static_cast<GuestAddress>(last_address + 4u);
+    const bool has_next = block_by_address.contains(next);
 
-    if (is_direct_branch(last) && !last.lk()) {
+    if ((is_direct_branch(last) || is_indirect_branch(last)) && last.lk()) {
+      if (has_next) add_edge(block, next, ir::EdgeKind::Fallthrough, true);
+      else block.has_external_exit = true;
+    } else if (is_direct_branch(last) && !last.lk()) {
       const auto target = last.direct_branch_target();
       const bool local = block_by_address.contains(target);
       add_edge(block, target, ir::EdgeKind::Branch, local);
       block.has_external_exit |= !local;
       if (!branch_condition_is_unconditional(last)) {
-        if (end < decoded.size())
-          add_edge(block, next, ir::EdgeKind::Fallthrough, true);
-        else
-          block.has_external_exit = true;
+        if (has_next) add_edge(block, next, ir::EdgeKind::Fallthrough, true);
+        else block.has_external_exit = true;
       }
     } else if (is_indirect_branch(last) && !last.lk()) {
       block.has_indirect_exit = true;
       if (!branch_condition_is_unconditional(last)) {
-        if (end < decoded.size())
-          add_edge(block, next, ir::EdgeKind::Fallthrough, true);
-        else
-          block.has_external_exit = true;
+        if (has_next) add_edge(block, next, ir::EdgeKind::Fallthrough, true);
+        else block.has_external_exit = true;
       }
     } else if (is_syscall(last)) {
       block.has_external_exit = true;
     } else if (is_instruction_sync(last)) {
-      // isync leaves the native translation even when the next guest address is
-      // inside the same discovered function so executable-page generations are
-      // revalidated before continuing.
       block.has_external_exit = true;
       add_edge(block, next, ir::EdgeKind::Branch, false);
     } else if (is_trap(last)) {
-      block.has_external_exit = true;  // taken trap
-      if (end < decoded.size())
-        add_edge(block, next, ir::EdgeKind::Fallthrough, true);
-    } else if (end < decoded.size()) {
+      block.has_external_exit = true;
+      if (has_next) add_edge(block, next, ir::EdgeKind::Fallthrough, true);
+    } else if (has_next) {
       add_edge(block, next, ir::EdgeKind::Fallthrough, true);
     } else {
       block.has_external_exit = true;
@@ -235,9 +255,8 @@ FunctionCompileResult StaticFunctionCompiler::compile(
       if (target == block_by_address.end()) continue;
       auto& predecessors = out.function.blocks[target->second].predecessors;
       if (std::find(predecessors.begin(), predecessors.end(),
-                    block.guest_address) == predecessors.end()) {
+                    block.guest_address) == predecessors.end())
         predecessors.push_back(block.guest_address);
-      }
     }
   }
 

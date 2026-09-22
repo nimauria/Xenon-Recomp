@@ -33,9 +33,38 @@ class AudioSystem final {
   AudioSystem(const AudioSystem&) = delete;
   AudioSystem& operator=(const AudioSystem&) = delete;
 
-  [[nodiscard]] bool initialize(std::string* error = nullptr);
+  // `auto_start_callback_pump` (default true) makes initialize() spawn and
+  // own a self-managed host thread that immediately pumps guest render-driver
+  // callbacks - the original, back-compat behavior standalone/unit tests
+  // rely on when there is no surrounding guest process to give the callback a
+  // real KernelThread/TLS identity. A caller that needs the callback to
+  // execute with a real Xbox-visible thread context (KernelProcess ->
+  // KernelThread -> KPCR/TLS - see XenonSession::start_audio_guest_thread())
+  // passes false here and instead drives the loop itself via
+  // begin_guest_callback_pump()/run_guest_callback_pump_body() on a thread it
+  // owns, stopping it with stop_guest_callback_pump().
+  [[nodiscard]] bool initialize(std::string* error = nullptr,
+                                bool auto_start_callback_pump = true);
   void shutdown() noexcept;
   [[nodiscard]] bool initialized() const noexcept { return initialized_.load(); }
+
+  // Marks the guest-callback pump loop active without starting any thread of
+  // AudioSystem's own. Call once before handing run_guest_callback_pump_body
+  // to an externally-owned thread (see initialize()'s auto_start_callback_pump
+  // doc comment above).
+  void begin_guest_callback_pump() noexcept { callback_running_.store(true); }
+  // Runs the guest-callback pump loop on the CALLING thread until
+  // stop_guest_callback_pump() is called. AudioSystem has no opinion on what
+  // that thread is - a caller that wants callbacks to execute with a real
+  // guest thread identity (KernelThread/KPCR/TLS) must establish that context
+  // on this same host thread *before* calling this.
+  void run_guest_callback_pump_body() { callback_pump(); }
+  // Stops the pump loop, whether self-managed (initialize()'s default) or
+  // externally-run (begin_guest_callback_pump()/run_guest_callback_pump_body()):
+  // signals callback_running_ false and wakes any waiters, then joins the
+  // self-managed thread if AudioSystem owns one. An externally-owned thread
+  // is the caller's to join after this returns.
+  void stop_guest_callback_pump() noexcept;
 
   [[nodiscard]] Mixer& mixer() noexcept { return mixer_; }
   [[nodiscard]] XmaDecoder& xma() noexcept { return xma_; }
@@ -65,6 +94,17 @@ class AudioSystem final {
   [[nodiscard]] std::uint32_t voice_category_change_mask() noexcept;
   [[nodiscard]] float voice_category_volume(std::uint32_t category) const noexcept;
   [[nodiscard]] bool set_voice_category_volume(std::uint32_t category, float value) noexcept;
+
+  // Host-side output gain, distinct from the guest-controlled voice-category
+  // volumes above: this is the user/session "master volume" and "mute when
+  // the game window loses focus" settings (SessionConfig::audio_master_volume
+  // / audio_mute_unfocused), applied as a final multiplier in render() so it
+  // affects everything reaching the host device (render-driver clients and
+  // generic mixer voices alike).
+  void set_master_volume(float value) noexcept;
+  [[nodiscard]] float master_volume() const noexcept { return master_volume_.load(); }
+  void set_muted(bool muted) noexcept { muted_.store(muted); }
+  [[nodiscard]] bool muted() const noexcept { return muted_.load(); }
 
   void enable_ducker(bool enabled) noexcept;
   [[nodiscard]] bool ducker_enabled() const noexcept { return ducker_enabled_.load(); }
@@ -131,6 +171,9 @@ class AudioSystem final {
   // advances through underrun silence as well as submitted audio so guest AV
   // synchronization follows real playback time rather than queue occupancy.
   std::atomic<std::uint64_t> render_tic_samples_{0};
+
+  std::atomic<float> master_volume_{1.0f};
+  std::atomic_bool muted_{false};
 
   std::atomic<std::uint32_t> speaker_config_{0x00010001u};
   std::array<std::atomic<float>, 32> category_volumes_{};

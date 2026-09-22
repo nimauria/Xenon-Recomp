@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.xenonrecomp.Xenon</id>
+  <name>Xenon Recomp</name>
+  <summary>Native Xbox 360 static-recompilation runtime and launcher</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">io.xenonrecomp.Xenon.desktop</launchable>
+  <description>
+    <p>Xenon Recomp provides a common runtime and launcher for legally obtained, game-specific Xbox 360 static recompilation modules.</p>
+  </description>
+</component>

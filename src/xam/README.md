@@ -28,4 +28,4 @@ Future phases will add:
 - Notifications
 - Achievements
 
-See `docs/XAM_V1.md` for complete specification.
+See `docs/xam/XAM_V1.md` for complete specification.

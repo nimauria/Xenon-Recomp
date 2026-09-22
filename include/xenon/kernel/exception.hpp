@@ -17,6 +17,11 @@ enum class ExceptionCode : std::uint32_t {
   IntegerDivideByZero = 0xC0000094,
   IntegerOverflow = 0xC0000095,
   PrivilegedInstruction = 0xC0000096,
+  // A `bl`/`bctrl`-style call target resolved to neither a discovered/
+  // compiled guest function nor a recognized XEX import thunk (or a
+  // recognized import whose specific export this build does not implement).
+  // Matches real NT's STATUS_PROCEDURE_NOT_FOUND - see XenonSession::call().
+  ProcedureNotFound = 0xC000007A,
   StackOverflow = 0xC00000FD,
   FloatingPointDenormal = 0xC000008D,
   FloatingPointDivideByZero = 0xC000008E,

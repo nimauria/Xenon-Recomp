@@ -21,7 +21,7 @@ struct LaunchConfiguration {
   QVariantMap module_settings;
   QVariantMap runtime_api_requirements;
   // Absolute path to the module's compiled-code native extension library
-  // (see docs/RUNTIME_HOST.md), or empty if the module declares none. The
+  // (see docs/runtime/RUNTIME_HOST.md), or empty if the module declares none. The
   // runtime host cannot run guest code without this.
   QString native_extension_path;
 

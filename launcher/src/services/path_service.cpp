@@ -22,18 +22,29 @@ QString PathService::cachePath() const {
   return QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
 }
 
-QString PathService::defaultGameLibraryPath() const {
+QString PathService::defaultLibraryRootPath() const {
   const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-  return QDir{documents}.filePath(QStringLiteral("Xenon/Games"));
+  return QDir{documents}.filePath(QStringLiteral("Xenon Launcher"));
+}
+
+QString PathService::libraryRootPath() const {
+  return settings_.stringValue(QStringLiteral("frontend/paths/libraryRoot"), defaultLibraryRootPath());
+}
+
+QString PathService::preparationCachePath() const {
+  return QDir{cachePath()}.filePath(QStringLiteral("Preparation"));
+}
+
+QString PathService::defaultGameLibraryPath() const {
+  return QDir{libraryRootPath()}.filePath(QStringLiteral("Games"));
 }
 
 QString PathService::defaultSaveDataPath() const {
-  const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-  return QDir{documents}.filePath(QStringLiteral("Xenon/Saves"));
+  return QDir{libraryRootPath()}.filePath(QStringLiteral("Saves"));
 }
 
 QString PathService::defaultProfilesPath() const {
-  return QDir{appDataPath()}.filePath(QStringLiteral("Profiles"));
+  return QDir{libraryRootPath()}.filePath(QStringLiteral("Profiles"));
 }
 
 QString PathService::defaultModulesPath() const {
@@ -55,12 +66,14 @@ QString PathService::libraryMetadataPath() const {
 
 QString PathService::configuredPath(const QString& id) const {
   const auto key = QStringLiteral("frontend/paths/") + id;
+  if (id == QStringLiteral("libraryRoot")) return libraryRootPath();
   if (id == QStringLiteral("games")) return settings_.stringValue(key, defaultGameLibraryPath());
   if (id == QStringLiteral("saves")) return settings_.stringValue(key, defaultSaveDataPath());
   if (id == QStringLiteral("profiles")) return settings_.stringValue(key, defaultProfilesPath());
   if (id == QStringLiteral("modules")) return settings_.stringValue(key, defaultModulesPath());
   if (id == QStringLiteral("screenshots")) return settings_.stringValue(key, defaultScreenshotsPath());
   if (id == QStringLiteral("cache")) return settings_.stringValue(key, cachePath());
+  if (id == QStringLiteral("preparationCache")) return preparationCachePath();
   return {};
 }
 
@@ -71,7 +84,8 @@ bool PathService::ensureDirectory(const QString& path) const {
 
 bool PathService::ensureLauncherDirectories() const {
   return ensureDirectory(appDataPath()) && ensureDirectory(configPath()) &&
-         ensureDirectory(cachePath()) && ensureDirectory(defaultProfilesPath()) &&
+         ensureDirectory(cachePath()) && ensureDirectory(preparationCachePath()) &&
+         ensureDirectory(configuredPath(QStringLiteral("profiles"))) &&
          ensureDirectory(defaultModulesPath()) && ensureDirectory(packagesPath()) &&
          ensureDirectory(QFileInfo{libraryMetadataPath()}.absolutePath());
 }

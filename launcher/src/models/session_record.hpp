@@ -45,6 +45,12 @@ struct SessionRecord final {
   qint64 elapsed_ms = 0;
   QVariantMap configuration;
   SessionError error;
+  // Automatic game preparation (docs/development/GAME_PREPARATION.md) progress, populated
+  // only while state == Preparing and this game needed a native module
+  // build. progress_percent is -1 when not meaningful (e.g. compiling).
+  QString progress_phase;
+  QString progress_message;
+  int progress_percent = -1;
 
   [[nodiscard]] bool active() const noexcept;
   [[nodiscard]] bool busy() const noexcept;

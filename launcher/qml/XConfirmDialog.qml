@@ -15,6 +15,7 @@ Popup {
 
     signal confirmed()
     signal secondaryTriggered()
+    signal cancelled()
 
     parent: Overlay.overlay
     width: Math.min(560, parent ? parent.width - Theme.space2Xl * 2 : 560)
@@ -115,7 +116,10 @@ Popup {
                 id: cancelButton
                 automationId: "dialog-cancel"
                 text: root.cancelText
-                onClicked: root.close()
+                onClicked: {
+                    root.close()
+                    root.cancelled()
+                }
             }
             XButton {
                 id: confirmButton

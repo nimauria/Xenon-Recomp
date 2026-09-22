@@ -71,7 +71,10 @@ QVariantMap SessionRecord::toVariantMap(bool include_configuration) const {
                      {QStringLiteral("canStop"), canStop()},
                      {QStringLiteral("canCancel"), canCancel()},
                      {QStringLiteral("failed"), state == SessionState::Failed},
-                     {QStringLiteral("error"), error.toVariantMap()}};
+                     {QStringLiteral("error"), error.toVariantMap()},
+                     {QStringLiteral("progressPhase"), progress_phase},
+                     {QStringLiteral("progressMessage"), progress_message},
+                     {QStringLiteral("progressPercent"), progress_percent}};
   if (include_configuration) result.insert(QStringLiteral("configuration"), configuration);
   return result;
 }

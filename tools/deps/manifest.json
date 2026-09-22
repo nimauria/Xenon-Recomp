@@ -1,0 +1,71 @@
+{
+  "schema": 3,
+  "dependencies": {
+    "sdl2": {
+      "name": "SDL2",
+      "kind": "git",
+      "repository": "https://github.com/libsdl-org/SDL.git",
+      "revision": "5d249570393f7a37e037abf22cd6012a4cc56a71",
+      "version": "2.32.10",
+      "license": "Zlib",
+      "linkage": "static",
+      "install_subdir": "sdl2",
+      "required_capabilities": ["SDL.h"]
+    },
+    "xenia-ffmpeg": {
+      "name": "xenia-project FFmpeg",
+      "kind": "git",
+      "repository": "https://github.com/xenia-project/FFmpeg.git",
+      "revision": "15ece0882e8d5875051ff5b73c5a8326f7cee9f5",
+      "version": "xenia-15ece088",
+      "license": "LGPL-2.1-or-later",
+      "linkage": "shared",
+      "install_subdir": "xenia-ffmpeg",
+      "required_capabilities": ["AV_CODEC_ID_XMAFRAMES"]
+    },
+    "vulkan-headers": {
+      "name": "Khronos Vulkan-Headers",
+      "kind": "git",
+      "repository": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+      "revision": "e3b1eec08173d6b825cd3ac88c885a63b621504a",
+      "version": "1.4.357.0",
+      "license": "Apache-2.0",
+      "linkage": "headers",
+      "install_subdir": "vulkan-headers",
+      "required_capabilities": ["vulkan/vulkan.h"]
+    },
+    "vulkan-loader": {
+      "name": "Khronos Vulkan-Loader",
+      "kind": "git",
+      "repository": "https://github.com/KhronosGroup/Vulkan-Loader.git",
+      "revision": "5f157b62e333c63260d05d81bf66faa216ab0fb8",
+      "version": "1.4.357.0",
+      "license": "Apache-2.0",
+      "linkage": "shared",
+      "install_subdir": "vulkan-loader",
+      "depends": ["vulkan-headers"],
+      "required_capabilities": ["vulkan-1/runtime"]
+    },
+    "dxc": {
+      "name": "Microsoft DirectX Shader Compiler",
+      "kind": "archive",
+      "repository": "https://github.com/microsoft/DirectXShaderCompiler",
+      "revision": "v1.9.2607",
+      "version": "1.9.2607",
+      "license": "NCSA/MIT",
+      "linkage": "shared",
+      "install_subdir": "dxc",
+      "required_capabilities": ["dxcapi.h", "dxcompiler"],
+      "assets": {
+        "windows-x64": {
+          "url": "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/dxc_2026_07_29.zip",
+          "sha256": "a1dfb116ba3eeae6a1582291b53a8e7bf65ad760676bd3194685c8f7367cd241"
+        },
+        "linux-x64": {
+          "url": "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2607/linux_dxc_2026_07_29.x86_x64.tar.gz",
+          "sha256": "55665c87824051ed4774ff3280a79ccbbb7d39243b9736ca5e98222134112d54"
+        }
+      }
+    }
+  }
+}

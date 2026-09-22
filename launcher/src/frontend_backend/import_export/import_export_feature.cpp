@@ -13,8 +13,8 @@ ImportExportFeature::ImportExportFeature(ContentImportService& content_import,
     : content_import_(content_import), profiles_(profiles), library_(library),
       modules_(modules), test_mode_(test_mode) {}
 
-ServiceResult ImportExportFeature::importGameContent(const QList<QUrl>& sources) {
-  if (!test_mode_) return content_import_.importGameContent(sources);
+ServiceResult ImportExportFeature::importGameContent(const QList<QUrl>& sources, bool moveIntoLibrary) {
+  if (!test_mode_) return content_import_.importGameContent(sources, moveIntoLibrary);
   if (sources.isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Game import"),
                                   QStringLiteral("No game content was selected."));

@@ -116,11 +116,18 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE void restartInSafeMode();
   Q_INVOKABLE void restartNormally();
 
+  // Called from main.cpp on QGuiApplication::applicationStateChanged so
+  // gamepad frontend navigation only reacts while the launcher window is
+  // actually the OS foreground application (Part 7).
+  void setLauncherForeground(bool active);
+
   Q_INVOKABLE void requestLauncherUpdateCheck();
   Q_INVOKABLE void requestLauncherUpdateDownload();
   Q_INVOKABLE void requestLauncherUpdateInstall();
   Q_INVOKABLE void cancelLauncherUpdateDownload();
   Q_INVOKABLE QVariantMap launcherUpdateState() const;
+  Q_INVOKABLE QVariantMap downloadActivitySnapshot() const;
+  Q_INVOKABLE void executeDownloadActivityAction(const QString& job_id, const QString& action_id);
   Q_INVOKABLE void requestModuleCatalogRefresh();
   Q_INVOKABLE QVariantList moduleCatalogEntries() const;
   Q_INVOKABLE QVariantMap moduleCatalogState() const;
@@ -214,11 +221,16 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE QVariantList libraryDlcActions(const QString& game_id, const QString& dlc_id) const;
   Q_INVOKABLE QVariantList libraryDlcBackgroundActions(const QString& game_id) const;
   Q_INVOKABLE QVariantMap libraryGameProperties(const QString& game_id) const;
-  Q_INVOKABLE bool importGameContent(const QList<QUrl>& sources);
+  Q_INVOKABLE bool importGameContent(const QList<QUrl>& sources, bool moveIntoLibrary = false);
   Q_INVOKABLE bool importDlcContent(const QString& game_id, const QList<QUrl>& sources);
   Q_INVOKABLE bool importDlcContentForEntry(const QString& game_id, const QString& dlc_id,
                                             const QList<QUrl>& sources);
   Q_INVOKABLE bool removeLibraryEntry(const QString& game_id);
+  Q_INVOKABLE bool setLibraryFavorite(const QString& game_id, bool favorite);
+  // Destructive and separate from removeLibraryEntry() on purpose - deletes
+  // the game's Xenon-managed storage directory, never its source/original
+  // location. See LibraryService::deleteManagedFiles().
+  Q_INVOKABLE bool deleteManagedGameFiles(const QString& game_id);
   Q_INVOKABLE bool verifyLibraryEntry(const QString& game_id);
   Q_INVOKABLE bool refreshLibraryMetadata(const QString& game_id);
   Q_INVOKABLE QString libraryContentPath(const QString& game_id) const;
@@ -262,6 +274,37 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE bool canOpenPath(const QString& path) const;
   Q_INVOKABLE bool openFolder(const QString& path);
   Q_INVOKABLE bool openExternalUrl(const QString& url);
+  Q_INVOKABLE void showToast(const QString& title, const QString& message, const QString& tone = QStringLiteral("info"));
+
+  // Thin forwarders onto FilesystemFeature's VFS management surface - see
+  // FilesystemPage.qml (Settings > Filesystem), which already called these
+  // exact method names before any of them existed on this bridge.
+  Q_INVOKABLE QVariantList getFilesystemMounts() const;
+  Q_INVOKABLE QVariantList getFilesystemSymbolicLinks() const;
+  Q_INVOKABLE QString getFilesystemWorkingDirectory() const;
+  Q_INVOKABLE QVariantMap getFilesystemStatus() const;
+  Q_INVOKABLE QVariantMap filesystemMountHostPath(const QString& mount_point, const QString& host_path,
+                                                   bool read_only);
+  Q_INVOKABLE QVariantMap filesystemMountGdfxImage(const QString& mount_point, const QString& image_path);
+  Q_INVOKABLE QVariantMap filesystemMountStfsPackage(const QString& mount_point, const QString& package_path);
+  Q_INVOKABLE QVariantMap filesystemUnmount(const QString& mount_point);
+  Q_INVOKABLE QVariantMap filesystemRegisterSymbolicLink(const QString& alias, const QString& target);
+  Q_INVOKABLE QVariantMap filesystemUnregisterSymbolicLink(const QString& alias);
+  Q_INVOKABLE QVariantMap filesystemSetWorkingDirectory(const QString& guest_path);
+  Q_INVOKABLE QVariantMap filesystemTestPath(const QString& guest_path);
+
+  // "online" / "offline" / "unknown" from Qt's own OS-level network
+  // reachability backend (QNetworkInformation) - a genuine connectivity
+  // check, not a guess. "unknown" means the platform has no reachability
+  // backend available, which the Network page must show honestly rather
+  // than assuming either state.
+  Q_INVOKABLE QString networkReachabilityStatus() const;
+
+  // Deletes one file from inside the configured screenshots/captures
+  // directory. Refuses (returns false, no-op) for any path that does not
+  // canonically resolve to inside that directory - this is a narrow,
+  // deliberately-scoped delete, not a general-purpose file removal API.
+  Q_INVOKABLE bool deleteCaptureFile(const QString& path);
   Q_INVOKABLE void copyDiagnostics();
   Q_INVOKABLE QString developerDiagnostics() const;
   Q_INVOKABLE QString userDiagnostics() const;
@@ -294,6 +337,7 @@ class LauncherBridge final : public QObject {
   void recoveryChanged();
   void modulesChanged();
   void updateStateChanged();
+  void downloadActivityChanged();
   void moduleCatalogChanged();
   void moduleUpdateStateChanged(const QString& module_id);
   void moduleUpdateHistoryChanged(const QString& module_id);

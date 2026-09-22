@@ -15,7 +15,7 @@ class ImportExportFeature final {
   ImportExportFeature(ContentImportService& content_import, ProfilesFeature& profiles,
                       LibraryFeature& library, ModulesFeature& modules, bool test_mode);
 
-  [[nodiscard]] ServiceResult importGameContent(const QList<QUrl>& sources);
+  [[nodiscard]] ServiceResult importGameContent(const QList<QUrl>& sources, bool moveIntoLibrary = false);
   [[nodiscard]] ServiceResult importDlc(const QString& game_id, const QList<QUrl>& sources,
                                         const QString& expected_dlc_id = {});
   [[nodiscard]] ServiceResult importModulePackages(const QList<QUrl>& sources);

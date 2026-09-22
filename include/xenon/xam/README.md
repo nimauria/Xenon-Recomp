@@ -29,4 +29,4 @@ std::string gamertag = users.gamertag(0);
 
 ## Documentation
 
-See `docs/XAM_V1.md` for complete documentation.
+See `docs/xam/XAM_V1.md` for complete documentation.

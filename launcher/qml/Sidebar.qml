@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 
 Rectangle {
@@ -10,6 +11,8 @@ Rectangle {
     property real backdropIntensity: 0.72
     property string backdropVariant: "default"
     property string backdropSource: ""
+    property bool developerModeEnabled: false
+    readonly property int developerPageIndex: 9
     signal pageRequested(int index)
     signal compactToggleRequested()
 
@@ -46,8 +49,12 @@ Rectangle {
     readonly property var primaryEntries: [
         { title: "Home", icon: "home", page: 4 },
         { title: "Library", icon: "library", page: 0 },
+        { title: "Downloads", icon: "downloads", page: 5 },
         { title: "Modules", icon: "modules", page: 1 },
-        { title: "Profiles", icon: "profiles", page: 2 }
+        { title: "Profiles", icon: "profiles", page: 2 },
+        { title: "Captures", icon: "captures", page: 6 },
+        { title: "Network", icon: "network", page: 7 },
+        { title: "Support", icon: "support", page: 8 }
     ]
 
     ColumnLayout {
@@ -68,23 +75,55 @@ Rectangle {
             onClicked: root.compactToggleRequested()
         }
 
-        Repeater {
-            model: root.primaryEntries
-            delegate: XNavButton {
-                required property var modelData
-                Layout.fillWidth: !root.compact
-                Layout.preferredWidth: root.compact ? 44 : -1
-                Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
-                text: modelData.title
-                iconName: modelData.icon
-                compact: root.compact
-                active: root.currentIndex === modelData.page
-                automationId: "nav-" + modelData.title.toLowerCase()
-                onClicked: root.pageRequested(modelData.page)
+        // The logo/collapse control above and Settings/status footer below
+        // stay fixed; only the primary destination list scrolls, so adding
+        // more top-level pages never clips navigation on a short/handheld
+        // window (Part 4).
+        Flickable {
+            id: navScroll
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentWidth: width
+            contentHeight: navColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
+
+            ColumnLayout {
+                id: navColumn
+                width: navScroll.width
+                spacing: Theme.spaceSm
+
+                Repeater {
+                    model: root.primaryEntries
+                    delegate: XNavButton {
+                        required property var modelData
+                        Layout.fillWidth: !root.compact
+                        Layout.preferredWidth: root.compact ? 44 : -1
+                        Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
+                        text: modelData.title
+                        iconName: modelData.icon
+                        compact: root.compact
+                        active: root.currentIndex === modelData.page
+                        automationId: "nav-" + modelData.title.toLowerCase()
+                        onClicked: root.pageRequested(modelData.page)
+                    }
+                }
+
+                XNavButton {
+                    visible: root.developerModeEnabled
+                    Layout.fillWidth: !root.compact
+                    Layout.preferredWidth: root.compact ? 44 : -1
+                    Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
+                    text: "Developer"
+                    iconName: "developer"
+                    compact: root.compact
+                    active: root.currentIndex === root.developerPageIndex
+                    automationId: "nav-developer"
+                    onClicked: root.pageRequested(root.developerPageIndex)
+                }
             }
         }
-
-        Item { Layout.fillHeight: true }
 
         XNavButton {
             Layout.fillWidth: !root.compact

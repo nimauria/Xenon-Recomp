@@ -33,7 +33,7 @@ AudioSystem::AudioSystem(memory::AddressSpace& memory,
 
 AudioSystem::~AudioSystem() { shutdown(); }
 
-bool AudioSystem::initialize(std::string* error) {
+bool AudioSystem::initialize(std::string* error, bool auto_start_callback_pump) {
   if (initialized_.load()) return true;
   if (!backend_) backend_ = create_sdl_audio_backend();
   if (!backend_) {
@@ -60,21 +60,27 @@ bool AudioSystem::initialize(std::string* error) {
     return false;
   }
 
-  callback_running_.store(true);
-  callback_thread_ = std::thread(&AudioSystem::callback_pump, this);
+  if (auto_start_callback_pump) {
+    callback_running_.store(true);
+    callback_thread_ = std::thread(&AudioSystem::callback_pump, this);
+  }
   initialized_.store(true);
   return true;
 }
 
-void AudioSystem::shutdown() noexcept {
-  if (!initialized_.exchange(false) && !xma_.initialized()) return;
-
+void AudioSystem::stop_guest_callback_pump() noexcept {
   // Stop guest callbacks before tearing down the native device or freeing any
   // wrapped callback arguments. A callback is allowed to submit audio, so it
   // must never race client destruction during shutdown.
   callback_running_.store(false);
   callback_cv_.notify_all();
   if (callback_thread_.joinable()) callback_thread_.join();
+}
+
+void AudioSystem::shutdown() noexcept {
+  if (!initialized_.exchange(false) && !xma_.initialized()) return;
+
+  stop_guest_callback_pump();
 
   if (backend_) backend_->close();
 
@@ -261,6 +267,10 @@ void AudioSystem::set_ducker_hold(float seconds) noexcept {
   if (std::isfinite(seconds)) ducker_hold_.store(std::max(seconds, 0.0f));
 }
 
+void AudioSystem::set_master_volume(float value) noexcept {
+  if (std::isfinite(value)) master_volume_.store(std::clamp(value, 0.0f, 1.0f));
+}
+
 void AudioSystem::update_ducker(std::span<float> samples) {
   if (samples.empty()) return;
   if (!ducker_enabled_.load()) {
@@ -339,7 +349,10 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
   // output. Mixing is additive so neither path silently suppresses the other.
   mixer_.mix(interleaved_stereo, kXboxSampleRate);
   update_ducker(interleaved_stereo);
-  for (float& sample : interleaved_stereo) sample = std::clamp(sample, -1.0f, 1.0f);
+  const float host_gain = muted_.load() ? 0.0f : master_volume_.load();
+  for (float& sample : interleaved_stereo) {
+    sample = std::clamp(sample * host_gain, -1.0f, 1.0f);
+  }
 
   // XAudioGetRenderDriverTic is a consumed-sample clock, not a count of
   // successfully submitted buffers. Advance even when we produced silence.

@@ -132,6 +132,18 @@ int main(int argc, char* argv[]) {
                                                   QStringLiteral("unknown")).toString()));
   }
 
+  // Part 7: gamepad frontend-navigation must not react unless the launcher
+  // is actually the OS foreground application (e.g. while a game the
+  // launcher started owns focus). InputSystem::set_focused() already exists
+  // specifically for this ("lets a launcher/overlay gate input... without
+  // teaching individual host drivers about frontend focus policy") but
+  // nothing previously called it.
+  launcher_bridge.setLauncherForeground(QGuiApplication::applicationState() == Qt::ApplicationActive);
+  QObject::connect(&app, &QGuiApplication::applicationStateChanged, &launcher_bridge,
+                   [&launcher_bridge](Qt::ApplicationState state) {
+                     launcher_bridge.setLauncherForeground(state == Qt::ApplicationActive);
+                   });
+
   QQmlApplicationEngine engine;
   engine.rootContext()->setContextProperty("launcherBridge", &launcher_bridge);
 

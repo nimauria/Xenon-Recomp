@@ -56,6 +56,23 @@ std::string state_name(core::SessionState state) {
 
 }  // namespace
 
+const char* launch_failure_category_name(LaunchFailureCategory category) noexcept {
+  switch (category) {
+    case LaunchFailureCategory::None: return "None";
+    case LaunchFailureCategory::SessionInitFailed: return "SessionInitFailed";
+    case LaunchFailureCategory::MissingRequiredContent: return "MissingRequiredContent";
+    case LaunchFailureCategory::ContentMountFailed: return "ContentMountFailed";
+    case LaunchFailureCategory::GameLoadFailed: return "GameLoadFailed";
+    case LaunchFailureCategory::ModuleRevisionMismatch: return "ModuleRevisionMismatch";
+    case LaunchFailureCategory::StartFailed: return "StartFailed";
+    case LaunchFailureCategory::WindowCreationFailed: return "WindowCreationFailed";
+    case LaunchFailureCategory::GraphicsPresentationFailed: return "GraphicsPresentationFailed";
+    case LaunchFailureCategory::AudioBackendFailed: return "AudioBackendFailed";
+    case LaunchFailureCategory::InputBackendFailed: return "InputBackendFailed";
+  }
+  return "Unknown";
+}
+
 StatusWriter::StatusWriter(std::string session_dir, LaunchConfig config)
     : session_dir_(std::move(session_dir)),
       config_(std::move(config)),
@@ -123,6 +140,12 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
     xex.set("entryPoint", hex32(loaded->image.entry_point));
     xex.set("imageBase", hex32(loaded->image.image_base));
     xex.set("executableRanges", static_cast<double>(loaded->executable_ranges.size()));
+    if (const auto& identity = session.effective_identity(); identity.has_value()) {
+      xex.set("titleUpdateApplied", identity->title_update_applied);
+      xex.set("baseVersion", hex32(identity->base_version.value));
+      xex.set("effectiveVersion", hex32(identity->effective_version.value));
+      xex.set("effectiveImageHash", xenon::xbox::format_effective_image_hash(identity->effective_image_hash));
+    }
     root.set("loadedXex", std::move(xex));
   } else {
     core::JsonValue xex = core::JsonValue::make_object();
@@ -151,7 +174,7 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
   std::filesystem::rename(temp_path, final_path, rename_error);
 }
 
-void StatusWriter::write_fatal(const std::string& message) {
+void StatusWriter::write_fatal(const std::string& message, LaunchFailureCategory category) {
   core::JsonValue root = core::JsonValue::make_object();
   root.set("available", true);
   root.set("pid", static_cast<double>(current_process_id()));
@@ -163,6 +186,9 @@ void StatusWriter::write_fatal(const std::string& message) {
   root.set("running", false);
   root.set("executionActive", false);
   root.set("lastError", message);
+  if (category != LaunchFailureCategory::None) {
+    root.set("errorCategory", std::string(launch_failure_category_name(category)));
+  }
   root.set("startedAtEpochMs", static_cast<double>(started_at_epoch_ms_));
   root.set("updatedAtEpochMs", static_cast<double>(now_epoch_ms()));
 

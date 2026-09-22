@@ -17,7 +17,8 @@ class KernelMemory {
   // Virtual memory allocation
   [[nodiscard]] bool allocate_virtual(
       std::uint32_t& address, std::uint32_t size,
-      memory::Protect protect, bool top_down = false);
+      memory::Protect protect, bool top_down = false,
+      bool zero_initialize = true);
 
   [[nodiscard]] bool free_virtual(std::uint32_t address);
 

@@ -115,6 +115,7 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.save_path = root.get_string("savePath");
   out.screenshots_path = root.get_string("screenshotsPath");
   out.offline = root.get_bool("offline", true);
+  out.headless_mode = root.get_bool("headlessMode", false);
 
   return true;
 }

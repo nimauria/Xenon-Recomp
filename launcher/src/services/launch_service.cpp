@@ -1,9 +1,11 @@
 #include "launch_service.hpp"
 
+#include "content_import_service.hpp"
 #include "dlc_service.hpp"
 #include "library_service.hpp"
 #include "module_service.hpp"
 #include "path_service.hpp"
+#include "preparation_service.hpp"
 #include "profile_service.hpp"
 #include "settings_service.hpp"
 #include "../runtime/runtime_bridge.hpp"
@@ -15,9 +17,17 @@ namespace xenon::launcher {
 LaunchService::LaunchService(SettingsService& settings, PathService& paths,
                              ProfileService& profiles, LibraryService& library,
                              ModuleService& modules, DlcService& dlc,
-                             FilesystemService& filesystem, IRuntimeBridge& runtime)
+                             FilesystemService& filesystem, IRuntimeBridge& runtime,
+                             PreparationService& preparation, ContentImportService& content_import)
     : settings_(settings), paths_(paths), profiles_(profiles), library_(library),
-      modules_(modules), dlc_(dlc), filesystem_(filesystem), runtime_(runtime) {}
+      modules_(modules), dlc_(dlc), filesystem_(filesystem), runtime_(runtime),
+      preparation_(preparation), content_import_(content_import) {}
+
+void LaunchService::ensureModuleResolved(const QString& game_id) const {
+  const auto game = library_.entry(game_id);
+  if (game.isEmpty() || !game.value(QStringLiteral("moduleId")).toString().trimmed().isEmpty()) return;
+  (void)content_import_.resolvePendingModule(game_id);
+}
 
 std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString& game_id) const {
   const auto game = library_.entry(game_id);
@@ -42,6 +52,18 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   config.module_settings = modules_.settingsValues(module_id);
   config.runtime_api_requirements = modules_.runtimeApiRequirements(module_id);
   config.native_extension_path = modules_.nativeExtensionPath(module_id);
+  // Automatic game preparation (docs/development/GAME_PREPARATION.md, Part 9): a module
+  // that does not ship its own native extension relies on Xenon's automatic
+  // pipeline instead - resolve whatever xenon-prepare has already validated
+  // and cached for this exact executable/module/hint revision. This is a
+  // fast, bounded, non-blocking cache lookup only (never compiles); an empty
+  // result here means SessionController::preparePhase() still needs to run
+  // (or re-run) preparation before this configuration is launch-ready.
+  if (config.native_extension_path.isEmpty() && preparation_.usesAutomaticPreparation(game_id)) {
+    QString cached_path;
+    (void)preparation_.checkCache(game_id, cached_path);
+    if (!cached_path.isEmpty()) config.native_extension_path = cached_path;
+  }
   config.profile_id = profile.value(QStringLiteral("profileId")).toString();
   config.profile_name = profile.value(QStringLiteral("profileName")).toString();
   config.region = profile.value(QStringLiteral("region"), QStringLiteral("Auto (Global)")).toString();
@@ -107,11 +129,18 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
 }
 
 ServiceResult LaunchService::validate(const QString& game_id) const {
+  // Defense in depth: SessionController's Preparing phase already calls
+  // ensureModuleResolved() before this runs (so a module installed after
+  // import can still trigger automatic preparation on the SAME Play press) -
+  // this is a cheap no-op whenever a module is already assigned, and a
+  // safety net for any other caller of validate() that skips that phase.
+  ensureModuleResolved(game_id);
   const auto game = library_.entry(game_id);
   if (game.isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Launch failed"),
                                   QStringLiteral("The selected game is not in the launcher library."));
   }
+
   if (!game.value(QStringLiteral("ready")).toBool()) {
     return ServiceResult::failure(QStringLiteral("Game not ready"),
                                   QStringLiteral("This library entry has not yet been identified and validated by a compatible game module."));
@@ -119,8 +148,10 @@ ServiceResult LaunchService::validate(const QString& game_id) const {
 
   const auto module_id = game.value(QStringLiteral("moduleId")).toString();
   if (module_id.trimmed().isEmpty()) {
-    return ServiceResult::failure(QStringLiteral("Module required"),
-                                  QStringLiteral("The selected game does not have a Xenon game module assigned."));
+    return ServiceResult::failure(
+        QStringLiteral("Module required"),
+        QStringLiteral("No installed Xenon module supports this title yet. Install a compatible "
+                       "module, then press Play again."));
   }
 
   const auto module = modules_.module(module_id);

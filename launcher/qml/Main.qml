@@ -16,6 +16,10 @@ ApplicationWindow {
     flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint
 
     property int currentPage: 0
+    // Page 9 (Developer) only exists in the pageForward/pageBack cycle order
+    // while Developer Mode is actually on, matching it not existing in the
+    // sidebar either.
+    readonly property int pageCount: developerModeEnabled ? 10 : 9
     property alias globalSearchText: topBar.searchText
     property bool compactLayout: launcherBridge.safeMode ? false : settingBool("general/compact", false)
     property string sidebarMode: launcherBridge.safeMode ? "Expanded" : launcherBridge.stringSetting("general/sidebarMode", "Auto")
@@ -41,7 +45,14 @@ ApplicationWindow {
     property bool profilesLoaded: false
     property bool settingsLoaded: false
     property bool homeLoaded: false
+    property bool downloadsLoaded: false
+    property bool capturesLoaded: false
+    property bool networkLoaded: false
+    property bool supportLoaded: false
+    property bool developerLoaded: false
+    property bool developerModeEnabled: launcherBridge.safeMode ? false : settingBool("developer/modeEnabled", false)
     property bool launcherReadyMarked: false
+    property int prewarmStep: 0
     property int pendingNavigationPage: -1
     property string pendingNavigationTarget: ""
     property string pendingNavigationSection: ""
@@ -106,22 +117,116 @@ ApplicationWindow {
         Qt.callLater(function() { root.requestActivate() })
     }
 
+    // The single dispatch point every input method (keyboard Shortcut items
+    // below, and xenon::input's FrontendInputRouter via
+    // launcherBridge.frontendAction - gamepad D-pad/stick/buttons) funnels
+    // through, so "what an action does" is defined exactly once regardless
+    // of which device triggered it (Part 2/3).
     function handleFrontendAction(action) {
+        // A modal that wants to interpret navigation actions itself (e.g.
+        // AvatarCropEditor's controller support) has claimed input via
+        // NavigationGuard - step aside rather than also reacting to the
+        // same signal (Qt dispatches one signal to every connected slot).
+        if (NavigationGuard.modalActive) return
         if (action === "quickCenter" || action === "menu") {
             topBar.toggleQuickCenter()
         } else if (action === "search") {
             topBar.focusSearch()
         } else if (action === "up" || action === "down") {
-            root.moveFocusedControl(action === "down")
+            var directionalPage = root.activePageItem()
+            if (!directionalPage || typeof directionalPage.handleDirectionalNavigation !== "function"
+                    || !directionalPage.handleDirectionalNavigation(action))
+                root.moveFocusedControl(action === "down")
         } else if (action === "confirm") {
             root.activateFocusedControl()
-        } else if (action === "pageBack" || action === "left") {
-            root.currentPage = Math.max(0, root.currentPage - 1)
-        } else if (action === "pageForward" || action === "right") {
-            root.currentPage = Math.min(4, root.currentPage + 1)
-        } else if (action === "cancel") {
-            topBar.closeQuickCenter()
+        } else if (action === "pageBack") {
+            root.currentPage = (root.currentPage + root.pageCount - 1) % root.pageCount
+        } else if (action === "pageForward") {
+            root.currentPage = (root.currentPage + 1) % root.pageCount
+        } else if (action === "left" || action === "right") {
+            var lateralPage = root.activePageItem()
+            if (lateralPage && typeof lateralPage.handleDirectionalNavigation === "function")
+                lateralPage.handleDirectionalNavigation(action)
+        } else if (action === "cancel" || action === "back") {
+            root.handleBackAction()
+        } else if (action === "context") {
+            root.openContextMenuForCurrentPage()
+        } else if (action === "secondary") {
+            root.triggerSecondaryActionForCurrentPage()
+        } else if (action === "scrollUp" || action === "scrollDown") {
+            root.movePageInFocusedList(action === "scrollDown")
         }
+    }
+
+    // Escape / Backspace / Alt+Left / gamepad B: close whatever is
+    // topmost first (QuickCenter, then any open Popup - a Popup already
+    // accepts Escape itself via CloseOnEscape before this ever runs, so
+    // reaching here means none was open) - never jumps to a different
+    // top-level page or resets the launcher (Part 9).
+    function handleBackAction() {
+        if (topBar.quickCenterVisible()) {
+            topBar.closeQuickCenter()
+            return
+        }
+        var page = root.activePageItem()
+        if (page && typeof page.handleBackNavigation === "function" && page.handleBackNavigation())
+            return
+        // No further history to pop - a terminal state, not an error.
+    }
+
+    function loaderForPage(page) {
+        if (page === 0) return libraryLoader
+        if (page === 1) return modulesLoader
+        if (page === 2) return profilesLoader
+        if (page === 3) return settingsLoader
+        if (page === 4) return homeLoader
+        if (page === 5) return downloadsLoader
+        if (page === 6) return capturesLoader
+        if (page === 7) return networkLoader
+        if (page === 8) return supportLoader
+        if (page === 9) return developerLoader
+        return homeLoader
+    }
+
+    function activePageItem() {
+        var loader = root.loaderForPage(root.currentPage)
+        return (loader && loader.status === Loader.Ready) ? loader.item : null
+    }
+
+    function focusCurrentPageSearch() {
+        var page = root.activePageItem()
+        if (page && typeof page.focusSearch === "function") {
+            page.focusSearch()
+            return
+        }
+        topBar.focusSearch()
+    }
+
+    // Shift+F10 / Menu key / gamepad Y: opens the same context menu
+    // right-click and each page's visible overflow button already open -
+    // one action model, three input paths (Part 17).
+    function openContextMenuForCurrentPage() {
+        var page = root.activePageItem()
+        if (page && typeof page.openContextMenuForFocusedItem === "function")
+            page.openContextMenuForFocusedItem()
+    }
+
+    function triggerSecondaryActionForCurrentPage() {
+        var page = root.activePageItem()
+        if (page && typeof page.triggerSecondaryAction === "function")
+            page.triggerSecondaryAction()
+    }
+
+    function movePageInFocusedList(forward) {
+        var page = root.activePageItem()
+        if (page && typeof page.movePage === "function") {
+            page.movePage(forward)
+            return
+        }
+        // No page-level paging handler - fall back to moving focus by a
+        // handful of steps so PageUp/PageDown/triggers still do *something*
+        // reasonable on pages that have not opted into precise paging.
+        for (var i = 0; i < 5; ++i) root.moveFocusedControl(forward)
     }
 
     function moveFocusedControl(forward) {
@@ -147,12 +252,59 @@ ApplicationWindow {
             focused.trigger()
     }
 
+    // Keep keyboard/controller focus inside the visible viewport. This is
+    // intentionally generic: pages can use ScrollView, ListView, GridView or
+    // Flickable without each implementing its own focus-scroll workaround.
+    function ensureFocusVisible(item) {
+        if (!item) return
+        var node = item.parent
+        while (node) {
+            var hasVerticalScroll = typeof node.contentY !== "undefined"
+                && typeof node.contentHeight !== "undefined" && typeof node.height !== "undefined"
+            var hasHorizontalScroll = typeof node.contentX !== "undefined"
+                && typeof node.contentWidth !== "undefined" && typeof node.width !== "undefined"
+            if (hasVerticalScroll || hasHorizontalScroll) {
+                if (!Boolean(node.dragging)) {
+                    var mapped = item.mapToItem(node, 0, 0)
+                    var margin = Theme.spaceMd
+                    if (hasVerticalScroll && Number(node.contentHeight || 0) > Number(node.height || 0)) {
+                        var nextY = Number(node.contentY || 0)
+                        if (mapped.y < margin)
+                            nextY += mapped.y - margin
+                        else if (mapped.y + item.height > node.height - margin)
+                            nextY += mapped.y + item.height - node.height + margin
+                        var maxY = Math.max(0, Number(node.contentHeight || 0) - Number(node.height || 0))
+                        node.contentY = Math.max(0, Math.min(maxY, nextY))
+                    }
+                    if (hasHorizontalScroll && Number(node.contentWidth || 0) > Number(node.width || 0)) {
+                        var nextX = Number(node.contentX || 0)
+                        if (mapped.x < margin)
+                            nextX += mapped.x - margin
+                        else if (mapped.x + item.width > node.width - margin)
+                            nextX += mapped.x + item.width - node.width + margin
+                        var maxX = Math.max(0, Number(node.contentWidth || 0) - Number(node.width || 0))
+                        node.contentX = Math.max(0, Math.min(maxX, nextX))
+                    }
+                }
+                // The nearest scrolling viewport is the one that owns this
+                // control; outer page scrolling should not fight nested lists.
+                return
+            }
+            node = node.parent
+        }
+    }
+
     function markPageLoaded(page) {
         if (page === 0) libraryLoaded = true
         else if (page === 1) modulesLoaded = true
         else if (page === 2) profilesLoaded = true
         else if (page === 3) settingsLoaded = true
         else if (page === 4) homeLoaded = true
+        else if (page === 5) downloadsLoaded = true
+        else if (page === 6) capturesLoaded = true
+        else if (page === 7) networkLoaded = true
+        else if (page === 8) supportLoaded = true
+        else if (page === 9) developerLoaded = true
     }
 
     function pageName(page) {
@@ -160,6 +312,11 @@ ApplicationWindow {
         if (page === 2) return "Profiles"
         if (page === 3) return "Settings"
         if (page === 4) return "Home"
+        if (page === 5) return "Downloads"
+        if (page === 6) return "Captures"
+        if (page === 7) return "Network"
+        if (page === 8) return "Support"
+        if (page === 9) return "Developer"
         return "Library"
     }
 
@@ -182,11 +339,7 @@ ApplicationWindow {
         var page = pendingNavigationPage
         if (page < 0) return
 
-        var loader = page === 0 ? libraryLoader
-                   : page === 1 ? modulesLoader
-                   : page === 2 ? profilesLoader
-                   : page === 3 ? settingsLoader
-                   : homeLoader
+        var loader = root.loaderForPage(page)
         if (!loader || loader.status !== Loader.Ready || !loader.item) return
 
         var handled = true
@@ -244,6 +397,11 @@ ApplicationWindow {
             Qt.callLater(function() { root.showMinimized() })
     }
 
+    onActiveFocusItemChanged: {
+        var focused = root.activeFocusItem
+        if (focused) Qt.callLater(function() { root.ensureFocusVisible(focused) })
+    }
+
     onXChanged: scheduleWindowStateSave()
     onYChanged: scheduleWindowStateSave()
     onWidthChanged: {
@@ -265,6 +423,21 @@ ApplicationWindow {
         onTriggered: root.persistWindowState()
     }
 
+    // Once the first page is interactive, construct a few frequently-used
+    // pages asynchronously during idle time. This keeps startup lean while
+    // making the first Home/Downloads/Modules switch feel immediate.
+    Timer {
+        id: pagePrewarmTimer
+        interval: 1300
+        repeat: true
+        running: root.launcherReadyMarked && !launcherBridge.safeMode && root.prewarmStep < 3
+        onTriggered: {
+            var pages = [4, 5, 1]
+            root.markPageLoaded(pages[root.prewarmStep])
+            root.prewarmStep += 1
+        }
+    }
+
     onCurrentPageChanged: {
         markPageLoaded(currentPage)
         if (topBar)
@@ -279,6 +452,25 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+3"; onActivated: root.currentPage = 2 }
     Shortcut { sequence: "Ctrl+,"; onActivated: root.currentPage = 3 }
     Shortcut { sequence: "Ctrl+J"; onActivated: topBar.toggleQuickCenter() }
+    Shortcut { sequence: "Ctrl+F"; onActivated: root.focusCurrentPageSearch() }
+
+    // Keyboard-only operation (Part 4). These reach the exact same
+    // handleFrontendAction()/handleBackAction() a gamepad also drives - see
+    // that function's own comment. Qt gives a focused TextField/TextArea
+    // first refusal on every one of these keys (arrow-key cursor movement,
+    // Backspace character deletion) before a Shortcut ever sees them, so
+    // none of this steals editing keys from text inputs.
+    Shortcut { sequence: "Up"; onActivated: root.handleFrontendAction("up") }
+    Shortcut { sequence: "Down"; onActivated: root.handleFrontendAction("down") }
+    Shortcut { sequence: "Left"; onActivated: root.handleFrontendAction("left") }
+    Shortcut { sequence: "Right"; onActivated: root.handleFrontendAction("right") }
+    Shortcut { sequence: "PageUp"; onActivated: root.handleFrontendAction("scrollUp") }
+    Shortcut { sequence: "PageDown"; onActivated: root.handleFrontendAction("scrollDown") }
+    Shortcut { sequence: "Escape"; onActivated: root.handleFrontendAction("back") }
+    Shortcut { sequence: "Backspace"; onActivated: root.handleFrontendAction("back") }
+    Shortcut { sequence: "Alt+Left"; onActivated: root.handleFrontendAction("back") }
+    Shortcut { sequence: "Shift+F10"; onActivated: root.handleFrontendAction("context") }
+    Shortcut { sequence: "Menu"; onActivated: root.handleFrontendAction("context") }
 
     Connections {
         target: launcherBridge
@@ -316,6 +508,13 @@ ApplicationWindow {
                     root.settingBool("accessibility/highContrast", false),
                     root.settingBool("accessibility/enhancedFocus", false),
                     root.settingBool("accessibility/reduceMotion", false))
+            else if (key === "developer/modeEnabled" && !launcherBridge.safeMode) {
+                root.developerModeEnabled = root.settingBool(key, false)
+                // The Developer page just lost its sidebar entry - it must
+                // not remain "current" with no way back to it via navigation.
+                if (!root.developerModeEnabled && root.currentPage === 9)
+                    root.currentPage = 4
+            }
         }
     }
 
@@ -342,6 +541,37 @@ ApplicationWindow {
         ProfilesPage { searchText: root.globalSearchText }
     }
 
+    Component {
+        id: settingsPageComponent
+        SettingsPage { searchText: root.globalSearchText }
+    }
+
+    Component {
+        id: downloadsPageComponent
+        DownloadsPage {
+            onRequestPage: function(index) { root.currentPage = index }
+        }
+    }
+
+    Component {
+        id: capturesPageComponent
+        CapturesPage { searchText: root.globalSearchText }
+    }
+
+    Component {
+        id: networkPageComponent
+        NetworkPage { }
+    }
+
+    Component {
+        id: supportPageComponent
+        SupportPage { }
+    }
+
+    Component {
+        id: developerPageComponent
+        DeveloperPage { }
+    }
 
     Component {
         id: safeModeBlockedPage
@@ -369,6 +599,7 @@ ApplicationWindow {
             onMinimizeRequested: root.showMinimized()
             onMaximizeRequested: root.toggleMaximize()
             onCloseRequested: root.close()
+            onDownloadsRequested: root.currentPage = 5
         }
 
         Rectangle {
@@ -415,6 +646,7 @@ ApplicationWindow {
                 backdropVariant: root.backdropVariant
                 backdropSource: root.backdropSource
                 currentIndex: root.currentPage
+                developerModeEnabled: root.developerModeEnabled
                 onPageRequested: function(index) { root.currentPage = index }
                 onCompactToggleRequested: {
                     var next = root.sidebarCompact ? "Expanded" : "Compact"
@@ -478,7 +710,7 @@ ApplicationWindow {
                         id: settingsLoader
                         active: root.settingsLoaded
                         asynchronous: true
-                        sourceComponent: Component { SettingsPage { searchText: root.globalSearchText } }
+                        sourceComponent: settingsPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(3, status)
                             if (status === Loader.Ready) root.applyPendingNavigation()
@@ -492,6 +724,61 @@ ApplicationWindow {
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : homePageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(4, status)
+                            if (status === Loader.Ready) root.applyPendingNavigation()
+                        }
+                    }
+
+                    Loader {
+                        id: downloadsLoader
+                        active: root.downloadsLoaded
+                        asynchronous: true
+                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : downloadsPageComponent
+                        onStatusChanged: {
+                            root.markLauncherReadyIfCurrent(5, status)
+                            if (status === Loader.Ready) root.applyPendingNavigation()
+                        }
+                    }
+
+                    Loader {
+                        id: capturesLoader
+                        active: root.capturesLoaded
+                        asynchronous: true
+                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : capturesPageComponent
+                        onStatusChanged: {
+                            root.markLauncherReadyIfCurrent(6, status)
+                            if (status === Loader.Ready) root.applyPendingNavigation()
+                        }
+                    }
+
+                    Loader {
+                        id: networkLoader
+                        active: root.networkLoaded
+                        asynchronous: true
+                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : networkPageComponent
+                        onStatusChanged: {
+                            root.markLauncherReadyIfCurrent(7, status)
+                            if (status === Loader.Ready) root.applyPendingNavigation()
+                        }
+                    }
+
+                    Loader {
+                        id: supportLoader
+                        active: root.supportLoaded
+                        asynchronous: true
+                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : supportPageComponent
+                        onStatusChanged: {
+                            root.markLauncherReadyIfCurrent(8, status)
+                            if (status === Loader.Ready) root.applyPendingNavigation()
+                        }
+                    }
+
+                    Loader {
+                        id: developerLoader
+                        active: root.developerLoaded && root.developerModeEnabled
+                        asynchronous: true
+                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : developerPageComponent
+                        onStatusChanged: {
+                            root.markLauncherReadyIfCurrent(9, status)
                             if (status === Loader.Ready) root.applyPendingNavigation()
                         }
                     }

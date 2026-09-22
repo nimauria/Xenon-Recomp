@@ -142,7 +142,7 @@ QString RuntimeBridge::runtimeHostPath() const { return runtime_host_path_; }
 ServiceResult RuntimeBridge::connect() {
   // "Connecting" here means locating the generic runtime/game-host binary
   // this launcher build ships alongside - there is nothing to keep an
-  // in-process connection to any more (see docs/RUNTIME_HOST.md). Every Play
+  // in-process connection to any more (see docs/runtime/RUNTIME_HOST.md). Every Play
   // action spawns its own detached xenon_runtime_host process.
   //
   // XENON_RUNTIME_HOST_PATH lets tests (and advanced dev workflows) point at
@@ -271,7 +271,7 @@ ServiceResult RuntimeBridge::launch(const LaunchConfiguration& configuration) {
   }
 
   core::JsonValue root = core::JsonValue::make_object();
-  // See docs/RUNTIME_HOST.md "Launch configuration version" - bump this only
+  // See docs/runtime/RUNTIME_HOST.md "Launch configuration version" - bump this only
   // when a field's meaning changes incompatibly; the runtime host rejects a
   // configVersion newer than it supports instead of guessing.
   root.set("configVersion", static_cast<double>(1));
@@ -300,7 +300,7 @@ ServiceResult RuntimeBridge::launch(const LaunchConfiguration& configuration) {
   root.set("audioMasterVolume", configuration.audio_master_volume);
   root.set("audioMuteUnfocused", configuration.audio_mute_unfocused);
   root.set("audioLatencyProfile", configuration.audio_latency_profile.toStdString());
-  // See docs/RUNTIME_HOST.md: not yet sourced from the launcher's
+  // See docs/runtime/RUNTIME_HOST.md: not yet sourced from the launcher's
   // "developer/verboseLogging" setting (RuntimeBridge has no SettingsService
   // access), so this is currently always false.
   root.set("logVerbose", false);
@@ -378,7 +378,7 @@ ServiceResult RuntimeBridge::stop() {
   // Give a clean/fast stop a brief chance to land before returning, without
   // noticeably blocking the UI thread. A game that does not exit
   // cooperatively is still bounded by the runtime host's own hard-stop
-  // timeout (see docs/RUNTIME_HOST.md) - this call does not wait for that.
+  // timeout (see docs/runtime/RUNTIME_HOST.md) - this call does not wait for that.
   constexpr int kPollIntervalMs = 50;
   constexpr int kMaxWaitMs = 500;
   for (int waited = 0; waited < kMaxWaitMs; waited += kPollIntervalMs) {
@@ -470,7 +470,7 @@ RuntimeBridge::ProcessState RuntimeBridge::queryProcessState(qint64 pid, void* h
     result.alive = false;
     // A detached, non-child process's exit code cannot be retrieved on POSIX
     // without being the parent that reaps it (no waitpid() is possible here
-    // - see docs/RUNTIME_HOST.md). Liveness is still reliable.
+    // - see docs/runtime/RUNTIME_HOST.md). Liveness is still reliable.
   }
   // Any other errno (e.g. EPERM) leaves `determinable` false: avoid reporting
   // a crash we cannot actually confirm.
@@ -495,7 +495,7 @@ QVariantMap RuntimeBridge::augmentedStatus() const {
   // terminal state - the runtime host crashed (or was killed) instead of
   // shutting down cleanly. Synthesize a bridge-only "crashed" state rather
   // than let the launcher keep showing stale "running"/"initializing" data
-  // for a process that no longer exists. See docs/RUNTIME_HOST.md.
+  // for a process that no longer exists. See docs/runtime/RUNTIME_HOST.md.
   if (!crash_logged_) {
     logRuntime(QStringLiteral("Runtime host process (pid %1) exited unexpectedly without reaching a terminal state")
                    .arg(current_session_pid_));

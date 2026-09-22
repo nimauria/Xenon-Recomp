@@ -1,6 +1,6 @@
 // Unit tests for xenon::runtime_host::LaunchConfig::load_from_file - the
 // input side of the launcher/runtime-host IPC contract documented in
-// docs/RUNTIME_HOST.md. RuntimeBridge (launcher side) is exercised
+// docs/runtime/RUNTIME_HOST.md. RuntimeBridge (launcher side) is exercised
 // separately in launcher/tests/runtime/runtime_bridge_tests.cpp; this file
 // only covers config parsing/validation in isolation, without any Qt or
 // process-spawning dependency.
@@ -250,6 +250,40 @@ int main() {
     assert(config.dlc.empty());
   }
   std::cout << "  [PASS] Optional fields fall back to documented defaults\n";
+
+  // Test 11 (Part 5.1 of the Gracemeria readiness pass): headlessMode
+  // defaults to false (every ordinary launcher Play action is Normal Play -
+  // see main.cpp's strict content/presentation/audio failure semantics,
+  // which only relax when this is explicitly true).
+  {
+    TempFile file("no_headless.json");
+    file.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
+
+    LaunchConfig config{};
+    std::string error;
+    const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
+    assert(ok);
+    assert(config.headless_mode == false &&
+           "headlessMode must default to false - an ordinary launch is always Normal Play");
+  }
+  std::cout << "  [PASS] headlessMode defaults to false (Normal Play)\n";
+
+  // Test 12: an explicit headlessMode=true round-trips.
+  {
+    TempFile file("headless.json");
+    file.write(R"json({
+      "sessionDir": "C:/sessions/x",
+      "contentPath": "C:/Games/X",
+      "headlessMode": true
+    })json");
+
+    LaunchConfig config{};
+    std::string error;
+    const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
+    assert(ok);
+    assert(config.headless_mode == true);
+  }
+  std::cout << "  [PASS] Explicit headlessMode=true round-trips\n";
 
   std::cout << "All LaunchConfig tests passed!\n";
   return 0;

@@ -45,7 +45,8 @@ int ApplicationFeature::rememberedPage() const {
 
 int ApplicationFeature::initialPage() const {
   if (settings_.boolValue(QStringLiteral("frontend/general/restoreLastPage"), false)) {
-    return qBound(0, rememberedPage(), 4);
+    const auto max_page = settings_.boolValue(QStringLiteral("developer/modeEnabled"), false) ? 9 : 8;
+    return qBound(0, rememberedPage(), max_page);
   }
 
   const auto startup = settings_.stringValue(QStringLiteral("frontend/general/startupPage"),
@@ -54,11 +55,16 @@ int ApplicationFeature::initialPage() const {
   if (startup == QStringLiteral("Profiles")) return 2;
   if (startup == QStringLiteral("Settings")) return 3;
   if (startup == QStringLiteral("Home")) return 4;
+  if (startup == QStringLiteral("Downloads")) return 5;
+  if (startup == QStringLiteral("Captures")) return 6;
+  if (startup == QStringLiteral("Network")) return 7;
+  if (startup == QStringLiteral("Support")) return 8;
   return 0;
 }
 
 void ApplicationFeature::rememberPage(int page_index) {
-  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, 4));
+  const auto max_page = settings_.boolValue(QStringLiteral("developer/modeEnabled"), false) ? 9 : 8;
+  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, max_page));
 }
 
 bool ApplicationFeature::featureEnabled(const QString& feature) const noexcept {

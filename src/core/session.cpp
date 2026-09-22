@@ -5,6 +5,21 @@
 #include "xenon/audio/system.hpp"
 #endif
 
+#if defined(XENON_HAS_VULKAN)
+#include "xenon/gpu/vulkan/backend.hpp"
+#endif
+#if defined(XENON_HAS_D3D12)
+#include "xenon/gpu/d3d12/backend.hpp"
+#endif
+
+#include "xenon/input/null_driver.hpp"
+#include "xenon/input/sdl_driver.hpp"
+#if defined(_WIN32)
+#include "xenon/input/xinput_driver.hpp"
+#endif
+
+#include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -53,11 +68,47 @@ void unload_native_library(void* handle) noexcept {
 
 // Contract a native extension library exports so XenonSession can bind its
 // recomp-driver-generated compiled-code registry into a CPU V2
-// ExecutionContext. Documented in docs/RUNTIME_HOST.md; module authors
+// ExecutionContext. Documented in docs/runtime/RUNTIME_HOST.md; module authors
 // (e.g. Project Gracemeria) implement this once around their generated
 // registry.cpp's bind_compiled_registry(ExecutionContext&).
 using XenonBindCompiledRegistryFn = void (*)(cpu::ExecutionContext&);
 constexpr const char* kBindCompiledRegistrySymbol = "Xenon_BindCompiledRegistry";
+
+// Optional, additive module-identity export: a module built by the Recomp
+// Driver from a specific effective XEX (base, or base+title-update -
+// generate_project() emits this automatically) may export this to declare
+// which effective-image SHA1 hash(es) (xbox::format_effective_image_hash()
+// hex form, semicolon-separated for more than one) its compiled registry is
+// valid for. A module with no such export is not identity-checked - this is
+// opt-in enforcement layered on top of the required
+// Xenon_BindCompiledRegistry contract, not a requirement on every module
+// (see docs/runtime/RUNTIME_HOST.md "Native extension contract"). Real hardware has
+// no equivalent concept; this exists purely so Xenon itself never runs code
+// generated from one guest executable revision against a different one.
+using XenonSupportedExecutableRevisionsFn = const char* (*)();
+constexpr const char* kSupportedExecutableRevisionsSymbol = "Xenon_SupportedExecutableRevisions";
+
+std::string ascii_lower(std::string_view value) {
+  std::string result(value);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return result;
+}
+
+// `declared` is a semicolon-separated list of hex SHA1 hashes (case-
+// insensitive); an empty entry between separators is ignored rather than
+// treated as a (never-matching) wildcard-less empty declaration.
+bool declared_revisions_include(std::string_view declared, const std::string& effective_hash_hex) {
+  std::size_t start = 0u;
+  while (start <= declared.size()) {
+    auto end = declared.find(';', start);
+    if (end == std::string_view::npos) end = declared.size();
+    const auto token = ascii_lower(declared.substr(start, end - start));
+    if (!token.empty() && token == effective_hash_hex) return true;
+    start = end + 1u;
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -178,12 +229,31 @@ void XenonSession::shutdown() {
   // a hard timeout should terminate the hosting process instead of blocking
   // here indefinitely.
   stop_requested_.store(true);
-  if (execution_thread_.joinable()) {
-    execution_thread_.join();
+  if (main_thread_) {
+    static_cast<void>(main_thread_->join());
   }
 
 #if defined(XENON_HAS_AUDIO)
-  // Stop native callbacks before unloading the title's compiled registry.
+  // Stop the guest-callback pump and join the audio callback's own
+  // KernelThread before unloading the title's compiled registry or
+  // destroying kernel_process_/memory_ below - see Part 4.8's "no leaked
+  // audio worker" requirement. Order matters: stop_guest_callback_pump()
+  // must run before audio_thread_->join() (the pump loop only exits once it
+  // observes callback_running_ false), and both must happen before
+  // kernel_process_.reset() (which would otherwise try to join the same
+  // thread again from ThreadManager::shutdown() while nothing is left
+  // draining its work).
+  if (audio_) {
+    audio_->stop_guest_callback_pump();
+  }
+  if (audio_thread_) {
+    static_cast<void>(audio_thread_->join());
+    audio_thread_.reset();
+  }
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, audio_thread_tls_);
+  }
+  audio_thread_tls_ = {};
   if (audio_) {
     audio_->shutdown();
     audio_.reset();
@@ -199,6 +269,7 @@ void XenonSession::shutdown() {
   // Shutdown in reverse order of initialization
   xam_.reset();
 
+  input_bridge_.reset();
   if (input_) {
     input_->shutdown();
     input_.reset();
@@ -206,6 +277,19 @@ void XenonSession::shutdown() {
 
   gpu_.reset();
   code_cache_.reset();
+
+  // Tear down the guest process/thread model before the memory it lives in.
+  // main_thread_ was already joined above; resetting kernel_process_ (and
+  // with it its ThreadManager) is then safe/idempotent.
+  main_thread_.reset();
+  kernel_process_.reset();
+  kernel_memory_.reset();
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, main_thread_tls_);
+  }
+  main_thread_tls_ = {};
+
+  io_bridge_.reset();
   kernel_io_.reset();
   filesystem_.reset();
 
@@ -215,14 +299,22 @@ void XenonSession::shutdown() {
   }
 
   loaded_xex_.reset();
+  effective_identity_.reset();
+  content_graph_.reset();
   main_cpu_state_.reset();
   export_registry_.clear();
 
-  set_state(SessionState::Stopped, "Session shut down");
+  // Every subsystem pointer above is now reset, so the session object is
+  // back in the same state as right after construction (not merely
+  // "stopped" - stop() leaves subsystems alive and also lands on Stopped,
+  // so Stopped alone cannot mean "torn down"). Landing on Uninitialized
+  // here is what makes is_initialized() correctly report false post-
+  // shutdown, and lets initialize() be called again on the same object.
+  set_state(SessionState::Uninitialized, "Session shut down");
 }
 
 bool XenonSession::init_memory() {
-  memory_ = std::make_unique<memory::AddressSpace>(config_.memory_mode);
+  memory_ = std::make_shared<memory::AddressSpace>(config_.memory_mode);
   if (!memory_->initialize()) {
     set_error("Memory subsystem initialization failed");
     return false;
@@ -237,6 +329,26 @@ bool XenonSession::init_filesystem() {
 
 bool XenonSession::init_kernel() {
   kernel_io_ = std::make_unique<kernel::KernelIoManager>(filesystem_);
+  io_bridge_ = std::make_unique<kernel::xbox::GuestIoBridge>(*memory_, *kernel_io_);
+  if (!xbox::register_xboxkrnl_io_imports(xbox_imports_)) {
+    set_error("Failed to register xboxkrnl I/O import thunks");
+    return false;
+  }
+
+  // Default handler for run_execution()'s guest exception dispatch (see its
+  // MemoryFault/Trap catch clauses): logs a structured, thread-scoped record
+  // rather than only surfacing a stringified last_error(). A native
+  // extension or future debugger hook can register additional handlers via
+  // exports() -> this is not exposed as a public API yet since nothing in
+  // this pass needs to add a second handler.
+  exception_dispatcher_.register_handler([this](const kernel::ExceptionRecord& record) {
+    if (config_.enable_logging) {
+      std::cout << "[XenonSession] Guest exception 0x" << std::hex
+                << static_cast<std::uint32_t>(record.code) << " at 0x" << record.address
+                << std::dec << std::endl;
+    }
+    return false;  // Do not suppress: run_execution() still reports failure.
+  });
   return true;
 }
 
@@ -247,25 +359,158 @@ bool XenonSession::init_cpu() {
 }
 
 bool XenonSession::init_gpu() {
-  // For now, always create a null backend
-  // In the future, this will select based on config_.graphics_backend
-  gpu_ = std::make_unique<gpu::NullBackend>();
-  return true;
+  // Null is only ever selected here because the caller explicitly asked for
+  // the literal backend name "null"/"none" - SessionConfig::graphics_backend
+  // defaults to "null" for callers that never touch it (e.g. headless/unit
+  // test sessions with enable_graphics left false, which never reach this
+  // function at all - see initialize()). Every other requested backend
+  // ("automatic", "vulkan", "d3d12") either constructs a real native backend
+  // or fails initialization outright; it never silently falls back to Null.
+  const std::string requested = ascii_lower(config_.graphics_backend);
+
+  if (requested == "null" || requested == "none") {
+    gpu_ = std::make_unique<gpu::NullBackend>();
+    return true;
+  }
+
+  bool want_vulkan = false;
+  bool want_d3d12 = false;
+  if (requested == "automatic" || requested == "auto" || requested.empty()) {
+#if defined(_WIN32) && defined(XENON_HAS_D3D12)
+    want_d3d12 = true;
+#elif defined(XENON_HAS_VULKAN)
+    want_vulkan = true;
+#else
+    set_error(
+        "Automatic graphics backend selection failed: this Xenon build has "
+        "no native graphics backend (Vulkan/D3D12) compiled in");
+    return false;
+#endif
+  } else if (requested == "vulkan") {
+    want_vulkan = true;
+  } else if (requested == "d3d12" || requested == "direct3d12" || requested == "dx12") {
+#if !defined(_WIN32)
+    set_error("D3D12 graphics backend was requested but is only available on Windows");
+    return false;
+#endif
+    want_d3d12 = true;
+  } else {
+    set_error("Unknown graphics backend requested: '" + config_.graphics_backend + "'");
+    return false;
+  }
+
+  if (want_d3d12) {
+#if defined(XENON_HAS_D3D12)
+    auto backend = std::make_unique<gpu::d3d12::Backend>();
+    if (!backend->initialize()) {
+      set_error("D3D12 graphics backend initialization failed: " + backend->error());
+      return false;
+    }
+    gpu_ = std::move(backend);
+    return true;
+#else
+    set_error("D3D12 graphics backend was requested but this Xenon build was compiled without D3D12 support");
+    return false;
+#endif
+  }
+
+  if (want_vulkan) {
+#if defined(XENON_HAS_VULKAN)
+    auto backend = std::make_unique<gpu::vulkan::Backend>();
+    if (!backend->initialize()) {
+      set_error("Vulkan graphics backend initialization failed: " + backend->error());
+      return false;
+    }
+    gpu_ = std::move(backend);
+    return true;
+#else
+    set_error("Vulkan graphics backend was requested but this Xenon build was compiled without Vulkan support");
+    return false;
+#endif
+  }
+
+  set_error("Graphics backend selection failed for '" + config_.graphics_backend + "'");
+  return false;
 }
 
 bool XenonSession::init_input() {
   input_ = std::make_unique<input::InputSystem>();
-  
-  // Add configured drivers
-  // For now, this is a placeholder - actual driver instantiation
-  // will be added when we have proper driver factories
-  
+
+  std::vector<std::string> requested = config_.input_drivers;
+  if (requested.empty()) requested.push_back("automatic");
+
+  bool added_real_driver = false;
+  bool explicit_null = false;
+
+  for (const auto& name : requested) {
+    const std::string driver = ascii_lower(name);
+    if (driver == "null" || driver == "none") {
+      explicit_null = true;
+      continue;
+    }
+    if (driver == "automatic" || driver == "auto") {
+#if defined(_WIN32)
+      if (auto xinput = input::create_xinput_driver()) {
+        added_real_driver |= input_->add_driver(std::move(xinput));
+      }
+#endif
+      if (auto sdl = input::create_sdl_input_driver()) {
+        added_real_driver |= input_->add_driver(std::move(sdl));
+      }
+      continue;
+    }
+    if (driver == "xinput") {
+#if defined(_WIN32)
+      auto xinput = input::create_xinput_driver();
+      if (!xinput) {
+        set_error("XInput input driver requested but unavailable on this build");
+        return false;
+      }
+      added_real_driver |= input_->add_driver(std::move(xinput));
+#else
+      set_error("XInput input driver requested but is only available on Windows");
+      return false;
+#endif
+      continue;
+    }
+    if (driver == "sdl") {
+      auto sdl = input::create_sdl_input_driver();
+      if (!sdl) {
+        set_error("SDL input driver requested but unavailable on this build");
+        return false;
+      }
+      added_real_driver |= input_->add_driver(std::move(sdl));
+      continue;
+    }
+    set_error("Unknown input driver requested: '" + name + "'");
+    return false;
+  }
+
+  // Normal Play may not end up with a fully empty (zero real provider) input
+  // system: that would silently strand every game that reads a controller.
+  // Only an explicit "null"/"none" entry in config_.input_drivers is allowed
+  // to produce a driver-less (or Null-driver-only) session, for headless/
+  // test/developer configurations.
+  if (!added_real_driver) {
+    if (!explicit_null) {
+      set_error(
+          "Input subsystem requested but no real input provider (SDL/XInput) "
+          "could be created on this build/platform");
+      return false;
+    }
+    if (!input_->add_driver(std::make_unique<input::NullInputDriver>())) {
+      set_error("Failed to install the explicit null input driver");
+      return false;
+    }
+  }
+
   auto result = input_->setup();
   if (result != input::Result::Success) {
     set_error("Input system setup failed");
     return false;
   }
-  
+
+  input_bridge_ = std::make_unique<input::xam::guest::GuestInputBridge>(*input_);
   return true;
 }
 
@@ -278,15 +523,21 @@ bool XenonSession::init_audio() {
 
   audio_ = std::make_unique<audio::AudioSystem>(*memory_);
   std::string error;
-  if (!audio_->initialize(&error)) {
+  // auto_start_callback_pump=false: the guest-callback pump must not run
+  // until it has a real KernelThread/KPCR/TLS identity to run with, which
+  // requires kernel_process_/loaded_xex_ - neither exists yet at session-init
+  // time. start_audio_guest_thread() (called from create_guest_process(),
+  // once a game is actually loaded) starts the pump for real.
+  if (!audio_->initialize(&error, /*auto_start_callback_pump=*/false)) {
     set_error(error.empty() ? "Audio system initialization failed" : error);
     audio_.reset();
     return false;
   }
+  audio_->set_master_volume(config_.audio_master_volume);
 
-  // Render-driver callbacks execute guest code on the audio worker. Give
-  // them a dedicated PPC stack and an independent CpuState so the audio
-  // thread never races the main guest thread's register file.
+  // Render-driver callbacks execute guest code on the audio callback's own
+  // KernelThread (see start_audio_guest_thread()). Give it a dedicated PPC
+  // stack so it never races the main guest thread's register file.
   constexpr std::uint32_t kAudioCallbackStackSize = 128u * 1024u;
   if (!memory_->allocate(kAudioCallbackStackSize, 16, memory::kReadWrite,
                          /*top_down=*/true, audio_callback_stack_base_)) {
@@ -296,14 +547,19 @@ bool XenonSession::init_audio() {
     return false;
   }
   audio_callback_stack_size_ = kAudioCallbackStackSize;
-  audio_->set_guest_callback_invoker(
-      [this](cpu::GuestAddress callback, cpu::GuestAddress argument) {
-        return invoke_audio_callback(callback, argument);
-      });
   return true;
 #else
   set_error("Audio was requested, but this Xenon build has no production audio subsystem");
   return false;
+#endif
+}
+
+void XenonSession::set_focused(bool focused) {
+  if (input_) input_->set_focused(focused);
+#if defined(XENON_HAS_AUDIO)
+  if (audio_ && config_.audio_mute_unfocused) {
+    audio_->set_muted(!focused);
+  }
 #endif
 }
 
@@ -333,12 +589,58 @@ bool XenonSession::init_exports() {
     return false;
   }
 #endif
-  
+
+  // Guest XamInput* calls go through the same canonical export_registry_ as
+  // XAM/Audio above (see input_bridge_'s comment in session.hpp) rather than
+  // a separate dispatcher, so they reach the InputSystem owned by this
+  // session regardless of which module/ordinal table a title imports them
+  // from.
+  if (input_bridge_) {
+    for (const auto& desc : input::xam::guest::exports()) {
+      core::ExportDescriptor export_desc{};
+      export_desc.library = "xam";
+      export_desc.name = std::string(desc.name);
+      export_desc.ordinal = desc.ordinal;
+      export_desc.requirement = ExportRequirement::Required;
+      export_desc.handler = [this, ordinal = desc.ordinal](ExportCallContext& ctx) {
+        return input_bridge_->dispatch(ordinal, ctx.cpu, ctx.memory);
+      };
+      if (!export_registry_.register_export(std::move(export_desc))) {
+        set_error("Failed to register XamInput export");
+        return false;
+      }
+    }
+  }
+
+  // Bridge xboxkrnl file I/O (NtCreateFile, NtReadFile, ...) into the same
+  // canonical export_registry_. xbox_imports_ already carries the real
+  // ordinal/thunk table (register_xboxkrnl_io_imports(), init_kernel()); each
+  // thunk operates on io_bridge_, which wraps this session's own kernel_io_ -
+  // so this is the active session's real filesystem state, not a global.
+  if (io_bridge_) {
+    for (const auto& desc : xbox_imports_.enumerate("xboxkrnl")) {
+      core::ExportDescriptor export_desc{};
+      export_desc.library = desc.module;
+      export_desc.name = desc.name;
+      export_desc.ordinal = desc.ordinal;
+      export_desc.requirement = ExportRequirement::Required;
+      export_desc.handler = [this, ordinal = desc.ordinal](ExportCallContext& ctx) {
+        xbox::ImportCallContext import_ctx{ctx.cpu, *memory_, *io_bridge_};
+        return xbox_imports_.invoke("xboxkrnl", ordinal, import_ctx);
+      };
+      if (!export_registry_.register_export(std::move(export_desc))) {
+        set_error("Failed to register xboxkrnl I/O export");
+        return false;
+      }
+    }
+  }
+
   return true;
 }
 
 SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
-                                     std::string_view game_id) {
+                                     std::string_view game_id,
+                                     std::span<const std::byte> title_update_bytes) {
   if (!is_initialized()) {
     return SessionResult::failure("Session not initialized");
   }
@@ -350,15 +652,52 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   set_state(SessionState::LoadingGame, "Loading game...");
   game_id_ = std::string(game_id);
 
-  // Load XEX into memory
-  xbox::LoadedXex loaded{};
+  // Parse the immutable base image first - always, even when a title update
+  // is selected, since apply_title_update() validates the update against it
+  // (title/media identity, base-signature digest, source version) and needs
+  // its header/effective-image bytes to do so. xex_bytes itself is never
+  // modified.
+  xbox::XexImage base_image{};
   std::string error;
-  if (!xbox::load_xex(*memory_, xex_bytes, loaded, memory::kXex64KBase, &error)) {
-    set_error("Failed to load XEX: " + error);
+  if (!xbox::parse_xex_image(xex_bytes, base_image, &error)) {
+    set_error("Failed to parse base XEX: " + error);
+    return SessionResult::failure(last_error_);
+  }
+
+  // When a title update was selected (see mount_content_graph()/Content
+  // Services), apply it through XEX Loader V2's canonical XEXP patcher and
+  // make the resulting *effective* image - not the base image - what
+  // actually gets mapped and executed. A malformed/incompatible update is a
+  // hard, explicit launch failure here: never a silent fallback to the base
+  // XEX (see docs/runtime/RUNTIME_SESSION.md's title-update integration section).
+  const bool has_title_update = !title_update_bytes.empty();
+  xbox::XexImage patched_image{};
+  const xbox::XexImage* effective_image = &base_image;
+  if (has_title_update) {
+    if (!xbox::apply_title_update(base_image, title_update_bytes, patched_image, &error)) {
+      set_error("Failed to apply title update: " + error);
+      return SessionResult::failure(last_error_);
+    }
+    effective_image = &patched_image;
+  }
+
+  // Map the effective image into memory.
+  xbox::LoadedXex loaded{};
+  if (!xbox::map_xex_image(*memory_, *effective_image, loaded, memory::kXex64KBase, &error)) {
+    set_error("Failed to map effective XEX image: " + error);
     return SessionResult::failure(last_error_);
   }
 
   loaded_xex_ = std::move(loaded);
+  effective_identity_ =
+      xbox::compute_effective_identity(base_image, has_title_update ? &patched_image : nullptr);
+  if (config_.enable_logging) {
+    std::cout << "[XenonSession] Effective executable: title_id=0x" << std::hex
+              << effective_identity_->title_id << " media_id=0x" << effective_identity_->media_id
+              << std::dec << " title_update_applied=" << (has_title_update ? "yes" : "no")
+              << " hash=" << xbox::format_effective_image_hash(effective_identity_->effective_image_hash)
+              << std::endl;
+  }
 
   // Resolve imports
   if (!resolve_xex_imports()) {
@@ -450,8 +789,8 @@ SessionResult XenonSession::start() {
   // OS thread has finished; state() already gates genuine concurrent runs
   // (it only reaches Ready/Paused again once run_execution() has returned),
   // so this reclaims that thread object rather than signaling "still busy".
-  if (execution_thread_.joinable()) {
-    execution_thread_.join();
+  if (main_thread_) {
+    static_cast<void>(main_thread_->join());
   }
   if (!native_extension_bound_) {
     return SessionResult::failure(
@@ -460,11 +799,32 @@ SessionResult XenonSession::start() {
              ? std::string("this game's module supplied no native extension")
              : native_extension_error_));
   }
+  if (!kernel_process_) {
+    return SessionResult::failure("No guest process available (create_guest_process() did not run)");
+  }
 
   stop_requested_.store(false);
-  set_state(SessionState::Running, "Starting game execution...");
-  execution_thread_ = std::thread([this]() { run_execution(); });
 
+  // A kernel::KernelThread cannot restart after terminating (see
+  // create_guest_process()'s comment), so each start() gets a fresh thread
+  // object bound to the same process/module/TLS state created once at
+  // load_game() time.
+  kernel::ThreadCreationParams thread_params{};
+  thread_params.stack_size = stack_size_;
+  thread_params.name = "MainThread";
+  main_thread_ = kernel_process_->thread_manager().create_thread(
+      [this]() -> std::uint32_t { return run_execution(); }, thread_params);
+  if (!main_thread_) {
+    set_error("Failed to create main KernelThread");
+    return SessionResult::failure(last_error_);
+  }
+  kernel_process_->set_main_thread(main_thread_);
+  if (!main_thread_->start()) {
+    set_error("Failed to start main KernelThread");
+    return SessionResult::failure(last_error_);
+  }
+
+  set_state(SessionState::Running, "Starting game execution...");
   return SessionResult::ok("Game started", SessionState::Running);
 }
 
@@ -502,7 +862,7 @@ SessionResult XenonSession::stop() {
   if (!execution_active_.load()) {
     // The execution thread never actually got into guest code (e.g. it
     // failed immediately), so it is safe to join synchronously here.
-    if (execution_thread_.joinable()) execution_thread_.join();
+    if (main_thread_) static_cast<void>(main_thread_->join());
     set_state(SessionState::Stopped, "Game stopped");
     return SessionResult::ok("Game stopped", SessionState::Stopped);
   }
@@ -581,7 +941,108 @@ bool XenonSession::create_guest_process() {
   // less a small back-chain reserve as PPC ABI convention expects.
   main_cpu_state_->gpr[1] = stack_address + kDefaultStackSize - 64u;
 
+  // Real guest process/thread model (XenonSession -> KernelProcess ->
+  // KernelThread -> CPU V2), consuming XEX Loader V2's already-produced
+  // output directly rather than reparsing default.xex. kernel_memory_ wraps
+  // the same memory_ this session already uses (see session.hpp comment) -
+  // no second Memory V2 instance or mapping set.
+  kernel_memory_ = std::make_shared<kernel::KernelMemory>(memory_);
+  kernel_process_ = std::make_shared<kernel::KernelProcess>(kernel_memory_);
+
+  const auto& image = loaded_xex_->image;
+  const std::string module_name =
+      !game_id_.empty() ? game_id_
+      : !image.original_pe_name.empty() ? image.original_pe_name
+                                        : std::string("default.xex");
+  auto module = kernel_process_->module_manager().load_module(
+      module_name, loaded_xex_->image_base,
+      static_cast<std::uint32_t>(image.effective_image.size()));
+  if (!module) {
+    set_error("Failed to register guest module with KernelProcess");
+    release_partial_guest_process();
+    return false;
+  }
+  module->set_entry_point(image.entry_point);
+  if (image.tls) {
+    module->set_tls_info(image.tls->raw_data_start, image.tls->data_size,
+                         image.tls->slot);
+  }
+
+  // TLS: allocate this thread's KPCR + compiler-emitted static TLS block
+  // from the XEX's already-parsed TLS metadata (image.tls), copy the raw
+  // template, zero-fill the remainder, and point gpr[13] at the KPCR - see
+  // guest_thread_context.hpp for exactly what real Xbox 360 semantics this
+  // reproduces and what it deliberately does not model.
+  std::string tls_error;
+  if (!setup_guest_thread_tls_context(*memory_, image.tls, stack_address,
+                                      kDefaultStackSize, main_thread_tls_,
+                                      &tls_error)) {
+    set_error("Failed to set up main thread TLS: " + tls_error);
+    release_partial_guest_process();
+    return false;
+  }
+  main_cpu_state_->gpr[13] = main_thread_tls_.kpcr_address;
+
+#if defined(XENON_HAS_AUDIO)
+  // Give the audio render-driver callback a real guest thread identity
+  // (KernelProcess -> KernelThread -> its own KPCR/TLS) now that
+  // kernel_process_/loaded_xex_ exist, instead of leaving it unable to run
+  // until start() creates the main thread - the audio callback thread is
+  // independent of the main game thread and, once started, persists across
+  // stop()/start() cycles until shutdown().
+  if (config_.enable_audio && audio_ && !start_audio_guest_thread()) {
+    release_partial_guest_process();
+    return false;
+  }
+#endif
+
+  // The main KernelThread object itself is (re)created per start() call (see
+  // start()), matching the previous bare-std::thread model's "each start()
+  // creates a fresh runnable thread" behavior - a kernel::KernelThread
+  // cannot restart after terminating, so a process that has genuinely
+  // finished/stopped needs a new thread object, not a resurrected one. The
+  // process/module/TLS/KPCR set up above is per-process and stays fixed
+  // across restarts, matching real Xbox process semantics.
   return true;
+}
+
+void XenonSession::release_partial_guest_process() noexcept {
+  // kernel_process_ was created fresh by this same create_guest_process()
+  // call and has not been published anywhere yet (load_game() only returns
+  // success after this function returns true), so resetting it here is
+  // enough to release its ModuleManager/ThreadManager and whatever module it
+  // had registered - nothing else can be holding a reference to it.
+  kernel_process_.reset();
+  kernel_memory_.reset();
+  if (memory_ && stack_base_) {
+    static_cast<void>(memory_->release(stack_base_));
+  }
+  stack_base_ = 0;
+  stack_size_ = 0;
+  // Main thread TLS setup runs before the audio guest thread is started (see
+  // create_guest_process()), so a later step in that same call (currently
+  // only start_audio_guest_thread()) can fail with main_thread_tls_ already
+  // allocated. release_guest_thread_tls_context() is a safe no-op on a
+  // still-zeroed context, so this is correct whether or not TLS setup itself
+  // ran yet.
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, main_thread_tls_);
+  }
+  main_thread_tls_ = {};
+#if defined(XENON_HAS_AUDIO)
+  // start_audio_guest_thread() cleans up its own audio_thread_/
+  // audio_thread_tls_ on failure, but guard here too in case a future step is
+  // ever inserted after it succeeds.
+  if (audio_thread_) {
+    if (audio_) audio_->stop_guest_callback_pump();
+    static_cast<void>(audio_thread_->join());
+    audio_thread_.reset();
+  }
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, audio_thread_tls_);
+  }
+  audio_thread_tls_ = {};
+#endif
 }
 
 void XenonSession::load_native_extension() {
@@ -620,6 +1081,39 @@ void XenonSession::load_native_extension() {
     return;
   }
 
+  // Module-compatibility validation: if this module declares which
+  // effective-executable revision(s) it was compiled for, the currently
+  // loaded effective image (base, or base+title-update - see load_game())
+  // must be one of them. A module that declares nothing is not checked
+  // (back-compat with modules that predate this contract); a module that
+  // does declare revisions and does not include the running one is rejected
+  // outright rather than silently run against code it was never generated
+  // from (see docs/runtime/RUNTIME_HOST.md's "Effective executable identity"
+  // section).
+  if (effective_identity_) {
+    if (auto* revisions_symbol =
+            resolve_native_symbol(native_extension_handle_, kSupportedExecutableRevisionsSymbol)) {
+      auto* revisions_fn = reinterpret_cast<XenonSupportedExecutableRevisionsFn>(revisions_symbol);
+      const char* declared_raw = revisions_fn();
+      const std::string declared = declared_raw ? declared_raw : "";
+      if (!declared.empty()) {
+        const auto effective_hash_hex =
+            ascii_lower(xbox::format_effective_image_hash(effective_identity_->effective_image_hash));
+        if (!declared_revisions_include(declared, effective_hash_hex)) {
+          native_extension_error_ =
+              "native extension does not declare compatibility with the effective executable "
+              "revision (hash " + effective_hash_hex + "); module declares: " + declared;
+          if (config_.enable_logging) {
+            std::cout << "[XenonSession] Native extension rejected: " << native_extension_error_
+                      << std::endl;
+          }
+          unload_native_extension();
+          return;
+        }
+      }
+    }
+  }
+
   auto* bind_fn = reinterpret_cast<XenonBindCompiledRegistryFn>(symbol);
   compiled_registry_binder_ = [bind_fn](cpu::ExecutionContext& context) { bind_fn(context); };
   native_extension_bound_ = true;
@@ -636,7 +1130,15 @@ void XenonSession::unload_native_extension() noexcept {
   }
 }
 
-void XenonSession::run_execution() {
+std::uint32_t XenonSession::run_execution() {
+  // Establishes this host thread as the active guest thread for anything
+  // that resolves "current thread" via kernel::ThreadManager (thread_local),
+  // so kernel/exception context below - and any future kernel export that
+  // asks "who am I" - is scoped to the real KernelThread, not inferred.
+  if (kernel_process_ && main_thread_) {
+    kernel_process_->thread_manager().set_current_thread(main_thread_);
+  }
+
   execution_active_.store(true);
   const auto entry = loaded_xex_->image.entry_point;
 
@@ -648,7 +1150,7 @@ void XenonSession::run_execution() {
   if (!context.compiled_lookup) {
     execution_active_.store(false);
     set_error("No compiled game code is available to execute");
-    return;
+    return 0xFFFFFFFFu;
   }
 
   auto* entry_fn = context.lookup_compiled(entry, cpu::CompiledLookupKind::Call);
@@ -657,14 +1159,25 @@ void XenonSession::run_execution() {
     address << std::hex << std::uppercase << entry;
     execution_active_.store(false);
     set_error("The native extension's compiled registry has no entry for 0x" + address.str());
-    return;
+    return 0xFFFFFFFFu;
   }
 
   cpu::ExecutionResult result{};
   bool crashed = false;
   std::string crash_message;
+  std::uint32_t crash_exit_code = 0xC0000005u;  // NTSTATUS-style default (access violation).
   try {
     result = entry_fn(context);
+  } catch (const memory::MemoryFault& fault) {
+    // Real connection to the guest exception path (not a new subsystem):
+    // Memory V2 already throws this on a genuine guest memory fault; route
+    // it through kernel::ExceptionDispatcher, scoped to the thread that just
+    // registered itself above, instead of only stringifying it.
+    crashed = true;
+    const auto record = kernel::ExceptionDispatcher::fault_to_exception(fault.info());
+    crash_exit_code = static_cast<std::uint32_t>(record.code);
+    static_cast<void>(exception_dispatcher_.dispatch_exception(record));
+    crash_message = std::string("Guest memory fault: ") + fault.what();
   } catch (const std::exception& ex) {
     crashed = true;
     crash_message = std::string("Unhandled exception during guest execution: ") + ex.what();
@@ -677,23 +1190,97 @@ void XenonSession::run_execution() {
 
   if (crashed) {
     set_error(crash_message);
-    return;
+    return crash_exit_code;
   }
   if (stop_requested_.load()) {
     set_state(SessionState::Stopped, "Game execution ended (stop requested)");
-    return;
+    return 0;
   }
   if (result.reason == cpu::FlowReason::Trap) {
     set_error("Game execution trapped (code " + std::to_string(result.detail) + ")");
-    return;
+    static_cast<void>(exception_dispatcher_.dispatch_exception(
+        kernel::ExceptionRecord{kernel::ExceptionCode::IllegalInstruction, 0,
+                                static_cast<std::uint32_t>(main_cpu_state_->cia), {}}));
+    return result.detail;
   }
   set_state(SessionState::Stopped, "Game execution completed");
+  return 0;
 }
 
 #if defined(XENON_HAS_AUDIO)
+bool XenonSession::start_audio_guest_thread() {
+  if (!audio_ || !kernel_process_ || !memory_ || !loaded_xex_) return false;
+  if (!audio_callback_stack_base_ || !audio_callback_stack_size_) {
+    set_error("Audio callback stack was not allocated");
+    return false;
+  }
+
+  // A dedicated KPCR + static-TLS block for the audio callback thread. Real
+  // Xbox 360 render-driver callbacks execute on their own kernel thread with
+  // their own TLS instance, never the game's main thread's - reusing the same
+  // image.tls template that seeded main_thread_tls_ but allocating an
+  // independent block guarantees the two threads observe distinct TLS state
+  // (see tests/core/session_tests.cpp's TLS-independence test).
+  std::string tls_error;
+  if (!setup_guest_thread_tls_context(*memory_, loaded_xex_->image.tls,
+                                      audio_callback_stack_base_,
+                                      audio_callback_stack_size_,
+                                      audio_thread_tls_, &tls_error)) {
+    set_error("Failed to set up audio callback thread TLS: " + tls_error);
+    return false;
+  }
+
+  kernel::ThreadCreationParams thread_params{};
+  thread_params.stack_size = audio_callback_stack_size_;
+  thread_params.name = "AudioCallbackThread";
+  audio_thread_ = kernel_process_->thread_manager().create_thread(
+      [this]() -> std::uint32_t { return run_audio_callback_thread(); },
+      thread_params);
+  if (!audio_thread_) {
+    set_error("Failed to create audio callback KernelThread");
+    release_guest_thread_tls_context(*memory_, audio_thread_tls_);
+    audio_thread_tls_ = {};
+    return false;
+  }
+
+  // Mark the pump active and wire the invoker before starting the thread, so
+  // there is no window where the thread is running but has nothing to do (or
+  // races begin_guest_callback_pump() against the thread's own startup).
+  audio_->begin_guest_callback_pump();
+  audio_->set_guest_callback_invoker(
+      [this](cpu::GuestAddress callback, cpu::GuestAddress argument) {
+        return invoke_audio_callback(callback, argument);
+      });
+
+  if (!audio_thread_->start()) {
+    set_error("Failed to start audio callback KernelThread");
+    audio_->stop_guest_callback_pump();
+    audio_thread_.reset();
+    release_guest_thread_tls_context(*memory_, audio_thread_tls_);
+    audio_thread_tls_ = {};
+    return false;
+  }
+  return true;
+}
+
+std::uint32_t XenonSession::run_audio_callback_thread() {
+  // Registers this host thread as audio_thread_ for anything that resolves
+  // "current thread" via kernel::ThreadManager (thread_local) - the same
+  // mechanism run_execution() uses for main_thread_ - so a guest xboxkrnl
+  // export invoked from inside a guest audio callback sees the audio
+  // callback's own thread identity, not the main thread's or none at all.
+  if (kernel_process_ && audio_thread_) {
+    kernel_process_->thread_manager().set_current_thread(audio_thread_);
+  }
+  if (audio_) {
+    audio_->run_guest_callback_pump_body();
+  }
+  return 0;
+}
+
 bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
                                          cpu::GuestAddress argument) {
-  if (!callback || !memory_ || !compiled_registry_binder_ ||
+  if (!callback || !memory_ || !compiled_registry_binder_ || !kernel_process_ ||
       !audio_callback_stack_base_ || !audio_callback_stack_size_) {
     return false;
   }
@@ -703,6 +1290,16 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
   state.gpr[1] = static_cast<std::uint64_t>(audio_callback_stack_base_) +
                  audio_callback_stack_size_ - 64u;
   state.gpr[3] = argument;
+  // The real fix this pass makes: gpr[13] points at this thread's OWN KPCR
+  // (allocated once in start_audio_guest_thread(), reused across every call -
+  // TLS is per-thread state that outlives a single callback invocation, not
+  // per-call scratch), instead of an isolated bare CpuState with no thread
+  // identity at all. Compiled guest code that accesses __declspec(thread)
+  // TLS or calls a real xboxkrnl export now does so through the same
+  // r13-relative KPCR mechanism the main thread uses (see
+  // guest_thread_context.hpp) and against the audio callback's own
+  // ThreadManager::current_thread(), set once in run_audio_callback_thread().
+  state.gpr[13] = audio_thread_tls_.kpcr_address;
 
   cpu::ExecutionContext context(state, *memory_, *this);
   compiled_registry_binder_(context);
@@ -734,8 +1331,68 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
     return *result;
   }
 
-  // No compiled code found
-  return {cpu::FlowReason::Branch, target, 0};
+  // This is the real "recompiled PPC -> import -> ExportRegistry" boundary.
+  // A direct `bl <address>` inside a recompiled function where <address>
+  // isn't a discovered/compiled function already lowers to exactly this
+  // runtime.call() fallback (see backend_cpp_aot.cpp's Op::Call/CallIndirect/
+  // BranchIndirect codegen: `auto rr=runtime.call(target,state,memory); if
+  // (rr.terminal()) return rr;` - a non-terminal result here simply falls
+  // through to the next guest instruction, exactly like a normal call
+  // returning). So a guest XEX import call site - a plain `bl` whose target
+  // is one of loaded_xex_->image.imports[i].guest_thunk (the guest address
+  // XEX Loader V2 already resolved from XEX_HEADER_IMPORT_LIBRARIES/the PE
+  // import directory - see xex_loader.cpp's parse_native_import_libraries/
+  // parse_pe_import_directory) - reaches external_call() -> ExportRegistry
+  // with zero changes needed to the recomp driver's analysis/codegen:
+  // guest_thunk addresses hold a plain data placeholder word (ordinal in the
+  // low 16 bits, attributes in the high 16 - see
+  // parse_native_import_libraries()'s comment), never real PPC instructions
+  // a "function" could be discovered/compiled at, so a call to one always
+  // falls into this runtime.call() fallback for every title, not just
+  // synthetic test fixtures.
+  if (loaded_xex_) {
+    for (const auto& import : loaded_xex_->image.imports) {
+      if (import.guest_thunk != target) continue;
+      const bool handled = external_call(import.module, import.ordinal, state, memory);
+      if (handled) {
+        // Fallthrough (non-terminal) matches normal call/return semantics:
+        // execution continues at the instruction after the `bl`.
+        return {cpu::FlowReason::Fallthrough, state.cia, 0u};
+      }
+      // A recognized import call site whose specific export this build does
+      // not implement is still a genuine, unrecoverable call failure from
+      // the guest program's point of view. Returning a non-terminal result
+      // here would be silently swallowed by Op::Call/CallIndirect's
+      // `if(rr.terminal()) return rr;` check, letting execution fall through
+      // to the next instruction with a stale, unspecified r3 as though the
+      // call had quietly succeeded - exactly the "silent ignore"/"return
+      // zero and continue" pattern the completion contract forbids. Trap is
+      // terminal, so it propagates all the way out to run_execution(),
+      // which already turns a terminal Trap into a dispatched guest
+      // exception instead of pretending nothing happened.
+      if (config_.enable_export_diagnostics) {
+        std::cout << "[XenonSession] Unresolved import call: " << import.module << "!"
+                  << (import.symbol.empty() ? std::to_string(import.ordinal) : import.symbol)
+                  << " at 0x" << std::hex << target << std::dec << std::endl;
+      }
+      return {cpu::FlowReason::Trap, target,
+              static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
+    }
+  }
+
+  // The target is neither a locally compiled function (already checked by
+  // Op::Call/CallIndirect's context.lookup_compiled() before ever reaching
+  // here - see backend_cpp_aot.cpp) nor a recognized XEX import call site.
+  // A `bl`/`bctrl` always expects SOME code to run and produce a real
+  // result, so - same reasoning as the unresolved-import case above - this
+  // must be a terminal, diagnosable failure rather than a silently
+  // swallowed non-terminal Branch.
+  if (config_.enable_export_diagnostics) {
+    std::cout << "[XenonSession] Unresolved call target: 0x" << std::hex << target
+              << " (neither compiled guest code nor a known import)" << std::dec << std::endl;
+  }
+  return {cpu::FlowReason::Trap, target,
+          static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
 }
 
 cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,

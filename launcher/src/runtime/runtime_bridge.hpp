@@ -31,7 +31,7 @@ class IRuntimeBridge {
 
 // Supervises the generic Xenon runtime/game-host process (xenon_runtime_host)
 // instead of executing guest code in the launcher itself. See
-// docs/RUNTIME_HOST.md for the process/IPC contract this implements: a JSON
+// docs/runtime/RUNTIME_HOST.md for the process/IPC contract this implements: a JSON
 // launch configuration handed to a detached child process, and
 // status.json/log.txt/stop.signal files in a per-session directory used to
 // supervise it afterward. Running detached is what lets a game outlive the
@@ -67,11 +67,11 @@ class RuntimeBridge final : public IRuntimeBridge {
   // host's OS process has exited without status.json ever reaching a
   // terminal state, synthesizes a "crashed" status instead of reporting
   // stale/missing data as if the session were still progressing. See
-  // docs/RUNTIME_HOST.md "Detecting a crash".
+  // docs/runtime/RUNTIME_HOST.md "Detecting a crash".
   [[nodiscard]] QVariantMap augmentedStatus() const;
   // Best-effort liveness/exit-code probe for a process this launcher does
   // not own as a child (the runtime host always runs detached - see
-  // docs/RUNTIME_HOST.md). `determinable` is false when the platform could
+  // docs/runtime/RUNTIME_HOST.md). `determinable` is false when the platform could
   // not give a trustworthy answer (e.g. permission denied), in which case
   // callers must not treat that as either "alive" or "dead".
   struct ProcessState {

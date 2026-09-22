@@ -17,6 +17,10 @@ LaunchFeature::LaunchFeature(LaunchService& launch, LibraryFeature& library, Dlc
     : launch_(launch), library_(library), dlc_(dlc), modules_(modules), profiles_(profiles),
       settings_(settings), paths_(paths), test_mode_(test_mode) {}
 
+void LaunchFeature::ensureModuleResolved(const QString& game_id) const {
+  if (!test_mode_) launch_.ensureModuleResolved(game_id);
+}
+
 QVariantMap LaunchFeature::configurationFor(const QString& game_id) const {
   if (!test_mode_) {
     const auto config = launch_.configurationFor(game_id);

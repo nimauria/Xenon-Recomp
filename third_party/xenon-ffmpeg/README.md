@@ -1,47 +1,48 @@
 # Xenon FFmpeg/XMA dependency
 
-This directory contains Xenon's vetted Windows x64 build of the FFmpeg
-`libavcodec` and `libavutil` libraries used by Audio V1.
+This directory contains Xenon's vetted **Windows x64 developer fallback** for
+FFmpeg `libavcodec` and `libavutil` used by Audio V1.
 
-It is **not** a dependency on the Xenia emulator at runtime. The decoder build
-is derived from the Xenia-maintained FFmpeg fork because that fork exposes the
-raw Xbox 360 hardware-frame interface `AV_CODEC_ID_XMAFRAMES` required by
-Xenon's XMA context implementation.
+It is not a runtime dependency on the Xenia emulator. The libraries are built
+from the Xenia-maintained FFmpeg fork because that fork exposes the raw Xbox 360
+hardware-frame interface `AV_CODEC_ID_XMAFRAMES` required by Xenon's XMA
+contexts.
 
 ## Pinned provenance
 
 - Xenia build-harness revision: `95a5c3ee250f80c3b9d139658649d9ffb6db3eec`
-- FFmpeg submodule revision: `15ece0882e8d5875051ff5b73c5a8326f7cee9f5`
-- FFmpeg libavcodec API version in this bundle: `58.134.100`
-- Windows architecture: x86-64
-- Build type: Release static libraries
-- Toolchain used for the current bundle: MSVC 14.51 / Visual Studio Build Tools 2026 (`v145`)
+- FFmpeg revision: `15ece0882e8d5875051ff5b73c5a8326f7cee9f5`
+- FFmpeg libavcodec API version: `58.134.100`
+- Triplet: `windows-x64`
+- Linkage: Release static libraries
 
-Only FFmpeg's installed/public headers (plus generated `avconfig.h`) are kept in
-`include/`; decoder source files are not copied into Xenon's include tree. The
-Windows bundle includes a SHA-256 identity manifest and CMake verifies the two
-archives plus `codec_id.h` before using them.
+`windows-x64/XenonFFmpegBundle.cmake` records the revision/triplet/linkage
+identity and SHA-256 hashes. CMake verifies that metadata before accepting the
+bundle.
 
-## CMake behavior
+## How it is used now
 
-On Windows x64, Xenon automatically prefers
-`third_party/xenon-ffmpeg/windows-x64`. A developer may override this by
-setting `XENON_AUDIO_FFMPEG_ROOT` to another compatible FFmpeg installation.
-The configure step still compiles a capability probe for
-`AV_CODEC_ID_XMAFRAMES`, so an incompatible library/header combination fails
-immediately rather than producing a silent/no-audio runtime.
+`XENON_DEPENDENCY_MODE=AUTO` may use this committed bundle on Windows x64 so a
+normal development checkout does not need to build FFmpeg first.
 
-Other platforms currently use a compatible system/external FFmpeg build.
+Official release presets use `XENON_DEPENDENCY_MODE=MANAGED` and deliberately
+skip this static fallback. `tools/deps/bootstrap.py` then builds the same pinned
+FFmpeg fork as shared libraries and stages them beside Xenon binaries. That path
+is also used to make Linux releases reproducible.
+
+The static bundle can be rebuilt with:
+
+```powershell
+./tools/rebuild_xenon_ffmpeg.ps1
+```
+
+The script also regenerates the identity manifest.
 
 ## Licensing
 
-FFmpeg is licensed primarily under LGPL-2.1-or-later; see the license files in
-`windows-x64/licenses/`. These archives were built from the non-GPL Xenia FFmpeg
-configuration. Xenon's MIT license does not replace FFmpeg's license.
+FFmpeg is primarily LGPL-2.1-or-later in this configuration. See
+`windows-x64/licenses/`.
 
-Anyone distributing a statically linked Xenon binary must satisfy the LGPL
-requirements applicable to static linking, including the user's ability to
-relink with a modified FFmpeg. A production release process should therefore
-publish the corresponding FFmpeg source/revision and relinkable Xenon objects,
-or move the packaged release to shared FFmpeg libraries. Keep this notice and
-the bundled license texts with distributed artifacts.
+The committed static bundle is intended for development convenience. Public
+release packaging should use the managed shared build described in
+`docs/development/DEPENDENCIES.md`, which keeps LGPL redistribution substantially simpler.

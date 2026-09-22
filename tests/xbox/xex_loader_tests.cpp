@@ -718,6 +718,71 @@ void test_parse_and_load_uncompressed_unencrypted() {
   assert(address_space.read8(kImageBase + kSectionSize) == 0x4Eu);
 }
 
+// map_xex_image() is load_xex()'s mapping half, factored out so a caller
+// with an already-parsed/patched XexImage (XenonSession, after
+// apply_title_update()) can map it without re-serializing back to file
+// bytes. This proves the refactor is behavior-preserving: parsing then
+// mapping separately must produce the same result as load_xex()'s single
+// call.
+void test_map_xex_image_matches_load_xex() {
+  auto fixture = make_uncompressed_fixture();
+
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+
+  memory::AddressSpace direct_space(memory::GuestTranslationMode::Compact);
+  assert(direct_space.initialize());
+  xbox::LoadedXex direct_loaded{};
+  assert(xbox::load_xex(direct_space, fixture.file, direct_loaded, memory::kXex64KBase, &error));
+
+  memory::AddressSpace mapped_space(memory::GuestTranslationMode::Compact);
+  assert(mapped_space.initialize());
+  xbox::LoadedXex mapped_loaded{};
+  assert(xbox::map_xex_image(mapped_space, image, mapped_loaded, memory::kXex64KBase, &error));
+
+  assert(direct_loaded.loaded && mapped_loaded.loaded);
+  assert(direct_loaded.image_base == mapped_loaded.image_base);
+  assert(direct_loaded.mapped_sections.size() == mapped_loaded.mapped_sections.size());
+  assert(direct_loaded.executable_ranges.size() == mapped_loaded.executable_ranges.size());
+  assert(mapped_space.read8(kImageBase + kSectionSize) == direct_space.read8(kImageBase + kSectionSize));
+}
+
+// compute_effective_identity()/compute_effective_image_hash(): the "which
+// exact executable" identity XenonSession publishes and native-extension
+// compatibility gating relies on (see src/core/session.cpp) must actually
+// differ once a title update changes the effective image, and match
+// whichever image (base or patched) it was computed from.
+void test_effective_identity_reflects_title_update() {
+  auto fixture = make_uncompressed_fixture();
+  xbox::XexImage base_image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, base_image, &error));
+
+  const auto base_only = xbox::compute_effective_identity(base_image);
+  assert(!base_only.title_update_applied);
+  assert(base_only.effective_image_hash == xbox::compute_effective_image_hash(base_image));
+
+  auto patch_pe = build_pe_body(kImageBase, /*with_export=*/false);
+  for (std::size_t i = patch_pe.data_rva; i < patch_pe.data_rva + 0x1000u; ++i) {
+    patch_pe.bytes[i] = std::byte{0xEE};
+  }
+  XexBuildOptions patch_opts{};
+  patch_opts.with_import_libraries = false;
+  patch_opts.module_flags = 0x00000001u | 0x00000010u | 0x00000020u;  // TITLE | MODULE_PATCH | PATCH_FULL
+  auto patch_fixture = build_base_xex(patch_pe, patch_opts);
+
+  xbox::XexImage patched{};
+  assert(xbox::apply_title_update(base_image, patch_fixture.file, patched, &error));
+
+  const auto patched_identity = xbox::compute_effective_identity(base_image, &patched);
+  assert(patched_identity.title_update_applied);
+  assert(patched_identity.effective_image_hash != base_only.effective_image_hash &&
+        "a title update that changes .data must change the effective identity hash");
+  assert(patched_identity.effective_image_hash == xbox::compute_effective_image_hash(patched));
+  assert(!xbox::format_effective_image_hash(patched_identity.effective_image_hash).empty());
+}
+
 // XEX1's security_info has a genuinely different on-disk byte layout from
 // XEX2 (different field order, no header_digest/export_table/
 // import_table_count fields, RootImportAddress in their place - see
@@ -1770,6 +1835,8 @@ int main() {
   test_invalid_header_size();
   test_missing_security_info_rejected();
   test_parse_and_load_uncompressed_unencrypted();
+  test_map_xex_image_matches_load_xex();
+  test_effective_identity_reflects_title_update();
   test_parse_and_load_xex1_format();
   test_xex1_security_info_uses_its_own_smaller_layout();
   test_page_descriptors_can_downgrade_writable_section();

@@ -99,7 +99,7 @@ New or expanded regression coverage includes:
 After the controlled-write/observer-removal slice, the complete generic Linux
 x86-64 Release matrix remains **24/24 passing**.
 
-The complete generic Linux x86-64 Release CTest matrix is run after each foundational change. Native Vulkan backend compilation requires a Vulkan SDK and D3D12/Windows host-VM validation requires a Windows build, so those platform-specific checks remain separate required validation rather than being inferred from generic Linux tests. See [`../MEMORY_V2.md`](../MEMORY_V2.md) for the live completion status and remaining hardening work.
+The complete generic Linux x86-64 Release CTest matrix is run after each foundational change. Native Vulkan backend compilation requires a Vulkan SDK and D3D12/Windows host-VM validation requires a Windows build, so those platform-specific checks remain separate required validation rather than being inferred from generic Linux tests. See [`MEMORY_V2.md`](MEMORY_V2.md) for the live completion status and remaining hardening work.
 
 ### Physical allocator slice
 

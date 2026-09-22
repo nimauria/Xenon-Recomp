@@ -16,6 +16,12 @@ Popup {
     property string avatarPath: ""
     property string pendingAvatarSource: ""
     property bool removeAvatarOnSave: false
+    property real avatarFocalX: 0.5
+    property real avatarFocalY: 0.5
+    property real avatarZoom: 1.0
+    readonly property string activeAvatarSource: pendingAvatarSource.length > 0
+        ? pendingAvatarSource
+        : (removeAvatarOnSave ? "" : avatarPath)
     property string gamePath: ""
     property string savePath: ""
     property string screenshotPath: ""
@@ -108,6 +114,9 @@ Popup {
             avatarPath: avatarPath,
             pendingAvatarSource: pendingAvatarSource,
             removeAvatarOnSave: removeAvatarOnSave,
+            avatarFocalX: avatarFocalX,
+            avatarFocalY: avatarFocalY,
+            avatarZoom: avatarZoom,
             customLocations: customLocations,
             gamePath: customLocations ? gamePath : "",
             savePath: customLocations ? savePath : "",
@@ -134,6 +143,9 @@ Popup {
         avatarPath = ""
         pendingAvatarSource = ""
         removeAvatarOnSave = false
+        avatarFocalX = 0.5
+        avatarFocalY = 0.5
+        avatarZoom = 1.0
         gamePath = ""
         savePath = ""
         screenshotPath = ""
@@ -163,6 +175,9 @@ Popup {
         avatarPath = String(data.avatarPath || "")
         pendingAvatarSource = ""
         removeAvatarOnSave = false
+        avatarFocalX = data.avatarFocalX !== undefined ? Number(data.avatarFocalX) : 0.5
+        avatarFocalY = data.avatarFocalY !== undefined ? Number(data.avatarFocalY) : 0.5
+        avatarZoom = data.avatarZoom !== undefined ? Number(data.avatarZoom) : 1.0
         gamePath = String(data.gamePath || "")
         savePath = String(data.savePath || "")
         screenshotPath = String(data.screenshotPath || "")
@@ -216,6 +231,9 @@ Popup {
             avatarPath: avatarPath,
             pendingAvatarSource: pendingAvatarSource,
             removeAvatarOnSave: removeAvatarOnSave,
+            avatarFocalX: avatarFocalX,
+            avatarFocalY: avatarFocalY,
+            avatarZoom: avatarZoom,
             gamePath: customLocations ? gamePath : "",
             savePath: customLocations ? savePath : "",
             screenshotPath: customLocations ? screenshotPath : "",
@@ -358,7 +376,7 @@ Popup {
             clip: true
             contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+            ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
             Item {
                 width: editorScroll.availableWidth
@@ -385,9 +403,10 @@ Popup {
                             Layout.preferredHeight: Layout.preferredWidth
                             Layout.alignment: avatarLayout.columns === 1 ? Qt.AlignHCenter : Qt.AlignTop
                             displayName: nameField.text.length > 0 ? nameField.text : "Profile"
-                            avatarSource: root.pendingAvatarSource.length > 0
-                                ? root.pendingAvatarSource
-                                : (root.removeAvatarOnSave ? "" : root.avatarPath)
+                            avatarSource: root.activeAvatarSource
+                            avatarFocalX: root.avatarFocalX
+                            avatarFocalY: root.avatarFocalY
+                            avatarZoom: root.avatarZoom
                             editable: launcherBridge.featureEnabled("profiles.avatars")
                             onChangeRequested: avatarDialog.open()
                         }
@@ -409,12 +428,26 @@ Popup {
                                 spacing: Theme.spaceSm
                                 XButton { text: "Choose image"; onClicked: avatarDialog.open() }
                                 XButton {
+                                    visible: root.activeAvatarSource.length > 0
+                                    text: "Adjust crop"
+                                    onClicked: {
+                                        avatarCropEditor.imageSource = root.activeAvatarSource
+                                        avatarCropEditor.initialFocalX = root.avatarFocalX
+                                        avatarCropEditor.initialFocalY = root.avatarFocalY
+                                        avatarCropEditor.initialZoom = root.avatarZoom
+                                        avatarCropEditor.open()
+                                    }
+                                }
+                                XButton {
                                     visible: root.avatarPath.length > 0 || root.pendingAvatarSource.length > 0
                                     text: "Remove"
                                     variant: "ghost"
                                     onClicked: {
                                         root.pendingAvatarSource = ""
                                         root.removeAvatarOnSave = true
+                                        root.avatarFocalX = 0.5
+                                        root.avatarFocalY = 0.5
+                                        root.avatarZoom = 1.0
                                     }
                                 }
                             }
@@ -508,7 +541,7 @@ Popup {
                             Text { text: "Startup page"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                             XComboBox {
                                 Layout.fillWidth: true
-                                model: ["Launcher default", "Home", "Library", "Modules", "Profiles", "Settings"]
+                                model: ["Launcher default", "Home", "Library", "Downloads", "Modules", "Profiles", "Captures", "Network", "Support", "Settings"]
                                 currentIndex: Math.max(0, model.indexOf(root.startupPage))
                                 onActivated: function(index) { root.startupPage = model[index] }
                             }
@@ -729,6 +762,26 @@ Popup {
         onAccepted: {
             root.pendingAvatarSource = selectedFile
             root.removeAvatarOnSave = false
+            // A newly picked image starts centered/unzoomed; immediately
+            // offer the crop editor rather than silently applying a raw
+            // center crop the user never confirmed.
+            root.avatarFocalX = 0.5
+            root.avatarFocalY = 0.5
+            root.avatarZoom = 1.0
+            avatarCropEditor.imageSource = selectedFile
+            avatarCropEditor.initialFocalX = 0.5
+            avatarCropEditor.initialFocalY = 0.5
+            avatarCropEditor.initialZoom = 1.0
+            avatarCropEditor.open()
+        }
+    }
+
+    AvatarCropEditor {
+        id: avatarCropEditor
+        onApplied: function(focalX, focalY, zoom) {
+            root.avatarFocalX = focalX
+            root.avatarFocalY = focalY
+            root.avatarZoom = zoom
         }
     }
 
@@ -742,12 +795,15 @@ Popup {
             : root.editSection === "paths" ? "Save paths"
             : root.editSection === "runtime" ? "Save runtime settings"
             : "Save changes"
+        // Cancelling this prompt means the same thing a separate "Discard
+        // changes" button used to: the user does not want to save, so close
+        // without saving. There is no third "go back and keep editing"
+        // option here - if they want that, they simply don't trigger this
+        // dialog's close in the first place.
         cancelText: "Cancel"
-        secondaryText: "Discard changes"
-        secondaryDestructive: true
         destructive: false
         onConfirmed: root.submit()
-        onSecondaryTriggered: {
+        onCancelled: {
             root.allowDirtyClose = true
             root.close()
         }

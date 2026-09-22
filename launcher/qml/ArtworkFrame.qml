@@ -6,6 +6,12 @@ Rectangle {
     property url source: ""
     property string fallbackTitle: ""
     property bool hero: false
+    // Normalized [0,1] source-image point that must stay visible under the
+    // cover crop (e.g. supplied by a module's tileArtFocal/heroArtFocal
+    // manifest metadata). Defaults to center, matching prior behavior for
+    // any artwork that declares no focal point.
+    property real focalX: 0.5
+    property real focalY: 0.5
 
     radius: Theme.controlRadius
     clip: true
@@ -13,14 +19,13 @@ Rectangle {
     border.width: Theme.borderWidth
     border.color: Theme.border
 
-    Image {
+    CoverImage {
         anchors.fill: parent
         source: root.source
         visible: root.source.toString().length > 0
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-        cache: true
-        smooth: true
+        fitMode: "cover"
+        focalX: root.focalX
+        focalY: root.focalY
     }
 
     Rectangle {

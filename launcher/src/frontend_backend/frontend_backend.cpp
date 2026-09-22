@@ -27,7 +27,7 @@ FrontendBackend::FrontendBackend(QObject* parent)
       game_properties_(library_, dlc_, modules_, profiles_, paths_),
       import_export_(core_.contentImport(), profiles_, library_, modules_, kTestMode),
       launch_(core_.launch(), library_, dlc_, modules_, profiles_, settings_, paths_, kTestMode),
-      session_(launch_, core_.library(), core_.settings(), kTestMode, nullptr),
+      session_(launch_, core_.library(), core_.settings(), core_.preparation(), kTestMode, nullptr),
       filesystem_(core_.paths(), core_.filesystem()),
       community_(settings_, session_, filesystem_, QStringLiteral(XENON_LAUNCHER_DISCORD_APPLICATION_ID),
                  core_.recovery().safeMode(), nullptr),
@@ -82,6 +82,10 @@ int FrontendBackend::initialPage() const {
   if (profile_page == QStringLiteral("Profiles")) return 2;
   if (profile_page == QStringLiteral("Settings")) return 3;
   if (profile_page == QStringLiteral("Home")) return 4;
+  if (profile_page == QStringLiteral("Downloads")) return 5;
+  if (profile_page == QStringLiteral("Captures")) return 6;
+  if (profile_page == QStringLiteral("Network")) return 7;
+  if (profile_page == QStringLiteral("Support")) return 8;
   if (profile_page == QStringLiteral("Library")) return 0;
   return application_.initialPage();
 }

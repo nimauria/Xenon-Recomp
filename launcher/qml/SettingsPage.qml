@@ -11,6 +11,21 @@ Item {
     property int inputRevision: 0
     property var launcherUpdateState: launcherBridge.launcherUpdateState()
 
+    // Only the category the user has actually visited gets its body built -
+    // constructing all 16 categories' full control trees the instant
+    // Settings first opens (the previous behaviour, since StackLayout
+    // instantiates every static child regardless of visibility) is the
+    // measurable first-open hit. Once visited a category stays warm exactly
+    // like Main.qml's own top-level page Loaders do.
+    property var visitedCategoryPages: ({ 0: true })
+    onCategoryIndexChanged: {
+        if (root.visitedCategoryPages[root.categoryIndex] !== true) {
+            var updated = Object.assign({}, root.visitedCategoryPages)
+            updated[root.categoryIndex] = true
+            root.visitedCategoryPages = updated
+        }
+    }
+
     readonly property var categories: launcherBridge.settingsCategories()
     readonly property var visibleCategories: categories.filter(function(category) {
         if (!launcherBridge.featureEnabled(category.feature))
@@ -395,7 +410,10 @@ Item {
                 visible: root.visibleCategories.length > 0
                 currentIndex: root.categoryIndex
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[0] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "General"
                     description: "Core launcher behaviour and navigation preferences."
 
@@ -444,9 +462,12 @@ Item {
                         description: "Restore registered General preferences without changing profiles, paths or theme choices."
                         XButton { Layout.fillWidth: true; text: "Reset General"; onClicked: launcherBridge.resetSettingsCategory("general") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[1] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Appearance"
                     description: "Theme definitions, accents and background assets are supplied by Launcher Core rather than hard-coded by this page."
 
@@ -606,9 +627,12 @@ Item {
                         description: "Restore the base theme, accent, custom colour, corner style and all background/decor settings."
                         XButton { Layout.fillWidth: true; text: "Reset Appearance"; onClicked: launcherBridge.resetSettingsCategory("appearance") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[2] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Library"
                     description: "Control how installed and missing game content is presented."
                     XSettingsCard {
@@ -627,13 +651,47 @@ Item {
                         }
                     }
                     XSettingsCard {
+                        title: "Default library view"
+                        description: "Choose the artwork browsing layout used when the Library opens. Grid density remains responsive on small screens."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceSm
+                            XComboBox {
+                                Layout.fillWidth: true
+                                model: root.optionLabels("library/viewMode")
+                                currentIndex: root.optionIndex("library/viewMode")
+                                onActivated: function(index) { root.saveOption("library/viewMode", index) }
+                            }
+                            XComboBox {
+                                Layout.fillWidth: true
+                                visible: root.getString("library/viewMode", "Focused") === "Grid"
+                                model: root.optionLabels("library/gridDensity")
+                                currentIndex: root.optionIndex("library/gridDensity")
+                                onActivated: function(index) { root.saveOption("library/gridDensity", index) }
+                            }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Wrap game navigation"
+                        description: "Moving past the first or last game wraps around in one-item-at-a-time controller and keyboard navigation."
+                        XSwitch { checked: root.getBool("library/wrapNavigation", true); onUserToggled: function(value) { root.save("library/wrapNavigation", value) } }
+                    }
+                    XSettingsCard {
+                        title: "Remember selected game"
+                        description: "Return to the last selected title when Xenon restarts. The preference stores only the library game identifier."
+                        XSwitch { checked: root.getBool("library/rememberSelection", true); onUserToggled: function(value) { root.save("library/rememberSelection", value) } }
+                    }
+                    XSettingsCard {
                         title: "Reset library presentation"
                         description: "Restore Library display preferences without removing games, modules or DLC."
                         XButton { Layout.fillWidth: true; text: "Reset Library"; onClicked: launcherBridge.resetSettingsCategory("library") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[3] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Paths"
                     description: "Launcher-wide defaults. Individual profiles may optionally override Games, Saves and Screenshots."
                     XPathField { label: "Game library"; helperText: "Default location for user-provided game content."; pathValue: root.getString("paths/games", launcherBridge.defaultGameLibraryPath); allowClear: true; onPathEdited: function(path) { root.save("paths/games", path) } }
@@ -647,9 +705,12 @@ Item {
                         description: "Return every launcher-wide storage location to its platform default. Profiles and modules are reloaded through Launcher Core."
                         XButton { Layout.fillWidth: true; text: "Reset Paths"; onClicked: launcherBridge.resetSettingsCategory("paths") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[4] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Runtime"
                     description: "Runtime preferences are validated now and become authoritative session inputs when the corresponding Xenon service is connected."
                     XSettingsCard {
@@ -687,9 +748,12 @@ Item {
                         description: "Restore automatic renderer selection and the default offline preference."
                         XButton { Layout.fillWidth: true; text: "Reset Runtime"; onClicked: launcherBridge.resetSettingsCategory("runtime") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[5] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Graphics"
                     description: "Host graphics preferences are persisted now; renderer-specific device controls will appear when the live graphics service exposes them."
                     XSettingsCard {
@@ -718,9 +782,12 @@ Item {
                         description: "Restore launcher-side graphics defaults."
                         XButton { Layout.fillWidth: true; text: "Reset Graphics"; onClicked: launcherBridge.resetSettingsCategory("graphics") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[6] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Input"
                     description: "Xenon Input is connected directly to the launcher. Configure live controllers, Xbox user routing, profiles, HOTAS/multi-source input and module API defaults here."
                     XSettingsCard {
@@ -866,9 +933,12 @@ Item {
                         description: "Restore Input defaults. Stable device/profile data remains in the Input profile store unless explicitly replaced."
                         XButton { Layout.fillWidth: true; text: "Reset Input"; onClicked: launcherBridge.resetSettingsCategory("input") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[7] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Audio"
                     description: "Launcher-side audio policy is ready now; device enumeration remains owned by Xenon Audio."
                     XSettingsCard {
@@ -906,9 +976,12 @@ Item {
                         description: "Restore launcher-side audio defaults."
                         XButton { Layout.fillWidth: true; text: "Reset Audio"; onClicked: launcherBridge.resetSettingsCategory("audio") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[8] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Network"
                     description: "This category becomes visible when Xenon networking advertises its frontend capability."
                     XSettingsCard {
@@ -916,12 +989,20 @@ Item {
                         description: "Online identity, matchmaking and service-replacement controls remain runtime-owned."
                         StatusPill { label: root.runtimeServiceLabel("network"); tone: root.runtimeServiceTone("network") }
                     }
+                } }
                 }
 
-                FilesystemPage {
+                Loader {
+                    active: root.visitedCategoryPages[9] === true
+                    asynchronous: true
+                    sourceComponent: Component { FilesystemPage {
+                    } }
                 }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[10] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Updates"
                     description: "Launcher Core checks Project Xenon GitHub Releases, verifies downloaded packages with SHA-256, and stages installation outside the QML layer."
 
@@ -1055,9 +1136,12 @@ Item {
                         description: "Restore automatic checks, stable-channel preference and module update defaults. Downloaded/staged packages are not installed by a reset."
                         XButton { Layout.fillWidth: true; text: "Reset Updates"; onClicked: launcherBridge.resetSettingsCategory("updates") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[11] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Community"
                     description: "Support links and optional Discord integration for the Xenon community."
 
@@ -1169,9 +1253,12 @@ Item {
                         description: "Turn Rich Presence back off and restore its privacy defaults. Community links are built into Xenon and are not removed."
                         XButton { Layout.fillWidth: true; text: "Reset Community"; onClicked: launcherBridge.resetSettingsCategory("community") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[12] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Accessibility"
                     description: "Readability, focus and motion settings are applied by the shared Theme layer and follow supported OS accessibility hints."
                     XSettingsCard {
@@ -1209,9 +1296,12 @@ Item {
                         description: "Restore launcher accessibility overrides while continuing to follow OS-level accessibility hints."
                         XButton { Layout.fillWidth: true; text: "Reset Accessibility"; onClicked: launcherBridge.resetSettingsCategory("accessibility") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[13] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Developer"
                     description: "Development-only fixture selection and diagnostics. Hidden from production builds."
                     XSettingsCard {
@@ -1263,9 +1353,12 @@ Item {
                         description: "Restore fixture and launcher diagnostic preferences."
                         XButton { Layout.fillWidth: true; text: "Reset Developer"; onClicked: launcherBridge.resetSettingsCategory("developer") }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[14] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "About Xenon"
                     description: "User-focused launcher information, diagnostics and project links."
                     XPanel {
@@ -1309,79 +1402,126 @@ Item {
                             }
                         }
                     }
-                    XSettingsCard {
-                        title: "Startup & recovery"
-                        description: launcherBridge.safeMode
-                            ? "Safe Mode is active. Production launcher state, runtime services and automatic update checks are not loaded in this session."
-                            : (Boolean(launcherBridge.recoveryState.previousUncleanShutdown)
-                               ? "Xenon preserved recovery information from a previous unclean shutdown."
-                               : "Xenon records clean shutdowns and preserves the previous startup log if a launcher process ends unexpectedly.")
-                        RowLayout {
-                            Layout.fillWidth: true
+                    XPanel {
+                        Layout.fillWidth: true
+                        implicitHeight: startupRecoveryColumn.implicitHeight + Theme.spaceXl * 2
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+                        decorated: true
+
+                        ColumnLayout {
+                            id: startupRecoveryColumn
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: Theme.spaceXl
                             spacing: Theme.spaceSm
-                            StatusPill {
-                                label: launcherBridge.safeMode ? "Safe Mode" : "Normal mode"
-                                tone: launcherBridge.safeMode ? Theme.warning : Theme.success
+
+                            Text { text: "Startup & recovery"; color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+                            Text {
+                                Layout.fillWidth: true
+                                text: launcherBridge.safeMode
+                                    ? "Safe Mode is active. Production launcher state, runtime services and automatic update checks are not loaded in this session."
+                                    : (Boolean(launcherBridge.recoveryState.previousUncleanShutdown)
+                                       ? "Xenon preserved recovery information from a previous unclean shutdown."
+                                       : "Xenon records clean shutdowns and preserves the previous startup log if a launcher process ends unexpectedly.")
+                                color: Theme.textMuted
+                                font.pixelSize: Theme.typeCaption
+                                wrapMode: Text.WordWrap
                             }
-                            Item { Layout.fillWidth: true }
-                            XButton {
-                                text: "Open Recovery Folder"
-                                onClicked: launcherBridge.openFolder(launcherBridge.recoveryDirectory())
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceSm
+                                StatusPill {
+                                    label: launcherBridge.safeMode ? "Safe Mode" : "Normal mode"
+                                    tone: launcherBridge.safeMode ? Theme.warning : Theme.success
+                                }
+                                Item { Layout.fillWidth: true }
+                                XButton {
+                                    text: "Open Recovery Folder"
+                                    onClicked: launcherBridge.openFolder(launcherBridge.recoveryDirectory())
+                                }
+                                XButton {
+                                    visible: !launcherBridge.safeMode
+                                    text: "Restart in Safe Mode"
+                                    onClicked: launcherBridge.restartInSafeMode()
+                                }
+                                XButton {
+                                    visible: launcherBridge.safeMode
+                                    text: "Restart Normally"
+                                    variant: "primary"
+                                    onClicked: launcherBridge.restartNormally()
+                                }
                             }
-                            XButton {
-                                visible: !launcherBridge.safeMode
-                                text: "Restart in Safe Mode"
-                                onClicked: launcherBridge.restartInSafeMode()
-                            }
-                            XButton {
-                                visible: launcherBridge.safeMode
-                                text: "Restart Normally"
-                                variant: "primary"
-                                onClicked: launcherBridge.restartNormally()
+                            Text {
+                                Layout.fillWidth: true
+                                visible: String(launcherBridge.recoveryState.lastIncidentAt || "").length > 0
+                                text: "Last incident: " + String(launcherBridge.recoveryState.lastIncidentAt || "Unknown")
+                                    + " • phase: " + String(launcherBridge.recoveryState.previousPhase || "Unknown")
+                                color: Theme.textMuted
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: Theme.typeCaption
                             }
                         }
-                        Text {
-                            Layout.fillWidth: true
-                            visible: String(launcherBridge.recoveryState.lastIncidentAt || "").length > 0
-                            text: "Last incident: " + String(launcherBridge.recoveryState.lastIncidentAt || "Unknown")
-                                + " • phase: " + String(launcherBridge.recoveryState.previousPhase || "Unknown")
-                            color: Theme.textMuted
-                            wrapMode: Text.WordWrap
-                            font.pixelSize: Theme.typeCaption
+                    }
+
+                    XPanel {
+                        Layout.fillWidth: true
+                        implicitHeight: supportDiagnosticsColumn.implicitHeight + Theme.spaceXl * 2
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+                        decorated: true
+
+                        ColumnLayout {
+                            id: supportDiagnosticsColumn
+                            anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                            anchors.margins: Theme.spaceXl
+                            spacing: Theme.spaceSm
+
+                            Text { text: "Support & diagnostics"; color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold }
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Create a privacy-sanitized ZIP for a GitHub issue or Discord support post. Local game/save/module/profile paths and profile names are omitted; known private paths are redacted from included log excerpts."
+                                color: Theme.textMuted
+                                font.pixelSize: Theme.typeCaption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spaceSm
+                                XButton {
+                                    Layout.fillWidth: true
+                                    text: "Create Support Bundle"
+                                    variant: "primary"
+                                    onClicked: {
+                                        var path = launcherBridge.createSupportBundle()
+                                        if (String(path).length > 0) launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
+                                    }
+                                }
+                                XButton {
+                                    Layout.fillWidth: true
+                                    text: "Open Support Folder"
+                                    onClicked: launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
+                                }
+                                XButton {
+                                    Layout.fillWidth: true
+                                    text: "Open Logs"
+                                    onClicked: launcherBridge.openFolder(launcherBridge.diagnosticsDirectory())
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Review a support bundle before posting it publicly. Third-party modules can write arbitrary diagnostic text to shared logs."
+                                color: Theme.textMuted
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: Theme.typeCaption
+                            }
                         }
                     }
                     XSettingsCard {
-                        title: "Support & diagnostics"
-                        description: "Create a privacy-sanitized ZIP for a GitHub issue or Discord support post. Local game/save/module/profile paths and profile names are omitted; known private paths are redacted from included log excerpts."
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: Theme.spaceSm
-                            XButton {
-                                Layout.fillWidth: true
-                                text: "Create Support Bundle"
-                                variant: "primary"
-                                onClicked: {
-                                    var path = launcherBridge.createSupportBundle()
-                                    if (String(path).length > 0) launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
-                                }
-                            }
-                            XButton {
-                                Layout.fillWidth: true
-                                text: "Open Support Folder"
-                                onClicked: launcherBridge.openFolder(launcherBridge.supportBundleDirectory())
-                            }
-                            XButton {
-                                Layout.fillWidth: true
-                                text: "Open Logs"
-                                onClicked: launcherBridge.openFolder(launcherBridge.diagnosticsDirectory())
-                            }
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            text: "Review a support bundle before posting it publicly. Third-party modules can write arbitrary diagnostic text to shared logs."
-                            color: Theme.textMuted
-                            wrapMode: Text.WordWrap
-                            font.pixelSize: Theme.typeCaption
+                        title: "Developer Mode"
+                        description: "Adds a Developer entry to the sidebar with runtime, kernel and input introspection tooling. Off by default."
+                        XSwitch {
+                            checked: root.getBool("developer/modeEnabled", false)
+                            onUserToggled: function(value) { root.save("developer/modeEnabled", value) }
                         }
                     }
                     XSettingsCard {
@@ -1389,9 +1529,12 @@ Item {
                         description: "Restore all registered preferences and launcher-wide paths. Game library entries, profiles and installed modules are not deleted."
                         XButton { Layout.fillWidth: true; text: "Reset All Settings"; variant: "danger"; onClicked: resetAllConfirm.open() }
                     }
-                }
+                } } }
 
-                XSettingsPage {
+                Loader {
+                    active: root.visitedCategoryPages[15] === true
+                    asynchronous: true
+                    sourceComponent: Component { XSettingsPage {
                     title: "Window & System"
                     description: "Desktop integration, launch behaviour and window persistence. These controls are launcher-only and do not depend on the Xenon runtime."
 
@@ -1476,7 +1619,7 @@ Item {
                         description: "Restore launcher desktop-integration preferences and forget saved window geometry. The xenon:// Windows registration is left alone unless you remove it explicitly."
                         XButton { Layout.fillWidth: true; text: "Reset System"; onClicked: launcherBridge.resetSettingsCategory("system") }
                     }
-                }
+                } } }
             }
 
             EmptyState {

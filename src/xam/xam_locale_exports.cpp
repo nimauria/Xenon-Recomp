@@ -26,7 +26,7 @@ void write_string_wide(cpu::MemoryPort& memory, cpu::GuestAddress addr,
 bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& locale_manager) {
   bool ok = true;
 
-  // XamGetLanguage (0x0206)
+  // XamGetLanguage (0x03D2)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -41,7 +41,7 @@ bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& loca
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamGetLocale (0x0207)
+  // XamGetLocale (0x04A9)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -56,12 +56,17 @@ bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& loca
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamGetTimeZoneInformation (0x0208)
+  // XamQueryTimeZoneInformation (0x04AA) - real Xbox 360 identity for what
+  // was previously registered under the invented name
+  // "XamGetTimeZoneInformation"; see xam_exports.hpp for the distinct
+  // GetTimeZoneInformation (0x043F, Win32-compatible re-export) and
+  // XamSetTimeZoneInformation (0x04AB, write side) identities this does
+  // NOT cover.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
-    desc.name = "XamGetTimeZoneInformation";
-    desc.ordinal = ordinal::XamGetTimeZoneInformation;
+    desc.name = "XamQueryTimeZoneInformation";
+    desc.ordinal = ordinal::XamQueryTimeZoneInformation;
     desc.requirement = core::ExportRequirement::Stubbed;
     desc.handler = [&locale_manager](core::ExportCallContext& ctx) -> bool {
       const auto out_tz_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]);

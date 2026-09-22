@@ -23,6 +23,8 @@ class LibraryFeature final : public QObject {
   [[nodiscard]] QVariantList manageActions(const QString& game_id) const;
   [[nodiscard]] QVariantList backgroundActions() const;
   [[nodiscard]] ServiceResult remove(const QString& game_id);
+  [[nodiscard]] ServiceResult setFavorite(const QString& game_id, bool favorite);
+  [[nodiscard]] ServiceResult deleteManagedFiles(const QString& game_id);
   [[nodiscard]] ServiceResult verify(const QString& game_id) const;
   [[nodiscard]] ServiceResult refreshMetadata(const QString& game_id);
   [[nodiscard]] QString contentPath(const QString& game_id) const;

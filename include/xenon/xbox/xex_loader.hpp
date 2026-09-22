@@ -183,7 +183,7 @@ struct XexSecurityInfo {
   // for XEX2 images. Exposed for completeness; not resolved into XexImport
   // entries by this loader (XEX_HEADER_IMPORT_LIBRARIES, present on both
   // formats' title EXEs, remains the primary import mechanism parse_xex_image()
-  // resolves - see docs/XEX_LOADER_V2.md "Known limitations").
+  // resolves - see docs/xbox/XEX_LOADER_V2.md "Known limitations").
   std::uint32_t xex1_root_import_address{};
 };
 
@@ -290,11 +290,27 @@ struct LoadedXex {
                                   std::string* error = nullptr,
                                   std::span<const std::byte> reference_image = {});
 
-// Maps `image`'s sections into Memory V2 with real per-page-descriptor R/W/X
+// Maps an already-parsed `image` (from parse_xex_image() or
+// apply_title_update()) into Memory V2 with real per-page-descriptor R/W/X
 // protections and hands executable ranges to CPU V2's executable-generation
 // tracking (via AddressSpace::write_bytes(), which already advances the
 // executable generation on physical writes - no separate XEX-specific
-// executable-page registry is introduced).
+// executable-page registry is introduced). This is the mapping half of what
+// load_xex() below does in one call; it is exposed separately so a caller
+// that already has a parsed/patched XexImage (e.g. XenonSession loading the
+// *effective* image after a title update was applied) does not need to
+// re-serialize it back into on-disk file bytes just to map it.
+[[nodiscard]] bool map_xex_image(memory::AddressSpace& memory,
+                                 const XexImage& image,
+                                 LoadedXex& out_loaded,
+                                 memory::GuestAddress preferred_base =
+                                     memory::kXex64KBase,
+                                 std::string* error = nullptr);
+
+// Parses `file_bytes` (see parse_xex_image()) and maps the result into
+// Memory V2 (see map_xex_image()). Equivalent to calling both separately;
+// kept as a single call for the common case of loading an unpatched XEX
+// straight from disk.
 [[nodiscard]] bool load_xex(memory::AddressSpace& memory,
                            std::span<const std::byte> file_bytes,
                            LoadedXex& out_loaded,
@@ -306,11 +322,46 @@ struct LoadedXex {
 // identity, base-signature digest, source-version match) and produces the
 // effective patched image in `out_image`. `base_image.effective_image` is
 // read only, never modified - the result is always a new, independent
-// XexImage. See docs/XEX_LOADER_V2.md for exactly what patch forms
+// XexImage. See docs/xbox/XEX_LOADER_V2.md for exactly what patch forms
 // (XEX_MODULE_PATCH_FULL vs XEX_MODULE_PATCH_DELTA) are supported.
 [[nodiscard]] bool apply_title_update(const XexImage& base_image,
                                      std::span<const std::byte> update_bytes,
                                      XexImage& out_image,
                                      std::string* error = nullptr);
+
+// SHA1 of `image.effective_image` - the canonical "which exact executable
+// bytes is this" identity XEX Loader V2 exposes to the rest of Xenon
+// (module-compatibility validation, recompilation identity, diagnostics).
+// Computed from the fully decrypted/decompressed/patched body, independent
+// of on-disk compression/encryption, so a base image and its title-update-
+// patched effective image reliably hash differently whenever the patch
+// actually changes code/data, and a module built from the same bytes always
+// reproduces the same hash. See docs/xbox/XEX_LOADER_V2.md "Effective executable
+// identity".
+[[nodiscard]] std::array<std::byte, 20> compute_effective_image_hash(const XexImage& image);
+
+// Lowercase hex string form of a compute_effective_image_hash() result, used
+// wherever the hash needs to be a plain string (native-extension ABI,
+// diagnostics/status.json).
+[[nodiscard]] std::string format_effective_image_hash(const std::array<std::byte, 20>& hash);
+
+// Summarizes the identity of the executable a session actually runs:
+// title/media ID, the base image's own version, the version of whichever
+// image is effective (== base_version when no title update was applied),
+// and the effective image's content hash. `patched_image`, when non-null,
+// is XEX Loader V2's apply_title_update() output for `base_image` - passing
+// it is what distinguishes "base XEX" from "base + selected title update"
+// identity for module-compatibility validation and diagnostics.
+struct XexEffectiveIdentity {
+  std::uint32_t title_id{};
+  std::uint32_t media_id{};
+  XexVersion base_version{};
+  XexVersion effective_version{};
+  std::array<std::byte, 20> effective_image_hash{};
+  bool title_update_applied{false};
+};
+
+[[nodiscard]] XexEffectiveIdentity compute_effective_identity(const XexImage& base_image,
+                                                               const XexImage* patched_image = nullptr);
 
 }  // namespace xenon::xbox

@@ -1,5 +1,5 @@
 // Tests for RuntimeBridge, the launcher-side half of the runtime-host IPC
-// contract (docs/RUNTIME_HOST.md). These exercise RuntimeBridge exactly as
+// contract (docs/runtime/RUNTIME_HOST.md). These exercise RuntimeBridge exactly as
 // the launcher UI does - through its public API - against a lightweight test
 // double (launcher/tests/fixtures/runtime_host_fixture.cpp) instead of the
 // real xenon_runtime_host, so a game module, a native extension, or CPU V2
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
   // Test 5: launcher closing while the runtime continues. disconnect() must
   // not touch the spawned process or this bridge's ability to keep
   // supervising/stopping it - that independence is the whole point of the
-  // runtime-host split (see docs/RUNTIME_HOST.md "Process independence").
+  // runtime-host split (see docs/runtime/RUNTIME_HOST.md "Process independence").
   {
     auto content_dir = makeContentDir();
     RuntimeBridge bridge;
@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     assert(!status.value(QStringLiteral("lastError")).toString().isEmpty());
 
 #if defined(Q_OS_WIN)
-    // Exit code recovery is Windows-only (see docs/RUNTIME_HOST.md "Detecting
+    // Exit code recovery is Windows-only (see docs/runtime/RUNTIME_HOST.md "Detecting
     // a crash" - POSIX cannot retrieve it for a non-child detached process).
     assert(status.contains(QStringLiteral("exitCode")));
     assert(status.value(QStringLiteral("exitCode")).toLongLong() == 137 &&

@@ -1,0 +1,12 @@
+set(_xenon_stage_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+execute_process(
+  COMMAND "@Python3_EXECUTABLE@"
+    "@PROJECT_SOURCE_DIR@/tools/release/stage_qt_linux.py"
+    --root "${_xenon_stage_root}"
+    --qt-root "@XENON_PACKAGING_QT_ROOT@"
+  RESULT_VARIABLE _xenon_qt_stage_result
+  COMMAND_ECHO STDOUT)
+if(NOT _xenon_qt_stage_result EQUAL 0)
+  message(FATAL_ERROR
+    "Failed to stage the Qt Linux runtime for the Xenon package")
+endif()

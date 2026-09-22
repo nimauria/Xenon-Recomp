@@ -39,6 +39,14 @@ enum class FrontendInputAction : std::uint8_t {
   Select,
   ScrollUp,
   ScrollDown,
+  // Opens the context menu for whatever item currently has focus - the
+  // controller-navigation equivalent of right-click / Shift+F10.
+  Context,
+  // Reserved for a page-specific secondary action (analogous to a second
+  // mouse button beyond primary activation); emitted but intentionally
+  // unbound to any specific behaviour at the router level, since the correct
+  // action is page-dependent.
+  Secondary,
 };
 
 struct FrontendInputEvent {

@@ -19,7 +19,7 @@ class RuntimeFeature final {
   // Live status of whatever the runtime host is currently doing (module
   // version, recompilation/native-extension state, renderer, subsystems,
   // unresolved imports, last error), read from its status.json. See
-  // docs/RUNTIME_HOST.md. Distinct from SessionController's play-flow state,
+  // docs/runtime/RUNTIME_HOST.md. Distinct from SessionController's play-flow state,
   // which only tracks the launcher-side prepare/validate/start phases.
   [[nodiscard]] QVariantMap gameStatus() const;
   // Tail of the runtime host's log file for the current/last session.

@@ -4,12 +4,14 @@
 #include "../../../services/service_result.hpp"
 
 #include <QElapsedTimer>
+#include <QMetaObject>
 #include <QObject>
 #include <QTimer>
 #include <QVariantList>
 
 namespace xenon::launcher {
 class LibraryService;
+class PreparationService;
 class SettingsService;
 }
 
@@ -21,7 +23,7 @@ class SessionController final : public QObject {
 
  public:
   SessionController(LaunchFeature& launch, LibraryService& library, SettingsService& storage,
-                    bool test_mode, QObject* parent = nullptr);
+                    PreparationService& preparation, bool test_mode, QObject* parent = nullptr);
 
   [[nodiscard]] QVariantMap currentSession() const;
   [[nodiscard]] QVariantList history() const;
@@ -64,12 +66,15 @@ class SessionController final : public QObject {
   LaunchFeature& launch_;
   LibraryService& library_;
   SettingsService& storage_;
+  PreparationService& preparation_;
   bool test_mode_ = false;
   SessionRecord current_;
   QVariantList history_;
   QElapsedTimer elapsed_;
   QTimer tick_timer_;
   quint64 generation_ = 0;
+  QMetaObject::Connection preparation_progress_connection_;
+  QMetaObject::Connection preparation_finished_connection_;
   static constexpr int kHistoryLimit = 50;
 };
 

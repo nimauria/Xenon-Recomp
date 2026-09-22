@@ -236,7 +236,8 @@ bool ContentManager::mount_content_graph(
     options.create_root = false;
     auto device = std::make_shared<filesystem::HostPathDevice>("game:", base_path, options);
     base_mounted = vfs.register_device(device) == filesystem::FsError::None;
-  } else if (base_path.extension() == ".iso" || base_path.extension() == ".dvd") {
+  } else if (base_path.extension() == ".iso" || base_path.extension() == ".dvd" ||
+             base_path.extension() == ".xgd") {
     auto source = std::make_shared<filesystem::GdfxImageSource>(base_path);
     if (source->initialize() == filesystem::FsError::None) {
       auto device = std::make_shared<filesystem::ReadOnlyContentDevice>("game:", std::move(source));

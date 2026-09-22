@@ -81,7 +81,7 @@ ComboBox {
             implicitHeight: contentHeight
             model: control.popup.visible ? control.delegateModel : null
             currentIndex: control.highlightedIndex
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
         }
 
         background: Rectangle {

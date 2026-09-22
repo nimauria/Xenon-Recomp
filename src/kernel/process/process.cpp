@@ -12,7 +12,8 @@ std::atomic<std::uint32_t> g_next_process_id{1};
 KernelProcess::KernelProcess(std::shared_ptr<KernelMemory> memory)
     : KernelObject(ObjectType::Process),
       process_id_(g_next_process_id.fetch_add(1, std::memory_order_relaxed)),
-      memory_(std::move(memory)) {}
+      memory_(std::move(memory)),
+      guest_heap_(*memory_) {}
 
 std::shared_ptr<KernelThread> KernelProcess::main_thread() const {
   return main_thread_;
@@ -33,6 +34,7 @@ void KernelProcess::set_exit_code(std::uint32_t exit_code) {
 void KernelProcess::terminate(std::uint32_t exit_code) {
   exit_code_ = exit_code;
   thread_manager_.shutdown();
+  guest_heap_.release_all();
 }
 
 std::string KernelProcess::get_env(const std::string& name) const {

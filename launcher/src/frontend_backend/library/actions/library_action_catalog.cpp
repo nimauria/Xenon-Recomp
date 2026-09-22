@@ -60,6 +60,17 @@ QVariantList LibraryActionCatalog::gameActions(const QVariantMap& game, bool tes
   result.append(action(QStringLiteral("copyId"), QStringLiteral("Copy game ID"), QStringLiteral("#")));
   result.append(action(QStringLiteral("remove"), QStringLiteral("Remove “%1” from Library").arg(title), QStringLiteral("×"),
                        true, true, true));
+  // Deliberately separate from "remove" above (which never deletes files -
+  // see LibraryService::remove()/deleteManagedFiles()) and requires its own,
+  // stronger confirmation in the UI. Gated the same way "saves"/"module
+  // folder" already are: a real check for whether anything is actually
+  // there to delete happens in the service when the action runs, so a
+  // managed-but-empty game correctly gets a clean "nothing to delete"
+  // result instead of this menu needing to duplicate that check.
+  result.append(action(QStringLiteral("deleteManagedFiles"),
+                       QStringLiteral("Delete managed files for “%1”…").arg(title), QStringLiteral("⌫"),
+                       managed_paths, false, true,
+                       managed_paths ? QString{} : fixtureReason(test_mode)));
   return result;
 }
 

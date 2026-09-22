@@ -6,10 +6,13 @@ Item {
 
     property string displayName: "Profile"
     property string avatarSource: ""
+    property real avatarFocalX: 0.5
+    property real avatarFocalY: 0.5
+    property real avatarZoom: 1.0
     property bool editable: false
     signal changeRequested()
     signal removeRequested()
-    readonly property bool imageReady: avatarImage.status === Image.Ready
+    readonly property bool imageReady: avatarImage.imageReady
 
     implicitWidth: 96
     implicitHeight: 96
@@ -22,16 +25,16 @@ Item {
         border.color: avatarMouse.containsMouse && root.editable ? Theme.accent : Theme.border
         clip: true
 
-        Image {
+        CoverImage {
             id: avatarImage
             anchors.fill: parent
             source: root.avatarSource
-            visible: root.imageReady
-            fillMode: Image.PreserveAspectCrop
-            asynchronous: true
-            cache: true
-            sourceSize.width: Math.max(128, width * 2)
-            sourceSize.height: Math.max(128, height * 2)
+            visible: imageReady
+            fitMode: "cover"
+            focalX: root.avatarFocalX
+            focalY: root.avatarFocalY
+            zoom: root.avatarZoom
+            decodeHeadroom: 4.0
         }
 
         Text {

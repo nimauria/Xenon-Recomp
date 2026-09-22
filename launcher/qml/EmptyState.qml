@@ -16,6 +16,7 @@ Item {
     signal secondaryClicked()
 
     ColumnLayout {
+        id: content
         anchors.centerIn: parent
         width: Math.min(parent.width - 48, 560)
         spacing: 14
@@ -59,11 +60,25 @@ Item {
             font.pixelSize: 12
         }
 
-        RowLayout {
+        GridLayout {
+            id: actionsGrid
+            // A host panel can be as narrow as ~270px of usable width (e.g. the
+            // Modules page's "Installed modules" sidebar), well below what
+            // "Browse Modules" + "Import Local Module" need side by side. A
+            // RowLayout has no way to shrink or wrap, so it simply overflowed
+            // the card at any width narrower than the buttons' combined natural
+            // size. Stack to one column instead, the same way the narrow-panel
+            // action rows elsewhere in the launcher already do.
             Layout.alignment: Qt.AlignHCenter
-            spacing: 10
+            readonly property bool stacked: root.showPrimary && root.showSecondary
+                && (primaryButton.implicitWidth + secondaryButton.implicitWidth + columnSpacing) > content.width
+            columns: stacked ? 1 : 2
+            columnSpacing: 10
+            rowSpacing: 10
 
             XButton {
+                id: primaryButton
+                Layout.alignment: Qt.AlignHCenter
                 visible: root.showPrimary
                 text: root.primaryText
                 variant: "primary"
@@ -71,6 +86,8 @@ Item {
             }
 
             XButton {
+                id: secondaryButton
+                Layout.alignment: Qt.AlignHCenter
                 visible: root.showSecondary
                 text: root.secondaryText
                 onClicked: root.secondaryClicked()

@@ -9,6 +9,8 @@ Button {
     required property string moduleName
     required property string status
     property url artworkSource: ""
+    property real artworkFocalX: 0.5
+    property real artworkFocalY: 0.5
     property bool selected: false
     property bool ready: false
     property bool installed: true
@@ -41,6 +43,8 @@ Button {
                 Layout.preferredWidth: Math.min(root.artworkSize, Math.max(76, root.width * 0.30))
                 Layout.preferredHeight: root.artworkSize
                 source: root.artworkSource
+                focalX: root.artworkFocalX
+                focalY: root.artworkFocalY
                 fallbackTitle: ""
             }
 

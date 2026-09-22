@@ -5,6 +5,8 @@
 #include "module_service.hpp"
 #include "../runtime/content_probe.hpp"
 
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QVariantMap>
 
@@ -23,7 +25,8 @@ bool ContentImportService::probeAvailable() const noexcept { return probe_.avail
 
 QString ContentImportService::probeStatus() const { return probe_.status(); }
 
-ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources) {
+ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources,
+                                                       bool moveIntoLibrary) {
   if (sources.isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Game import"),
                                   QStringLiteral("No game content was selected."));
@@ -37,6 +40,7 @@ ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources
 
   int imported = 0;
   int failed = 0;
+  int move_failed = 0;
   QVariantList imported_ids;
   QVariantList module_candidates;
   for (const auto& value : modules_.modules()) {
@@ -53,9 +57,13 @@ ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources
     }
     const auto identification = probe_.identifyGame(source, module_candidates);
     const auto identified = identification.data.toMap();
-    const auto module_id = identified.value(QStringLiteral("moduleId")).toString().trimmed();
-    if (!identification.ok || identified.isEmpty() || module_id.isEmpty() ||
-        modules_.module(module_id).isEmpty()) {
+    // A compatible installed module is NOT required to import: identifyGame()
+    // already returns ok=true with an empty "moduleId" when the disc/title
+    // itself was identified but no installed module claims it yet - the
+    // library still records the identity and source (Part 7). Only a genuine
+    // probe failure (unreadable content, invalid XEX, or ambiguous module
+    // matches) rejects the import.
+    if (!identification.ok || identified.isEmpty()) {
       ++failed;
       continue;
     }
@@ -66,6 +74,12 @@ ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources
     }
     ++imported;
     imported_ids.append(registered.data);
+
+    if (moveIntoLibrary) {
+      const auto move_result =
+          moveSourceIntoLibrary(registered.data.toString(), source.toLocalFile());
+      if (!move_result.ok) ++move_failed;
+    }
   }
 
   if (imported == 0) {
@@ -76,7 +90,112 @@ ServiceResult ContentImportService::importGameContent(const QList<QUrl>& sources
 
   QString message = QStringLiteral("Imported %1 identified game item(s).").arg(imported);
   if (failed > 0) message += QStringLiteral(" %1 item(s) could not be imported.").arg(failed);
+  if (move_failed > 0) {
+    message += QStringLiteral(" %1 item(s) were imported but could not be moved into the managed "
+                              "library; they remain playable from their original location.")
+                   .arg(move_failed);
+  }
   return ServiceResult::success(QStringLiteral("Library updated"), message, imported_ids);
+}
+
+ServiceResult ContentImportService::moveSourceIntoLibrary(const QString& game_id,
+                                                          const QString& local_path) {
+  const auto destination_dir = library_.ensureMediaDirectory(game_id);
+  if (destination_dir.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Move into library"),
+                                  QStringLiteral("Could not create the managed media folder."));
+  }
+
+  const QFileInfo source_info{local_path};
+  auto destination_path = QDir{destination_dir}.filePath(source_info.fileName());
+  if (QFileInfo{destination_path}.exists() &&
+      QFileInfo{destination_path}.absoluteFilePath() != source_info.absoluteFilePath()) {
+    // Name collision with unrelated content already in this game's Media
+    // folder (rare - two differently-imported files sharing a filename).
+    // Disambiguate rather than silently overwrite.
+    const auto base = source_info.completeBaseName();
+    const auto suffix = source_info.suffix();
+    int attempt = 2;
+    QString candidate;
+    do {
+      candidate = suffix.isEmpty() ? QStringLiteral("%1 (%2)").arg(base).arg(attempt)
+                                   : QStringLiteral("%1 (%2).%3").arg(base).arg(attempt).arg(suffix);
+      destination_path = QDir{destination_dir}.filePath(candidate);
+      ++attempt;
+    } while (QFileInfo::exists(destination_path));
+  }
+
+  if (QFileInfo{destination_path}.exists()) {
+    // Already at the destination (e.g. a retried import) - just record it.
+    return library_.relocateMedia(game_id, local_path, destination_path);
+  }
+
+  // QFile::rename() is atomic on the same volume. Never delete the original
+  // until the destination is confirmed present and the right size - a
+  // multi-gigabyte disc image must never be lost to a partial/failed move.
+  QFile source_file{local_path};
+  if (source_file.rename(destination_path)) {
+    return library_.relocateMedia(game_id, local_path, destination_path);
+  }
+
+  // Cross-volume (or otherwise rename-incapable) fallback: copy, verify size,
+  // THEN remove the original.
+  if (!QFile::copy(local_path, destination_path)) {
+    return ServiceResult::failure(
+        QStringLiteral("Move into library"),
+        QStringLiteral("Could not move '%1' into the managed library: %2")
+            .arg(source_info.fileName(), source_file.errorString()));
+  }
+  const auto source_size = source_info.size();
+  const auto destination_size = QFileInfo{destination_path}.size();
+  if (destination_size != source_size) {
+    QFile::remove(destination_path);
+    return ServiceResult::failure(
+        QStringLiteral("Move into library"),
+        QStringLiteral("The copy of '%1' into the managed library did not match the original "
+                       "size; the original file was left in place.")
+            .arg(source_info.fileName()));
+  }
+  if (!QFile::remove(local_path)) {
+    // The copy is verified good; leaving the original behind is safe (no
+    // data loss) even though this is not a clean "move" - report it as such
+    // rather than a hard failure.
+    return library_.relocateMedia(game_id, local_path, destination_path);
+  }
+  return library_.relocateMedia(game_id, local_path, destination_path);
+}
+
+ServiceResult ContentImportService::resolvePendingModule(const QString& game_id) {
+  const auto game = library_.entry(game_id);
+  if (game.isEmpty()) {
+    return ServiceResult::failure(QStringLiteral("Module resolution"),
+                                  QStringLiteral("The selected game is not in the launcher library."));
+  }
+  if (!game.value(QStringLiteral("moduleId")).toString().trimmed().isEmpty()) {
+    return ServiceResult::success(QStringLiteral("Module already assigned"),
+                                  QStringLiteral("This library entry already has a Xenon module assigned."));
+  }
+  if (!probe_.available()) {
+    return ServiceResult::failure(
+        QStringLiteral("Module resolution pending"),
+        QStringLiteral("Module matching is waiting for the Xenon filesystem/content probe."));
+  }
+
+  QVariantList module_candidates;
+  for (const auto& value : modules_.modules()) {
+    auto candidate = value.toMap();
+    candidate.insert(QStringLiteral("manifest"),
+                     modules_.manifest(candidate.value(QStringLiteral("moduleId")).toString()));
+    module_candidates.append(candidate);
+  }
+
+  const auto matched = probe_.matchModule(
+      game.value(QStringLiteral("titleId")).toString(), game.value(QStringLiteral("mediaId")).toString(),
+      game.value(QStringLiteral("xexVersion")).toString(), game.value(QStringLiteral("discNumber")).toInt(),
+      module_candidates);
+  if (!matched.ok) return matched;
+
+  return library_.applyIdentification(game_id, matched.data.toMap());
 }
 
 ServiceResult ContentImportService::importDlcContent(const QString& game_id,

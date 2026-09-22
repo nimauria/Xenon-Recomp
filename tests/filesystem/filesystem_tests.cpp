@@ -927,6 +927,22 @@ void test_gdfx_image_source_and_vfs() {
   assert(info.read_only);
   assert(!info.is_directory);
 
+  // read_all() (the primitive the automatic game preparation pipeline uses
+  // to pull a whole default.xex out of a mounted disc image with no
+  // extraction to a temporary file - see xenon/recomp/artifact_cache.hpp and
+  // tools/xenon_prepare.cpp) must return exactly the file's full, correct
+  // contents.
+  {
+    std::vector<std::byte> whole_file;
+    assert(fs::read_all(*source, "DEFAULT.XEX", whole_file) == fs::FsError::None);
+    assert(whole_file.size() == info.size);
+    std::array<std::byte, 0x80> direct{};
+    std::size_t direct_bytes_read = 0;
+    assert(source->read_at("DEFAULT.XEX", 0, direct, direct_bytes_read) == fs::FsError::None);
+    assert(direct_bytes_read == direct.size());
+    assert(std::equal(whole_file.begin(), whole_file.end(), direct.begin()));
+  }
+
   std::vector<fs::DirectoryEntry> root_entries;
   assert(source->list("", root_entries) == fs::FsError::None);
   assert(root_entries.size() == 2);

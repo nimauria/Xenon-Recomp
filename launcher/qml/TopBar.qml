@@ -9,11 +9,19 @@ Rectangle {
     property bool maximized: false
     property bool compact: false
     property int currentPage: 0
+    property int activityRevision: 0
+    readonly property var downloadActivity: {
+        var revision = root.activityRevision
+        return launcherBridge.downloadActivitySnapshot()
+    }
+    readonly property int downloadAttentionCount: Number(downloadActivity.activeCount || 0)
+        + Number(downloadActivity.readyCount || 0) + Number(downloadActivity.failureCount || 0)
 
     signal minimizeRequested()
     signal maximizeRequested()
     signal closeRequested()
     signal quickCenterRequested()
+    signal downloadsRequested()
 
     function toggleQuickCenter() {
         if (quickCenter.visible) quickCenter.close()
@@ -44,12 +52,17 @@ Rectangle {
             }
         }
     }
-    Shortcut {
-        sequence: "Ctrl+F"
-        onActivated: {
-            searchField.forceActiveFocus()
-            commandPalette.openPalette()
-        }
+
+    Connections {
+        target: launcherBridge
+        function onDownloadActivityChanged() { activityRefreshThrottle.restart() }
+    }
+
+    Timer {
+        id: activityRefreshThrottle
+        interval: 120
+        repeat: false
+        onTriggered: root.activityRevision += 1
     }
 
     Item {
@@ -195,6 +208,49 @@ Rectangle {
         }
 
         Item { Layout.fillWidth: true }
+
+        Item {
+            id: downloadActivityButtonHost
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
+
+            XIconButton {
+                id: downloadActivityButton
+                anchors.fill: parent
+                iconName: "downloads"
+                tooltip: root.downloadAttentionCount > 0
+                    ? (Number(root.downloadActivity.activeCount || 0) + " active • "
+                       + Number(root.downloadActivity.readyCount || 0) + " ready • "
+                       + Number(root.downloadActivity.failureCount || 0) + " issues")
+                    : "Downloads and activity"
+                variant: root.currentPage === 5 || Number(root.downloadActivity.activeCount || 0) > 0 ? "filled" : "ghost"
+                onClicked: root.downloadsRequested()
+            }
+
+            Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: -2
+                anchors.top: parent.top
+                anchors.topMargin: -2
+                width: Math.max(18, activityBadgeText.implicitWidth + 8)
+                height: 18
+                radius: 9
+                color: Number(root.downloadActivity.failureCount || 0) > 0 ? Theme.danger
+                    : Number(root.downloadActivity.activeCount || 0) > 0 ? Theme.accent : Theme.warning
+                border.width: 2
+                border.color: Theme.header
+                visible: root.downloadAttentionCount > 0
+
+                Text {
+                    id: activityBadgeText
+                    anchors.centerIn: parent
+                    text: root.downloadAttentionCount > 99 ? "99+" : String(root.downloadAttentionCount)
+                    color: "white"
+                    font.pixelSize: 9
+                    font.weight: Font.Bold
+                }
+            }
+        }
 
         Item {
             Layout.preferredWidth: Theme.controlHeight

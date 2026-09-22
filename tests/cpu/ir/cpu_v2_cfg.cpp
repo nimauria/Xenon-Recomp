@@ -102,8 +102,13 @@ int main() {
   assert(has_predecessor(exit, 0x2008u));
   assert(exit.has_indirect_exit);
 
-  // A direct linked branch is call metadata, not a CFG successor/predecessor;
-  // the containing block continues after the call returns.
+  // A direct linked branch (call) is its own block boundary - deliberately,
+  // not merely incidentally: this guarantees a setjmp continuation always has
+  // an explicit local block label a propagated guest LongJump can resume at
+  // (see ends_basic_block()'s comment in function_compiler.cpp). The call
+  // itself is still call metadata, not a CFG successor/predecessor edge: the
+  // call's target block's predecessor list must reflect only the real
+  // fallthrough-CFG edge into it, never the calling block.
   constexpr GuestAddress call_base = 0x3000u;
   const std::array<std::uint32_t, 3> call_words = {
       0x48000009u,  // bl +8 -> 0x3008
@@ -112,13 +117,23 @@ int main() {
   };
   const auto calls = compiler.compile(call_base, call_words);
   assert(calls.ok);
-  assert(calls.function.blocks.size() == 2u);
-  assert(has_edge(calls.function.blocks[0], 0x3008u, ir::EdgeKind::Call, true));
-  // 0x3008 is also the normal fallthrough after the instruction at 0x3004, so
-  // the block has exactly one real predecessor. The call edge must not create a
-  // second predecessor entry.
-  assert(has_predecessor(calls.function.blocks[1], 0x3000u));
-  assert(calls.function.blocks[1].predecessors.size() == 1u);
+  assert(calls.function.blocks.size() == 3u);
+  const auto& call_block = calls.function.blocks[0];
+  const auto& call_fallthrough_block = calls.function.blocks[1];
+  const auto& call_target_block = calls.function.blocks[2];
+  assert(call_block.guest_address == 0x3000u);
+  assert(call_fallthrough_block.guest_address == 0x3004u);
+  assert(call_target_block.guest_address == 0x3008u);
+  assert(has_edge(call_block, 0x3008u, ir::EdgeKind::Call, true));
+  // The call instruction ends its own block, so the block containing it also
+  // falls through normally to the very next instruction.
+  assert(has_edge(call_block, 0x3004u, ir::EdgeKind::Fallthrough, true));
+  assert(has_predecessor(call_fallthrough_block, 0x3000u));
+  assert(call_fallthrough_block.predecessors.size() == 1u);
+  // 0x3008 is also the call's target, but the Call edge must never create a
+  // predecessor entry - only the real fallthrough edge from 0x3004 may.
+  assert(has_predecessor(call_target_block, 0x3004u));
+  assert(call_target_block.predecessors.size() == 1u);
 
   // A direct branch outside the discovered function is an explicit external
   // exit and must never be mistaken for a local CFG edge.

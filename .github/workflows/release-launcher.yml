@@ -1,16 +1,30 @@
-name: Release Xenon Launcher
+name: Release Xenon
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix (for manual validation builds)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: xenon-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  QT_VERSION: "6.10.3"
+
 jobs:
   windows-x64:
-    name: Windows x64 launcher
+    if: github.event_name == 'workflow_dispatch' || vars.XENON_PRODUCTION_RELEASES_ENABLED == 'true'
+    name: Windows x64 production installer
     runs-on: windows-2022
 
     steps:
@@ -20,83 +34,334 @@ jobs:
       - name: Resolve release version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
-            throw "Release tags must use semantic versions such as v0.1.0 or v0.2.0-beta.1. Got: $tag"
+          $manual = "${{ inputs.version }}"
+          if ($manual) {
+            $version = $manual
+            $tag = "v$manual"
+          } else {
+            $tag = "${{ github.ref_name }}"
+            if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+              throw "Release tags must use semantic versions such as v0.1.0 or v0.2.0-beta.1. Got: $tag"
+            }
+            $version = $Matches.version
           }
-          "XENON_RELEASE_VERSION=$($Matches.version)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "XENON_RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
           "XENON_RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Install Qt 6.10.3
+      - name: Enter MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install build tools
         shell: pwsh
         run: |
+          choco install ninja nsis nasm -y --no-progress
           python -m pip install --upgrade pip aqtinstall
-          aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 -O C:\Qt
-          "QT_ROOT=C:\Qt\6.10.3\msvc2022_64" | Out-File -FilePath $env:GITHUB_ENV -Append
+          aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+          "QT_ROOT=C:\Qt\$env:QT_VERSION\msvc2022_64" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Configure launcher
+      - name: Install MSYS2 make for FFmpeg
+        uses: msys2/setup-msys2@v2
+        with:
+          location: C:\msys64
+          update: true
+          install: >-
+            make
+
+      - name: Provision pinned Xenon dependencies
         shell: pwsh
         run: |
-          cmake -S . -B build/release-launcher `
-            -G "Visual Studio 17 2022" -A x64 `
+          python tools/deps/bootstrap.py ensure --triplet windows-x64 --jobs 4
+          python tools/deps/bootstrap.py verify --triplet windows-x64
+
+      - name: Configure production build
+        shell: pwsh
+        run: |
+          cmake --preset windows-x64-release `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT" `
-            -DXENON_BUILD_LAUNCHER=ON `
             -DXENON_LAUNCHER_VERSION_OVERRIDE="$env:XENON_RELEASE_VERSION" `
-            -DXENON_LAUNCHER_UPDATE_REPOSITORY="${{ github.repository }}" `
-            -DXENON_BUILD_TESTS=OFF `
-            -DXENON_ENABLE_MEMORY=OFF `
-            -DXENON_ENABLE_GRAPHICS=OFF `
-            -DXENON_ENABLE_VULKAN=OFF `
-            -DXENON_ENABLE_D3D12=OFF `
-            -DXENON_ENABLE_DXC=OFF `
-            -DXENON_ENABLE_AUDIO=OFF `
-            -DXENON_ENABLE_INPUT=OFF `
-            -DXENON_ENABLE_NETWORK=OFF
+            -DXENON_LAUNCHER_UPDATE_REPOSITORY="${{ github.repository }}"
 
-      - name: Build launcher
-        shell: pwsh
-        run: cmake --build build/release-launcher --target xenon_launcher --config Release --parallel
-
-      - name: Deploy Qt runtime
+      - name: Build and test
         shell: pwsh
         run: |
-          $exe = Resolve-Path "build/release-launcher/launcher/Release/xenon_launcher.exe"
-          & "$env:QT_ROOT\bin\windeployqt.exe" `
-            --release `
-            --compiler-runtime `
-            --qmldir "launcher/qml" `
-            $exe
+          cmake --build --preset windows-x64-release
+          ctest --preset windows-x64-release
 
-      - name: Package portable launcher
+      - name: Optional Authenticode signing of payload executables
+        shell: pwsh
+        env:
+          XENON_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          XENON_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if (-not $env:XENON_SIGNING_CERT_BASE64) {
+            Write-Host "No Windows signing certificate configured; continuing with an unsigned validation build."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "xenon-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:XENON_SIGNING_CERT_BASE64))
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+          if (-not $signtool) { throw "signtool.exe not found" }
+          Get-ChildItem build/windows-x64-release -Filter *.exe -Recurse |
+            Where-Object { $_.Name -in @('xenon_launcher.exe','xenon_runtime_host.exe') } |
+            ForEach-Object {
+              & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p $env:XENON_SIGNING_CERT_PASSWORD $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Signing failed: $($_.FullName)" }
+            }
+          Remove-Item $pfx -Force
+
+      - name: Stage and verify install tree
         shell: pwsh
         run: |
-          $source = Resolve-Path "build/release-launcher/launcher/Release"
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $asset = "dist/xenon-launcher-windows-x64.zip"
-          if (Test-Path $asset) { Remove-Item $asset -Force }
-          Compress-Archive -Path "$source\*" -DestinationPath $asset -CompressionLevel Optimal
-          $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  xenon-launcher-windows-x64.zip" | Set-Content -NoNewline "$asset.sha256"
+          $stage = (Resolve-Path .).Path + "\build\windows-x64-release\stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          cmake --install build/windows-x64-release --prefix $stage
+          python tools/release/verify_install.py --root $stage --platform windows --require-audio --require-dxc --require-vulkan
 
-      - name: Publish GitHub release assets
+      - name: Create NSIS installer and portable ZIP
         shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          cpack -G NSIS --config build/windows-x64-release/CPackConfig.cmake -B dist
+          if ($LASTEXITCODE -ne 0) { throw "NSIS packaging failed" }
+          cpack -G ZIP --config build/windows-x64-release/CPackConfig.cmake -B dist
+          if ($LASTEXITCODE -ne 0) { throw "ZIP packaging failed" }
+
+      - name: Sign and smoke-test installer
+        shell: pwsh
+        env:
+          XENON_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          XENON_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          $installer = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer was not produced" }
+          if ($env:XENON_SIGNING_CERT_BASE64) {
+            $pfx = Join-Path $env:RUNNER_TEMP "xenon-signing.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:XENON_SIGNING_CERT_BASE64))
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+              Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
+            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p $env:XENON_SIGNING_CERT_PASSWORD $installer.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Installer signing failed" }
+            & $signtool verify /pa /v $installer.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Installer signature verification failed" }
+            Remove-Item $pfx -Force
+          }
+          $smoke = (Resolve-Path .).Path + "\build\windows-x64-release\installer-smoke"
+          if (Test-Path $smoke) { Remove-Item $smoke -Recurse -Force }
+          New-Item -ItemType Directory -Force $smoke | Out-Null
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$smoke") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Silent installer smoke test failed with $($process.ExitCode)" }
+          python tools/release/verify_install.py --root $smoke --platform windows --require-audio --require-dxc --require-vulkan
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Where-Object { $_.Name -notmatch '\.sha256$' -and $_.FullName -notmatch '_CPack_Packages' } | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -NoNewline "$($_.FullName).sha256"
+          }
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenon-windows-x64
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  linux-x64:
+    if: github.event_name == 'workflow_dispatch' || vars.XENON_PRODUCTION_RELEASES_ENABLED == 'true'
+    name: Linux x64 production package
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manual='${{ inputs.version }}'
+          if [[ -n "$manual" ]]; then
+            version="$manual"
+            tag="v$manual"
+          else
+            tag='${{ github.ref_name }}'
+            if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+              echo "Invalid release tag: $tag" >&2
+              exit 2
+            fi
+            version="${tag#v}"
+          fi
+          echo "XENON_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "XENON_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Install build and packaging tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build nasm patchelf pkg-config dpkg-dev fakeroot \
+            libx11-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxrandr-dev libxcb1-dev libxcb-cursor-dev \
+            libxcb-keysyms1-dev libxcb-xkb-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxcb-sync-dev libxcb-randr0-dev libgl1-mesa-dev
+          python3 -m pip install --user --upgrade aqtinstall
+          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
+          echo "QT_ROOT=$HOME/Qt/$QT_VERSION/gcc_64" >> "$GITHUB_ENV"
+
+      - name: Provision pinned Xenon dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/deps/bootstrap.py ensure --triplet linux-x64 --jobs 4
+          python3 tools/deps/bootstrap.py verify --triplet linux-x64
+
+      - name: Configure production build
+        shell: bash
+        run: |
+          cmake --preset linux-x64-release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DXENON_LAUNCHER_VERSION_OVERRIDE="$XENON_RELEASE_VERSION" \
+            -DXENON_LAUNCHER_UPDATE_REPOSITORY="${{ github.repository }}"
+
+      - name: Build and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build --preset linux-x64-release
+          ctest --preset linux-x64-release
+
+      - name: Stage and verify install tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$PWD/build/linux-x64-release/stage"
+          rm -rf "$stage"
+          cmake --install build/linux-x64-release --prefix "$stage"
+          python3 tools/release/verify_install.py --root "$stage" --platform linux --require-audio --require-dxc --require-vulkan
+
+      - name: Create Debian installer and portable archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cpack -G DEB --config build/linux-x64-release/CPackConfig.cmake -B dist
+          cpack -G TGZ --config build/linux-x64-release/CPackConfig.cmake -B dist
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb >/dev/null
+
+      - name: Install and smoke-test Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(find dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          if [[ -z "$deb" ]]; then
+            echo "Debian package was not produced" >&2
+            exit 2
+          fi
+          cleanup() { sudo apt-get remove -y xenon-recomp >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          sudo apt-get install -y "$deb"
+          python3 tools/release/verify_install.py --root /usr --platform linux --require-audio --require-dxc --require-vulkan
+          for binary in /usr/bin/xenon_launcher /usr/bin/xenon_runtime_host; do
+            unresolved="$(ldd "$binary" | grep -F 'not found' || true)"
+            if [[ -n "$unresolved" ]]; then
+              printf '%s\n' "$unresolved" >&2
+              echo "Unresolved runtime dependency in $binary" >&2
+              exit 2
+            fi
+          done
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f \( -name '*.deb' -o -name '*.tar.gz' \) -print0 |
+            while IFS= read -r -d '' file; do sha256sum "$file" > "$file.sha256"; done
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenon-linux-x64
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  source-offer:
+    if: github.event_name == 'workflow_dispatch' || vars.XENON_PRODUCTION_RELEASES_ENABLED == 'true'
+    name: Third-party source bundle
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          manual='${{ inputs.version }}'
+          if [[ -n "$manual" ]]; then
+            version="$manual"
+          else
+            version='${{ github.ref_name }}'
+            version="${version#v}"
+          fi
+          echo "XENON_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build matching LGPL source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 tools/release/collect_source_offer.py \
+            --version "$XENON_RELEASE_VERSION" \
+            --output "dist/Xenon-Third-Party-Sources-$XENON_RELEASE_VERSION.zip"
+          sha256sum "dist/Xenon-Third-Party-Sources-$XENON_RELEASE_VERSION.zip" > \
+            "dist/Xenon-Third-Party-Sources-$XENON_RELEASE_VERSION.zip.sha256"
+
+      - name: Upload source-compliance artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenon-third-party-sources
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v') && vars.XENON_PRODUCTION_RELEASES_ENABLED == 'true'
+    needs: [windows-x64, linux-x64, source-offer]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download validated release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:XENON_RELEASE_TAG
-          $asset = "dist/xenon-launcher-windows-x64.zip"
-          $checksum = "$asset.sha256"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset $checksum --clobber
-          } else {
-            $args = @(
-              "release", "create", $tag,
-              $asset, $checksum,
-              "--verify-tag",
-              "--generate-notes",
-              "--title", "Xenon Launcher $tag"
-            )
-            if ($env:XENON_RELEASE_VERSION.Contains('-')) { $args += "--prerelease" }
-            gh @args
-          }
+          set -euo pipefail
+          tag='${{ github.ref_name }}'
+          args=(release create "$tag" --verify-tag --generate-notes --title "Xenon Recomp $tag")
+          if [[ "$tag" == *-* ]]; then args+=(--prerelease); fi
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f | sort)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh "${args[@]}" "${assets[@]}"
+          fi

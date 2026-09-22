@@ -15,7 +15,7 @@ namespace {
 constexpr std::uint32_t kXex1Magic = 0x58455831u;  // 'XEX1'
 constexpr std::uint32_t kXex2Magic = 0x58455832u;  // 'XEX2'
 
-// XEX_HEADER_* keys this loader understands (see docs/XEX_LOADER_V2.md for
+// XEX_HEADER_* keys this loader understands (see docs/xbox/XEX_LOADER_V2.md for
 // the full enumeration; unknown keys are skipped, not rejected).
 constexpr std::uint32_t kHeaderResourceInfo = 0x000002FFu;
 constexpr std::uint32_t kHeaderFileFormatInfo = 0x000003FFu;
@@ -41,7 +41,7 @@ constexpr std::size_t kSecurityInfoFixedSize = 0x184u;  // XEX2, up to page_desc
 // place, and every field from load_address onward reordered - see
 // parse_security_info() below. Verified against the real xex1::SecurityInfo
 // layout (independent reimplementation; no source copied - see
-// docs/XEX_LOADER_V2.md "Research rule").
+// docs/xbox/XEX_LOADER_V2.md "Research rule").
 constexpr std::size_t kXex1SecurityInfoFixedSize = 0x168u;  // Up to page_descriptor_count.
 constexpr std::size_t kPageDescriptorSize = 24u;         // 4-byte value + 20-byte digest.
 constexpr std::size_t kExecutionInfoSize = 0x18u;
@@ -324,7 +324,7 @@ void parse_native_tls(std::span<const std::byte> bytes, std::uint32_t header_siz
 // LZX-compressed payload (or no payload at all for the compressed_len 0/1
 // sentinel record kinds - see xex_lzx::apply_delta_patch_records()). Layout
 // verified against the real xex2_opt_delta_patch_descriptor structure
-// (independent reimplementation; no source copied - see docs/XEX_LOADER_V2.md
+// (independent reimplementation; no source copied - see docs/xbox/XEX_LOADER_V2.md
 // "Research rule").
 constexpr std::size_t kDeltaPatchRecordHeaderOffset = 0x4Cu;
 constexpr std::size_t kDeltaPatchRecordHeaderSize = 12u;
@@ -1009,16 +1009,26 @@ void parse_native_import_libraries(std::span<const std::byte> header_bytes, std:
       const auto thunk_rva_or_addr = read_be32(header_bytes, table_entry_offset);
       if (thunk_rva_or_addr == 0u) continue;
 
+      // A thunk address outside the effective image is a malformed import
+      // table entry (corrupt data or a hostile/truncated image) - there is
+      // no placeholder word to read an ordinal from. Previously this fell
+      // through silently, pushing a well-formed-looking XexImport with
+      // ordinal=0/attributes=0, which could accidentally resolve against
+      // whatever export happens to be registered at ordinal 0 for that
+      // library. Skip it instead: this matches the existing
+      // `thunk_rva_or_addr == 0u -> continue` precedent just above for
+      // "this entry cannot be resolved" rather than fabricating one.
+      if (thunk_rva_or_addr < image_base ||
+          static_cast<std::size_t>(thunk_rva_or_addr - image_base) + 4u > effective_image.size()) {
+        continue;
+      }
+
       XexImport import{};
       import.module = library_name;
       import.guest_thunk = thunk_rva_or_addr;
-
-      if (thunk_rva_or_addr >= image_base &&
-          static_cast<std::size_t>(thunk_rva_or_addr - image_base) + 4u <= effective_image.size()) {
-        const auto placeholder = read_be32(effective_image, thunk_rva_or_addr - image_base);
-        import.ordinal = static_cast<std::uint16_t>(placeholder & 0xFFFFu);
-        import.attributes = placeholder >> 16u;
-      }
+      const auto placeholder = read_be32(effective_image, thunk_rva_or_addr - image_base);
+      import.ordinal = static_cast<std::uint16_t>(placeholder & 0xFFFFu);
+      import.attributes = placeholder >> 16u;
       imports.push_back(import);
     }
 
@@ -1111,7 +1121,7 @@ bool try_parse_pe_sections(std::span<const std::byte> effective_image, std::uint
 // header-patch algorithm (validated against xenia-project/xenia's
 // XexModule::ApplyPatch(), read for research purposes only; this is an
 // independent reimplementation against Xenon's own XexDeltaPatchDescriptor,
-// not copied source - see docs/XEX_LOADER_V2.md "Research rule").
+// not copied source - see docs/xbox/XEX_LOADER_V2.md "Research rule").
 //
 // When the descriptor is absent or delta_headers_source_size == 0 (no header
 // *content* actually changed - the common case for code/data-only updates),
@@ -1371,16 +1381,11 @@ bool parse_xex_image(std::span<const std::byte> bytes, XexImage& out_image, std:
   return true;
 }
 
-bool load_xex(memory::AddressSpace& memory, std::span<const std::byte> file_bytes, LoadedXex& out_loaded,
-             memory::GuestAddress preferred_base, std::string* error) {
+bool map_xex_image(memory::AddressSpace& memory, const XexImage& image, LoadedXex& out_loaded,
+                   memory::GuestAddress preferred_base, std::string* error) {
   out_loaded = {};
   if (!memory.initialize()) {
     if (error) *error = "Memory V2 cannot initialize for XEX mapping.";
-    return false;
-  }
-
-  XexImage image{};
-  if (!parse_xex_image(file_bytes, image, error)) {
     return false;
   }
 
@@ -1443,6 +1448,16 @@ bool load_xex(memory::AddressSpace& memory, std::span<const std::byte> file_byte
     out_loaded.error.clear();
   }
   return ok;
+}
+
+bool load_xex(memory::AddressSpace& memory, std::span<const std::byte> file_bytes, LoadedXex& out_loaded,
+             memory::GuestAddress preferred_base, std::string* error) {
+  XexImage image{};
+  if (!parse_xex_image(file_bytes, image, error)) {
+    out_loaded = {};
+    return false;
+  }
+  return map_xex_image(memory, image, out_loaded, preferred_base, error);
 }
 
 bool apply_title_update(const XexImage& base_image, std::span<const std::byte> update_bytes,
@@ -1602,6 +1617,34 @@ bool apply_title_update(const XexImage& base_image, std::span<const std::byte> u
   // replacement image in their own right.
   out_image = std::move(patch_image);
   return true;
+}
+
+std::array<std::byte, 20> compute_effective_image_hash(const XexImage& image) {
+  return crypto::sha1(image.effective_image);
+}
+
+std::string format_effective_image_hash(const std::array<std::byte, 20>& hash) {
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string result;
+  result.reserve(hash.size() * 2u);
+  for (const auto byte : hash) {
+    const auto value = std::to_integer<unsigned char>(byte);
+    result.push_back(kHexDigits[(value >> 4u) & 0xFu]);
+    result.push_back(kHexDigits[value & 0xFu]);
+  }
+  return result;
+}
+
+XexEffectiveIdentity compute_effective_identity(const XexImage& base_image, const XexImage* patched_image) {
+  const XexImage& effective = patched_image ? *patched_image : base_image;
+  XexEffectiveIdentity identity{};
+  identity.title_id = effective.title_id;
+  identity.media_id = effective.media_id;
+  identity.base_version = base_image.execution_info.version;
+  identity.effective_version = effective.execution_info.version;
+  identity.effective_image_hash = compute_effective_image_hash(effective);
+  identity.title_update_applied = patched_image != nullptr;
+  return identity;
 }
 
 }  // namespace xenon::xbox

@@ -19,6 +19,7 @@ class LaunchFeature final {
                 ModulesFeature& modules, ProfilesFeature& profiles, SettingsFeature& settings,
                 PathsFeature& paths, bool test_mode);
 
+  void ensureModuleResolved(const QString& game_id) const;
   [[nodiscard]] QVariantMap configurationFor(const QString& game_id) const;
   [[nodiscard]] ServiceResult validate(const QString& game_id) const;
   [[nodiscard]] ServiceResult startValidated(const QString& game_id);

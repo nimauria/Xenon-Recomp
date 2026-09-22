@@ -16,7 +16,9 @@ void write_u32_be(cpu::MemoryPort& memory, cpu::GuestAddress addr, std::uint32_t
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager) {
   bool ok = true;
 
-  // XamShowDeviceSelectorUI (0x0250) - Stubbed
+  // XamShowDeviceSelectorUI (0x02CB) - Stubbed; part of the XamShow* system
+  // UI family (see xam_exports.hpp), not content storage - registered here
+  // anyway since ContentManager owns the default-device data it returns.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -38,7 +40,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentCreateEnumerator (0x0234) - Stubbed
+  // XamContentCreateEnumerator (0x025C) - Stubbed
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -59,7 +61,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentClose (0x0237) - Stubbed
+  // XamContentClose (0x025A) - Stubbed
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -73,7 +75,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentGetDeviceData (0x0238) - Enhanced with content services
+  // XamContentGetDeviceData (0x025E) - Enhanced with content services
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -111,7 +113,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentGetDeviceName (0x0239) - Enhanced
+  // XamContentGetDeviceName (0x025F) - Enhanced
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";

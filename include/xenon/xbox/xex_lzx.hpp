@@ -69,7 +69,7 @@ struct DecodeResult {
 // other Huffman-coded stream. `input.size()` must be small enough to fit in
 // one 32 KiB output chunk (no inter-chunk realignment is emitted). This
 // exists purely to build deterministic Huffman-path test fixtures for
-// decode() - see docs/XEX_LOADER_V2.md. `window_bits` must match the
+// decode() - see docs/xbox/XEX_LOADER_V2.md. `window_bits` must match the
 // value decode() will be called with (it determines how many position-slot
 // match symbols the main tree reserves, which must be signalled - as
 // unused, length 0 - even though this encoder never emits a match).

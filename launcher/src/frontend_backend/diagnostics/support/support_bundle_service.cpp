@@ -342,7 +342,7 @@ ServiceResult SupportBundleService::create(const QString& user_summary,
   root.insert(QStringLiteral("runtimeCapabilities"), runtime_.capabilities());
   const auto game_status = runtime_.gameStatus();
   if (game_status.value(QStringLiteral("available"), false).toBool()) {
-    // Selected fields only: status.json (docs/RUNTIME_HOST.md) can include
+    // Selected fields only: status.json (docs/runtime/RUNTIME_HOST.md) can include
     // absolute paths and titles the rest of this bundle deliberately omits.
     root.insert(QStringLiteral("gameStatus"),
                selectedFields(game_status, {QStringLiteral("stateName"), QStringLiteral("initialized"),
@@ -379,7 +379,7 @@ ServiceResult SupportBundleService::create(const QString& user_summary,
   const auto startup_log = sanitizedLog(startupLogPath(), 192 * 1024);
   const auto recovery_log = sanitizedLog(latestRecoveryLogPath(), 192 * 1024);
   const auto update_log = sanitizedLog(safeLogPath(QStringLiteral("update-install.log")), 96 * 1024);
-  // Tail of the current/last runtime host's log.txt (docs/RUNTIME_HOST.md) -
+  // Tail of the current/last runtime host's log.txt (docs/runtime/RUNTIME_HOST.md) -
   // covers crash output and missing-export diagnostics from guest execution.
   const auto runtime_host_log = redactText(runtime_.runtimeLog()).toUtf8();
 

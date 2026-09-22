@@ -1,7 +1,7 @@
 #pragma once
 
 // Launch configuration contract for the Xenon runtime host. See
-// docs/RUNTIME_HOST.md for the authoritative schema. The launcher writes one
+// docs/runtime/RUNTIME_HOST.md for the authoritative schema. The launcher writes one
 // of these as JSON per Play action; this process reads it once at startup.
 
 #include <cstdint>
@@ -20,7 +20,7 @@ struct LaunchConfig {
   // implements. Bump this and reject older/newer configs in
   // load_from_file() whenever a field's meaning changes incompatibly (adding
   // an optional field with a safe default does not require a bump). See
-  // docs/RUNTIME_HOST.md.
+  // docs/runtime/RUNTIME_HOST.md.
   static constexpr int kCurrentVersion = 1;
 
   // Defaults to kCurrentVersion so a LaunchConfig built directly in code
@@ -73,6 +73,17 @@ struct LaunchConfig {
   std::string save_path;
   std::string screenshots_path;
   bool offline{true};
+
+  // Explicit, opt-in headless/test/developer mode (Part 5 of the Gracemeria
+  // readiness pass - see docs/runtime/RUNTIME_HOST.md's "Normal Play vs headless"
+  // section). Defaults to false: an ordinary launcher-issued Play action is
+  // always "Normal Play", where required base content, a requested real
+  // presentation window/surface, and audio must all actually succeed or the
+  // launch fails outright (see main.cpp) - never a silent "continuing
+  // without it". Only a caller that explicitly sets this may run with
+  // content/presentation/audio missing, e.g. an automated compatibility
+  // sweep or a dedicated/offscreen host with no window.
+  bool headless_mode{false};
 
   // Parses a launch configuration from a JSON file at `path`. Returns false
   // and fills `error` on any structural problem (missing file, invalid JSON,

@@ -3,6 +3,7 @@
 #include "../settings/settings_feature.hpp"
 #include "../../services/path_service.hpp"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QTimer>
@@ -74,6 +75,21 @@ class InputFeature::Impl {
   std::unique_ptr<xenon::input::module_api::Provider> module_api{};
   std::array<xenon::input::GamepadState, xenon::input::kMaxUsers> frontend_previous_states{};
   std::array<bool, xenon::input::kMaxUsers> frontend_has_previous{};
+
+  // Part 6: analog-stick-driven navigation repeat state, independent per
+  // user and per direction so holding a direction repeats deterministically
+  // instead of racing frame-rate-dependent polling, and independent of the
+  // D-pad's own always-discrete button edges.
+  struct DirectionRepeatState {
+    bool held = false;
+    qint64 next_fire_ms = 0;
+  };
+  static constexpr qint64 kInitialRepeatDelayMs = 420;
+  static constexpr qint64 kRepeatIntervalMs = 120;
+  // Up, Down, Left, Right per user.
+  std::array<std::array<DirectionRepeatState, 4>, xenon::input::kMaxUsers> frontend_direction_repeat{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_left_trigger_held{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_right_trigger_held{};
 
   QString storePath() const {
     return QDir{paths.configuredPath(QStringLiteral("profiles"))}
@@ -195,14 +211,21 @@ class InputFeature::Impl {
     router.bind({source, GamepadButton::DpadRight, FrontendInputAction::Right});
     router.bind({source, GamepadButton::A, FrontendInputAction::Confirm});
     router.bind({source, GamepadButton::B, FrontendInputAction::Cancel});
-    router.bind({source, GamepadButton::X, FrontendInputAction::Menu});
-    router.bind({source, GamepadButton::Y, FrontendInputAction::Search});
+    // X is reserved for a page-specific secondary action (Part 5); Y opens
+    // the focused item's context menu, the controller equivalent of
+    // right-click/Shift+F10 (Part 17 requires this to reach the same action
+    // model, not a separate one).
+    router.bind({source, GamepadButton::X, FrontendInputAction::Secondary});
+    router.bind({source, GamepadButton::Y, FrontendInputAction::Context});
     router.bind({source, GamepadButton::Guide, FrontendInputAction::QuickCenter});
     router.bind({source, GamepadButton::LeftShoulder, FrontendInputAction::PageBack});
     router.bind({source, GamepadButton::RightShoulder, FrontendInputAction::PageForward});
     router.bind({source, GamepadButton::Start, FrontendInputAction::QuickCenter});
     frontend_previous_states.fill({});
     frontend_has_previous.fill(false);
+    frontend_direction_repeat.fill({});
+    frontend_left_trigger_held.fill(false);
+    frontend_right_trigger_held.fill(false);
   }
 #endif
 };
@@ -250,6 +273,18 @@ QVariantList InputFeature::frontendActions() {
 #if XENON_LAUNCHER_RUNTIME_INPUT
   if (!impl_->system) return result;
   using namespace xenon::input;
+  const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+  // Same fraction-of-full-range deadzone the guest-facing default profile
+  // uses (input/deadzone setting) - one meaningful "controller deadzone"
+  // concept for the user, applied here in the raw int16 axis domain since
+  // frontend navigation reads raw gamepad state directly rather than going
+  // through the guest profile's own deadzone-shaping code path.
+  const auto deadzone_fraction =
+      std::clamp(static_cast<float>(impl_->settings.numberValue(QStringLiteral("input/deadzone"), 0.10)),
+                0.0f, 0.5f);
+  const auto stick_deadzone = static_cast<std::int16_t>(deadzone_fraction * 32767.0f);
+  constexpr std::uint8_t kTriggerThreshold = 40;  // out of 255
+
   for (std::uint32_t user = 0; user < kMaxUsers; ++user) {
     State state{};
     if (impl_->system->get_state(user, state) != Result::Success) continue;
@@ -259,9 +294,62 @@ QVariantList InputFeature::frontendActions() {
     impl_->frontend_has_previous[user] = true;
     if (!had_previous) continue;
 
+    // Part 5/6: D-pad and left-stick both drive Up/Down/Left/Right through
+    // the same timed-repeat state machine, so holding either feels
+    // identical and neither can "race" the poll rate - each repeat fires at
+    // most once per kRepeatIntervalMs regardless of how often this function
+    // is called.
+    const bool dpad_up = (state.gamepad.buttons & GamepadButton::DpadUp) != 0;
+    const bool dpad_down = (state.gamepad.buttons & GamepadButton::DpadDown) != 0;
+    const bool dpad_left = (state.gamepad.buttons & GamepadButton::DpadLeft) != 0;
+    const bool dpad_right = (state.gamepad.buttons & GamepadButton::DpadRight) != 0;
+    const bool stick_up = state.gamepad.thumb_ly > stick_deadzone;
+    const bool stick_down = state.gamepad.thumb_ly < -stick_deadzone;
+    const bool stick_left = state.gamepad.thumb_lx < -stick_deadzone;
+    const bool stick_right = state.gamepad.thumb_lx > stick_deadzone;
+    const std::array<bool, 4> held_now{dpad_up || stick_up, dpad_down || stick_down,
+                                       dpad_left || stick_left, dpad_right || stick_right};
+    constexpr std::uint16_t kDirectionCode[4] = {GamepadButton::DpadUp, GamepadButton::DpadDown,
+                                                 GamepadButton::DpadLeft, GamepadButton::DpadRight};
+    for (int direction = 0; direction < 4; ++direction) {
+      auto& repeat_state = impl_->frontend_direction_repeat[user][static_cast<std::size_t>(direction)];
+      if (held_now[static_cast<std::size_t>(direction)]) {
+        if (!repeat_state.held) {
+          repeat_state.held = true;
+          repeat_state.next_fire_ms = now_ms + Impl::kInitialRepeatDelayMs;
+          impl_->system->frontend_router().dispatch(FrontendInputSource::Gamepad,
+                                                     kDirectionCode[direction], true, false);
+        } else if (now_ms >= repeat_state.next_fire_ms) {
+          repeat_state.next_fire_ms = now_ms + Impl::kRepeatIntervalMs;
+          impl_->system->frontend_router().dispatch(FrontendInputSource::Gamepad,
+                                                     kDirectionCode[direction], true, true);
+        }
+      } else {
+        repeat_state.held = false;
+      }
+    }
+
+    // Triggers are analog (Part 5's "page/scroll larger content"), not
+    // discrete button codes the router's bind()/dispatch() lookup covers, so
+    // push their events directly - edge-triggered (press again after
+    // releasing to scroll again), matching how a real trigger click feels
+    // rather than continuously repeating while held down.
+    const bool left_trigger_now = state.gamepad.left_trigger > kTriggerThreshold;
+    const bool right_trigger_now = state.gamepad.right_trigger > kTriggerThreshold;
+    if (left_trigger_now && !impl_->frontend_left_trigger_held[user]) {
+      impl_->system->frontend_router().push(
+          {FrontendInputSource::Gamepad, FrontendInputAction::ScrollUp,
+           state.gamepad.left_trigger, static_cast<std::uint64_t>(now_ms), true, false});
+    }
+    if (right_trigger_now && !impl_->frontend_right_trigger_held[user]) {
+      impl_->system->frontend_router().push(
+          {FrontendInputSource::Gamepad, FrontendInputAction::ScrollDown,
+           state.gamepad.right_trigger, static_cast<std::uint64_t>(now_ms), true, false});
+    }
+    impl_->frontend_left_trigger_held[user] = left_trigger_now;
+    impl_->frontend_right_trigger_held[user] = right_trigger_now;
+
     constexpr std::uint16_t buttons[] = {
-        GamepadButton::DpadUp, GamepadButton::DpadDown,
-        GamepadButton::DpadLeft, GamepadButton::DpadRight,
         GamepadButton::A, GamepadButton::B, GamepadButton::X,
         GamepadButton::Y, GamepadButton::Guide,
         GamepadButton::LeftShoulder, GamepadButton::RightShoulder,
@@ -288,6 +376,10 @@ QVariantList InputFeature::frontendActions() {
         case FrontendInputAction::QuickCenter: action = QStringLiteral("quickCenter"); break;
         case FrontendInputAction::PageBack: action = QStringLiteral("pageBack"); break;
         case FrontendInputAction::PageForward: action = QStringLiteral("pageForward"); break;
+        case FrontendInputAction::Context: action = QStringLiteral("context"); break;
+        case FrontendInputAction::Secondary: action = QStringLiteral("secondary"); break;
+        case FrontendInputAction::ScrollUp: action = QStringLiteral("scrollUp"); break;
+        case FrontendInputAction::ScrollDown: action = QStringLiteral("scrollDown"); break;
         case FrontendInputAction::Search: action = QStringLiteral("search"); break;
         default: break;
       }
@@ -445,6 +537,14 @@ QString InputFeature::profileStorePath() const {
   return impl_->storePath();
 #else
   return {};
+#endif
+}
+
+void InputFeature::setFrontendFocused(bool focused) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (impl_->system) impl_->system->set_focused(focused);
+#else
+  static_cast<void>(focused);
 #endif
 }
 

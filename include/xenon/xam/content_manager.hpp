@@ -18,7 +18,7 @@ class VirtualFileSystem;
 namespace xenon::xam {
 
 // Forward declarations
-class ContentGraph;
+struct ContentGraph;
 class TitleUpdateManager;
 class DLCManager;
 class SaveManager;

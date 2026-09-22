@@ -2,6 +2,7 @@
 
 #include "../launch_feature.hpp"
 #include "../../../services/library_service.hpp"
+#include "../../../services/preparation_service.hpp"
 #include "../../../services/settings_service.hpp"
 
 #include <QDateTime>
@@ -15,8 +16,10 @@ constexpr auto kTestHistoryKey = "session/history-test";
 }
 
 SessionController::SessionController(LaunchFeature& launch, LibraryService& library,
-                                     SettingsService& storage, bool test_mode, QObject* parent)
-    : QObject(parent), launch_(launch), library_(library), storage_(storage), test_mode_(test_mode) {
+                                     SettingsService& storage, PreparationService& preparation,
+                                     bool test_mode, QObject* parent)
+    : QObject(parent), launch_(launch), library_(library), storage_(storage),
+      preparation_(preparation), test_mode_(test_mode) {
   tick_timer_.setInterval(1000);
   tick_timer_.setSingleShot(false);
   connect(&tick_timer_, &QTimer::timeout, this, [this]() {
@@ -93,6 +96,15 @@ ServiceResult SessionController::stop() {
 
   if (previous == SessionState::Preparing || previous == SessionState::Validating ||
       previous == SessionState::Starting) {
+    if (previous == SessionState::Preparing && preparation_.isPreparing(current_.game_id)) {
+      // Cooperative cancellation (Part 19): the worker terminates its own
+      // compiler child process tree and exits on its own; the connected
+      // finished() handler above still runs, but the generation check
+      // there will already have advanced by the time it fires, so it is a
+      // no-op - finishCancellation() below is what actually resolves this
+      // pending session.
+      preparation_.cancel(current_.game_id);
+    }
     QTimer::singleShot(0, this, [this, generation]() { finishCancellation(generation); });
     return ServiceResult::success(QStringLiteral("Launch cancelled"),
                                   QStringLiteral("The pending game launch is being cancelled."));
@@ -136,6 +148,11 @@ void SessionController::scheduleStart(quint64 generation) {
 
 void SessionController::preparePhase(quint64 generation) {
   if (generation != generation_ || current_.state != SessionState::Preparing) return;
+  // Must run before configurationFor()/usesAutomaticPreparation() below - a
+  // module installed after this game was imported without one needs to be
+  // resolved before this same Preparing phase decides whether an automatic
+  // native-module build is needed (Part 7).
+  launch_.ensureModuleResolved(current_.game_id);
   const auto configuration = launch_.configurationFor(current_.game_id);
   if (configuration.isEmpty()) {
     failCurrent(QStringLiteral("configuration"),
@@ -150,8 +167,73 @@ void SessionController::preparePhase(quint64 generation) {
   current_.profile_name = configuration.value(QStringLiteral("profileName")).toString();
   current_.module_id = configuration.value(QStringLiteral("moduleId")).toString();
   current_.module_name = configuration.value(QStringLiteral("moduleName")).toString();
-  setState(SessionState::Validating);
-  scheduleValidate(generation);
+
+  // Automatic game preparation (docs/development/GAME_PREPARATION.md, Part 9): a module
+  // that relies on Xenon's automatic pipeline (no pre-built native
+  // extension of its own) needs its cache checked - and, if stale/missing,
+  // a real out-of-process build - before this session can proceed past
+  // Preparing. A traditional module (already resolved a native extension
+  // path via configurationFor()) skips straight to Validating exactly as
+  // before - zero behavior change for it.
+  if (test_mode_ || !preparation_.usesAutomaticPreparation(current_.game_id)) {
+    setState(SessionState::Validating);
+    scheduleValidate(generation);
+    return;
+  }
+
+  QString cached_path;
+  const auto cache_check = preparation_.checkCache(current_.game_id, cached_path);
+  if (!cache_check.ok) {
+    failCurrent(QStringLiteral("preparation-check"), cache_check);
+    return;
+  }
+  if (!cached_path.isEmpty()) {
+    current_.configuration.insert(QStringLiteral("nativeExtensionPath"), cached_path);
+    setState(SessionState::Validating);
+    scheduleValidate(generation);
+    return;
+  }
+
+  current_.progress_phase = QStringLiteral("Inspecting");
+  current_.progress_message = QStringLiteral("Preparing %1 for its first launch...").arg(current_.title);
+  current_.progress_percent = 0;
+  emit changed();
+
+  QObject::disconnect(preparation_progress_connection_);
+  QObject::disconnect(preparation_finished_connection_);
+  const auto game_id = current_.game_id;
+  preparation_progress_connection_ = connect(
+      &preparation_, &PreparationService::progress, this,
+      [this, generation, game_id](const QString& progress_game_id, const QString& phase, int percent,
+                                  const QString& task) {
+        if (generation != generation_ || progress_game_id != game_id ||
+            current_.state != SessionState::Preparing) {
+          return;
+        }
+        current_.progress_phase = phase;
+        current_.progress_message = task.isEmpty() ? phase : task;
+        current_.progress_percent = percent;
+        emit changed();
+      });
+  preparation_finished_connection_ = connect(
+      &preparation_, &PreparationService::finished, this,
+      [this, generation, game_id](const QString& finished_game_id, bool success,
+                                  const QString& native_extension_path, const QString& error_message) {
+        if (finished_game_id != game_id) return;
+        QObject::disconnect(preparation_progress_connection_);
+        QObject::disconnect(preparation_finished_connection_);
+        if (generation != generation_ || current_.state != SessionState::Preparing) return;
+        if (!success) {
+          failCurrent(QStringLiteral("preparation"),
+                      ServiceResult::failure(QStringLiteral("Preparation failed"), error_message));
+          return;
+        }
+        current_.configuration.insert(QStringLiteral("nativeExtensionPath"), native_extension_path);
+        current_.progress_percent = 100;
+        setState(SessionState::Validating);
+        scheduleValidate(generation);
+      });
+  preparation_.beginPreparation(current_.game_id);
 }
 
 void SessionController::validatePhase(quint64 generation) {

@@ -7,11 +7,14 @@ KernelMemory::KernelMemory(std::shared_ptr<memory::AddressSpace> address_space)
 
 bool KernelMemory::allocate_virtual(
     std::uint32_t& address, std::uint32_t size,
-    memory::Protect protect, bool top_down) {
-  
+    memory::Protect protect, bool top_down, bool zero_initialize) {
   memory::GuestAddress guest_address = address;
   constexpr std::uint32_t kDefaultAlign = 64 * 1024;  // 64KB alignment
-  if (!address_space_->allocate(size, kDefaultAlign, protect, top_down, guest_address)) {
+  memory::VirtualAllocationOptions options{};
+  options.commit = true;
+  options.zero_initialize = zero_initialize;
+  if (!address_space_->allocate(size, kDefaultAlign, protect, top_down, guest_address,
+                                std::nullopt, options)) {
     return false;
   }
   address = static_cast<std::uint32_t>(guest_address);

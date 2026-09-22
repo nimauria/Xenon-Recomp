@@ -113,6 +113,31 @@ class ContentFileHandle final : public FileHandle {
 
 }  // namespace
 
+FsError read_all(const ReadOnlyContentSource& source, std::string_view relative_path,
+                 std::vector<std::byte>& out_bytes) {
+  out_bytes.clear();
+  FileInfo info{};
+  auto error = source.stat(relative_path, info);
+  if (error != FsError::None) return error;
+  if (info.is_directory) return FsError::IsDirectory;
+  if (info.size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    return FsError::InvalidArgument;
+  }
+
+  std::vector<std::byte> buffer(static_cast<std::size_t>(info.size));
+  std::uint64_t offset = 0;
+  while (offset < buffer.size()) {
+    std::size_t bytes_read = 0;
+    error = source.read_at(relative_path, offset,
+                           std::span(buffer).subspan(offset), bytes_read);
+    if (error != FsError::None) return error;
+    if (bytes_read == 0) return FsError::IoError;  // short read: source is inconsistent with its own stat()
+    offset += bytes_read;
+  }
+  out_bytes = std::move(buffer);
+  return FsError::None;
+}
+
 ReadOnlyContentDevice::ReadOnlyContentDevice(
     std::string mount_point, std::shared_ptr<ReadOnlyContentSource> source)
     : Device(std::move(mount_point), true), source_(std::move(source)) {

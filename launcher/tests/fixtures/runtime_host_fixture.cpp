@@ -1,6 +1,6 @@
 // Lightweight stand-in for xenon_runtime_host, used only by
 // launcher/tests/runtime/runtime_bridge_tests.cpp. It speaks the same
-// file-based contract documented in docs/RUNTIME_HOST.md (launch-config.json
+// file-based contract documented in docs/runtime/RUNTIME_HOST.md (launch-config.json
 // in; status.json/log.txt out; stop.signal requests a stop) without ever
 // touching XenonSession, so RuntimeBridge's process-supervision behavior can
 // be exercised deterministically and without real game content, a native
@@ -164,7 +164,7 @@ class FixtureStatusWriter {
   std::int64_t started_at_epoch_ms_;
 };
 
-// SessionState numbering (docs/RUNTIME_SESSION.md / include/xenon/core/session.hpp):
+// SessionState numbering (docs/runtime/RUNTIME_SESSION.md / include/xenon/core/session.hpp):
 // Uninitialized=0 Initializing=1 Ready=2 LoadingGame=3 Running=4 Paused=5
 // Stopping=6 Stopped=7 Failed=8
 constexpr int kInitializing = 1;
@@ -232,7 +232,7 @@ int run_crash_scenario(FixtureStatusWriter& status) {
   std::this_thread::sleep_for(std::chrono::milliseconds(80));
   // Deliberately never writes a terminal status and exits with a
   // distinctive, non-zero code - this is what RuntimeBridge::augmentedStatus()
-  // must recognize as a crash (see docs/RUNTIME_HOST.md "Detecting a crash").
+  // must recognize as a crash (see docs/runtime/RUNTIME_HOST.md "Detecting a crash").
   std::_Exit(137);
 }
 

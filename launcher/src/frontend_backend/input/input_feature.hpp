@@ -36,6 +36,14 @@ class InputFeature final : public QObject {
   [[nodiscard]] QVariantList frontendActions();
   [[nodiscard]] QString profileStorePath() const;
 
+  // Gates gamepad frontend-navigation processing on real OS-level launcher
+  // foreground state (Part 7: controller navigation must not react unless
+  // the launcher is explicitly active/foreground - e.g. while a game is
+  // running and has taken focus). Forwards to the underlying InputSystem's
+  // own set_focused(), which already exists specifically for this purpose
+  // (see its header comment) but was never previously called from anywhere.
+  void setFrontendFocused(bool focused);
+
   [[nodiscard]] ServiceResult refresh();
   [[nodiscard]] ServiceResult reconfigure();
   [[nodiscard]] ServiceResult applySettings();

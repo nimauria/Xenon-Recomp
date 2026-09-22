@@ -15,7 +15,7 @@ bool register_notification_exports(core::ExportRegistry& registry,
                                    NotificationManager& notification_manager) {
   bool ok = true;
 
-  // XamNotifyCreateListener (0x0210)
+  // XamNotifyCreateListener (0x028A)
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -37,12 +37,13 @@ bool register_notification_exports(core::ExportRegistry& registry,
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamNotifyGetNext (0x0211)
+  // XNotifyGetNext (0x028B) - real xam.xex identity has no "Xam" prefix;
+  // see xam_exports.hpp for the rename rationale.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
-    desc.name = "XamNotifyGetNext";
-    desc.ordinal = ordinal::XamNotifyGetNext;
+    desc.name = "XNotifyGetNext";
+    desc.ordinal = ordinal::XNotifyGetNext;
     desc.requirement = core::ExportRequirement::Stubbed;
     desc.handler = [&notification_manager](core::ExportCallContext& ctx) -> bool {
       auto notification = notification_manager.get_next_notification();
@@ -60,12 +61,13 @@ bool register_notification_exports(core::ExportRegistry& registry,
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamNotifyPositionUI (0x0212) - Stubbed
+  // XNotifyPositionUI (0x028C) - Stubbed; real xam.xex identity has no
+  // "Xam" prefix, see xam_exports.hpp.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
-    desc.name = "XamNotifyPositionUI";
-    desc.ordinal = ordinal::XamNotifyPositionUI;
+    desc.name = "XNotifyPositionUI";
+    desc.ordinal = ordinal::XNotifyPositionUI;
     desc.requirement = core::ExportRequirement::Stubbed;
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
       // No UI to position
