@@ -50,6 +50,16 @@ struct ExportDescriptor {
   ExportRequirement requirement{ExportRequirement::Required};
 };
 
+// Guest-backed variable exported by an Xbox system module. XEX native-import
+// type-0 records for true variables are rewritten to this guest address before
+// execution, matching the console loader's variable-import contract.
+struct VariableExportDescriptor {
+  std::string library{};
+  std::string name{};
+  std::uint32_t ordinal{};
+  cpu::GuestAddress guest_address{};
+};
+
 // Unified Xbox export registry
 // Replaces subsystem-specific import dispatchers with a common model
 // Supports xboxkrnl.exe, xam.xex, xbdm.xex, and future system modules
@@ -88,6 +98,19 @@ class ExportRegistry {
                                        std::string_view name,
                                        ExportCallContext& context) const;
 
+  // Register/resolve a guest-backed variable export. Function and variable
+  // namespaces are intentionally separate because Xbox modules may expose
+  // both through the same ordinal-oriented import format.
+  [[nodiscard]] bool register_variable(VariableExportDescriptor descriptor);
+  [[nodiscard]] bool unregister_variable(std::string_view library,
+                                         std::uint32_t ordinal);
+  [[nodiscard]] std::optional<cpu::GuestAddress> resolve_variable(
+      std::string_view library, std::uint32_t ordinal) const;
+  [[nodiscard]] std::optional<cpu::GuestAddress> resolve_variable(
+      std::string_view library, std::string_view name) const;
+  [[nodiscard]] bool contains_variable(std::string_view library,
+                                       std::uint32_t ordinal) const;
+
   // Check if an export exists
   [[nodiscard]] bool contains(std::string_view library, std::uint32_t ordinal) const;
   [[nodiscard]] bool contains(std::string_view library, std::string_view name) const;
@@ -109,6 +132,8 @@ class ExportRegistry {
   mutable std::shared_mutex mutex_{};
   std::unordered_map<std::string, ExportDescriptor> ordinal_map_{};
   std::unordered_map<std::string, ExportDescriptor> name_map_{};
+  std::unordered_map<std::string, VariableExportDescriptor> variable_ordinal_map_{};
+  std::unordered_map<std::string, VariableExportDescriptor> variable_name_map_{};
 };
 
 }  // namespace xenon::core

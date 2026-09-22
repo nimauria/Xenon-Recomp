@@ -20,7 +20,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -511,86 +510,89 @@ bool XenonSession::init_input() {
     return false;
   }
 
+  // Apply the launcher's focus policy after setup so a foreground-only
+  // session never leaks input while its presentation window is unfocused.
   input_->set_background_input_policy(
       config_.input_background ? input::BackgroundInputPolicy::Always
                                : input::BackgroundInputPolicy::ForegroundOnly);
-  input_->set_vibration_enabled(config_.input_rumble);
 
-  // The launcher owns persistence for Input V1 profiles, while the runtime
-  // owns their application to guest-visible state. Loading the same profile
-  // store here closes that boundary without introducing a Qt dependency. A
-  // missing profile file is a normal first-run condition; a malformed one is
-  // diagnostic-only and falls back to the built-in default profile.
+  // The launcher exposes one simple global deadzone.  Feed it into the
+  // default runtime profile rather than duplicating deadzone math in the
+  // session/runtime host.  Per-device/user profile bindings still override
+  // this default through ProfileStore as usual.
+  if (auto profile = input_->profiles().profile("default")) {
+    const auto dz = static_cast<float>(std::clamp(config_.input_deadzone, 0.0, 0.95));
+    profile->left_stick.inner_deadzone = dz;
+    profile->right_stick.inner_deadzone = dz;
+    if (!input_->profiles().upsert(std::move(*profile))) {
+      set_error("Failed to apply default input deadzone profile");
+      return false;
+    }
+  }
+
+  // Load persistent input profiles when the launcher supplied its profile
+  // store.  A missing file is allowed on first run; malformed existing files
+  // remain a hard error because silently discarding user mappings is worse
+  // than surfacing the configuration problem.
   if (!config_.input_profile_store_path.empty()) {
-    std::error_code profile_ec;
-    if (std::filesystem::is_regular_file(config_.input_profile_store_path, profile_ec)) {
-      if (!input_->profiles().load(config_.input_profile_store_path) && config_.enable_logging) {
-        std::cout << "[XenonSession] Input profile store could not be loaded: "
-                  << config_.input_profile_store_path.string() << " ("
-                  << input_->profiles().diagnostics().last_error << ")" << std::endl;
-      }
+    const std::filesystem::path profile_path(config_.input_profile_store_path);
+    std::error_code ec;
+    if (std::filesystem::exists(profile_path, ec) && !ec &&
+        !input_->profiles().load(profile_path)) {
+      set_error("Failed to load input profile store: '" +
+                config_.input_profile_store_path + "'");
+      return false;
     }
   }
 
-  // Keep the launcher's simple global deadzone meaningful for users who are
-  // still on the default profile. Explicit user/device-bound profiles remain
-  // authoritative and are not rewritten.
-  const float requested_deadzone = std::isfinite(config_.input_deadzone)
-      ? std::clamp(config_.input_deadzone, 0.0f, 0.95f)
-      : 0.10f;
-  if (auto default_profile = input_->profiles().profile("default")) {
-    default_profile->left_stick.inner_deadzone = requested_deadzone;
-    default_profile->right_stick.inner_deadzone = requested_deadzone;
-    static_cast<void>(input_->profiles().upsert(std::move(*default_profile)));
-  }
-
-  const auto devices = input_->devices();
-  const auto resolve_device = [&](std::string_view requested) -> std::optional<input::DeviceId> {
-    if (requested.empty() || ascii_lower(requested) == "automatic" ||
-        ascii_lower(requested) == "auto") {
-      return std::nullopt;
-    }
-    for (const auto& device : devices) {
+  const auto match_device = [this](std::string_view selector)
+      -> std::optional<input::DeviceId> {
+    if (selector.empty()) return std::nullopt;
+    const auto wanted = ascii_lower(selector);
+    if (wanted == "automatic" || wanted == "auto") return std::nullopt;
+    for (const auto& device : input_->devices()) {
       if (!device.connected) continue;
-      if (device.identity_key == requested || device.persistent_key == requested ||
-          device.name == requested) {
+      if (ascii_lower(device.identity_key) == wanted ||
+          ascii_lower(device.persistent_key) == wanted ||
+          ascii_lower(device.name) == wanted ||
+          ascii_lower(device.driver_name) == wanted) {
         return device.id;
       }
     }
     return std::nullopt;
   };
 
-  std::array<bool, input::kMaxUsers> explicit_route{};
-  for (std::uint32_t user = 0; user < input::kMaxUsers; ++user) {
-    const auto& requested_sources = config_.input_user_sources[user];
-    if (requested_sources.empty()) continue;
-    bool primary_assigned = false;
-    for (const auto& source : requested_sources) {
-      const auto device = resolve_device(source);
-      if (!device) {
-        if (config_.enable_logging) {
-          std::cout << "[XenonSession] Requested input source not connected: '" << source
-                    << "' (user " << user << ")" << std::endl;
+  // Preferred device is an explicit user-0 override.  If the selector no
+  // longer exists (device unplugged/renamed), retain InputSystem's automatic
+  // assignment rather than failing the entire game launch.
+  if (auto preferred = match_device(config_.input_preferred_device)) {
+    static_cast<void>(input_->assign_user(0, *preferred));
+  }
+
+  // Add launcher-defined multi-source routes (controller + keyboard/HOTAS,
+  // accessibility devices, etc.).  Unknown selectors are intentionally
+  // ignored here so hotplug can be reconciled by a later frontend refresh.
+  for (const auto& route : config_.input_user_sources) {
+    if (route.user_index >= input::kMaxUsers) continue;
+    bool primary_selected = input_->device_for_user(route.user_index).has_value();
+    for (const auto& selector : route.sources) {
+      const auto device = match_device(selector);
+      if (!device) continue;
+      if (!primary_selected) {
+        if (input_->assign_user(route.user_index, *device) == input::Result::Success) {
+          primary_selected = true;
         }
-        continue;
-      }
-      const auto route_result = !primary_assigned
-          ? input_->assign_user(user, *device)
-          : input_->add_user_source(user, *device);
-      if (route_result == input::Result::Success) {
-        primary_assigned = true;
-        explicit_route[user] = true;
+      } else {
+        static_cast<void>(input_->add_user_source(route.user_index, *device));
       }
     }
   }
 
-  // Preferred device is the lightweight user-0 shortcut. Explicit per-user
-  // routing wins when both are present.
-  if (!explicit_route[0]) {
-    if (const auto preferred = resolve_device(config_.input_preferred_device)) {
-      static_cast<void>(input_->assign_user(0, *preferred));
-    }
-  }
+  // input_rumble is retained in SessionConfig for the launcher/runtime
+  // contract.  The current InputSystem has no global force-feedback gate;
+  // GuestInputBridge continues to use the per-device capability path.  This
+  // avoids lying by pretending a session-level toggle is already enforced.
+  // A dedicated InputSystem vibration policy can consume this field later.
 
   input_bridge_ = std::make_unique<input::xam::guest::GuestInputBridge>(*input_);
   return true;
@@ -717,6 +719,203 @@ bool XenonSession::init_exports() {
     }
   }
 
+  if (!init_kernel_variable_exports()) {
+    set_error("Failed to initialize xboxkrnl variable exports");
+    return false;
+  }
+
+  return true;
+}
+
+bool XenonSession::init_kernel_variable_exports() {
+  if (!memory_) return false;
+
+  // One compact guest page backs the kernel variables that retail titles are
+  // allowed to import directly. Keeping the addresses in ExportRegistry makes
+  // variable imports a first-class system-module contract rather than a
+  // title-specific patch table.
+  memory::GuestAddress page{};
+  if (!memory_->allocate(memory::kBasePageSize, memory::kBasePageSize,
+                         memory::kReadWrite, /*top_down=*/true, page)) {
+    return false;
+  }
+
+  struct VariableSpec {
+    std::uint32_t ordinal;
+    const char* name;
+    std::uint32_t offset;
+  };
+  // Xbox 360 xboxkrnl variable ordinals. These are platform ABI, not
+  // title-specific data.
+  constexpr VariableSpec kVariables[] = {
+      {0x001Bu, "ExThreadObjectType", 0x000u},
+      {0x0059u, "KeDebugMonitorData", 0x010u},
+      {0x00ADu, "KeTimeStampBundle", 0x020u},
+      {0x0158u, "XboxKrnlVersion", 0x040u},
+      {0x0193u, "XexExecutableModuleHandle", 0x050u},
+      {0x01AEu, "ExLoadedCommandLine", 0x060u},
+      {0x01BEu, "VdGlobalDevice", 0x0A0u},
+      {0x01C0u, "VdGpuClockInMHz", 0x0B0u},
+      {0x01C1u, "VdHSIOCalibrationLock", 0x0C0u},
+      {0x0266u, "KeCertMonitorData", 0x0E0u},
+  };
+
+  for (const auto& variable : kVariables) {
+    VariableExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl.exe";
+    descriptor.name = variable.name;
+    descriptor.ordinal = variable.ordinal;
+    descriptor.guest_address = page + variable.offset;
+    if (!export_registry_.register_variable(std::move(descriptor))) return false;
+  }
+
+  try {
+    // ExThreadObjectType is an exported pointer variable. Give it a stable,
+    // non-null guest object-type descriptor rather than leaving imported code
+    // to dereference address zero. The descriptor is intentionally minimal;
+    // Xenon's handle layer owns the actual host-side object type semantics.
+    constexpr auto kThreadObjectTypeDescriptor = 0x200u;
+    memory_->write32_be(page + 0x000u, page + kThreadObjectTypeDescriptor);
+
+    // KeDebugMonitorData / KeCertMonitorData / VdGlobalDevice are valid null
+    // values when the corresponding optional service/device is absent. The
+    // allocation itself is nevertheless real, so importing code sees the
+    // address of the exported variable, not a raw ordinal placeholder.
+    memory_->write32_be(page + 0x010u, 0u);
+    memory_->write32_be(page + 0x0A0u, 0u);
+    memory_->write32_be(page + 0x0E0u, 0u);
+
+    // KeTimeStampBundle is 24 bytes. It starts zeroed; time services can
+    // refresh it later without changing the exported address.
+    for (std::uint32_t offset = 0; offset < 24u; offset += 4u) {
+      memory_->write32_be(page + 0x020u + offset, 0u);
+    }
+
+    // Retail-compatible kernel version storage. This follows the established
+    // Xbox runtime convention used by recomp/emulation projects: major 2 and
+    // permissive high build/revision fields for compatibility checks.
+    memory_->write16_be(page + 0x040u, 2u);
+    memory_->write16_be(page + 0x042u, 0xFFFFu);
+    memory_->write16_be(page + 0x044u, 0xFFFFu);
+    memory_->write8(page + 0x046u, 0x80u);
+    memory_->write8(page + 0x047u, 0x00u);
+
+    // XexExecutableModuleHandle is a pointer variable. Back it with a small
+    // stable module record now; refresh_dynamic_kernel_variables() fills the
+    // XEX-header pointer once the effective image has been loaded.
+    constexpr auto kExecutableModuleRecord = 0x100u;
+    memory_->write32_be(page + 0x050u, page + kExecutableModuleRecord);
+
+    static constexpr char kCommandLine[] = "\"default.xex\"";
+    std::vector<std::byte> command_line(sizeof(kCommandLine));
+    for (std::size_t i = 0; i < sizeof(kCommandLine); ++i) {
+      command_line[i] = static_cast<std::byte>(kCommandLine[i]);
+    }
+    memory_->write_bytes(page + 0x060u, command_line);
+
+    // Xenos nominal GPU clock is 500 MHz.
+    memory_->write32_be(page + 0x0B0u, 500u);
+
+    // VdHSIOCalibrationLock is an RTL critical section (28 bytes). Initialize
+    // the fields used by the Xbox runtime: synchronization-event type, spin
+    // count / 256, signal state 0, lock count -1, recursion 0, owner 0.
+    memory_->write8(page + 0x0C0u, 1u);
+    memory_->write8(page + 0x0C1u, static_cast<std::uint8_t>((10000u + 255u) >> 8u));
+    memory_->write32_be(page + 0x0C4u, 0u);
+    memory_->write32_be(page + 0x0D0u, 0xFFFFFFFFu);
+    memory_->write32_be(page + 0x0D4u, 0u);
+    memory_->write32_be(page + 0x0D8u, 0u);
+  } catch (const memory::MemoryFault&) {
+    return false;
+  }
+
+  return true;
+}
+
+bool XenonSession::bind_xex_variable_imports() {
+  if (!loaded_xex_ || !memory_) return false;
+
+  for (const auto& import : loaded_xex_->image.imports) {
+    if (!import.is_variable()) continue;
+
+    std::optional<cpu::GuestAddress> variable;
+    if (!import.symbol.empty()) {
+      variable = export_registry_.resolve_variable(import.module, import.symbol);
+    }
+    if (!variable) {
+      variable = export_registry_.resolve_variable(import.module, import.ordinal);
+    }
+    if (!variable) continue;  // Kept as an unresolved compatibility diagnostic.
+
+    const auto mapping = memory_->query(import.guest_thunk);
+    if (!mapping || mapping->state != memory::PageState::Committed || mapping->page_size == 0u) {
+      set_error("Variable import slot is not mapped/committed: " + import.module +
+                " ordinal " + std::to_string(import.ordinal));
+      return false;
+    }
+
+    const auto page_size = mapping->page_size;
+    const auto page_base = import.guest_thunk - (import.guest_thunk % page_size);
+    const auto original_protect = mapping->current_protect;
+    const auto writable_protect = original_protect | memory::Protect::Write;
+    if (writable_protect != original_protect &&
+        !memory_->protect(page_base, page_size, writable_protect)) {
+      set_error("Failed to make variable import page writable: " + import.module +
+                " ordinal " + std::to_string(import.ordinal));
+      return false;
+    }
+
+    bool wrote = false;
+    try {
+      memory_->write32_be(import.guest_thunk, *variable);
+      wrote = true;
+    } catch (const memory::MemoryFault&) {
+      wrote = false;
+    }
+
+    if (writable_protect != original_protect) {
+      if (!memory_->protect(page_base, page_size, original_protect)) {
+        set_error("Failed to restore variable import page protection: " + import.module +
+                  " ordinal " + std::to_string(import.ordinal));
+        return false;
+      }
+    }
+    if (!wrote) {
+      set_error("Failed to bind variable import: " + import.module + " ordinal " +
+                std::to_string(import.ordinal));
+      return false;
+    }
+  }
+  return true;
+}
+
+bool XenonSession::refresh_dynamic_kernel_variables() {
+  if (!memory_ || !loaded_xex_) return false;
+  const auto module_handle_storage =
+      export_registry_.resolve_variable("xboxkrnl.exe", 0x0193u);
+  if (!module_handle_storage) return true;
+
+  try {
+    const auto module_record = memory_->read32_be(*module_handle_storage);
+    if (module_record == 0u) return false;
+
+    // Preserve a guest copy of the effective XEX header and expose its address
+    // at the loader-record field used by Xbox code that queries XEX optional
+    // headers. This is deliberately a minimal loader record; KernelModule is
+    // still the canonical host-side module object.
+    if (!loaded_xex_->image.header_bytes.empty()) {
+      memory::GuestAddress header_copy{};
+      const auto header_size = static_cast<std::uint32_t>(loaded_xex_->image.header_bytes.size());
+      if (!memory_->allocate(header_size, 16u, memory::kReadWrite,
+                             /*top_down=*/true, header_copy)) {
+        return false;
+      }
+      memory_->write_bytes(header_copy, loaded_xex_->image.header_bytes);
+      memory_->write32_be(module_record + 0x58u, header_copy);
+    }
+  } catch (const memory::MemoryFault&) {
+    return false;
+  }
   return true;
 }
 
@@ -781,6 +980,14 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
               << std::endl;
   }
 
+  // Bind true native variable imports to guest-backed system-module
+  // variables before any guest code or callbacks can observe the IAT slots.
+  if (!bind_xex_variable_imports()) {
+    return SessionResult::failure(last_error_.empty()
+                                      ? "Failed to bind XEX variable imports"
+                                      : last_error_);
+  }
+
   // Resolve imports
   if (!resolve_xex_imports()) {
     return SessionResult::failure("Failed to resolve XEX imports");
@@ -794,6 +1001,10 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   // Create guest process/main thread
   if (!create_guest_process()) {
     return SessionResult::failure("Failed to create guest process");
+  }
+  if (!refresh_dynamic_kernel_variables()) {
+    set_error("Failed to initialize dynamic xboxkrnl variable exports");
+    return SessionResult::failure(last_error_);
   }
 
   set_state(SessionState::Ready, "Game loaded successfully");
@@ -967,24 +1178,41 @@ bool XenonSession::resolve_xex_imports() {
     return false;
   }
 
-  // Static recompilation bakes direct guest-to-guest calls into the
-  // generated native code, so nothing needs patching here. This pass is a
-  // preflight diagnostic: it records which imports this build's export
-  // registry does not (yet) know about, surfaced as compatibility warnings
-  // in session/game status. Missing entries are resolved lazily and
-  // per-call through external_call() rather than failing the whole load,
-  // since most titles only exercise a fraction of their imports.
+  // XEX-native function imports contain both a type-0 address record and a
+  // type-1 callable thunk. Only the callable thunk participates in function
+  // export resolution. Standalone type-0 records are genuine variable
+  // imports and resolve through the guest-backed variable-export registry.
   unresolved_imports_.clear();
   for (const auto& import : loaded_xex_->image.imports) {
-    const bool resolved = !import.symbol.empty()
-                               ? export_registry_.contains(import.module, import.symbol)
-                               : export_registry_.contains(import.module, import.ordinal);
+    if (import.is_function_address()) continue;
+
+    bool resolved = false;
+    if (import.is_variable()) {
+      resolved = !import.symbol.empty()
+                     ? export_registry_.resolve_variable(import.module, import.symbol).has_value()
+                     : export_registry_.contains_variable(import.module, import.ordinal);
+    } else if (import.callable()) {
+      resolved = !import.symbol.empty()
+                     ? export_registry_.contains(import.module, import.symbol)
+                     : export_registry_.contains(import.module, import.ordinal);
+    }
     if (resolved) continue;
+
+    const bool already_reported = std::any_of(
+        unresolved_imports_.begin(), unresolved_imports_.end(),
+        [&](const UnresolvedImport& existing) {
+          return existing.library == import.module && existing.symbol == import.symbol &&
+                 existing.ordinal == import.ordinal;
+        });
+    if (already_reported) continue;
+
     unresolved_imports_.push_back(
         UnresolvedImport{import.module, import.symbol, import.ordinal});
     if (config_.enable_export_diagnostics) {
-      std::cout << "[XenonSession] Unresolved import: " << import.module << " '"
-                << import.symbol << "' ordinal " << import.ordinal << std::endl;
+      std::cout << "[XenonSession] Unresolved "
+                << (import.is_variable() ? "variable import: " : "import: ")
+                << import.module << " '" << import.symbol << "' ordinal "
+                << import.ordinal << std::endl;
     }
   }
   return true;
@@ -1258,12 +1486,80 @@ std::uint32_t XenonSession::run_execution() {
     // Real connection to the guest exception path (not a new subsystem):
     // Memory V2 already throws this on a genuine guest memory fault; route
     // it through kernel::ExceptionDispatcher, scoped to the thread that just
-    // registered itself above, instead of only stringifying it.
+    // registered itself above. Also retain the guest CPU/memory state that
+    // caused the first fault - "fault at 0" alone cannot distinguish a null
+    // data dereference from an indirect call, bad ABI state, or bad mapping.
     crashed = true;
-    const auto record = kernel::ExceptionDispatcher::fault_to_exception(fault.info());
+    const auto& info = fault.info();
+    const auto record = kernel::ExceptionDispatcher::fault_to_exception(info);
     crash_exit_code = static_cast<std::uint32_t>(record.code);
     static_cast<void>(exception_dispatcher_.dispatch_exception(record));
-    crash_message = std::string("Guest memory fault: ") + fault.what();
+
+    const auto access_name = [](memory::AccessKind access) {
+      switch (access) {
+        case memory::AccessKind::Read: return "read";
+        case memory::AccessKind::Write: return "write";
+        case memory::AccessKind::Execute: return "execute";
+      }
+      return "unknown";
+    };
+    const auto reason_name = [](memory::FaultReason reason) {
+      switch (reason) {
+        case memory::FaultReason::Unmapped: return "unmapped";
+        case memory::FaultReason::Uncommitted: return "uncommitted";
+        case memory::FaultReason::Protection: return "protection";
+        case memory::FaultReason::OutOfRange: return "out-of-range";
+        case memory::FaultReason::MmioWidth: return "mmio-width";
+      }
+      return "unknown";
+    };
+    const auto page_state_name = [](memory::PageState state) {
+      switch (state) {
+        case memory::PageState::Free: return "free";
+        case memory::PageState::Reserved: return "reserved";
+        case memory::PageState::Committed: return "committed";
+      }
+      return "unknown";
+    };
+    const auto protect_string = [](memory::Protect protect) {
+      std::string result;
+      result += memory::has(protect, memory::Protect::Read) ? 'R' : '-';
+      result += memory::has(protect, memory::Protect::Write) ? 'W' : '-';
+      result += memory::has(protect, memory::Protect::Execute) ? 'X' : '-';
+      if (memory::has(protect, memory::Protect::NoCache)) result += "|NC";
+      if (memory::has(protect, memory::Protect::WriteCombine)) result += "|WC";
+      return result;
+    };
+
+    std::ostringstream diagnostic;
+    diagnostic << "Guest memory fault: " << fault.what()
+               << " [cia=0x" << std::hex << std::uppercase << main_cpu_state_->cia
+               << " nia=0x" << main_cpu_state_->nia
+               << " lr=0x" << main_cpu_state_->lr
+               << " ctr=0x" << main_cpu_state_->ctr
+               << " request=0x" << info.request_address
+               << " fault=0x" << info.fault_address
+               << std::dec << " width=" << info.width
+               << " access=" << access_name(info.access)
+               << " reason=" << reason_name(info.reason)
+               << " page_state=" << page_state_name(info.page_state)
+               << " mapped=" << (info.mapped ? "yes" : "no")
+               << " committed=" << (info.committed ? "yes" : "no")
+               << " current_protect=" << protect_string(info.current_protect)
+               << " allocation_protect=" << protect_string(info.allocation_protect)
+               << " page_size=0x" << std::hex << info.page_size
+               << " r1=0x" << main_cpu_state_->gpr[1]
+               << " r2=0x" << main_cpu_state_->gpr[2]
+               << " r3=0x" << main_cpu_state_->gpr[3]
+               << " r4=0x" << main_cpu_state_->gpr[4]
+               << " r5=0x" << main_cpu_state_->gpr[5]
+               << " r6=0x" << main_cpu_state_->gpr[6]
+               << " r7=0x" << main_cpu_state_->gpr[7]
+               << " r8=0x" << main_cpu_state_->gpr[8]
+               << " r9=0x" << main_cpu_state_->gpr[9]
+               << " r10=0x" << main_cpu_state_->gpr[10]
+               << " r13=0x" << main_cpu_state_->gpr[13] << ']';
+    crash_message = diagnostic.str();
   } catch (const std::exception& ex) {
     crashed = true;
     crash_message = std::string("Unhandled exception during guest execution: ") + ex.what();
@@ -1418,27 +1714,13 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
   }
 
   // This is the real "recompiled PPC -> import -> ExportRegistry" boundary.
-  // A direct `bl <address>` inside a recompiled function where <address>
-  // isn't a discovered/compiled function already lowers to exactly this
-  // runtime.call() fallback (see backend_cpp_aot.cpp's Op::Call/CallIndirect/
-  // BranchIndirect codegen: `auto rr=runtime.call(target,state,memory); if
-  // (rr.terminal()) return rr;` - a non-terminal result here simply falls
-  // through to the next guest instruction, exactly like a normal call
-  // returning). So a guest XEX import call site - a plain `bl` whose target
-  // is one of loaded_xex_->image.imports[i].guest_thunk (the guest address
-  // XEX Loader V2 already resolved from XEX_HEADER_IMPORT_LIBRARIES/the PE
-  // import directory - see xex_loader.cpp's parse_native_import_libraries/
-  // parse_pe_import_directory) - reaches external_call() -> ExportRegistry
-  // with zero changes needed to the recomp driver's analysis/codegen:
-  // guest_thunk addresses hold a plain data placeholder word (ordinal in the
-  // low 16 bits, attributes in the high 16 - see
-  // parse_native_import_libraries()'s comment), never real PPC instructions
-  // a "function" could be discovered/compiled at, so a call to one always
-  // falls into this runtime.call() fallback for every title, not just
-  // synthetic test fixtures.
+  // Native XEX function imports have two records: a type-0 address record and
+  // a type-1 callable thunk. Only type-1 is a callable import. Standalone
+  // type-0 records are imported variables and are bound to guest-backed
+  // system variables during load_game().
   if (loaded_xex_) {
     for (const auto& import : loaded_xex_->image.imports) {
-      if (import.guest_thunk != target) continue;
+      if (!import.callable() || import.guest_thunk != target) continue;
       const bool handled = external_call(import.module, import.ordinal, state, memory);
       if (handled) {
         // Fallthrough (non-terminal) matches normal call/return semantics:

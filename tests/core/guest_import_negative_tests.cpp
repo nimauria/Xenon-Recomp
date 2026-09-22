@@ -79,7 +79,8 @@ struct ImportSpec {
 // - a single `blr`, never actually reached by any of these tests, which
 // stop short of start()/execution - and one .data page) whose native
 // XEX_HEADER_IMPORT_LIBRARIES table lists exactly `imports`, one library
-// record per entry, each pointing at its own data placeholder word (ordinal
+// type-1 function-thunk record per entry, each pointing at its own data
+// placeholder word (record_type=1 | ordinal
 // only, matching the real on-disk format - see xex_loader.cpp's
 // parse_native_import_libraries()). `tls_data_size`, when nonzero, adds an
 // XEX_HEADER_TLS_INFO optional header advertising that much per-thread TLS
@@ -161,7 +162,8 @@ std::vector<std::byte> make_minimal_xex(const std::vector<ImportSpec>& imports,
       be16(bytes, lib_offset + 0x24, static_cast<std::uint16_t>(i));
       be16(bytes, lib_offset + 0x26, 1);
       be32(bytes, lib_offset + 0x28, kLoadAddress + thunk_rva);
-      be32(bytes, header + thunk_rva, imports[i].ordinal);  // placeholder word at the thunk address
+      be32(bytes, header + thunk_rva,
+           0x01000000u | imports[i].ordinal);  // type-1 callable import thunk
       lib_offset += 0x2C;
       data_cursor += 4;
     }
@@ -259,6 +261,27 @@ void test_export_registry_no_cross_library_collision() {
   }
 
   std::cout << "  [ok] ExportRegistry: identical ordinal/name under different libraries never cross-resolves\n";
+}
+
+void test_export_registry_variable_resolution() {
+  xenon::core::ExportRegistry registry;
+  xenon::core::VariableExportDescriptor variable{};
+  variable.library = "xboxkrnl.exe";
+  variable.name = "ProbeVariable";
+  variable.ordinal = 0x123u;
+  variable.guest_address = 0x90001000u;
+  assert(registry.register_variable(variable));
+  assert(registry.contains_variable("xboxkrnl", 0x123u));
+  assert(registry.resolve_variable("xboxkrnl.exe", 0x123u).value() == 0x90001000u);
+  assert(registry.resolve_variable("xboxkrnl", "ProbeVariable").value() == 0x90001000u);
+  assert(!registry.resolve_variable("xam", 0x123u).has_value());
+
+  // Function exports and variable exports live in separate namespaces. A
+  // variable must never make a callable import appear implemented.
+  assert(!registry.contains("xboxkrnl", 0x123u));
+  registry.clear();
+  assert(!registry.contains_variable("xboxkrnl", 0x123u));
+  std::cout << "  [ok] ExportRegistry: guest-backed variables resolve by library/ordinal/name without becoming callable exports\n";
 }
 
 // --- Item 3(c): a malformed native import table entry must not fabricate
@@ -421,6 +444,7 @@ void test_guest_process_creation_rollback() {
 int main() {
   std::cout << "Testing guest import negative paths and identity/rollback guarantees...\n";
   test_export_registry_no_cross_library_collision();
+  test_export_registry_variable_resolution();
   test_malformed_import_entry_is_skipped();
   test_unresolved_import_diagnostics();
   test_missing_native_module_fails_explicitly();

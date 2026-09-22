@@ -167,7 +167,8 @@ std::vector<std::byte> make_audio_callback_xex() {
   be32(bytes, data_file_base + 0x04, 0xDEADBEEFu);  // audio_kpcr_result sentinel
   be32(bytes, data_file_base + 0x08, 0xDEADBEEFu);  // local_call_result sentinel
   be32(bytes, data_file_base + 0x0C, 0xDEADBEEFu);  // export_call_result sentinel
-  be32(bytes, data_file_base + 0x10, kAudioUnderrunOrdinal);  // import placeholder
+  be32(bytes, data_file_base + 0x10,
+       0x01000000u | kAudioUnderrunOrdinal);  // type-1 callable import thunk
 
   // .text (word indices; text_base = kLoadAddress + kTextRva):
   //   0-3   entry:          lis/ori/stw r13,(main_kpcr_result); blr

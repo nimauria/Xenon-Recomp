@@ -413,6 +413,12 @@ int main() {
            "NtCreateFile should be registered under the xboxkrnl library");
     assert(session.exports()->contains("xboxkrnl", "NtReadFile"));
     assert(session.exports()->contains("xboxkrnl", "NtWriteFile"));
+
+    const auto version = session.exports()->resolve_variable("xboxkrnl", 0x0158u);
+    assert(version.has_value() && *version != 0u &&
+           "XboxKrnlVersion must be a real guest-backed variable export");
+    assert(session.memory()->read16_be(*version) == 2u);
+    assert(session.exports()->resolve_variable("xboxkrnl.exe", "VdGpuClockInMHz").has_value());
     session.shutdown();
   }
 

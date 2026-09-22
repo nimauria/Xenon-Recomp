@@ -135,6 +135,54 @@ ExportCallResult ExportRegistry::invoke(std::string_view library,
   return {handled, handled, {}};
 }
 
+bool ExportRegistry::register_variable(VariableExportDescriptor descriptor) {
+  if (descriptor.library.empty() || descriptor.guest_address == 0u) {
+    return false;
+  }
+
+  std::unique_lock lock(mutex_);
+  const auto ordinal_key = make_ordinal_key(descriptor.library, descriptor.ordinal);
+  variable_ordinal_map_[ordinal_key] = descriptor;
+  if (!descriptor.name.empty()) {
+    variable_name_map_[make_name_key(descriptor.library, descriptor.name)] = descriptor;
+  }
+  return true;
+}
+
+bool ExportRegistry::unregister_variable(std::string_view library,
+                                         std::uint32_t ordinal) {
+  std::unique_lock lock(mutex_);
+  const auto ordinal_key = make_ordinal_key(library, ordinal);
+  auto it = variable_ordinal_map_.find(ordinal_key);
+  if (it == variable_ordinal_map_.end()) return false;
+  if (!it->second.name.empty()) {
+    variable_name_map_.erase(make_name_key(library, it->second.name));
+  }
+  variable_ordinal_map_.erase(it);
+  return true;
+}
+
+std::optional<cpu::GuestAddress> ExportRegistry::resolve_variable(
+    std::string_view library, std::uint32_t ordinal) const {
+  std::shared_lock lock(mutex_);
+  const auto it = variable_ordinal_map_.find(make_ordinal_key(library, ordinal));
+  if (it == variable_ordinal_map_.end()) return std::nullopt;
+  return it->second.guest_address;
+}
+
+std::optional<cpu::GuestAddress> ExportRegistry::resolve_variable(
+    std::string_view library, std::string_view name) const {
+  std::shared_lock lock(mutex_);
+  const auto it = variable_name_map_.find(make_name_key(library, name));
+  if (it == variable_name_map_.end()) return std::nullopt;
+  return it->second.guest_address;
+}
+
+bool ExportRegistry::contains_variable(std::string_view library,
+                                       std::uint32_t ordinal) const {
+  return resolve_variable(library, ordinal).has_value();
+}
+
 bool ExportRegistry::contains(std::string_view library,
                              std::uint32_t ordinal) const {
   return resolve(library, ordinal) != nullptr;
@@ -170,6 +218,8 @@ void ExportRegistry::clear() {
   std::unique_lock lock(mutex_);
   ordinal_map_.clear();
   name_map_.clear();
+  variable_ordinal_map_.clear();
+  variable_name_map_.clear();
 }
 
 }  // namespace xenon::core

@@ -52,19 +52,46 @@ constexpr std::uint32_t kPatchDelta = 0x00000040u;
 constexpr std::uint32_t kUserMode = 0x00000080u;
 }  // namespace module_flags
 
-// One entry from the XEX-native import-libraries optional header
-// (XEX_HEADER_IMPORT_LIBRARIES). `guest_thunk` is the guest RVA of the
-// placeholder value patched into the image at that address; `ordinal` and
-// `attributes` are decoded from that placeholder's low/high 16 bits once the
-// effective image is available (see parse_xex_image()). Resolution against
-// the running export registry is Runtime/ExportRegistry's job, not the
-// parser's - this is a structural description only.
+// XEX native-import records have two distinct on-image roles. A type-0
+// record is an import-address/value slot (or a true imported variable when no
+// matching type-1 record exists); a type-1 record is the callable import
+// thunk. Keeping that distinction is essential: flattening both records into
+// identical "imports" duplicates diagnostics and makes true variable imports
+// impossible to bind correctly. PE imports are represented as callable
+// imports as well.
+enum class XexImportKind : std::uint8_t {
+  Variable = 0,
+  FunctionThunk = 1,
+  FunctionAddress = 2,
+  PeFunction = 3,
+  Unknown = 0xFF,
+};
+
+// One import record discovered from the XEX-native import-libraries optional
+// header (XEX_HEADER_IMPORT_LIBRARIES) or, as a fallback, the PE import
+// directory. `guest_thunk` is the guest address of the record/IAT slot. A
+// FunctionAddress record is metadata paired with a callable FunctionThunk; on
+// Xbox kernel imports its slot is not itself a callable function pointer. True
+// Variable records are rewritten by the runtime to the guest address exported
+// by the system module. `attributes` preserves the encoded upper 16 bits of
+// the native placeholder for diagnostics/tooling.
 struct XexImport {
   std::string module;
   std::string symbol;
   std::uint16_t ordinal{};
   std::uint32_t guest_thunk{};
   std::uint32_t attributes{};
+  XexImportKind kind{XexImportKind::Unknown};
+
+  [[nodiscard]] bool callable() const noexcept {
+    return kind == XexImportKind::FunctionThunk || kind == XexImportKind::PeFunction;
+  }
+  [[nodiscard]] bool is_function_address() const noexcept {
+    return kind == XexImportKind::FunctionAddress;
+  }
+  [[nodiscard]] bool is_variable() const noexcept {
+    return kind == XexImportKind::Variable;
+  }
 };
 
 struct XexExport {

@@ -16,8 +16,9 @@
 // xex_loader.cpp's parse_native_import_libraries()) and, on a match, calls
 // external_call(module, ordinal, state, memory) - reaching the exact same
 // core::ExportRegistry every other subsystem's exports already use. No
-// codegen or analysis change was needed: an import's guest_thunk address
-// holds a plain data placeholder word (ordinal in the low 16 bits), never
+// codegen or analysis change was needed: an import's callable guest_thunk
+// address is a type-1 native import record (record type in the top byte,
+// ordinal in the low 16 bits), never
 // real PPC instructions a function could be discovered/compiled at, so a
 // call to one always falls into this path for every title.
 //
@@ -265,9 +266,9 @@ std::vector<std::byte> make_import_calling_xex() {
   }
   be32(bytes, data_file_base + 0x14, 0xDEADBEEFu);  // result_underrun sentinel
   be32(bytes, data_file_base + 0x18, 0xDEADBEEFu);  // result_xam sentinel
-  be32(bytes, data_file_base + 0x1C, kAudioUnderrunOrdinal);  // import placeholder: ordinal only
-  be32(bytes, data_file_base + 0x20, kXamInputCapabilitiesOrdinal);
-  be32(bytes, data_file_base + 0x24, kNtCreateFileOrdinal);
+  be32(bytes, data_file_base + 0x1C, 0x01000000u | kAudioUnderrunOrdinal);
+  be32(bytes, data_file_base + 0x20, 0x01000000u | kXamInputCapabilitiesOrdinal);
+  be32(bytes, data_file_base + 0x24, 0x01000000u | kNtCreateFileOrdinal);
   be32(bytes, data_file_base + 0x28, 0xDEADBEEFu);  // result_local sentinel
   be32(bytes, data_file_base + 0x2C, 0xCCCCCCCCu);  // handle_out sentinel
 

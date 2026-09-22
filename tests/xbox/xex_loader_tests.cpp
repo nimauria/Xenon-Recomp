@@ -542,19 +542,31 @@ XexBuildResult build_base_xex(const PeBuildResult& pe, const XexBuildOptions& op
   return result;
 }
 
-// Patches the two native-import placeholder values (ordinal + attributes<<16)
-// directly into the PE body at the given RVAs.
+// Patches two native-import placeholder values directly into the PE body.
+// Native XEX import records encode the ordinal in bits 0..15, attributes in
+// bits 16..23 and the record type in bits 24..31 (0=address/variable,
+// 1=function thunk). Existing fixtures default both records to type 0; tests
+// that exercise function-import pairing explicitly request a type-1 second
+// record with the same ordinal.
 void patch_import_placeholders(std::vector<std::byte>& pe_bytes, std::uint32_t data_rva,
-                              std::uint16_t ordinal0, std::uint16_t ordinal1) {
+                              std::uint16_t ordinal0, std::uint16_t ordinal1,
+                              std::uint8_t record_type0 = 0u,
+                              std::uint8_t record_type1 = 0u) {
   const auto patch_be32 = [&](std::size_t file_offset, std::uint32_t value) {
     pe_bytes[file_offset + 0] = static_cast<std::byte>((value >> 24) & 0xFFu);
     pe_bytes[file_offset + 1] = static_cast<std::byte>((value >> 16) & 0xFFu);
     pe_bytes[file_offset + 2] = static_cast<std::byte>((value >> 8) & 0xFFu);
     pe_bytes[file_offset + 3] = static_cast<std::byte>(value & 0xFFu);
   };
+  const auto encoded = [](std::uint16_t ordinal, std::uint8_t attributes,
+                          std::uint8_t record_type) {
+    return static_cast<std::uint32_t>(ordinal) |
+           (static_cast<std::uint32_t>(attributes) << 16u) |
+           (static_cast<std::uint32_t>(record_type) << 24u);
+  };
   // .data section's raw file offset equals its RVA offset in build_pe_body().
-  patch_be32(data_rva + 0x10u, static_cast<std::uint32_t>(ordinal0));
-  patch_be32(data_rva + 0x14u, static_cast<std::uint32_t>(ordinal1) | (0x0007u << 16));
+  patch_be32(data_rva + 0x10u, encoded(ordinal0, 0u, record_type0));
+  patch_be32(data_rva + 0x14u, encoded(ordinal1, 7u, record_type1));
 }
 
 // Wraps a raw LZX bitstream in the XEX xex2_compressed_block_info container:
@@ -759,6 +771,52 @@ void test_parse_and_load_uncompressed_unencrypted() {
 // bytes. This proves the refactor is behavior-preserving: parsing then
 // mapping separately must produce the same result as load_xex()'s single
 // call.
+void test_native_function_import_pair_is_classified_without_rewriting_address_slot() {
+  auto pe = build_pe_body(kImageBase, /*with_export=*/false);
+  constexpr std::uint16_t kOrdinal = 0x0042u;
+  patch_import_placeholders(pe.bytes, pe.data_rva, kOrdinal, kOrdinal,
+                            /*record_type0=*/0u, /*record_type1=*/1u);
+  XexBuildOptions opts{};
+  auto fixture = build_base_xex(pe, opts);
+
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  assert(image.imports.size() == 2u);
+
+  const auto address_slot = kImageBase + pe.data_rva + 0x10u;
+  const auto callable_thunk = kImageBase + pe.data_rva + 0x14u;
+  const auto* slot = static_cast<const xbox::XexImport*>(nullptr);
+  const auto* thunk = static_cast<const xbox::XexImport*>(nullptr);
+  for (const auto& import : image.imports) {
+    assert(import.module == "xboxkrnl.exe");
+    assert(import.ordinal == kOrdinal);
+    if (import.kind == xbox::XexImportKind::FunctionAddress) slot = &import;
+    if (import.kind == xbox::XexImportKind::FunctionThunk) thunk = &import;
+  }
+  assert(slot != nullptr && thunk != nullptr);
+  assert(slot->guest_thunk == address_slot);
+  assert(thunk->guest_thunk == callable_thunk);
+  assert(!slot->callable());
+  assert(thunk->callable());
+
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+  xbox::LoadedXex loaded{};
+  assert(xbox::map_xex_image(address_space, image, loaded, memory::kXex64KBase, &error));
+  assert(error.empty());
+
+  // Mapping preserves the native import records. The type-0 half of a kernel
+  // function import is not a callable function pointer; only the type-1 thunk
+  // is dispatched as an external call.
+  assert(address_space.read32_be(address_slot) ==
+         static_cast<std::uint32_t>(kOrdinal));
+  // The callable thunk likewise remains encoded; execution is intercepted by
+  // RuntimeServices::call rather than interpreted as PPC code.
+  assert(address_space.read32_be(callable_thunk) ==
+         (0x01000000u | (7u << 16u) | static_cast<std::uint32_t>(kOrdinal)));
+}
+
 void test_map_xex_image_rounds_section_size_up_to_memory_page() {
   xbox::XexImage image{};
   xbox::XexSection section{};
@@ -2029,6 +2087,7 @@ int main() {
   test_missing_security_info_rejected();
   test_pe_section_virtual_size_uses_field_after_full_eight_byte_name();
   test_parse_and_load_uncompressed_unencrypted();
+  test_native_function_import_pair_is_classified_without_rewriting_address_slot();
   test_map_xex_image_rounds_section_size_up_to_memory_page();
   test_map_xex_image_merges_sections_that_share_allocation_pages();
   test_map_xex_image_rolls_back_partial_mapping_failure();

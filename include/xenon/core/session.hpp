@@ -1,9 +1,7 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <cstdint>
-#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -38,18 +36,32 @@ class AudioSystem;
 
 namespace xenon::core {
 
+// Per-user host input routing supplied by the launcher/runtime host.  Source
+// strings are matched against InputSystem device identity, persistent key,
+// display name, or driver name after setup/hotplug enumeration.
+struct InputUserSourceConfig {
+  std::uint32_t user_index{};
+  std::vector<std::string> sources{};
+};
+
 // Configuration for a Xenon runtime session
 struct SessionConfig {
   bool enable_graphics{false};
   std::string graphics_backend{"null"};
   bool enable_input{false};
   std::vector<std::string> input_drivers{};
+
+  // Runtime input preferences written by the launcher.  Keep these in the
+  // core session contract rather than runtime_host so direct embedders and
+  // tests receive identical input behavior.
   std::string input_preferred_device{"Automatic"};
-  float input_deadzone{0.10f};
+  double input_deadzone{0.10};
   bool input_rumble{true};
   bool input_background{false};
-  std::filesystem::path input_profile_store_path{};
-  std::array<std::vector<std::string>, input::kMaxUsers> input_user_sources{};
+  int input_module_api_version{1};
+  std::string input_profile_store_path{};
+  std::vector<InputUserSourceConfig> input_user_sources{};
+
   bool enable_audio{false};
   float audio_master_volume{1.0f};
   // Consumed by XenonSession::set_focused(): when true, losing focus mutes
@@ -270,6 +282,9 @@ class XenonSession final : public cpu::RuntimeServices {
   bool init_audio();
   bool init_xam();
   bool init_exports();
+  bool init_kernel_variable_exports();
+  bool bind_xex_variable_imports();
+  bool refresh_dynamic_kernel_variables();
   bool resolve_xex_imports();
   bool bind_compiled_code();
   bool create_guest_process();
