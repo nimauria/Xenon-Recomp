@@ -1,5 +1,6 @@
 #include "presentation_host.hpp"
 
+#if defined(XENON_HAS_PRESENTATION_HOST)
 #include <SDL.h>
 
 #if defined(XENON_HAS_VULKAN)
@@ -162,5 +163,32 @@ void PresentationHost::pump_events(PresentationEvents& out_events) {
     }
   }
 }
+
+#else
+
+namespace xenon::runtime_host {
+
+PresentationHost::~PresentationHost() = default;
+
+bool PresentationHost::create(std::uint32_t, std::uint32_t, const std::string&,
+                              xenon::gpu::Backend&, std::string* error) {
+  if (error) {
+    *error =
+        "Presentation is unavailable because this Xenon build has no SDL2 "
+        "runtime-host window backend";
+  }
+  return false;
+}
+
+void PresentationHost::destroy() noexcept {
+  window_ = nullptr;
+  backend_ = nullptr;
+}
+
+void PresentationHost::pump_events(PresentationEvents& out_events) {
+  out_events = {};
+}
+
+#endif  // XENON_HAS_PRESENTATION_HOST
 
 }  // namespace xenon::runtime_host

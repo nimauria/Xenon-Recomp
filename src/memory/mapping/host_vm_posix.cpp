@@ -231,6 +231,10 @@ bool supports_fixed_shared_mapping() noexcept {
 #endif
 }
 
+std::size_t fixed_shared_mapping_granularity() noexcept {
+  return supports_fixed_shared_mapping() ? page_size() : 0u;
+}
+
 void* reserve_fixed_shared_mapping_region(std::size_t size) noexcept {
   return supports_fixed_shared_mapping() ? reserve(size) : nullptr;
 }

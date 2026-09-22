@@ -62,7 +62,8 @@ int main() {
   // baseline because the Phase 6 benchmark measured it faster than the direct
   // aperture. Direct mode remains independently testable and build-selectable.
 #if defined(XENON_MEMORY_DEFAULT_DIRECT_APERTURE) && XENON_MEMORY_DEFAULT_DIRECT_APERTURE
-  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+  if (host_vm::capabilities().supports_fixed_mapping_granularity(kBasePageSize) &&
+      sizeof(void*) >= 8u) {
     assert(mem.direct_aperture_active());
   }
 #else
@@ -108,7 +109,8 @@ int main() {
 
   // Dynamic aperture mappings follow commit/decommit/recommit and XEX aliases
   // while preserving one physical backing object.
-  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+  if (host_vm::capabilities().supports_fixed_mapping_granularity(kBasePageSize) &&
+      sizeof(void*) >= 8u) {
     AddressSpace aperture_mem(GuestTranslationMode::DirectAperture);
     assert(aperture_mem.initialize());
     assert(aperture_mem.direct_aperture_active());

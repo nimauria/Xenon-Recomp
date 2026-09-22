@@ -110,6 +110,7 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   config.audio_latency_profile = overrideOr(QStringLiteral("audio/latencyProfile"),
                                             settings_.stringValue(QStringLiteral("frontend/audio/latencyProfile"),
                                                                   QStringLiteral("Automatic"))).toString();
+  config.verbose_logging = settings_.boolValue(QStringLiteral("developer/verboseLogging"), false);
   config.game_root = game_path_override.isEmpty() ? paths_.configuredPath(QStringLiteral("games"))
                                                   : game_path_override;
   config.managed_game_path = library_.managedPath(game_id);
@@ -194,5 +195,7 @@ ServiceResult LaunchService::launch(const QString& game_id) {
 }
 
 ServiceResult LaunchService::stop() { return runtime_.stop(); }
+
+QVariantMap LaunchService::runtimeStatus() const { return runtime_.sessionStatus(); }
 
 }  // namespace xenon::launcher

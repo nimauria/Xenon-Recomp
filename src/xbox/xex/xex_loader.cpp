@@ -4,7 +4,9 @@
 #include <array>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_lzx.hpp"
@@ -98,6 +100,12 @@ bool range_valid(std::size_t offset, std::size_t length, std::size_t size) {
 std::uint32_t align_down(std::uint32_t value, std::uint32_t alignment) {
   if (alignment == 0u) return value;
   return value - (value % alignment);
+}
+
+std::uint64_t align_up(std::uint64_t value, std::uint32_t alignment) {
+  if (alignment == 0u) return value;
+  const auto remainder = value % alignment;
+  return remainder == 0u ? value : value + (alignment - remainder);
 }
 
 std::uint32_t xex_page_size_for(std::uint32_t guest_address) {
@@ -1085,7 +1093,7 @@ bool try_parse_pe_sections(std::span<const std::byte> effective_image, std::uint
     }
     if (section.name.empty()) section.name = ".section" + std::to_string(index);
 
-    section.virtual_size = read_le32(effective_image, section_offset + 4u);
+    section.virtual_size = read_le32(effective_image, section_offset + 0x08u);
     section.virtual_address =
         static_cast<memory::GuestAddress>(image_base + read_le32(effective_image, section_offset + 0x0Cu));
     section.raw_size = read_le32(effective_image, section_offset + 0x10u);
@@ -1396,58 +1404,273 @@ bool map_xex_image(memory::AddressSpace& memory, const XexImage& image, LoadedXe
   out_loaded.image_base = image_base;
   out_loaded.image = image;
 
-  const auto map_section = [&](const XexSection& section) {
-    const auto section_size = std::max(section.virtual_size, section.raw_size);
-    if (section_size == 0u) return true;
-
-    const auto page_size = xex_page_size_for(static_cast<std::uint32_t>(section.virtual_address));
-    const auto section_start = align_down(static_cast<std::uint32_t>(section.virtual_address), page_size);
-    const auto write_offset = static_cast<std::uint32_t>(section.virtual_address) - section_start;
-    const auto reservation_size = static_cast<std::uint32_t>(
-        std::max<std::uint64_t>(page_size, static_cast<std::uint64_t>(write_offset) + section_size));
-
-    auto section_protect = section.protect;
-    const bool should_temp_write = !section.bytes.empty() && !memory::has(section_protect, memory::Protect::Write);
-    if (should_temp_write) section_protect = section_protect | memory::Protect::Write;
-
-    if (!memory.reserve_fixed(section_start, reservation_size, section_protect)) return false;
-    if (!memory.commit_fixed(section_start, reservation_size, section_protect, false)) return false;
-    if (!section.bytes.empty()) {
-      try {
-        memory.write_bytes(section_start + write_offset, section.bytes);
-      } catch (...) {
-        return false;
-      }
-    }
-    if (should_temp_write) {
-      (void)memory.protect(section_start, reservation_size, section.protect);
-    }
-    out_loaded.mapped_sections.push_back(section);
-    if (section.executable) {
-      out_loaded.executable_ranges.push_back({section_start, section_start + reservation_size});
-    }
-    return true;
-  };
-
   if (image.sections.empty()) {
     if (error) *error = "No PE or section data were extracted from this XEX image.";
     return false;
   }
 
-  bool ok = true;
+  struct SectionMappingPlan {
+    const XexSection* section{};
+    memory::GuestAddress section_begin{};
+    std::uint64_t section_end{};  // Exclusive, kept wide for overflow checks.
+    memory::GuestAddress mapped_begin{};
+    std::uint64_t mapped_end{};   // Exclusive.
+    std::uint32_t page_size{};
+  };
+
+  struct AllocationPlan {
+    memory::GuestAddress begin{};
+    std::uint64_t end{};  // Exclusive.
+    std::uint32_t page_size{};
+  };
+
+  std::vector<SectionMappingPlan> section_plans;
+  section_plans.reserve(image.sections.size());
+
+  const auto set_section_error = [&](std::string_view stage,
+                                     const XexSection& section,
+                                     memory::GuestAddress mapped_begin,
+                                     std::uint64_t mapped_end,
+                                     std::uint32_t page_size) {
+    if (!error) return;
+    std::ostringstream stream;
+    stream << "Failed to " << stage << " PE section '"
+           << (section.name.empty() ? "<unnamed>" : section.name)
+           << "' in Xenon Memory V2: address=0x" << std::hex << std::uppercase
+           << static_cast<std::uint32_t>(section.virtual_address)
+           << " virtual_size=0x" << section.virtual_size
+           << " raw_size=0x" << section.raw_size
+           << " mapped_base=0x" << mapped_begin
+           << " mapped_size=0x" << (mapped_end >= mapped_begin ? mapped_end - mapped_begin : 0u)
+           << " page_size=0x" << page_size << '.';
+    *error = stream.str();
+  };
+
+  // Plan every section before reserving anything. Xbox PE sections are byte
+  // ranges, while Memory V2 reserves the native Xbox allocation granularity
+  // (64 KiB in the 0x8... XEX aperture, 4 KiB in the 0x9... aperture). Real
+  // titles may therefore have distinct PE sections that share one or more
+  // allocation pages. Those pages must be reserved once for the image, not
+  // once per section.
   for (const auto& section : image.sections) {
-    if (!map_section(section)) {
-      ok = false;
-      if (error) *error = "Failed to map a PE section into Xenon Memory V2.";
-      break;
+    const std::uint64_t section_size = std::max<std::uint64_t>(
+        std::max(section.virtual_size, section.raw_size), section.bytes.size());
+    if (section_size == 0u) continue;
+
+    const auto section_begin =
+        static_cast<memory::GuestAddress>(section.virtual_address);
+    const auto page_size = xex_page_size_for(section_begin);
+    const std::uint64_t section_end =
+        static_cast<std::uint64_t>(section_begin) + section_size;
+    if (section_end > (std::uint64_t{1} << 32u) || section_end <= section_begin) {
+      set_section_error("size", section, section_begin, section_end, page_size);
+      return false;
+    }
+
+    const auto last_byte = static_cast<memory::GuestAddress>(section_end - 1u);
+    if (xex_page_size_for(last_byte) != page_size) {
+      set_section_error("map across incompatible XEX page regions for", section,
+                        section_begin, section_end, page_size);
+      return false;
+    }
+
+    const auto mapped_begin = align_down(section_begin, page_size);
+    const auto mapped_end = align_up(section_end, page_size);
+    if (mapped_end <= mapped_begin || mapped_end > (std::uint64_t{1} << 32u)) {
+      set_section_error("align", section, mapped_begin, mapped_end, page_size);
+      return false;
+    }
+
+    section_plans.push_back(
+        {&section, section_begin, section_end, mapped_begin, mapped_end, page_size});
+  }
+
+  if (section_plans.empty()) {
+    if (error) *error = "XEX image contains no non-empty PE sections to map.";
+    return false;
+  }
+
+  std::vector<AllocationPlan> allocations;
+  allocations.reserve(section_plans.size());
+  std::vector<std::size_t> order(section_plans.size());
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+  std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+    const auto& a = section_plans[lhs];
+    const auto& b = section_plans[rhs];
+    if (a.mapped_begin != b.mapped_begin) return a.mapped_begin < b.mapped_begin;
+    if (a.mapped_end != b.mapped_end) return a.mapped_end < b.mapped_end;
+    return a.page_size < b.page_size;
+  });
+
+  for (const auto index : order) {
+    const auto& plan = section_plans[index];
+    if (!allocations.empty() && allocations.back().page_size == plan.page_size &&
+        static_cast<std::uint64_t>(plan.mapped_begin) <= allocations.back().end) {
+      allocations.back().end = std::max(allocations.back().end, plan.mapped_end);
+      continue;
+    }
+    allocations.push_back({plan.mapped_begin, plan.mapped_end, plan.page_size});
+  }
+
+  std::vector<memory::GuestAddress> mapped_allocation_bases;
+  mapped_allocation_bases.reserve(allocations.size());
+
+  const auto rollback_mappings = [&] {
+    for (auto it = mapped_allocation_bases.rbegin();
+         it != mapped_allocation_bases.rend(); ++it) {
+      (void)memory.release(*it);
+    }
+    mapped_allocation_bases.clear();
+    out_loaded.mapped_sections.clear();
+    out_loaded.executable_ranges.clear();
+    out_loaded.loaded = false;
+  };
+
+  const auto describe_allocation_failure = [&](std::string_view stage,
+                                               const AllocationPlan& allocation) {
+    if (!error) return;
+    std::ostringstream stream;
+    stream << "Failed to " << stage
+           << " merged PE allocation in Xenon Memory V2: mapped_base=0x"
+           << std::hex << std::uppercase << allocation.begin
+           << " mapped_size=0x" << (allocation.end - allocation.begin)
+           << " page_size=0x" << allocation.page_size << " sections=";
+    bool first = true;
+    for (const auto& plan : section_plans) {
+      if (plan.mapped_end <= allocation.begin ||
+          static_cast<std::uint64_t>(plan.mapped_begin) >= allocation.end) {
+        continue;
+      }
+      if (!first) stream << ',';
+      stream << '\'' << (plan.section->name.empty() ? "<unnamed>" : plan.section->name)
+             << '\'';
+      first = false;
+    }
+    stream << '.';
+    *error = stream.str();
+  };
+
+  // Reserve/commit each merged allocation exactly once. Keep it writable only
+  // while the PE bytes are copied; final guest protections are applied below.
+  for (const auto& allocation : allocations) {
+    const auto size64 = allocation.end - allocation.begin;
+    if (size64 == 0u || size64 > std::numeric_limits<std::uint32_t>::max()) {
+      describe_allocation_failure("size", allocation);
+      rollback_mappings();
+      return false;
+    }
+    const auto size = static_cast<std::uint32_t>(size64);
+    if (!memory.reserve_fixed(allocation.begin, size, memory::kReadWrite)) {
+      describe_allocation_failure("reserve", allocation);
+      rollback_mappings();
+      return false;
+    }
+    mapped_allocation_bases.push_back(allocation.begin);
+    // PE virtual tails are required to start zeroed. Committing the merged
+    // image ranges with zero initialization also makes bytes between sections
+    // deterministic instead of exposing recycled physical RAM contents.
+    if (!memory.commit_fixed(allocation.begin, size, memory::kReadWrite, true)) {
+      describe_allocation_failure("commit", allocation);
+      rollback_mappings();
+      return false;
     }
   }
 
-  if (ok) {
-    out_loaded.loaded = true;
-    out_loaded.error.clear();
+  // Copy each section at its real guest virtual address. Sharing allocation
+  // pages is now harmless because the backing range was created once above.
+  for (const auto& plan : section_plans) {
+    const auto& section = *plan.section;
+    if (!section.bytes.empty()) {
+      try {
+        memory.write_bytes(plan.section_begin, section.bytes);
+      } catch (...) {
+        set_section_error("write", section, plan.mapped_begin, plan.mapped_end,
+                          plan.page_size);
+        rollback_mappings();
+        return false;
+      }
+    }
+    out_loaded.mapped_sections.push_back(section);
   }
-  return ok;
+
+  // Resolve the final protection for one Memory V2 native XEX page. XEX page
+  // descriptors remain authoritative when present. If a title has no
+  // descriptor coverage for that native page, PE-section protection is the
+  // fallback. Multiple descriptor sub-pages are ORed because Memory V2's
+  // 0x8... aperture intentionally exposes 64 KiB protection granularity.
+  const auto protection_for_native_page = [&](memory::GuestAddress page_begin,
+                                              std::uint32_t native_page_size) {
+    memory::Protect descriptor_protect = memory::Protect::None;
+    bool descriptor_covered = false;
+    if (!image.security.page_descriptors.empty()) {
+      const auto descriptor_page_size =
+          (image.security.image_flags & 0x10000000u) != 0u
+              ? memory::kBasePageSize
+              : memory::kLargePageSize;
+      const std::uint64_t page_end =
+          static_cast<std::uint64_t>(page_begin) + native_page_size;
+      for (std::uint64_t address = page_begin; address < page_end;
+           address += descriptor_page_size) {
+        const auto protect = protect_for_address(
+            image.security, static_cast<std::uint32_t>(address));
+        if (protect != memory::Protect::None) {
+          descriptor_covered = true;
+          descriptor_protect |= protect;
+        }
+      }
+    }
+    if (descriptor_covered) return descriptor_protect;
+
+    memory::Protect section_protect = memory::Protect::None;
+    const std::uint64_t page_end =
+        static_cast<std::uint64_t>(page_begin) + native_page_size;
+    for (const auto& plan : section_plans) {
+      if (plan.section_end <= page_begin ||
+          static_cast<std::uint64_t>(plan.section_begin) >= page_end) {
+        continue;
+      }
+      section_protect |= plan.section->protect;
+    }
+    return section_protect;
+  };
+
+  out_loaded.executable_ranges.clear();
+  for (const auto& allocation : allocations) {
+    for (std::uint64_t page64 = allocation.begin; page64 < allocation.end;
+         page64 += allocation.page_size) {
+      const auto page = static_cast<memory::GuestAddress>(page64);
+      const auto final_protect = protection_for_native_page(page, allocation.page_size);
+      if (!memory.protect(page, allocation.page_size, final_protect)) {
+        if (error) {
+          std::ostringstream stream;
+          stream << "Failed to apply final XEX page protection in Memory V2: address=0x"
+                 << std::hex << std::uppercase << page
+                 << " size=0x" << allocation.page_size
+                 << " protect=0x" << static_cast<unsigned>(final_protect) << '.';
+          *error = stream.str();
+        }
+        rollback_mappings();
+        return false;
+      }
+
+      if (memory::has(final_protect, memory::Protect::Execute)) {
+        if (!out_loaded.executable_ranges.empty()) {
+          auto& previous = out_loaded.executable_ranges.back();
+          if (previous.end == page && previous.page_size == allocation.page_size &&
+              previous.protect == final_protect) {
+            previous.end = page + allocation.page_size;
+            continue;
+          }
+        }
+        out_loaded.executable_ranges.push_back(
+            {page, page + allocation.page_size, allocation.page_size, final_protect});
+      }
+    }
+  }
+
+  out_loaded.loaded = true;
+  out_loaded.error.clear();
+  return true;
 }
 
 bool load_xex(memory::AddressSpace& memory, std::span<const std::byte> file_bytes, LoadedXex& out_loaded,

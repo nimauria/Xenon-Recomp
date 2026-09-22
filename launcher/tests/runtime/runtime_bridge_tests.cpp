@@ -164,6 +164,38 @@ int main(int argc, char** argv) {
   }
   std::cout << "  [PASS] A well-formed configuration passes prepareLaunch()\n";
 
+  // Test 2e: loose XEX and disc-image paths are valid runtime content shapes.
+  // The fixture never opens them; this specifically protects the launcher
+  // preflight from regressing back to its old directory-only assumption.
+  {
+    QTemporaryDir dir;
+    assert(dir.isValid());
+    const auto loose_path = QDir(dir.path()).filePath(QStringLiteral("game.xex"));
+    QFile loose(loose_path);
+    assert(loose.open(QIODevice::WriteOnly));
+    loose.write("XEX2");
+    loose.close();
+
+    RuntimeBridge bridge;
+    assert(bridge.connect().ok);
+    assert(bridge.prepareLaunch(makeConfig(loose_path, QStringLiteral("scenario-normal"))).ok);
+
+    const auto iso_path = QDir(dir.path()).filePath(QStringLiteral("game.iso"));
+    QFile iso(iso_path);
+    assert(iso.open(QIODevice::WriteOnly));
+    iso.write("disc fixture");
+    iso.close();
+    assert(bridge.prepareLaunch(makeConfig(iso_path, QStringLiteral("scenario-normal"))).ok);
+
+    const auto unsupported_path = QDir(dir.path()).filePath(QStringLiteral("game.txt"));
+    QFile unsupported(unsupported_path);
+    assert(unsupported.open(QIODevice::WriteOnly));
+    unsupported.write("not supported");
+    unsupported.close();
+    assert(!bridge.prepareLaunch(makeConfig(unsupported_path, QStringLiteral("scenario-normal"))).ok);
+  }
+  std::cout << "  [PASS] Runtime preflight accepts loose XEX/disc sources and rejects unknown files\n";
+
   // Test 3: runtime starts, and the IPC lifecycle reaches "running" through
   // its documented intermediate states.
   {

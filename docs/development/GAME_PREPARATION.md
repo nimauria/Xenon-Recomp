@@ -34,6 +34,13 @@ extraction, via:
   primitive that lets a caller (title-update application, the preparation
   pipeline) get a complete in-memory `default.xex`/patch file out of a
   mounted disc image without ever writing a temporary file.
+- `xenon_runtime_host` now uses the same source model for Normal Play.
+  `runtime_host/src/content_source.cpp` normalizes an extracted directory, a
+  loose `.xex`, or an `.iso`/`.xgd`/`.dvd` into executable bytes plus the path
+  that backs `game:`. A `.dvd` descriptor is resolved once to its referenced
+  image, and that same image supplies both `default.xex` and the runtime VFS
+  mount. A loose XEX keeps its containing directory mounted so sibling game
+  assets remain visible.
 - Game identity (Title ID, Media ID, XEX version, disc number/count, and the
   effective executable's content hash) always comes from parsing the real
   XEX header via `xenon::xbox::parse_xex_image()`/`compute_effective_identity()`
@@ -88,8 +95,9 @@ name. Consequences:
   list (each with its own Media ID/disc number/source path) rather than a
   second top-level library entry — multi-region media is never duplicated
   merely to "appear in multiple region folders."
-- `contentPath` remains the currently-active disc for play purposes;
-  `media[]` is the full set of known discs/regions for that title.
+- `contentPath` remains the currently-active source for play purposes (disc
+  image, extracted directory, or loose XEX); `media[]` is the full set of
+  known discs/regions for that title.
 
 ### Move into Xenon Library vs. Keep in current location
 
@@ -299,6 +307,23 @@ building the generated CMake project, or launching a loose `default.xex`
 from a directory, all continue to work unchanged. Automatic preparation is
 an additional, optional path for the consumer `Add Game` → `Play` flow, not
 a replacement for developer tooling.
+
+### Runtime handoff
+
+After preparation resolves a fresh `nativeExtensionPath`, the launcher passes
+the original `contentPath` to `xenon_runtime_host`; it does not rewrite an ISO
+into a temporary extracted directory. The host reads the base XEX directly
+from the selected source, mounts the matching source as `game:`/`d:`/`dvd:`,
+loads the prepared native module, and only then publishes a Running state. The
+launcher waits for that runtime status instead of treating process creation as
+a successful game launch.
+
+Supported base-content shapes at this boundary are:
+
+- an extracted directory containing a root `default.xex`;
+- a loose `.xex` (its parent directory becomes the game filesystem root);
+- `.iso` and `.xgd` GDFX/XDVDFS images;
+- `.dvd` descriptors resolving to one of those images.
 
 ## 7. Local compiler toolchain — STATUS: INCOMPLETE
 

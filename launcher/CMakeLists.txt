@@ -566,6 +566,43 @@ set_target_properties(xenon_launcher PROPERTIES
   MACOSX_BUNDLE TRUE
 )
 
+# A developer build of the launcher must be directly runnable from its build
+# output directory. Linking against Qt on Windows is not enough: Qt Quick and
+# Quick Controls also need their runtime DLLs and QML plugin tree beside the
+# executable. Previously this only happened for installer builds or when the
+# optional PowerShell -Deploy switch was used, which meant a normal
+# `cmake --build ... --target xenon_launcher` produced an EXE that failed at
+# startup with errors such as Qt6QuickControls2d.dll not found.
+#
+# Keep packaging's install-time deployment below, but also deploy the Qt/QML
+# runtime after every launcher link on Windows. POST_BUILD only runs when the
+# executable is actually rebuilt, so incremental no-op builds stay cheap.
+if(WIN32)
+  option(XENON_LAUNCHER_AUTO_DEPLOY_QT_RUNTIME
+    "Deploy the Qt/QML runtime beside developer xenon_launcher builds" ON)
+
+  if(XENON_LAUNCHER_AUTO_DEPLOY_QT_RUNTIME)
+    set(_xenon_windeployqt "${XENON_LAUNCHER_QT_RUNTIME_DIR}/windeployqt.exe")
+    if(NOT XENON_LAUNCHER_QT_RUNTIME_DIR OR NOT EXISTS "${_xenon_windeployqt}")
+      message(FATAL_ERROR
+        "XENON_LAUNCHER_AUTO_DEPLOY_QT_RUNTIME=ON, but windeployqt.exe could "
+        "not be resolved from the selected Qt installation. Qt runtime dir: "
+        "'${XENON_LAUNCHER_QT_RUNTIME_DIR}'. Set CMAKE_PREFIX_PATH to a full "
+        "Qt MSVC installation or disable XENON_LAUNCHER_AUTO_DEPLOY_QT_RUNTIME.")
+    endif()
+
+    add_custom_command(TARGET xenon_launcher POST_BUILD
+      COMMAND "${CMAKE_COMMAND}"
+        "-DXENON_WINDEPLOYQT=${_xenon_windeployqt}"
+        "-DXENON_DEPLOY_CONFIG=$<CONFIG>"
+        "-DXENON_DEPLOY_QML_DIR=${CMAKE_CURRENT_SOURCE_DIR}/qml"
+        "-DXENON_DEPLOY_EXECUTABLE=$<TARGET_FILE:xenon_launcher>"
+        -P "${CMAKE_SOURCE_DIR}/cmake/DeployQtDeveloperRuntime.cmake"
+      COMMENT "Deploying Qt/QML runtime beside xenon_launcher"
+      VERBATIM)
+  endif()
+endif()
+
 install(TARGETS xenon_launcher
   BUNDLE DESTINATION .
   RUNTIME DESTINATION bin

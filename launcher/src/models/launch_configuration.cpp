@@ -31,6 +31,7 @@ QVariantMap LaunchConfiguration::toVariantMap() const {
   result.insert(QStringLiteral("audioMasterVolume"), audio_master_volume);
   result.insert(QStringLiteral("audioMuteUnfocused"), audio_mute_unfocused);
   result.insert(QStringLiteral("audioLatencyProfile"), audio_latency_profile);
+  result.insert(QStringLiteral("logVerbose"), verbose_logging);
   result.insert(QStringLiteral("gameRoot"), game_root);
   result.insert(QStringLiteral("managedGamePath"), managed_game_path);
   result.insert(QStringLiteral("dlc"), dlc);

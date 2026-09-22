@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -510,6 +511,87 @@ bool XenonSession::init_input() {
     return false;
   }
 
+  input_->set_background_input_policy(
+      config_.input_background ? input::BackgroundInputPolicy::Always
+                               : input::BackgroundInputPolicy::ForegroundOnly);
+  input_->set_vibration_enabled(config_.input_rumble);
+
+  // The launcher owns persistence for Input V1 profiles, while the runtime
+  // owns their application to guest-visible state. Loading the same profile
+  // store here closes that boundary without introducing a Qt dependency. A
+  // missing profile file is a normal first-run condition; a malformed one is
+  // diagnostic-only and falls back to the built-in default profile.
+  if (!config_.input_profile_store_path.empty()) {
+    std::error_code profile_ec;
+    if (std::filesystem::is_regular_file(config_.input_profile_store_path, profile_ec)) {
+      if (!input_->profiles().load(config_.input_profile_store_path) && config_.enable_logging) {
+        std::cout << "[XenonSession] Input profile store could not be loaded: "
+                  << config_.input_profile_store_path.string() << " ("
+                  << input_->profiles().diagnostics().last_error << ")" << std::endl;
+      }
+    }
+  }
+
+  // Keep the launcher's simple global deadzone meaningful for users who are
+  // still on the default profile. Explicit user/device-bound profiles remain
+  // authoritative and are not rewritten.
+  const float requested_deadzone = std::isfinite(config_.input_deadzone)
+      ? std::clamp(config_.input_deadzone, 0.0f, 0.95f)
+      : 0.10f;
+  if (auto default_profile = input_->profiles().profile("default")) {
+    default_profile->left_stick.inner_deadzone = requested_deadzone;
+    default_profile->right_stick.inner_deadzone = requested_deadzone;
+    static_cast<void>(input_->profiles().upsert(std::move(*default_profile)));
+  }
+
+  const auto devices = input_->devices();
+  const auto resolve_device = [&](std::string_view requested) -> std::optional<input::DeviceId> {
+    if (requested.empty() || ascii_lower(requested) == "automatic" ||
+        ascii_lower(requested) == "auto") {
+      return std::nullopt;
+    }
+    for (const auto& device : devices) {
+      if (!device.connected) continue;
+      if (device.identity_key == requested || device.persistent_key == requested ||
+          device.name == requested) {
+        return device.id;
+      }
+    }
+    return std::nullopt;
+  };
+
+  std::array<bool, input::kMaxUsers> explicit_route{};
+  for (std::uint32_t user = 0; user < input::kMaxUsers; ++user) {
+    const auto& requested_sources = config_.input_user_sources[user];
+    if (requested_sources.empty()) continue;
+    bool primary_assigned = false;
+    for (const auto& source : requested_sources) {
+      const auto device = resolve_device(source);
+      if (!device) {
+        if (config_.enable_logging) {
+          std::cout << "[XenonSession] Requested input source not connected: '" << source
+                    << "' (user " << user << ")" << std::endl;
+        }
+        continue;
+      }
+      const auto route_result = !primary_assigned
+          ? input_->assign_user(user, *device)
+          : input_->add_user_source(user, *device);
+      if (route_result == input::Result::Success) {
+        primary_assigned = true;
+        explicit_route[user] = true;
+      }
+    }
+  }
+
+  // Preferred device is the lightweight user-0 shortcut. Explicit per-user
+  // routing wins when both are present.
+  if (!explicit_route[0]) {
+    if (const auto preferred = resolve_device(config_.input_preferred_device)) {
+      static_cast<void>(input_->assign_user(0, *preferred));
+    }
+  }
+
   input_bridge_ = std::make_unique<input::xam::guest::GuestInputBridge>(*input_);
   return true;
 }
@@ -736,9 +818,13 @@ SessionResult XenonSession::mount_content_graph(
   // Initialize content services if not already done
   auto& content_manager = xam_->content();
   if (!content_manager.save_manager()) {
-    // Use default save directory
-    auto documents = std::filesystem::temp_directory_path().parent_path() / "Documents";
-    auto save_dir = documents / "Xenon" / "Saves";
+    // The launcher resolves savePath for the active profile/game and forwards
+    // it through SessionConfig. Direct/headless callers that do not provide
+    // one fall back to a private temp root rather than guessing a platform
+    // Documents directory from temp_directory_path().
+    const auto save_dir = config_.save_root_path.empty()
+                              ? (std::filesystem::temp_directory_path() / "Xenon" / "Saves")
+                              : config_.save_root_path;
     content_manager.initialize_content_services(save_dir);
   }
   

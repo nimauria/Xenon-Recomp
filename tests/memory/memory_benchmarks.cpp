@@ -372,7 +372,8 @@ int main(int argc, char** argv) {
     }
     return sum;
   });
-  if (host_vm::supports_fixed_shared_mapping() && sizeof(void*) >= 8u) {
+  if (host_vm::capabilities().supports_fixed_mapping_granularity(kBasePageSize) &&
+      sizeof(void*) >= 8u) {
     AddressSpace direct_memory(GuestTranslationMode::DirectAperture);
     if (direct_memory.initialize() && direct_memory.direct_aperture_active() &&
         direct_memory.commit_fixed(base, bytes, kReadWrite)) {

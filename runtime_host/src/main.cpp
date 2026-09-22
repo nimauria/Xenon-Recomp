@@ -22,10 +22,15 @@
 #include <thread>
 #include <vector>
 
+#include "content_source.hpp"
 #include "launch_config.hpp"
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
+#include "xenon/memory/host_vm.hpp"
+#include "xenon/memory/types.hpp"
+#endif
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
@@ -33,6 +38,36 @@ namespace {
 
 using xenon::runtime_host::LaunchConfig;
 using xenon::runtime_host::StatusWriter;
+
+#ifndef XENON_HOST_PLATFORM_NAME
+#define XENON_HOST_PLATFORM_NAME "unknown"
+#endif
+#ifndef XENON_HOST_ARCH_NAME
+#define XENON_HOST_ARCH_NAME "unknown"
+#endif
+
+void log_host_capabilities() {
+  std::cout << "[runtime_host] Host platform=" << XENON_HOST_PLATFORM_NAME
+            << " arch=" << XENON_HOST_ARCH_NAME
+            << " pointer_bits=" << (sizeof(void*) * 8u) << std::endl;
+#if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
+  const auto capabilities = xenon::memory::host_vm::capabilities();
+  const bool xbox_4k_aperture =
+      sizeof(void*) >= 8u && capabilities.supports_fixed_mapping_granularity(
+                                  xenon::memory::kBasePageSize);
+  std::cout << "[runtime_host] Host VM page_size=" << capabilities.page_size
+            << " allocation_granularity=" << capabilities.allocation_granularity
+            << " fixed_shared_mapping="
+            << (capabilities.fixed_shared_mapping ? "yes" : "no")
+            << " fixed_mapping_granularity="
+            << capabilities.fixed_shared_mapping_granularity
+            << " page_views="
+            << (capabilities.fixed_shared_mapping_requires_page_views ? "yes"
+                                                                       : "no")
+            << " xbox_4k_aperture_compatible="
+            << (xbox_4k_aperture ? "yes" : "no") << std::endl;
+#endif
+}
 
 std::optional<std::string> parse_launch_config_argument(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
@@ -67,20 +102,7 @@ void redirect_log(const std::string& session_dir) {
   std::ios::sync_with_stdio(true);
 }
 
-// Searches common default.xex spellings directly under content_path. Real
-// disc image / STFS package resolution happens earlier, in the launcher's
-// content probe; by the time this process runs, content_path is expected to
-// already be an extracted/root game directory containing one.
-std::filesystem::path find_default_xex(const std::filesystem::path& content_path) {
-  for (const auto* name : {"default.xex", "Default.xex", "DEFAULT.XEX"}) {
-    auto candidate = content_path / name;
-    std::error_code error;
-    if (std::filesystem::exists(candidate, error)) return candidate;
-  }
-  return {};
-}
-
-bool read_file_bytes(const std::filesystem::path& path, std::vector<std::byte>& out_bytes) {
+bool read_host_file_bytes(const std::filesystem::path& path, std::vector<std::byte>& out_bytes) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file.is_open()) return false;
   const auto size = file.tellg();
@@ -112,6 +134,16 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   if (config.enable_input && !launch.input_backend.empty() &&
       launch.input_backend != "Automatic") {
     config.input_drivers = {launch.input_backend};
+  }
+  config.input_preferred_device = launch.input_preferred_device;
+  config.input_deadzone = static_cast<float>(launch.input_deadzone);
+  config.input_rumble = launch.input_rumble;
+  config.input_background = launch.input_background;
+  config.input_profile_store_path = launch.input_profile_store_path;
+  for (const auto& route : launch.input_user_sources) {
+    if (route.user_index < config.input_user_sources.size()) {
+      config.input_user_sources[route.user_index] = route.sources;
+    }
   }
 
   // Audio V1 is a real, always-on subsystem for Normal Play - there is no
@@ -150,6 +182,7 @@ int main(int argc, char** argv) {
   redirect_log(launch.session_dir);
   std::cout << "[runtime_host] Starting session '" << launch.session_id << "' for game '"
             << launch.game_id << "' (" << launch.title << ")" << std::endl;
+  log_host_capabilities();
 
   StatusWriter status(launch.session_dir, launch);
 
@@ -177,19 +210,17 @@ int main(int argc, char** argv) {
   status.write(session, "Session initialized");
 
   const std::filesystem::path content_path(launch.content_path);
-  const auto xex_path = find_default_xex(content_path);
-  if (xex_path.empty()) {
-    status.write_fatal("Could not locate a default.xex under the game content path",
+  xenon::runtime_host::BaseContent base_content{};
+  std::string content_error;
+  if (!xenon::runtime_host::load_base_content(content_path, base_content, content_error)) {
+    status.write_fatal("Could not load base game content: " + content_error,
                        xenon::runtime_host::LaunchFailureCategory::MissingRequiredContent);
     return 1;
   }
-
-  std::vector<std::byte> xex_bytes;
-  if (!read_file_bytes(xex_path, xex_bytes)) {
-    status.write_fatal("Could not read the XEX executable file: " + xex_path.string(),
-                       xenon::runtime_host::LaunchFailureCategory::MissingRequiredContent);
-    return 1;
-  }
+  auto& xex_bytes = base_content.xex_bytes;
+  std::cout << "[runtime_host] Base executable loaded from '"
+            << base_content.executable_description << "'; game:/ backing path='"
+            << base_content.mount_path.string() << "'" << std::endl;
 
   // Peek the XEX header for the title ID before loading, so content mounting
   // (game:/dlcN:/saves: VFS devices) happens with the real title identity
@@ -212,7 +243,7 @@ int main(int argc, char** argv) {
   // of the Gracemeria readiness pass).
   if (title_id != 0) {
     auto mount_result = session.mount_content_graph(
-        title_id, content_path,
+        title_id, base_content.mount_path,
         launch.title_update_path.empty() ? std::filesystem::path{}
                                          : std::filesystem::path(launch.title_update_path),
         launch.dlc_root_path.empty() ? std::filesystem::path{}
@@ -254,7 +285,7 @@ int main(int argc, char** argv) {
   if (const auto* content_graph = session.content_graph();
       content_graph != nullptr && content_graph->has_title_update()) {
     const auto& update_path = content_graph->selected_title_update->source_path;
-    if (!read_file_bytes(update_path, title_update_bytes)) {
+    if (!read_host_file_bytes(update_path, title_update_bytes)) {
       status.write_fatal("Could not read the selected title-update file: " + update_path.string(),
                          xenon::runtime_host::LaunchFailureCategory::MissingRequiredContent);
       return 1;

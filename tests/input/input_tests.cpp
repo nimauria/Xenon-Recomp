@@ -273,6 +273,15 @@ void test_capabilities_vibration_and_focus_gating() {
   assert(system.get_state(0, neutral) == input::Result::Success);
   assert(neutral.gamepad == input::GamepadState{});
   system.set_active(true);
+
+  system.set_vibration_enabled(false);
+  assert(!system.vibration_enabled());
+  assert(system.set_vibration(0, rumble) == input::Result::Success);
+  assert(mock->vibration_calls == 2);  // user-disabled rumble is swallowed
+  system.set_vibration_enabled(true);
+  assert(system.vibration_enabled());
+  assert(system.set_vibration(0, rumble) == input::Result::Success);
+  assert(mock->vibration_calls == 3);
 }
 
 void test_any_user_keystroke_routing() {

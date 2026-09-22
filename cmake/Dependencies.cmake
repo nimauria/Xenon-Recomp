@@ -153,8 +153,20 @@ function(_xenon_bootstrap_dependency dependency_name out_result)
 
   message(STATUS
     "Provisioning Xenon managed dependency '${dependency_name}' for ${XENON_DEPENDENCY_TRIPLET}")
+  # Keep managed dependency builds on the same toolchain that successfully
+  # configured Xenon. In particular, a Visual Studio parent configure can find
+  # MSVC from a normal PowerShell session, while a fresh Ninja child cannot.
+  # Passing this context prevents bootstrap.py from accidentally switching
+  # generators just because ninja.exe happens to be installed.
   execute_process(
-    COMMAND "${Python3_EXECUTABLE}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "XENON_CMAKE_COMMAND=${CMAKE_COMMAND}"
+      "XENON_CMAKE_GENERATOR=${CMAKE_GENERATOR}"
+      "XENON_CMAKE_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+      "XENON_CMAKE_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+      "XENON_CMAKE_GENERATOR_INSTANCE=${CMAKE_GENERATOR_INSTANCE}"
+      "XENON_CMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+      "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tools/deps/bootstrap.py"
       ensure
       --triplet "${XENON_DEPENDENCY_TRIPLET}"

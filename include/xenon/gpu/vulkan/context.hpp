@@ -21,6 +21,11 @@ struct DeviceProperties {
   std::uint32_t api_version{};
   VkPhysicalDeviceType device_type{VK_PHYSICAL_DEVICE_TYPE_OTHER};
   std::uint64_t device_local_bytes{};
+  // True when the selected device exposes VK_KHR_portability_subset (for
+  // example a Vulkan implementation layered over Metal). Xbox semantics stay
+  // in the canonical GPU layer; backends may use this to choose compatible
+  // implementation details without platform-name checks.
+  bool portability_subset{};
 };
 
 class Context {

@@ -66,6 +66,12 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.module_name = root.get_string("moduleName");
   out.module_path = root.get_string("modulePath");
   out.module_version = root.get_string("moduleVersion");
+  if (const auto* settings = root.find("moduleSettings")) {
+    out.module_settings_json = settings->dump();
+  }
+  if (const auto* requirements = root.find("runtimeApiRequirements")) {
+    out.runtime_api_requirements_json = requirements->dump();
+  }
   out.native_extension_path = root.get_string("nativeExtensionPath");
 
   out.profile_id = root.get_string("profileId");
@@ -86,7 +92,33 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   }
 
   out.renderer = root.get_string("renderer", "Automatic");
+  out.shader_cache = root.get_bool("shaderCache", true);
+  out.shader_cache_mode = root.get_string("shaderCacheMode", "Persistent");
+
   out.input_backend = root.get_string("inputBackend", "Automatic");
+  out.input_preferred_device = root.get_string("inputPreferredDevice", "Automatic");
+  out.input_deadzone = root.get_number("inputDeadzone", 0.10);
+  out.input_rumble = root.get_bool("inputRumble", true);
+  out.input_background = root.get_bool("inputBackground", false);
+  out.input_module_api_version = static_cast<int>(root.get_number("inputModuleApiVersion", 0));
+  out.input_profile_store_path = root.get_string("inputProfileStorePath");
+  out.input_user_sources.clear();
+  if (const auto* routes = root.find("inputUserSources")) {
+    if (const auto* route_array = routes->as_array()) {
+      for (const auto& route : *route_array) {
+        InputUserSources parsed_route{};
+        parsed_route.user_index = static_cast<std::uint32_t>(route.get_number("userIndex", 0));
+        if (const auto* sources = route.find("sources")) {
+          if (const auto* source_array = sources->as_array()) {
+            for (const auto& source : *source_array) {
+              if (source.is_string()) parsed_route.sources.push_back(source.as_string());
+            }
+          }
+        }
+        if (parsed_route.user_index < 4) out.input_user_sources.push_back(std::move(parsed_route));
+      }
+    }
+  }
 
   out.audio_master_volume = root.get_number("audioMasterVolume", 1.0);
   out.audio_mute_unfocused = root.get_bool("audioMuteUnfocused", false);

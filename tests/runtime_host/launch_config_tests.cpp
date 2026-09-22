@@ -61,13 +61,27 @@ int main() {
       "moduleName": "Halo 3 Module",
       "modulePath": "C:/Xenon/modules/halo3-module",
       "moduleVersion": "1.2.0",
+      "moduleSettings": {"difficulty": "ace", "hud": true},
+      "runtimeApiRequirements": {"input": {"version": 1, "required": true}},
       "nativeExtensionPath": "C:/Xenon/modules/halo3-module/native/halo3.dll",
       "profileId": "profile-1",
       "profileName": "Player One",
       "region": "Auto (Global)",
       "profileXuid": "16140901064495857665",
       "renderer": "Vulkan",
+      "shaderCache": false,
+      "shaderCacheMode": "MemoryOnly",
       "inputBackend": "XInput",
+      "inputPreferredDevice": "xinput:controller-0",
+      "inputDeadzone": 0.15,
+      "inputRumble": false,
+      "inputBackground": true,
+      "inputModuleApiVersion": 1,
+      "inputProfileStorePath": "C:/Xenon/profiles/input.conf",
+      "inputUserSources": [
+        {"userIndex": 0, "sources": ["xinput:controller-0", "sdl:hotas-1"]},
+        {"userIndex": 1, "sources": ["xinput:controller-1"]}
+      ],
       "audioMasterVolume": 0.75,
       "audioMuteUnfocused": true,
       "audioLatencyProfile": "Low",
@@ -99,7 +113,21 @@ int main() {
            "C:/Xenon/modules/halo3-module/native/halo3.dll");
     assert(config.profile_xuid == 16140901064495857665ULL);
     assert(config.renderer == "Vulkan");
+    assert(config.shader_cache == false);
+    assert(config.shader_cache_mode == "MemoryOnly");
+    assert(config.module_settings_json.find("difficulty") != std::string::npos);
+    assert(config.runtime_api_requirements_json.find("input") != std::string::npos);
     assert(config.input_backend == "XInput");
+    assert(config.input_preferred_device == "xinput:controller-0");
+    assert(config.input_deadzone == 0.15);
+    assert(config.input_rumble == false);
+    assert(config.input_background == true);
+    assert(config.input_module_api_version == 1);
+    assert(config.input_profile_store_path == "C:/Xenon/profiles/input.conf");
+    assert(config.input_user_sources.size() == 2);
+    assert(config.input_user_sources[0].user_index == 0);
+    assert(config.input_user_sources[0].sources.size() == 2);
+    assert(config.input_user_sources[0].sources[1] == "sdl:hotas-1");
     assert(config.audio_master_volume == 0.75);
     assert(config.audio_mute_unfocused == true);
     assert(config.audio_latency_profile == "Low");
@@ -241,7 +269,14 @@ int main() {
     const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
     assert(ok);
     assert(config.renderer == "Automatic");
+    assert(config.shader_cache == true);
+    assert(config.shader_cache_mode == "Persistent");
     assert(config.input_backend == "Automatic");
+    assert(config.input_preferred_device == "Automatic");
+    assert(config.input_deadzone == 0.10);
+    assert(config.input_rumble == true);
+    assert(config.input_background == false);
+    assert(config.input_user_sources.empty());
     assert(config.audio_master_volume == 1.0);
     assert(config.audio_mute_unfocused == false);
     assert(config.audio_latency_profile.empty());

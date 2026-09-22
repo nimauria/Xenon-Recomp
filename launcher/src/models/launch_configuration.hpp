@@ -43,6 +43,7 @@ struct LaunchConfiguration {
   double audio_master_volume = 1.0;
   bool audio_mute_unfocused = false;
   QString audio_latency_profile;
+  bool verbose_logging = false;
   QString game_root;
   QString managed_game_path;
   QVariantList dlc;

@@ -10,6 +10,8 @@
 # if the launcher process exits or crashes.
 add_executable(xenon_runtime_host
   src/main.cpp
+  src/content_source.cpp
+  src/content_source.hpp
   src/launch_config.cpp
   src/launch_config.hpp
   src/status_writer.cpp
@@ -20,6 +22,10 @@ add_executable(xenon_runtime_host
 target_link_libraries(xenon_runtime_host PRIVATE xenon_core)
 target_include_directories(xenon_runtime_host PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(xenon_runtime_host PRIVATE cxx_std_20)
+target_compile_definitions(xenon_runtime_host PRIVATE
+  XENON_HOST_PLATFORM_NAME="${XENON_HOST_PLATFORM}"
+  XENON_HOST_ARCH_NAME="${XENON_HOST_ARCH}"
+  XENON_RUNTIME_HAS_MEMORY=$<BOOL:${XENON_ENABLE_MEMORY}>)
 xenon_enable_warnings(xenon_runtime_host)
 
 # The game window belongs to this process (see presentation_host.hpp), reusing

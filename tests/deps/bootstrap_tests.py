@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,46 @@ class DependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.normalize_arch("x86_64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("AMD64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("aarch64"), "arm64")
+
+    def test_visual_studio_generator_detection_prefers_newest(self):
+        help_text = """
+        * Visual Studio 18 2026 = Generates Visual Studio 2026 project files.
+          Visual Studio 17 2022 = Generates Visual Studio 2022 project files.
+        """
+        generators = bootstrap._visual_studio_generators(help_text)
+        self.assertEqual(generators[0][2], "Visual Studio 18 2026")
+        self.assertEqual(generators[1][2], "Visual Studio 17 2022")
+
+    def test_cmake_generator_args_inherit_parent_visual_studio_context(self):
+        names = (
+            "XENON_CMAKE_GENERATOR",
+            "XENON_CMAKE_GENERATOR_PLATFORM",
+            "XENON_CMAKE_GENERATOR_TOOLSET",
+            "XENON_CMAKE_GENERATOR_INSTANCE",
+            "XENON_CMAKE_MAKE_PROGRAM",
+        )
+        previous = {name: os.environ.get(name) for name in names}
+        try:
+            os.environ["XENON_CMAKE_GENERATOR"] = "Visual Studio 18 2026"
+            os.environ["XENON_CMAKE_GENERATOR_PLATFORM"] = "x64"
+            os.environ["XENON_CMAKE_GENERATOR_TOOLSET"] = "v145"
+            os.environ["XENON_CMAKE_GENERATOR_INSTANCE"] = r"C:\\VS\\18\\BuildTools"
+            os.environ["XENON_CMAKE_MAKE_PROGRAM"] = "ignored-for-vs"
+            self.assertEqual(
+                bootstrap._cmake_generator_args(),
+                [
+                    "-G", "Visual Studio 18 2026",
+                    "-A", "x64",
+                    "-T", "v145",
+                    r"-DCMAKE_GENERATOR_INSTANCE=C:\\VS\\18\\BuildTools",
+                ],
+            )
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
     def test_verify_rejects_mainline_style_ffmpeg_without_xmaframes(self):
         with tempfile.TemporaryDirectory() as td:

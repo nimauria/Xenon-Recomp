@@ -434,6 +434,35 @@ BackgroundInputPolicy InputSystem::background_input_policy() const noexcept {
   return background_policy_;
 }
 
+void InputSystem::set_vibration_enabled(bool enabled) {
+  std::vector<std::pair<InputDriver*, NativeDeviceId>> stop_vibration;
+  {
+    std::scoped_lock lock(mutex_);
+    if (vibration_enabled_ == enabled) return;
+    vibration_enabled_ = enabled;
+    if (!enabled) {
+      for (auto& [id, record] : records_) {
+        static_cast<void>(id);
+        if (!record.info.connected || record.driver_index >= drivers_.size()) continue;
+        if (record.last_vibration.left_motor_speed == 0 &&
+            record.last_vibration.right_motor_speed == 0) {
+          continue;
+        }
+        stop_vibration.emplace_back(drivers_[record.driver_index].driver.get(), record.native_id);
+        record.last_vibration = {};
+      }
+    }
+  }
+  for (const auto& [driver, native] : stop_vibration) {
+    if (driver) static_cast<void>(driver->set_vibration(native, {}));
+  }
+}
+
+bool InputSystem::vibration_enabled() const noexcept {
+  std::scoped_lock lock(mutex_);
+  return vibration_enabled_;
+}
+
 bool InputSystem::effective_active() const noexcept {
   std::scoped_lock lock(mutex_);
   return effective_active_locked();
@@ -596,7 +625,7 @@ Result InputSystem::set_vibration(std::uint32_t user_index,
     driver = drivers_[route.driver_index].driver.get();
     auto& record = records_.at(route.id);
     ++record.vibration_requests;
-    if (!effective_active_locked()) {
+    if (!vibration_enabled_ || !effective_active_locked()) {
       record.last_result = Result::Success;
       return Result::Success;
     }

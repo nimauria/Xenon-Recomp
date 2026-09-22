@@ -13,6 +13,25 @@ enum class Protection : std::uint8_t {
   ReadWriteExecute,
 };
 
+// Host VM facts that affect which Memory V2 acceleration paths are safe.
+// Guest/Xbox page semantics remain fixed at 4 KiB above this layer; these
+// values describe only what the host OS can map efficiently and correctly.
+struct Capabilities {
+  std::size_t page_size{};
+  std::size_t allocation_granularity{};
+  std::size_t fixed_shared_mapping_granularity{};
+  bool fixed_shared_mapping{};
+  bool fixed_shared_mapping_requires_page_views{};
+
+  [[nodiscard]] bool supports_fixed_mapping_granularity(
+      std::size_t requested_granularity) const noexcept {
+    return fixed_shared_mapping && fixed_shared_mapping_granularity != 0u &&
+           requested_granularity != 0u &&
+           requested_granularity >= fixed_shared_mapping_granularity &&
+           (requested_granularity % fixed_shared_mapping_granularity) == 0u;
+  }
+};
+
 // Opaque host-backed shared-memory object. The native handle is deliberately
 // hidden so Windows/POSIX details never escape the host-VM layer. SharedMemory
 // is move-only and releases its native object automatically.
@@ -78,6 +97,12 @@ void release(void* address, std::size_t size) noexcept;
 // aperture. A backend returning false from supports_fixed_shared_mapping()
 // must leave the portable compact page-table path fully functional.
 [[nodiscard]] bool supports_fixed_shared_mapping() noexcept;
+// Smallest offset/size granularity accepted by map_shared_fixed() on this
+// backend. Returns zero when fixed shared mappings are unavailable. This is
+// intentionally distinct from allocation_granularity(): modern Windows can
+// replace placeholders at 4 KiB even though ordinary section views use a
+// 64 KiB allocation granularity.
+[[nodiscard]] std::size_t fixed_shared_mapping_granularity() noexcept;
 // Reserve/release the enclosing address range used by a direct guest aperture.
 // Windows uses placeholder reservations so 4 KiB section offsets can replace
 // slices despite the ordinary 64 KiB MapViewOfFile allocation granularity.
@@ -96,5 +121,15 @@ void release_fixed_shared_mapping_region(void* address,
 // Replaces fixed shared views with inaccessible reserved address-space slices,
 // keeping the enclosing aperture address range owned by Xenon.
 [[nodiscard]] bool restore_reservation(void* address, std::size_t size) noexcept;
+
+[[nodiscard]] inline Capabilities capabilities() noexcept {
+  return Capabilities{
+      page_size(),
+      allocation_granularity(),
+      fixed_shared_mapping_granularity(),
+      supports_fixed_shared_mapping(),
+      fixed_shared_mapping_requires_page_views(),
+  };
+}
 
 }  // namespace xenon::memory::host_vm

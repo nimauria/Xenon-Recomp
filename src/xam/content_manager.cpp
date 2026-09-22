@@ -1,5 +1,9 @@
 #include "xenon/xam/content_manager.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <string_view>
+
 #include "xenon/filesystem/gdfx_image_source.hpp"
 #include "xenon/filesystem/host_path_device.hpp"
 #include "xenon/filesystem/read_only_content_device.hpp"
@@ -225,6 +229,12 @@ bool ContentManager::mount_content_graph(
 
   if (!graph.has_base()) return false;
 
+  // VFS devices are always mounted at absolute guest device paths. Drive-
+  // style names such as game:/d:/dvd:/dlcN:/saves: are symbolic aliases,
+  // not Device mount points (Device::Device enforces this contract).
+  constexpr std::string_view kBaseDevicePath = "\\Device\\CdRom0";
+  constexpr std::string_view kSaveDevicePath = "\\Device\\Harddisk0\\Partition1\\Saves";
+
   // Mount base game. Failure here is fatal to the whole mount: nothing else
   // is guest-visible without "game:".
   const auto& base_path = graph.base->source_path;
@@ -234,37 +244,69 @@ bool ContentManager::mount_content_graph(
     filesystem::HostPathDeviceOptions options{};
     options.read_only = true;
     options.create_root = false;
-    auto device = std::make_shared<filesystem::HostPathDevice>("game:", base_path, options);
+    auto device = std::make_shared<filesystem::HostPathDevice>(
+        std::string(kBaseDevicePath), base_path, options);
     base_mounted = vfs.register_device(device) == filesystem::FsError::None;
-  } else if (base_path.extension() == ".iso" || base_path.extension() == ".dvd" ||
-             base_path.extension() == ".xgd") {
-    auto source = std::make_shared<filesystem::GdfxImageSource>(base_path);
-    if (source->initialize() == filesystem::FsError::None) {
-      auto device = std::make_shared<filesystem::ReadOnlyContentDevice>("game:", std::move(source));
+  } else {
+    auto extension = base_path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (extension == ".xex") {
+      // A loose XEX is an executable selection, not a complete filesystem.
+      // Mount its containing directory as game:/ so sibling assets remain
+      // visible exactly as they are for an extracted game directory.
+      filesystem::HostPathDeviceOptions options{};
+      options.read_only = true;
+      options.create_root = false;
+      auto root = base_path.parent_path();
+      if (root.empty()) root = ".";
+      auto device = std::make_shared<filesystem::HostPathDevice>(
+          std::string(kBaseDevicePath), root, options);
       base_mounted = vfs.register_device(device) == filesystem::FsError::None;
+    } else if (extension == ".iso" || extension == ".dvd" || extension == ".xgd") {
+      // .dvd is a descriptor, not disc bytes. Resolve it through the same
+      // helper the content probe/preparation path uses so all runtime entry
+      // points mount the referenced image rather than trying to parse the
+      // descriptor text as GDFX. Non-.dvd paths are returned unchanged.
+      std::filesystem::path image_path;
+      if (filesystem::resolve_gdfx_image_path(base_path, image_path) == filesystem::FsError::None) {
+        auto source = std::make_shared<filesystem::GdfxImageSource>(image_path);
+        if (source->initialize() == filesystem::FsError::None) {
+          auto device = std::make_shared<filesystem::ReadOnlyContentDevice>(
+              std::string(kBaseDevicePath), std::move(source));
+          base_mounted = vfs.register_device(device) == filesystem::FsError::None;
+        }
+      }
     }
   }
   if (!base_mounted) return false;
 
-  // Register symbolic links. Best-effort beyond this point: a title update,
-  // DLC package, or save directory that fails to mount just leaves that one
-  // guest path unavailable rather than aborting the whole session.
-  static_cast<void>(vfs.register_symbolic_link("d:", "game:"));
-  static_cast<void>(vfs.register_symbolic_link("dvd:", "game:"));
+  // Register the aliases titles expect. Point them directly at the physical
+  // device path (rather than chaining aliases) to keep resolution simple and
+  // deterministic. This also matches the convention exercised by the VFS
+  // tests and used by established Xbox 360 recomp runtimes.
+  static_cast<void>(vfs.register_symbolic_link("game:", kBaseDevicePath));
+  static_cast<void>(vfs.register_symbolic_link("d:", kBaseDevicePath));
+  static_cast<void>(vfs.register_symbolic_link("dvd:", kBaseDevicePath));
   static_cast<void>(vfs.set_working_directory("game:"));
 
-  // Mount DLC
+  // Mount DLC. Each package gets a real internal device path and a stable
+  // dlcN: alias. Device constructors must never receive the alias itself.
   for (std::size_t i = 0; i < graph.installed_dlc.size(); ++i) {
     const auto& dlc = graph.installed_dlc[i];
     auto stfs_source = std::make_shared<filesystem::StfsPackageSource>(dlc->source_path);
     if (stfs_source->initialize() == filesystem::FsError::None) {
-      const auto mount_point = "dlc" + std::to_string(i) + ":";
-      auto device = std::make_shared<filesystem::ReadOnlyContentDevice>(mount_point, std::move(stfs_source));
-      static_cast<void>(vfs.register_device(device));
+      const auto device_path = "\\Device\\Content" + std::to_string(i);
+      const auto alias = "dlc" + std::to_string(i) + ":";
+      auto device = std::make_shared<filesystem::ReadOnlyContentDevice>(
+          device_path, std::move(stfs_source));
+      if (vfs.register_device(device) == filesystem::FsError::None) {
+        static_cast<void>(vfs.register_symbolic_link(alias, device_path));
+      }
     }
   }
 
-  // Mount save directory
+  // Mount save directory through the same physical-device + alias model.
   if (!graph.saves.empty() && save_manager_) {
     const auto& first_save = graph.saves[0];
     auto save_base = save_manager_->base_directory() /
@@ -274,8 +316,11 @@ bool ContentManager::mount_content_graph(
       filesystem::HostPathDeviceOptions save_options{};
       save_options.read_only = false;
       save_options.create_root = true;
-      auto device = std::make_shared<filesystem::HostPathDevice>("saves:", save_base, save_options);
-      static_cast<void>(vfs.register_device(device));
+      auto device = std::make_shared<filesystem::HostPathDevice>(
+          std::string(kSaveDevicePath), save_base, save_options);
+      if (vfs.register_device(device) == filesystem::FsError::None) {
+        static_cast<void>(vfs.register_symbolic_link("saves:", kSaveDevicePath));
+      }
     }
   }
 

@@ -75,7 +75,27 @@ int main() {
   }
   std::cout << "  [PASS] write_fatal() omits errorCategory when uncategorized\n";
 
-  // Test 3: every category name is distinct and non-empty (guards against a
+  // Test 3: publishing a second status must replace the existing status.json.
+  // This is specifically a regression test for Windows, where
+  // std::filesystem::rename(temp, existing) does not replace the target.
+  {
+    xenon::runtime_host::StatusWriter status(session_dir.string(), launch);
+    status.write_fatal("first");
+    status.write_fatal("second",
+                       xenon::runtime_host::LaunchFailureCategory::GameLoadFailed);
+
+    xenon::core::JsonValue root;
+    std::string parse_error;
+    const auto contents = read_file(std::filesystem::path(status.status_path()));
+    assert(xenon::core::JsonValue::parse(contents, root, &parse_error));
+    assert(root.get_string("lastError") == "second" &&
+           "the second publish must replace the existing status.json");
+    assert(root.get_string("errorCategory") == "GameLoadFailed");
+    assert(!std::filesystem::exists(std::filesystem::path(status.status_path()).string() + ".tmp"));
+  }
+  std::cout << "  [PASS] repeated status publishes replace the existing JSON\n";
+
+  // Test 4: every category name is distinct and non-empty (guards against a
   // future enum entry silently falling through to the same default string).
   {
     const xenon::runtime_host::LaunchFailureCategory categories[] = {

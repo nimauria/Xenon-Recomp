@@ -4,6 +4,7 @@
 #include "service_result.hpp"
 
 #include <optional>
+#include <QVariantMap>
 
 namespace xenon::launcher {
 
@@ -36,6 +37,7 @@ class LaunchService final {
   [[nodiscard]] ServiceResult startValidated(const QString& game_id);
   [[nodiscard]] ServiceResult launch(const QString& game_id);
   [[nodiscard]] ServiceResult stop();
+  [[nodiscard]] QVariantMap runtimeStatus() const;
 
  private:
   SettingsService& settings_;

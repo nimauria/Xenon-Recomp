@@ -156,14 +156,10 @@ if ($EnableDiscordRichPresence -and $DiscordSdkRoot) {
 }
 
 if ($Deploy) {
-    $deployTool = Join-Path $qtBin "windeployqt.exe"
-    if (-not (Test-Path $deployTool)) {
-        throw "windeployqt.exe was not found under $qtBin"
-    }
-
-    $deployMode = if ($Configuration -eq "Debug") { "--debug" } else { "--release" }
-    Write-Host "Deploying Qt runtime" -ForegroundColor Cyan
-    & $deployTool $deployMode --qmldir (Join-Path $repoRoot "launcher\qml") $exe
+    # Kept for command-line compatibility. Qt/QML deployment is now owned by
+    # the xenon_launcher CMake target itself, so direct CMake/Visual Studio
+    # builds and this helper script produce the same runnable output.
+    Write-Host "Qt runtime deployment is automatic for xenon_launcher builds; -Deploy is no longer required." -ForegroundColor DarkGray
 }
 
 Write-Host "Launcher ready: $exe" -ForegroundColor Green

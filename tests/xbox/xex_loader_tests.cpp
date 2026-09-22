@@ -94,9 +94,9 @@ constexpr std::uint32_t kImageBase = 0x82000000u;
 constexpr std::uint32_t kPageSize4KB = 0x1000u;
 // Memory V2 maps the 0x80000000-0x8FFFFFFF XEX region using 64 KiB "large"
 // pages regardless of the XEX's own page-descriptor granularity (see
-// xex_page_size_for() in xex_loader.cpp), so section virtual addresses must
-// be 64 KiB apart or two sections that round down to the same large-page
-// base collide when load_xex() reserves each section's page.
+// xex_page_size_for() in xex_loader.cpp). The mapper coalesces PE sections
+// that share those allocation pages, while this fixture keeps its ordinary
+// sections 64 KiB apart for simple address expectations.
 constexpr std::uint32_t kSectionSize = 0x10000u;
 
 // ---------------------------------------------------------------------------
@@ -672,6 +672,41 @@ XexBuildResult make_uncompressed_fixture(bool with_export = true) {
   return build_base_xex(pe, opts);
 }
 
+void test_pe_section_virtual_size_uses_field_after_full_eight_byte_name() {
+  auto pe = build_pe_body(kImageBase, /*with_export=*/false);
+
+  // IMAGE_SECTION_HEADER is 40 bytes. Name occupies bytes [0, 8), then
+  // Misc.VirtualSize is the DWORD at +0x08. An exactly-eight-character
+  // section name catches regressions where VirtualSize is accidentally read
+  // from +0x04: the last four name bytes of ".XBMOVIE" spell "OVIE" and
+  // decode little-endian as 0x4549564F.
+  constexpr std::size_t kFirstSectionHeaderOffset = 0x178u;
+  constexpr std::uint32_t kExpectedVirtualSize = 0x00012345u;
+  constexpr std::array<char, 8> kEightByteName{'.', 'X', 'B', 'M', 'O', 'V', 'I', 'E'};
+  for (std::size_t i = 0; i < kEightByteName.size(); ++i) {
+    pe.bytes[kFirstSectionHeaderOffset + i] = static_cast<std::byte>(kEightByteName[i]);
+  }
+  const auto put_le32 = [&](std::size_t offset, std::uint32_t value) {
+    pe.bytes[offset + 0u] = static_cast<std::byte>(value & 0xFFu);
+    pe.bytes[offset + 1u] = static_cast<std::byte>((value >> 8u) & 0xFFu);
+    pe.bytes[offset + 2u] = static_cast<std::byte>((value >> 16u) & 0xFFu);
+    pe.bytes[offset + 3u] = static_cast<std::byte>((value >> 24u) & 0xFFu);
+  };
+  put_le32(kFirstSectionHeaderOffset + 0x08u, kExpectedVirtualSize);
+
+  XexBuildOptions opts{};
+  opts.with_import_libraries = false;
+  auto fixture = build_base_xex(pe, opts);
+
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  assert(!image.sections.empty());
+  assert(image.sections.front().name == ".XBMOVIE");
+  assert(image.sections.front().virtual_size == kExpectedVirtualSize);
+  assert(image.sections.front().virtual_size != 0x4549564Fu);
+}
+
 void test_parse_and_load_uncompressed_unencrypted() {
   auto fixture = make_uncompressed_fixture();
 
@@ -724,6 +759,164 @@ void test_parse_and_load_uncompressed_unencrypted() {
 // bytes. This proves the refactor is behavior-preserving: parsing then
 // mapping separately must produce the same result as load_xex()'s single
 // call.
+void test_map_xex_image_rounds_section_size_up_to_memory_page() {
+  xbox::XexImage image{};
+  xbox::XexSection section{};
+  section.name = ".unaligned";
+  section.virtual_address = memory::kXex64KBase + 0x10000u + 0x1234u;
+  section.virtual_size = 0x173A4u;
+  section.raw_size = 0x17000u;
+  section.protect = memory::kReadExecute;
+  section.executable = true;
+  section.readable = true;
+  section.bytes.assign(section.raw_size, std::byte{0x5A});
+  image.sections.push_back(section);
+
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+
+  xbox::LoadedXex loaded{};
+  std::string error;
+  assert(xbox::map_xex_image(address_space, image, loaded,
+                             memory::kXex64KBase, &error));
+  assert(error.empty());
+  assert(loaded.loaded);
+  assert(loaded.mapped_sections.size() == 1u);
+  assert(loaded.executable_ranges.size() == 1u);
+
+  const auto expected_base = memory::kXex64KBase + 0x10000u;
+  constexpr std::uint32_t expected_size = 0x20000u;
+  const auto mapping = address_space.query(section.virtual_address);
+  assert(mapping.has_value());
+  assert(mapping->state == memory::PageState::Committed);
+  assert(mapping->allocation_base == expected_base);
+  assert(mapping->allocation_size == expected_size);
+  assert(loaded.executable_ranges.front().begin == expected_base);
+  assert(loaded.executable_ranges.front().end == expected_base + expected_size);
+  assert(address_space.read8(section.virtual_address) == 0x5Au);
+  assert(address_space.read8(section.virtual_address + section.raw_size - 1u) == 0x5Au);
+}
+
+void test_map_xex_image_merges_sections_that_share_allocation_pages() {
+  xbox::XexImage image{};
+
+  xbox::XexSection text{};
+  text.name = ".text";
+  text.virtual_address = memory::kXex64KBase + 0x10000u;
+  text.virtual_size = 0x18000u;
+  text.raw_size = 0x18000u;
+  text.protect = memory::kReadExecute;
+  text.executable = true;
+  text.readable = true;
+  text.bytes.assign(text.raw_size, std::byte{0x11});
+  image.sections.push_back(text);
+
+  // Distinct byte range, but its 64 KiB-aligned mapping shares the 0x20000
+  // allocation page with .text. This mirrors real XEX layouts such as a
+  // .pdata section beginning part-way through the final .text allocation
+  // page. Mapping sections independently would reject the second reserve.
+  xbox::XexSection pdata{};
+  pdata.name = ".pdata";
+  pdata.virtual_address = memory::kXex64KBase + 0x29E00u;
+  pdata.virtual_size = 0x6174u;
+  pdata.raw_size = 0x10000u;
+  pdata.protect = memory::Protect::Read;
+  pdata.readable = true;
+  pdata.bytes.assign(pdata.raw_size, std::byte{0x22});
+  image.sections.push_back(pdata);
+
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+
+  xbox::LoadedXex loaded{};
+  std::string error;
+  assert(xbox::map_xex_image(address_space, image, loaded,
+                             memory::kXex64KBase, &error));
+  assert(error.empty());
+  assert(loaded.loaded);
+  assert(loaded.mapped_sections.size() == 2u);
+
+  const auto text_mapping = address_space.query(text.virtual_address);
+  const auto pdata_mapping = address_space.query(pdata.virtual_address);
+  assert(text_mapping.has_value());
+  assert(pdata_mapping.has_value());
+  assert(text_mapping->allocation_base == memory::kXex64KBase + 0x10000u);
+  assert(pdata_mapping->allocation_base == text_mapping->allocation_base);
+  assert(text_mapping->allocation_size == 0x30000u);
+  assert(pdata_mapping->allocation_size == 0x30000u);
+
+  // Both sections survive at their actual byte addresses even though their
+  // backing allocation pages overlap.
+  assert(address_space.read8(text.virtual_address) == 0x11u);
+  assert(address_space.read8(text.virtual_address + text.raw_size - 1u) == 0x11u);
+  assert(address_space.read8(pdata.virtual_address) == 0x22u);
+  assert(address_space.read8(pdata.virtual_address + pdata.raw_size - 1u) == 0x22u);
+
+  // The shared page must carry the union required by the sections occupying
+  // it, while the final .pdata-only page remains read-only.
+  const auto shared_page = address_space.query(memory::kXex64KBase + 0x20000u);
+  const auto pdata_only_page = address_space.query(memory::kXex64KBase + 0x30000u);
+  assert(shared_page.has_value());
+  assert(pdata_only_page.has_value());
+  assert(memory::has(shared_page->current_protect, memory::Protect::Read));
+  assert(memory::has(shared_page->current_protect, memory::Protect::Execute));
+  assert(!memory::has(shared_page->current_protect, memory::Protect::Write));
+  assert(pdata_only_page->current_protect == memory::Protect::Read);
+}
+
+void test_map_xex_image_rolls_back_partial_mapping_failure() {
+  xbox::XexImage image{};
+
+  xbox::XexSection first{};
+  first.name = ".first";
+  first.virtual_address = memory::kXex64KBase + 0x10000u;
+  first.virtual_size = 0x10000u;
+  first.raw_size = 0x10000u;
+  first.protect = memory::kReadWrite;
+  first.readable = true;
+  first.writable = true;
+  first.bytes.assign(first.raw_size, std::byte{0xA5});
+  image.sections.push_back(first);
+
+  xbox::XexSection conflicting{};
+  conflicting.name = ".conflict";
+  conflicting.virtual_address = memory::kXex64KBase + 0x40000u;
+  conflicting.virtual_size = 0x10000u;
+  conflicting.raw_size = 0x10000u;
+  conflicting.protect = memory::Protect::Read;
+  conflicting.readable = true;
+  conflicting.bytes.assign(conflicting.raw_size, std::byte{0xCC});
+  image.sections.push_back(conflicting);
+
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+
+  // Pre-existing guest allocation forces the second merged image allocation
+  // to fail. The mapper must release only allocations it created earlier in
+  // this call and must leave this external reservation untouched.
+  assert(address_space.reserve_fixed(conflicting.virtual_address, 0x10000u,
+                                     memory::Protect::Read));
+
+  xbox::LoadedXex loaded{};
+  std::string error;
+  assert(!xbox::map_xex_image(address_space, image, loaded,
+                              memory::kXex64KBase, &error));
+  assert(!error.empty());
+  assert(error.find(".conflict") != std::string::npos);
+  assert(error.find("reserve") != std::string::npos);
+  assert(!loaded.loaded);
+  assert(loaded.mapped_sections.empty());
+  assert(loaded.executable_ranges.empty());
+
+  const auto first_mapping = address_space.query(first.virtual_address);
+  assert(first_mapping.has_value());
+  assert(first_mapping->state == memory::PageState::Free);
+
+  const auto conflict_mapping = address_space.query(conflicting.virtual_address);
+  assert(conflict_mapping.has_value());
+  assert(conflict_mapping->state == memory::PageState::Reserved);
+}
+
 void test_map_xex_image_matches_load_xex() {
   auto fixture = make_uncompressed_fixture();
 
@@ -1834,7 +2027,11 @@ int main() {
   test_malformed_xex();
   test_invalid_header_size();
   test_missing_security_info_rejected();
+  test_pe_section_virtual_size_uses_field_after_full_eight_byte_name();
   test_parse_and_load_uncompressed_unencrypted();
+  test_map_xex_image_rounds_section_size_up_to_memory_page();
+  test_map_xex_image_merges_sections_that_share_allocation_pages();
+  test_map_xex_image_rolls_back_partial_mapping_failure();
   test_map_xex_image_matches_load_xex();
   test_effective_identity_reflects_title_update();
   test_parse_and_load_xex1_format();

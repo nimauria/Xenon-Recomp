@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -350,19 +351,19 @@ def _install_dxc_archive(extracted: Path, prefix: Path, triplet: str) -> None:
 def _build_vulkan_headers(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
     shutil.rmtree(build, ignore_errors=True)
     cmd = [
-        "cmake", "-S", str(source), "-B", str(build), *_cmake_generator_args(),
+        _cmake_executable(), "-S", str(source), "-B", str(build), *_cmake_generator_args(),
         "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={prefix}",
         "-DVULKAN_HEADERS_ENABLE_TESTS=OFF",
     ]
     _run(cmd, quiet=quiet)
-    _run(["cmake", "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
+    _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
 
 def _build_vulkan_loader(source: Path, build: Path, prefix: Path, headers_prefix: Path,
                          jobs: int, quiet: bool) -> None:
     shutil.rmtree(build, ignore_errors=True)
     cmd = [
-        "cmake", "-S", str(source), "-B", str(build), *_cmake_generator_args(),
+        _cmake_executable(), "-S", str(source), "-B", str(build), *_cmake_generator_args(),
         "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={prefix}",
         f"-DVULKAN_HEADERS_INSTALL_DIR={headers_prefix}",
         "-DBUILD_TESTS=OFF", "-DLOADER_CODEGEN=OFF",
@@ -371,7 +372,7 @@ def _build_vulkan_loader(source: Path, build: Path, prefix: Path, headers_prefix
     # Wayland development packages on the RELEASE BUILD MACHINE only; they are
     # not end-user installer prerequisites.
     _run(cmd, quiet=quiet)
-    _run(["cmake", "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
+    _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
 
 def _stage_vulkan_runtime(prefix: Path, triplet: str) -> list[str]:
@@ -379,7 +380,12 @@ def _stage_vulkan_runtime(prefix: Path, triplet: str) -> list[str]:
     shutil.rmtree(runtime, ignore_errors=True)
     runtime.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
-    patterns = ["vulkan-1.dll"] if triplet.startswith("windows-") else ["libvulkan.so", "libvulkan.so.*"]
+    if triplet.startswith("windows-"):
+        patterns = ["vulkan-1.dll"]
+    elif triplet.startswith("macos-"):
+        patterns = ["libvulkan.dylib", "libvulkan.*.dylib"]
+    else:
+        patterns = ["libvulkan.so", "libvulkan.so.*"]
     for base in (prefix / "bin", prefix / "lib", prefix / "lib64"):
         for pattern in patterns:
             for src in sorted(base.glob(pattern)) if base.is_dir() else []:
@@ -389,7 +395,69 @@ def _stage_vulkan_runtime(prefix: Path, triplet: str) -> list[str]:
     return sorted(set(copied))
 
 
+def _cmake_executable() -> str:
+    # When the bootstrap is launched by Xenon's parent CMake configure, use the
+    # exact CMake executable that configured the parent project. This avoids a
+    # second CMake installation on PATH selecting different generators.
+    return os.environ.get("XENON_CMAKE_COMMAND") or "cmake"
+
+
+def _visual_studio_generators(cmake_help: str) -> list[tuple[int, int, str]]:
+    generators: list[tuple[int, int, str]] = []
+    pattern = re.compile(r"Visual Studio (\d+) (\d{4})")
+    for match in pattern.finditer(cmake_help):
+        name = match.group(0)
+        candidate = (int(match.group(1)), int(match.group(2)), name)
+        if candidate not in generators:
+            generators.append(candidate)
+    return sorted(generators, reverse=True)
+
+
+def _native_vs_platform() -> str:
+    arch = normalize_arch(platform.machine())
+    if arch == "arm64":
+        return "ARM64"
+    if arch == "x86":
+        return "Win32"
+    return "x64"
+
+
 def _cmake_generator_args() -> list[str]:
+    # Auto-bootstrap is normally launched from an already configured Xenon
+    # build. Preserve that generator so a Visual Studio parent does not spawn a
+    # Ninja child that suddenly requires cl.exe/INCLUDE/LIB to be on the shell
+    # PATH. This is especially important from normal PowerShell, where CMake's
+    # VS generator can locate MSVC but a standalone Ninja configure cannot.
+    inherited = os.environ.get("XENON_CMAKE_GENERATOR", "").strip()
+    if inherited:
+        args = ["-G", inherited]
+        generator_platform = os.environ.get("XENON_CMAKE_GENERATOR_PLATFORM", "").strip()
+        generator_toolset = os.environ.get("XENON_CMAKE_GENERATOR_TOOLSET", "").strip()
+        generator_instance = os.environ.get("XENON_CMAKE_GENERATOR_INSTANCE", "").strip()
+        make_program = os.environ.get("XENON_CMAKE_MAKE_PROGRAM", "").strip()
+        if generator_platform:
+            args.extend(["-A", generator_platform])
+        if generator_toolset:
+            args.extend(["-T", generator_toolset])
+        if generator_instance:
+            args.append(f"-DCMAKE_GENERATOR_INSTANCE={generator_instance}")
+        if make_program and "Ninja" in inherited:
+            args.append(f"-DCMAKE_MAKE_PROGRAM={make_program}")
+        return args
+
+    # Standalone bootstrap on Windows should prefer a Visual Studio generator.
+    # Merely having ninja.exe on PATH is not enough: Ninja still needs a fully
+    # initialized MSVC developer environment, while the VS generator can locate
+    # the installed Build Tools itself.
+    if sys.platform.startswith("win"):
+        try:
+            help_text = _capture([_cmake_executable(), "--help"])
+            generators = _visual_studio_generators(help_text)
+        except BootstrapError:
+            generators = []
+        if generators:
+            return ["-G", generators[0][2], "-A", _native_vs_platform()]
+
     if shutil.which("ninja"):
         return ["-G", "Ninja"]
     return []
@@ -399,7 +467,7 @@ def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool)
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "cmake", "-S", str(source), "-B", str(build),
+        _cmake_executable(), "-S", str(source), "-B", str(build),
         *_cmake_generator_args(),
         "-DCMAKE_BUILD_TYPE=Release",
         f"-DCMAKE_INSTALL_PREFIX={prefix}",
@@ -412,7 +480,7 @@ def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool)
         "-DSDL_INSTALL=ON",
     ]
     _run(cmd, quiet=quiet)
-    _run(["cmake", "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
+    _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
 
 def _find_msys_bash() -> str | None:
@@ -613,6 +681,11 @@ def verify_dependency(key: str, entry: dict, root: Path, triplet: str) -> tuple[
                 return False, "vulkan-1.dll not staged"
             if not _candidate_lib(prefix, ["vulkan-1.lib", "vulkan.lib"]):
                 return False, "Vulkan loader import library not found"
+        elif triplet.startswith("macos-"):
+            if not any(runtime.glob("libvulkan*.dylib")):
+                return False, "libvulkan dylib runtime not staged"
+            if not _candidate_lib(prefix, ["libvulkan.dylib", "libvulkan.1.dylib", "libvulkan.a"]):
+                return False, "Vulkan loader link library not found"
         else:
             if not any(runtime.glob("libvulkan.so*")):
                 return False, "libvulkan.so runtime not staged"

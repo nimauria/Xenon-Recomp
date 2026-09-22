@@ -52,9 +52,11 @@ class SessionController final : public QObject {
   void schedulePrepare(quint64 generation);
   void scheduleValidate(quint64 generation);
   void scheduleStart(quint64 generation);
+  void scheduleRuntimeStartPoll(quint64 generation);
   void preparePhase(quint64 generation);
   void validatePhase(quint64 generation);
   void startPhase(quint64 generation);
+  void pollRuntimeStart(quint64 generation);
   void finishCancellation(quint64 generation);
   void finishStop(quint64 generation);
   void failCurrent(const QString& code, const ServiceResult& result);
@@ -71,11 +73,15 @@ class SessionController final : public QObject {
   SessionRecord current_;
   QVariantList history_;
   QElapsedTimer elapsed_;
+  QElapsedTimer startup_elapsed_;
   QTimer tick_timer_;
+  bool runtime_process_started_ = false;
   quint64 generation_ = 0;
   QMetaObject::Connection preparation_progress_connection_;
   QMetaObject::Connection preparation_finished_connection_;
   static constexpr int kHistoryLimit = 50;
+  static constexpr int kRuntimeStartPollMs = 100;
+  static constexpr int kRuntimeStartTimeoutMs = 30000;
 };
 
 }  // namespace xenon::launcher::frontend_backend

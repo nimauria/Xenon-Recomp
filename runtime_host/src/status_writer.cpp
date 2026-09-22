@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 
 #include "xenon/core/json.hpp"
@@ -52,6 +53,29 @@ std::string state_name(core::SessionState state) {
     case core::SessionState::Failed: return "failed";
   }
   return "unknown";
+}
+
+[[nodiscard]] bool publish_status_file(const std::filesystem::path& temp_path,
+                                       const std::filesystem::path& final_path) {
+#if defined(_WIN32)
+  // std::filesystem::rename does not replace an existing destination on
+  // Windows. status.json is rewritten repeatedly, so explicitly request
+  // replace-existing semantics while keeping the temp file on the same volume.
+  if (::MoveFileExW(temp_path.c_str(), final_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE) {
+    return true;
+  }
+  std::error_code cleanup_error;
+  std::filesystem::remove(temp_path, cleanup_error);
+  return false;
+#else
+  std::error_code rename_error;
+  std::filesystem::rename(temp_path, final_path, rename_error);
+  if (!rename_error) return true;
+  std::error_code cleanup_error;
+  std::filesystem::remove(temp_path, cleanup_error);
+  return false;
+#endif
 }
 
 }  // namespace
@@ -104,6 +128,15 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
   root.set("moduleName", config_.module_name);
   root.set("moduleVersion", config_.module_version);
   root.set("requestedRenderer", config_.renderer);
+  root.set("shaderCache", config_.shader_cache);
+  root.set("shaderCacheMode", config_.shader_cache_mode);
+  root.set("inputBackend", config_.input_backend);
+  root.set("inputPreferredDevice", config_.input_preferred_device);
+  root.set("inputDeadzone", config_.input_deadzone);
+  root.set("inputRumble", config_.input_rumble);
+  root.set("inputBackground", config_.input_background);
+  root.set("moduleSettingsPresent", config_.module_settings_json != "{}" &&
+                                      config_.module_settings_json != "null");
   root.set("startedAtEpochMs", static_cast<double>(started_at_epoch_ms_));
   root.set("updatedAtEpochMs", static_cast<double>(now_epoch_ms()));
   if (!phase_message.empty()) root.set("phaseMessage", phase_message);
@@ -158,6 +191,7 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
   subsystems.set("filesystem", session.filesystem() != nullptr);
   subsystems.set("input", session.input() != nullptr);
   subsystems.set("gpu", session.gpu() != nullptr);
+  subsystems.set("audio", session.audio() != nullptr);
   subsystems.set("xam", session.xam() != nullptr);
   root.set("subsystems", std::move(subsystems));
 
@@ -170,8 +204,10 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     out << root.dump();
   }
-  std::error_code rename_error;
-  std::filesystem::rename(temp_path, final_path, rename_error);
+  if (!publish_status_file(temp_path, final_path)) {
+    std::cerr << "[runtime_host] Failed to publish status file: "
+              << final_path.string() << std::endl;
+  }
 }
 
 void StatusWriter::write_fatal(const std::string& message, LaunchFailureCategory category) {
@@ -198,8 +234,10 @@ void StatusWriter::write_fatal(const std::string& message, LaunchFailureCategory
     std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
     out << root.dump();
   }
-  std::error_code rename_error;
-  std::filesystem::rename(temp_path, final_path, rename_error);
+  if (!publish_status_file(temp_path, final_path)) {
+    std::cerr << "[runtime_host] Failed to publish status file: "
+              << final_path.string() << std::endl;
+  }
 }
 
 }  // namespace xenon::runtime_host

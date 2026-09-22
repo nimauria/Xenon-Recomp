@@ -119,6 +119,11 @@ ServiceResult LaunchFeature::stop() {
   return ServiceResult::success(QStringLiteral("Fixture session stopped"));
 }
 
+QVariantMap LaunchFeature::runtimeStatus() const {
+  if (!test_mode_) return launch_.runtimeStatus();
+  return {};
+}
+
 QString LaunchFeature::afterLaunchBehavior() const {
   return settings_.stringValue(QStringLiteral("runtime/afterLaunch"), QStringLiteral("Keep launcher open"));
 }

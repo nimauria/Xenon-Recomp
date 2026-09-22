@@ -73,13 +73,24 @@ Written once by the launcher before starting the process, passed as
   "moduleName": "Halo 3 Module",
   "modulePath": "C:/Xenon/modules/halo3-module",
   "moduleVersion": "1.2.0",
+  "moduleSettings": {},
+  "runtimeApiRequirements": {},
   "nativeExtensionPath": "C:/Xenon/modules/halo3-module/native/halo3.dll",
   "profileId": "profile-1",
   "profileName": "Player One",
   "region": "Auto (Global)",
   "profileXuid": "16140901064495857665",
   "renderer": "Automatic",
+  "shaderCache": true,
+  "shaderCacheMode": "Persistent",
   "inputBackend": "Automatic",
+  "inputPreferredDevice": "Automatic",
+  "inputDeadzone": 0.10,
+  "inputRumble": true,
+  "inputBackground": false,
+  "inputModuleApiVersion": 1,
+  "inputProfileStorePath": "C:/Xenon/Profiles/input-profiles-v1.conf",
+  "inputUserSources": [{ "userIndex": 0, "sources": [] }],
   "audioMasterVolume": 1.0,
   "audioMuteUnfocused": false,
   "audioLatencyProfile": "",
@@ -98,6 +109,12 @@ Only `sessionDir` and `contentPath` are required; everything else has a
 sensible empty/default fallback. `nativeExtensionPath` is resolved by the
 launcher from the module's manifest (`ModuleService::nativeExtensionPath`,
 see below) — the runtime host does not parse module manifests itself.
+
+`contentPath` may be an extracted directory containing a root `default.xex`,
+a loose `.xex`, an Xbox 360 `.iso`/`.xgd` GDFX/XDVDFS image, or a `.dvd`
+descriptor. `runtime_host/src/content_source.cpp` normalizes all four forms.
+Disc images are read and mounted directly without whole-image extraction; a
+loose XEX uses its containing directory as the runtime `game:` filesystem.
 
 `headlessMode` (defaults to `false`, i.e. Normal Play) is a Gracemeria
 readiness pass addition (Part 5) - see "Normal Play vs. headless/test mode"
@@ -380,28 +397,26 @@ install. See `launcher/tests/runtime/runtime_bridge_tests.cpp` and
   is hard-tied to the Xbox render-driver's fixed 256-sample frame contract, so
   a host latency/buffer-size knob cannot be layered on without decoupling
   that guest-visible timing first.
-- **`logVerbose` is parsed and now drives real host-side diagnostics**
-  (`SessionConfig::verbose_logging`, extra launch/entrypoint/backend logging
-  and an unresolved-imports dump in `runtime_host/src/main.cpp`), but
-  `RuntimeBridge` still has no `SettingsService` access to read the
-  launcher's live `developer/verboseLogging` preference, so `launch()` still
-  always writes `logVerbose: false` - the runtime-host consumer side of this
-  gap is closed, the launcher-side sourcing is not.
-- **Display/window settings are not part of the schema.** Resolution,
-  fullscreen, and vsync have no consumer anywhere yet — there is no
-  swapchain/presentation layer to configure (see "Presentation" above) — so
-  no placeholder fields were added for them.
-- **Input backend selection is real; XAM/xboxkrnl-file-I/O export
+- **`logVerbose` is end-to-end.** The launcher's live
+  `developer/verboseLogging` preference is copied into `LaunchConfiguration`,
+  serialized by `RuntimeBridge`, parsed by the host, and drives
+  `SessionConfig::verbose_logging` diagnostics.
+- **Display/window settings are not part of the schema yet.** The runtime now
+  owns a real presentation window/surface, but resolution/fullscreen/vsync are
+  not exposed as launch-contract controls and therefore still use the host's
+  current defaults.
+- **Input launch settings are real; XAM/xboxkrnl-file-I/O export
   reachability is real.** `XenonSession::init_input()` selects real SDL/
   XInput drivers via `input_backend` (or fails outright if none can be
-  created), and guest `XamInput*`, XAM, Audio, and xboxkrnl file-I/O
+  created), applies background-input and global rumble policy, loads the
+  launcher-owned input profile store, applies the launcher deadzone to the
+  default profile, and resolves preferred/per-user source routing against
+  connected device identities. Guest `XamInput*`, XAM, Audio, and xboxkrnl file-I/O
   (`NtCreateFile` et al.) calls all now resolve through the one
   `core::ExportRegistry` `XenonSession::exports()` owns, rather than the
   separate `cpu::ExternalCallRegistry`/`xbox::ImportRegistry` surfaces that
   previously had no session ever registering into them.
-- **Guest process/thread model.** Normal title startup still creates only a
-  bare `cpu::CpuState` + stack + entry point in `create_guest_process()`; it
-  does not go through `kernel::KernelProcess`/`KernelThread`, and XEX TLS
-  metadata is parsed but not yet attached to the main guest thread. This is
-  the one item from the wider XenonSession production-integration effort
-  this pass did not reach - see the session's finish report for why.
+- **Guest process/thread startup is integrated.** `XenonSession` creates a
+  `KernelProcess`/`KernelThread`, registers the loaded module, provisions the
+  guest stack/KPCR/TLS context, and executes the bound compiled-code registry
+  through CPU V2. Multiple independent guest threads remain later work.

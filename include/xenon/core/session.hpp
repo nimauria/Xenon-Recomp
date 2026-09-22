@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -42,6 +44,12 @@ struct SessionConfig {
   std::string graphics_backend{"null"};
   bool enable_input{false};
   std::vector<std::string> input_drivers{};
+  std::string input_preferred_device{"Automatic"};
+  float input_deadzone{0.10f};
+  bool input_rumble{true};
+  bool input_background{false};
+  std::filesystem::path input_profile_store_path{};
+  std::array<std::vector<std::string>, input::kMaxUsers> input_user_sources{};
   bool enable_audio{false};
   float audio_master_volume{1.0f};
   // Consumed by XenonSession::set_focused(): when true, losing focus mutes
@@ -67,6 +75,12 @@ struct SessionConfig {
   // lifecycle lines (see runtime_host/src/main.cpp).
   bool verbose_logging{false};
   bool enable_export_diagnostics{true};
+
+  // Optional host root for this launch's save data. The launcher already
+  // resolves profile/game-specific savePath; wiring it through SessionConfig
+  // keeps SaveManager out of guessed platform folders. Empty means use a
+  // conservative temporary fallback for direct/headless callers.
+  std::filesystem::path save_root_path{};
 
   // Optional path to a game-specific native extension library ("module" in
   // launcher terms: symbols, patches, and the recomp-driver-generated

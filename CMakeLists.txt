@@ -1283,6 +1283,17 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
   xenon_enable_test_asserts(xenon_runtime_host_tests)
   add_test(NAME xenon_runtime_host_tests COMMAND xenon_runtime_host_tests)
 
+  add_executable(xenon_runtime_content_source_tests
+    tests/runtime_host/content_source_tests.cpp
+    runtime_host/src/content_source.cpp
+    runtime_host/src/content_source.hpp
+  )
+  target_include_directories(xenon_runtime_content_source_tests PRIVATE runtime_host/src)
+  target_link_libraries(xenon_runtime_content_source_tests PRIVATE xenon_core)
+  target_compile_features(xenon_runtime_content_source_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_runtime_content_source_tests)
+  add_test(NAME xenon_runtime_content_source_tests COMMAND xenon_runtime_content_source_tests)
+
   # Part 5.7 (Gracemeria readiness pass): structured launch-failure
   # categories in status.json - see tests/runtime_host/status_writer_tests.cpp.
   add_executable(xenon_status_writer_tests

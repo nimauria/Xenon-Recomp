@@ -234,8 +234,14 @@ class AddressSpace::GuestAperture {
 
   bool initialize(const host_vm::SharedMemory& shared) {
     if (active()) return true;
+    const auto host_capabilities = host_vm::capabilities();
+    // The direct aperture aliases guest pages individually. A host may support
+    // fixed mappings in general while still requiring a mapping granularity
+    // larger than the Xbox 360's 4 KiB base page (Apple Silicon commonly uses
+    // larger host pages). In that case compact translation remains the safe,
+    // fully functional path instead of letting aperture setup fail piecemeal.
     if (sizeof(void*) < 8u || !shared.valid() ||
-        !host_vm::supports_fixed_shared_mapping() ||
+        !host_capabilities.supports_fixed_mapping_granularity(kBasePageSize) ||
         kSize > (std::numeric_limits<std::size_t>::max)()) {
       return false;
     }

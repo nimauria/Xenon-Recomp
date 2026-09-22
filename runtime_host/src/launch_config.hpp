@@ -15,6 +15,11 @@ struct DlcEntry {
   std::string path;
 };
 
+struct InputUserSources {
+  std::uint32_t user_index{0};
+  std::vector<std::string> sources{};
+};
+
 struct LaunchConfig {
   // Schema version of the launch configuration contract this struct/parser
   // implements. Bump this and reject older/newer configs in
@@ -40,6 +45,11 @@ struct LaunchConfig {
   std::string module_name;
   std::string module_path;
   std::string module_version;
+  // JSON snapshots of generic launcher/module configuration. The runtime
+  // preserves these across the process boundary even when a particular
+  // subsystem has no consumer yet, so settings do not silently disappear.
+  std::string module_settings_json{"{}"};
+  std::string runtime_api_requirements_json{"{}"};
 
   // Absolute path to the module's compiled-code native extension library, or
   // empty if the module supplies none (session still loads; it just cannot
@@ -52,18 +62,23 @@ struct LaunchConfig {
   std::uint64_t profile_xuid{0};
 
   std::string renderer;
+  bool shader_cache{true};
+  std::string shader_cache_mode{"Persistent"};
+
   std::string input_backend;
+  std::string input_preferred_device{"Automatic"};
+  double input_deadzone{0.10};
+  bool input_rumble{true};
+  bool input_background{false};
+  int input_module_api_version{0};
+  std::string input_profile_store_path;
+  std::vector<InputUserSources> input_user_sources{};
 
   double audio_master_volume{1.0};
   bool audio_mute_unfocused{false};
   std::string audio_latency_profile;
 
-  // Mirrors the launcher's "developer/verboseLogging" preference. Defaults
-  // to false; RuntimeBridge does not yet have access to SettingsService to
-  // forward the live value (see RuntimeBridge::launch()), so this is
-  // currently always written as false - a real, parsed field the runtime
-  // host already honors (see build_session_config() in main.cpp), not a
-  // stub, but not yet fed a live setting either.
+  // Mirrors the launcher's live "developer/verboseLogging" preference.
   bool log_verbose{false};
 
   std::string title_update_path;

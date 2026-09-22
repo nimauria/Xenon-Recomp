@@ -2,11 +2,14 @@
 
 #include "xenon/core/call_bridge.hpp"
 #include "xenon/core/guest_thread_context.hpp"
+#include "xenon/filesystem/path.hpp"
 #include "xenon/cpu/flat_memory.hpp"
 #include "xenon/memory/address_space.hpp"
 
 #include <cassert>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 
 int main() {
@@ -133,6 +136,53 @@ int main() {
     
     session.shutdown();
     assert(!session.is_initialized() && "Session should not be initialized after shutdown");
+  }
+
+  // Regression: content mounting must create an absolute physical VFS device
+  // and expose game:/d:/dvd: as aliases. Passing "game:" directly into a
+  // Device constructor throws std::invalid_argument and previously crashed
+  // the runtime host before native-module binding.
+  {
+    const auto root = std::filesystem::temp_directory_path() / "xenon_session_content_mount_test";
+    const auto saves = root / "saves";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    {
+      std::ofstream xex(root / "default.xex", std::ios::binary);
+      xex << "XEX2";
+    }
+
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    config.save_root_path = saves;
+    assert(session.initialize(config).success);
+
+    const auto mount = session.mount_content_graph(0x4E4D07D1u, root, {}, {}, 0);
+    assert(mount.success && "directory content should mount without throwing");
+
+    xenon::filesystem::ResolvedPath resolved{};
+    assert(session.filesystem()->resolve("game:\\default.xex", resolved) ==
+           xenon::filesystem::FsError::None);
+    assert(resolved.device != nullptr);
+    assert(resolved.device->mount_point() == "\\Device\\CdRom0");
+    assert(resolved.relative_path == "default.xex");
+
+    const auto links = session.filesystem()->symbolic_links();
+    auto has_alias = [&](std::string_view alias) {
+      return std::any_of(links.begin(), links.end(), [&](const auto& link) {
+        return xenon::filesystem::guest_path_equal(link.alias, alias) &&
+               xenon::filesystem::guest_path_equal(link.target, "\\Device\\CdRom0");
+      });
+    };
+    assert(has_alias("game:"));
+    assert(has_alias("d:"));
+    assert(has_alias("dvd:"));
+
+    session.shutdown();
+    std::filesystem::remove_all(root);
   }
 
   // Test 1b: Session can be re-initialized after a clean shutdown (this only

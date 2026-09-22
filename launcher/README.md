@@ -132,7 +132,7 @@ QML UI -> LauncherBridge -> FrontendBackend -> LauncherCore services -> RuntimeB
 
 Launcher behaviour is split into feature-owned C++ slices for application state, settings/paths, profiles, library/DLC, modules/catalog/settings, import/export, updates, filesystem integration, diagnostics, branding, runtime projection and launching. Production persistence is implemented by shared Launcher Core services, while test fixtures live in the same feature layer so QML does not maintain a second set of business rules.
 
-The runtime boundary is intentionally truthful: the current `xenon::Runtime` API supports initialization/shutdown but does not yet expose a generic game-session execution API or live subsystem registry. `RuntimeBridge` therefore validates and carries a launch contract to that boundary without reporting a fake successful launch. When `Xenon::Filesystem` is built, the launcher now uses the framework content probe to identify extracted/root `default.xex` content and direct XEX2 files and matches their Xbox title/media metadata against installed module manifests. GDFX disc-image parsing is now available through `Xenon::Filesystem`, including `.dvd` descriptor resolution and XEX2 identity probing inside the image. STFS/DLC packages, module ABI loading, save services, and actual session execution remain later framework work below the launcher API.
+The runtime boundary is process-separated and real: `RuntimeBridge` writes the versioned launch contract, starts `xenon_runtime_host`, supervises its `status.json`, and reports the runtime's actual state back to QML. The launcher does not mark a session Running merely because the host process was created; `SessionController` waits until the runtime reports `stateName: "running"`, and it propagates runtime failure/crash/stop transitions back into launcher state. `Xenon::Filesystem` identifies extracted game directories, loose XEX2 executables, and GDFX/XDVDFS `.iso`/`.xgd`/`.dvd` sources, then matches Xbox title/media metadata against installed module manifests. Normal Play can now keep those source forms all the way through the runtime: disc images are read and mounted directly, loose XEX input uses its containing directory as `game:`, and no full-disc extraction is required. Native compiled modules are loaded by `XenonSession`; preparation/cache and module revision checks remain below the QML boundary.
 
 See [`BACKEND.md`](BACKEND.md) and [`src/frontend_backend/README.md`](src/frontend_backend/README.md) for feature/service ownership, persistence, the launch contract, QML boundary rules, and the remaining Xenon framework seams.
 
@@ -189,8 +189,9 @@ The launcher Input page is now backed by the real `Xenon::Input` subsystem when
 that target is compiled. It exposes live connected devices, stable identities,
 four Xbox-user routes, optional multi-source assignment, profile selection,
 background-input policy, rumble testing and support diagnostics. These values
-are persisted through Launcher Core rather than QML-owned state and are carried
-into `LaunchConfiguration` for the future game-session runtime.
+are persisted through Launcher Core rather than QML-owned state, carried through
+`LaunchConfiguration`/`launch-config.json`, and applied by the live runtime input
+system during session initialization.
 
 Game modules do not consume the Qt frontend. A module may instead negotiate the
 versioned native Input ABI with `runtimeApis.input` in its manifest and include
@@ -199,9 +200,8 @@ For example Project Gracemeria can consume the runtime's final merged/profiled
 Xbox-visible state without importing SDL/XInput or private `InputSystem` types.
 See `../docs/modules/INPUT_API_V1.md`.
 
-The current runtime still lacks the final generic game-session/native-module
-loader, so the launch contract records the API requirement and input routing
-without pretending a module has already been handed a live function table. The
-future session loader only needs to create the runtime-owned Input API provider
-and pass its `ApiV1` table to the negotiated module; the Input ABI itself is
-already defined.
+The generic game-session/native compiled-code loader is now present: prepared
+`xenon_game_module` libraries bind their compiled registry into `XenonSession`.
+The versioned Input module ABI remains a separate negotiated API surface; the
+launch contract preserves a module's runtime API requirements so unsupported
+requirements can be rejected explicitly rather than silently ignored.

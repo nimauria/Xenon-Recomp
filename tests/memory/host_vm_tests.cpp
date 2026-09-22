@@ -15,6 +15,22 @@ int main() {
   assert(granularity >= page);
   assert((granularity % page) == 0u);
 
+  const auto capabilities = vm::capabilities();
+  assert(capabilities.page_size == page);
+  assert(capabilities.allocation_granularity == granularity);
+  assert(capabilities.fixed_shared_mapping ==
+         vm::supports_fixed_shared_mapping());
+  assert(capabilities.fixed_shared_mapping_requires_page_views ==
+         vm::fixed_shared_mapping_requires_page_views());
+  if (capabilities.fixed_shared_mapping) {
+    assert(capabilities.fixed_shared_mapping_granularity >= page);
+    assert((capabilities.fixed_shared_mapping_granularity % page) == 0u);
+    assert(capabilities.supports_fixed_mapping_granularity(page));
+  } else {
+    assert(capabilities.fixed_shared_mapping_granularity == 0u);
+    assert(!capabilities.supports_fixed_mapping_granularity(page));
+  }
+
   // Anonymous reserve / commit / protect / discard / decommit semantics.
   const auto anonymous_size = page * 2u;
   auto* reservation = static_cast<std::byte*>(vm::reserve(anonymous_size));

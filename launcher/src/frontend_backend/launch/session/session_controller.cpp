@@ -25,6 +25,43 @@ SessionController::SessionController(LaunchFeature& launch, LibraryService& libr
   connect(&tick_timer_, &QTimer::timeout, this, [this]() {
     if (current_.state != SessionState::Running) return;
     current_.elapsed_ms = runningElapsedMs();
+
+    // RuntimeBridge supervises the detached process and synthesizes a
+    // "crashed" state when it exits without publishing a terminal status.
+    // Poll that authoritative state while running so the launcher never
+    // leaves a dead game displayed as Running indefinitely.
+    if (!test_mode_) {
+      const auto runtime_status = launch_.runtimeStatus();
+      const auto runtime_state = runtime_status.value(QStringLiteral("stateName")).toString();
+      if (runtime_state == QStringLiteral("failed") ||
+          runtime_state == QStringLiteral("crashed")) {
+        const auto message = runtime_status.value(QStringLiteral("lastError")).toString();
+        failCurrent(QStringLiteral("runtime-%1").arg(runtime_state),
+                    ServiceResult::failure(
+                        runtime_state == QStringLiteral("crashed")
+                            ? QStringLiteral("Game process crashed")
+                            : QStringLiteral("Game session failed"),
+                        message.isEmpty()
+                            ? QStringLiteral("The Xenon runtime ended unexpectedly.")
+                            : message,
+                        runtime_status));
+        return;
+      }
+      if (runtime_state == QStringLiteral("stopped")) {
+        tick_timer_.stop();
+        runtime_process_started_ = false;
+        current_.elapsed_ms = runningElapsedMs();
+        current_.ended_at = QDateTime::currentDateTimeUtc();
+        if (!current_.game_id.isEmpty()) {
+          (void)library_.recordSessionEnded(current_.game_id, current_.elapsed_ms,
+                                            QStringLiteral("stopped"));
+        }
+        archiveCurrent(QStringLiteral("stopped"));
+        current_ = {};
+        emit changed();
+        return;
+      }
+    }
     emit changed();
   });
   restoreHistory();
@@ -62,6 +99,7 @@ ServiceResult SessionController::start(const QString& game_id) {
   }
 
   ++generation_;
+  runtime_process_started_ = false;
   current_ = {};
   current_.session_id = QUuid::createUuid().toString(QUuid::WithoutBraces);
   current_.game_id = requested_game;
@@ -95,7 +133,7 @@ ServiceResult SessionController::stop() {
   const auto generation = generation_;
 
   if (previous == SessionState::Preparing || previous == SessionState::Validating ||
-      previous == SessionState::Starting) {
+      (previous == SessionState::Starting && !runtime_process_started_)) {
     if (previous == SessionState::Preparing && preparation_.isPreparing(current_.game_id)) {
       // Cooperative cancellation (Part 19): the worker terminates its own
       // compiler child process tree and exits on its own; the connected
@@ -118,6 +156,7 @@ ServiceResult SessionController::stop() {
 void SessionController::dismissFailure() {
   if (current_.state != SessionState::Failed) return;
   ++generation_;
+  runtime_process_started_ = false;
   current_ = {};
   emit changed();
 }
@@ -144,6 +183,11 @@ void SessionController::scheduleValidate(quint64 generation) {
 
 void SessionController::scheduleStart(quint64 generation) {
   QTimer::singleShot(0, this, [this, generation]() { startPhase(generation); });
+}
+
+void SessionController::scheduleRuntimeStartPoll(quint64 generation) {
+  QTimer::singleShot(kRuntimeStartPollMs, this,
+                     [this, generation]() { pollRuntimeStart(generation); });
 }
 
 void SessionController::preparePhase(quint64 generation) {
@@ -255,19 +299,82 @@ void SessionController::startPhase(quint64 generation) {
     return;
   }
 
-  current_.started_at = QDateTime::currentDateTimeUtc();
-  current_.elapsed_ms = 0;
-  current_.error = {};
-  elapsed_.restart();
-  tick_timer_.start();
-  setState(SessionState::Running);
+  // Process creation only means xenon_runtime_host exists. Do not report the
+  // game as Running until the runtime itself publishes stateName=running.
+  // This keeps UI state truthful through XEX load, content mount, module
+  // binding, presentation creation and guest start failures.
+  runtime_process_started_ = true;
+  startup_elapsed_.restart();
+  current_.progress_phase = QStringLiteral("Runtime");
+  current_.progress_message = QStringLiteral("Waiting for the Xenon runtime to start the game...");
+  current_.progress_percent = -1;
+  emit changed();
+  scheduleRuntimeStartPoll(generation);
+}
 
-  const auto behavior = launch_.afterLaunchBehavior();
-  if (behavior == QStringLiteral("Minimize launcher")) {
-    emit launcherActionRequested(QStringLiteral("minimize"));
-  } else if (behavior == QStringLiteral("Close launcher")) {
-    emit launcherActionRequested(QStringLiteral("close"));
+void SessionController::pollRuntimeStart(quint64 generation) {
+  if (generation != generation_ || current_.state != SessionState::Starting ||
+      !runtime_process_started_) {
+    return;
   }
+
+  const auto runtime_status = launch_.runtimeStatus();
+  const auto runtime_state = runtime_status.value(QStringLiteral("stateName")).toString();
+  const auto phase = runtime_status.value(QStringLiteral("phaseMessage")).toString();
+  if (!phase.isEmpty() && phase != current_.progress_message) {
+    current_.progress_message = phase;
+    emit changed();
+  }
+
+  if (runtime_state == QStringLiteral("failed") || runtime_state == QStringLiteral("crashed") ||
+      runtime_state == QStringLiteral("stopped")) {
+    runtime_process_started_ = false;
+    const auto message = runtime_status.value(QStringLiteral("lastError")).toString();
+    failCurrent(QStringLiteral("runtime-start"),
+                ServiceResult::failure(
+                    runtime_state == QStringLiteral("crashed")
+                        ? QStringLiteral("Runtime host crashed")
+                        : QStringLiteral("Game failed to start"),
+                    message.isEmpty()
+                        ? QStringLiteral("The Xenon runtime ended before the game reached Running.")
+                        : message,
+                    runtime_status));
+    return;
+  }
+
+  if (runtime_state == QStringLiteral("running") &&
+      runtime_status.value(QStringLiteral("running"), true).toBool()) {
+    current_.started_at = QDateTime::currentDateTimeUtc();
+    current_.elapsed_ms = 0;
+    current_.error = {};
+    current_.progress_phase.clear();
+    current_.progress_message.clear();
+    current_.progress_percent = -1;
+    elapsed_.restart();
+    tick_timer_.start();
+    setState(SessionState::Running);
+
+    const auto behavior = launch_.afterLaunchBehavior();
+    if (behavior == QStringLiteral("Minimize launcher")) {
+      emit launcherActionRequested(QStringLiteral("minimize"));
+    } else if (behavior == QStringLiteral("Close launcher")) {
+      emit launcherActionRequested(QStringLiteral("close"));
+    }
+    return;
+  }
+
+  if (startup_elapsed_.isValid() && startup_elapsed_.elapsed() >= kRuntimeStartTimeoutMs) {
+    static_cast<void>(launch_.stop());
+    runtime_process_started_ = false;
+    failCurrent(QStringLiteral("runtime-start-timeout"),
+                ServiceResult::failure(
+                    QStringLiteral("Game startup timed out"),
+                    QStringLiteral("The Xenon runtime did not report a running game within 30 seconds."),
+                    runtime_status));
+    return;
+  }
+
+  scheduleRuntimeStartPoll(generation);
 }
 
 void SessionController::finishCancellation(quint64 generation) {
@@ -275,6 +382,7 @@ void SessionController::finishCancellation(quint64 generation) {
   current_.ended_at = QDateTime::currentDateTimeUtc();
   current_.elapsed_ms = 0;
   archiveCurrent(QStringLiteral("cancelled"));
+  runtime_process_started_ = false;
   current_ = {};
   emit changed();
 }
@@ -288,6 +396,7 @@ void SessionController::finishStop(quint64 generation) {
   }
 
   tick_timer_.stop();
+  runtime_process_started_ = false;
   current_.elapsed_ms = runningElapsedMs();
   current_.ended_at = QDateTime::currentDateTimeUtc();
   if (!test_mode_ && !current_.game_id.isEmpty()) {
@@ -300,6 +409,7 @@ void SessionController::finishStop(quint64 generation) {
 
 void SessionController::failCurrent(const QString& code, const ServiceResult& result) {
   tick_timer_.stop();
+  runtime_process_started_ = false;
   if (current_.started_at.isValid()) current_.elapsed_ms = runningElapsedMs();
   current_.ended_at = QDateTime::currentDateTimeUtc();
   current_.error.code = code;

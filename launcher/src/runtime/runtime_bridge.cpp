@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMetaType>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QUuid>
@@ -55,6 +56,46 @@ constexpr auto kRuntimeHostExecutable = "xenon_runtime_host.exe";
 constexpr auto kRuntimeHostExecutable = "xenon_runtime_host";
 #endif
 
+// Converts launcher-owned QVariant trees into the dependency-free JSON value
+// used by the runtime-host contract. Keeping this conversion here prevents Qt
+// types from leaking across the launcher/runtime process boundary.
+xenon::core::JsonValue variantToJson(const QVariant& value) {
+  if (!value.isValid() || value.isNull()) return {};
+  switch (value.typeId()) {
+    case QMetaType::Bool:
+      return xenon::core::JsonValue(value.toBool());
+    case QMetaType::Int:
+    case QMetaType::UInt:
+    case QMetaType::LongLong:
+    case QMetaType::ULongLong:
+    case QMetaType::Double:
+    case QMetaType::Float:
+      return xenon::core::JsonValue(value.toDouble());
+    case QMetaType::QString:
+      return xenon::core::JsonValue(value.toString().toStdString());
+    case QMetaType::QStringList: {
+      auto out = xenon::core::JsonValue::make_array();
+      for (const auto& entry : value.toStringList()) out.append(entry.toStdString());
+      return out;
+    }
+    case QMetaType::QVariantList: {
+      auto out = xenon::core::JsonValue::make_array();
+      for (const auto& entry : value.toList()) out.append(variantToJson(entry));
+      return out;
+    }
+    case QMetaType::QVariantMap: {
+      auto out = xenon::core::JsonValue::make_object();
+      const auto map = value.toMap();
+      for (auto it = map.cbegin(); it != map.cend(); ++it) {
+        out.set(it.key().toStdString(), variantToJson(it.value()));
+      }
+      return out;
+    }
+    default:
+      return xenon::core::JsonValue(value.toString().toStdString());
+  }
+}
+
 // Converts a parsed JSON value (see xenon/core/json.hpp) into the QVariant
 // tree the rest of the launcher already works with, so RuntimeBridge can
 // hand session status straight to frontend_backend/QML without a second
@@ -89,14 +130,23 @@ QVariant jsonToVariant(const xenon::core::JsonValue& value) {
   return {};
 }
 
-// Helper: Find default.xex in content path (used only for a pre-flight
-// existence check; the runtime host resolves it again for itself since it
-// is the process that actually reads the file).
-bool contentHasDefaultXex(const QString& content_path) {
-  for (const auto* name : {"default.xex", "Default.xex", "DEFAULT.XEX"}) {
-    if (QFileInfo::exists(QDir(content_path).filePath(QString::fromLatin1(name)))) return true;
+bool directoryHasDefaultXex(const QString& content_path) {
+  const QDir directory(content_path);
+  const auto entries = directory.entryInfoList(QDir::Files | QDir::Readable | QDir::NoDotAndDotDot);
+  for (const auto& entry : entries) {
+    if (entry.fileName().compare(QStringLiteral("default.xex"), Qt::CaseInsensitive) == 0) return true;
   }
   return false;
+}
+
+bool isSupportedRuntimeContentSource(const QString& content_path) {
+  const QFileInfo info(content_path);
+  if (!info.exists()) return false;
+  if (info.isDir()) return directoryHasDefaultXex(content_path);
+  if (!info.isFile()) return false;
+  const auto extension = info.suffix().toLower();
+  return extension == QStringLiteral("xex") || extension == QStringLiteral("iso") ||
+         extension == QStringLiteral("xgd") || extension == QStringLiteral("dvd");
 }
 
 QString findTitleUpdatePath(const LaunchConfiguration& config) {
@@ -198,10 +248,25 @@ QVariantMap RuntimeBridge::capabilities() const {
   result.insert(QStringLiteral("graphics"), false);
   result.insert(QStringLiteral("audio"), false);
   result.insert(QStringLiteral("inputCompiled"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_INPUT));
-  result.insert(QStringLiteral("input"), static_cast<bool>(XENON_LAUNCHER_RUNTIME_INPUT));
+  result.insert(QStringLiteral("input"), false);
   result.insert(QStringLiteral("inputModuleApiVersion"), XENON_LAUNCHER_RUNTIME_INPUT ? 1 : 0);
   result.insert(QStringLiteral("network"), false);
   result.insert(QStringLiteral("sessionLaunch"), true);
+
+  // Once a runtime session exists, prefer its live subsystem snapshot over
+  // compile-time expectations. This keeps About/diagnostics honest when a
+  // backend was built but failed to initialize on the current machine.
+  const auto live = augmentedStatus();
+  if (live.value(QStringLiteral("available"), false).toBool()) {
+    const auto subsystems = live.value(QStringLiteral("subsystems")).toMap();
+    if (!subsystems.isEmpty()) {
+      result.insert(QStringLiteral("memory"), subsystems.value(QStringLiteral("memory"), false));
+      result.insert(QStringLiteral("graphics"), subsystems.value(QStringLiteral("gpu"), false));
+      result.insert(QStringLiteral("audio"), subsystems.value(QStringLiteral("audio"), false));
+      result.insert(QStringLiteral("input"), subsystems.value(QStringLiteral("input"), false));
+    }
+    result.insert(QStringLiteral("runtimeState"), live.value(QStringLiteral("stateName")));
+  }
   return result;
 }
 
@@ -215,10 +280,11 @@ ServiceResult RuntimeBridge::prepareLaunch(const LaunchConfiguration& configurat
     return ServiceResult::failure(QStringLiteral("Game content missing"),
                                   QStringLiteral("The launch configuration does not point to existing local game content."));
   }
-  if (!contentHasDefaultXex(content)) {
+  if (!isSupportedRuntimeContentSource(content)) {
     return ServiceResult::failure(
-        QStringLiteral("Game executable missing"),
-        QStringLiteral("Could not find a default.xex under the game's content path."));
+        QStringLiteral("Unsupported game content"),
+        QStringLiteral("Xenon can launch an extracted game directory containing default.xex, "
+                       "a loose .xex, or an Xbox 360 .iso/.xgd/.dvd disc source."));
   }
   if (configuration.module_id.trimmed().isEmpty()) {
     return ServiceResult::failure(QStringLiteral("Game module required"),
@@ -284,6 +350,8 @@ ServiceResult RuntimeBridge::launch(const LaunchConfiguration& configuration) {
   root.set("moduleName", configuration.module_name.toStdString());
   root.set("modulePath", configuration.module_path.toStdString());
   root.set("moduleVersion", configuration.module_version.toStdString());
+  root.set("moduleSettings", variantToJson(configuration.module_settings));
+  root.set("runtimeApiRequirements", variantToJson(configuration.runtime_api_requirements));
   root.set("nativeExtensionPath", configuration.native_extension_path.toStdString());
   root.set("profileId", configuration.profile_id.toStdString());
   root.set("profileName", configuration.profile_name.toStdString());
@@ -296,14 +364,20 @@ ServiceResult RuntimeBridge::launch(const LaunchConfiguration& configuration) {
   // silently come out wrong on the runtime host side.
   root.set("profileXuid", QString::number(0xE000000000000001ULL).toStdString());
   root.set("renderer", configuration.renderer.toStdString());
+  root.set("shaderCache", configuration.shader_cache);
+  root.set("shaderCacheMode", configuration.shader_cache_mode.toStdString());
   root.set("inputBackend", configuration.input_backend.toStdString());
+  root.set("inputPreferredDevice", configuration.input_preferred_device.toStdString());
+  root.set("inputDeadzone", configuration.input_deadzone);
+  root.set("inputRumble", configuration.input_rumble);
+  root.set("inputBackground", configuration.input_background);
+  root.set("inputModuleApiVersion", configuration.input_module_api_version);
+  root.set("inputProfileStorePath", configuration.input_profile_store_path.toStdString());
+  root.set("inputUserSources", variantToJson(configuration.input_user_sources));
   root.set("audioMasterVolume", configuration.audio_master_volume);
   root.set("audioMuteUnfocused", configuration.audio_mute_unfocused);
   root.set("audioLatencyProfile", configuration.audio_latency_profile.toStdString());
-  // See docs/runtime/RUNTIME_HOST.md: not yet sourced from the launcher's
-  // "developer/verboseLogging" setting (RuntimeBridge has no SettingsService
-  // access), so this is currently always false.
-  root.set("logVerbose", false);
+  root.set("logVerbose", configuration.verbose_logging);
   root.set("titleUpdatePath", findTitleUpdatePath(configuration).toStdString());
   root.set("dlcRootPath", findDlcRootPath(configuration).toStdString());
 

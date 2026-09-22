@@ -91,6 +91,8 @@ bool unmap(void* address, std::size_t) noexcept {
 
 bool supports_fixed_shared_mapping() noexcept { return false; }
 
+std::size_t fixed_shared_mapping_granularity() noexcept { return 0u; }
+
 void* reserve_fixed_shared_mapping_region(std::size_t) noexcept {
   return nullptr;
 }

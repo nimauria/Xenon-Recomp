@@ -55,6 +55,8 @@ class InputSystem {
   [[nodiscard]] bool focused() const noexcept;
   void set_background_input_policy(BackgroundInputPolicy policy);
   [[nodiscard]] BackgroundInputPolicy background_input_policy() const noexcept;
+  void set_vibration_enabled(bool enabled);
+  [[nodiscard]] bool vibration_enabled() const noexcept;
   [[nodiscard]] bool effective_active() const noexcept;
 
   [[nodiscard]] Result get_state(std::uint32_t user_index, State& out_state);
@@ -150,6 +152,7 @@ class InputSystem {
   bool active_{true};
   bool focused_{true};
   BackgroundInputPolicy background_policy_{BackgroundInputPolicy::ForegroundOnly};
+  bool vibration_enabled_{true};
   ProfileStore profiles_{};
   FrontendInputRouter frontend_router_{};
 };
