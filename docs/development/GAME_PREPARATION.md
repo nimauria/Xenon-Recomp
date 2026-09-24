@@ -138,6 +138,7 @@ never inferred from a filename.
 |---|---|---|
 | `title_id`, `media_id` | `XexEffectiveIdentity` | the executable's own declared identity changes |
 | `effective_image_hash` | `xbox::compute_effective_image_hash()` of the **effective** (decrypted/decompressed, title-update-patched if applicable) image | the base XEX or the applied title update changes in any way that changes code/data |
+| `xex_relative_path` | Gen 11: which discovered executable this artifact is for (`game_intake.hpp`'s `DiscoveredExecutable::relative_path`, default `"default.xex"`) | a title ships more than one XEX module — two modules of the same title never collide on one cache entry |
 | `module_id` | the assigned Xenon module | a different module is assigned |
 | `module_compatibility_version` | the module's **explicit** `manifest.json` `"compatibilityVersion"` field (`FileModuleHintProvider::compatibility_version()`, default `"1"`) — deliberately **not** the module's cosmetic display version | the module author bumps it (native hook/patch/ABI changes) |
 | `hint_set_hash` | SHA-1 of the exact `AnalysisHintSetV2` JSON actually consumed | the module's analysis data for this exact revision changes, even if `compatibilityVersion` was not bumped |
@@ -171,7 +172,13 @@ version, so an ordinary launcher update does not force this.
 - `discard()`/an unresolved `ArtifactStagingBuild`'s destructor removes the
   staging directory, leaving any existing valid entry untouched (Part 19).
 - `clean_stale_staging()` removes leftovers from a killed/crashed previous
-  run; the worker calls it once at startup.
+  run. It is deliberately **not** called automatically at worker startup any
+  more (Gen 10): with real preparation-workspace reuse and Gen 11's
+  multi-module preparation, more than one worker can legitimately be
+  building at once, and a blanket sweep could destroy another one's
+  in-progress staging directory. It remains available for explicit
+  maintenance use and is covered directly by
+  `tests/recomp/artifact_cache_tests.cpp`.
 
 Covered end-to-end by `tests/recomp/artifact_cache_tests.cpp` (digest
 stability/invalidation, stage/commit/discard, rollback-on-invalid-module,
@@ -189,20 +196,31 @@ Pipeline, entirely in-memory until generated source needs to hit disk:
 
 ```
 content (ISO / directory / loose .xex)
-  -> default.xex bytes (GdfxImageSource + filesystem::read_all() for an ISO;
-     a plain read for a directory/loose file - never extracted)
-  -> xbox::parse_xex_image()                              [base image]
-  -> xbox::apply_title_update()  (if --title-update given) [effective image]
-  -> xbox::compute_effective_identity()                    [cache key material]
-  -> FileModuleHintProvider::provide()                      [AnalysisHintSetV2]
-  -> ArtifactCacheStore::lookup()  -- Fresh? skip straight to done.
-  -> recomp::load_and_analyze() (DriverOptions::pre_parsed_image - the
-     already-resolved effective XexImage handed in directly; no re-parsing
-     of a raw file, no ISO-awareness anywhere in xex_loader.hpp/driver.hpp)
-  -> recomp::generate_project()          [generated C++ + CMakeLists.txt]
-  -> nested `cmake -S/-B` + `cmake --build --target xenon_game_module`
-  -> ArtifactCacheStore::begin_staging()/commit()           [atomic promote]
+  -> recomp::discover_game_executables()   [Gen 11: every .xex module, not
+                                             just default.xex - see
+                                             docs/recomp/GAME_INTAKE_GEN11.md]
+  -> for each discovered module:
+       -> recomp::read_game_executable_bytes() (GdfxImageSource +
+          filesystem::read_all() for an ISO; a plain read for a directory/
+          loose file - never extracted)
+       -> xbox::parse_xex_image()                              [base image]
+       -> xbox::apply_title_update()  (primary module only,
+          if --title-update given)                             [effective image]
+       -> xbox::compute_effective_identity()                    [cache key material]
+       -> FileModuleHintProvider::provide()                      [AnalysisHintSetV2]
+       -> ArtifactCacheStore::lookup()  -- Fresh? skip straight to done.
+       -> recomp::load_and_analyze() (DriverOptions::pre_parsed_image - the
+          already-resolved effective XexImage handed in directly; no re-parsing
+          of a raw file, no ISO-awareness anywhere in xex_loader.hpp/driver.hpp)
+       -> recomp::generate_project()          [generated C++ + CMakeLists.txt]
+       -> nested `cmake -S/-B` + `cmake --build --target xenon_game_module`
+       -> ArtifactCacheStore::begin_staging()/commit()           [atomic promote]
+  -> GameCompilationGraph::to_json()  [<cache-root>/game-compilation-graph.json]
 ```
+
+A title with exactly one discovered module (the overwhelming majority) runs
+byte-for-behavior-identically to every `xenon-prepare` invocation before
+Gen 11 existed.
 
 `DriverOptions::pre_parsed_image` (new field, `include/xenon/recomp/driver.hpp`)
 is what makes "no full ISO extraction" and "XEX Loader V2 stays
@@ -225,7 +243,10 @@ xenon-prepare --content <path> --cache-root <dir>
 `--query` never compiles — it only resolves identity and consults the cache,
 printing one line of JSON to stdout:
 `{"ok":true,"needsPreparation":bool,"status":"Fresh"|"Missing"|"Invalid","cacheKey":"...","titleId":"...","mediaId":"...","effectiveImageHash":"...","nativeExtensionPath":"..."}`
-(or `{"ok":false,"error":"..."}`). This is what the launcher uses for the
+(or `{"ok":false,"error":"..."}`). The top-level fields always describe the
+primary module; when Gen 11 discovers more than one executable, an
+additional `"modules"` array carries the same identity/status/cache-key
+shape per discovered module. This is what the launcher uses for the
 fast "does Play need to build anything?" check.
 
 Prepare mode (no `--query`) progressively overwrites `--status-file` with

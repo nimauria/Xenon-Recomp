@@ -1,6 +1,7 @@
 #include "xenon/recomp/worker_pool.hpp"
 
 #include <atomic>
+#include <algorithm>
 
 namespace xenon::recomp {
 
@@ -42,8 +43,8 @@ void WorkerPool::parallel_for(std::size_t count, const std::function<void(std::s
     }
   };
 
-  const auto worker_thread_count = worker_count_ > 1 ? worker_count_ - 1 : 0;
-  std::vector<std::thread> threads;
+  const auto worker_thread_count = std::min(worker_count_, count) - 1;
+  std::vector<std::jthread> threads;
   threads.reserve(worker_thread_count);
   for (std::size_t i = 0; i < worker_thread_count; ++i) threads.emplace_back(claim_and_run);
   // The calling thread also participates: for a small batch this means the

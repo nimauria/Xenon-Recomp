@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     if (tool == "recomp-driver")
       std::cout << "usage: recomp-driver <game.xex> [output-directory] [--hints file] "
                    "[--module <module-directory>] [--observations <adaptive-observations.jsonl>] "
-                   "[--knowledge <knowledge.jsonl>] [--knowledge-export <knowledge.jsonl>] "
+                   "[--graph-cache <directory>] [--knowledge <knowledge.jsonl>] [--knowledge-export <knowledge.jsonl>] "
                    "[--knowledge-min-score N] [--no-knowledge-seed] "
                    "[--jobs auto|N] [--quiet] [--json]\n"
                    "  --module points at an installed Project Gracemeria module package\n"
@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
         std::cerr << tool << ": --observations: " << observation_error << "\n";
         return 1;
       }
+    } else if (std::string(argv[index]) == "--graph-cache" && index + 1 < argc) {
+      options.graph_cache = argv[++index];
     } else if (std::string(argv[index]) == "--knowledge" && index + 1 < argc) {
       std::string knowledge_error;
       if (!xenon::recomp::load_knowledge_base(

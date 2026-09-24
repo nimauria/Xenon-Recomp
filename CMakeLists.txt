@@ -62,6 +62,9 @@ add_library(xenon_core STATIC
   src/core/guest_thread_context.cpp
   src/core/export_registry.cpp
   src/core/call_bridge.cpp
+  src/core/run_fingerprint.cpp
+  src/core/capability_report.cpp
+  src/logging/logger.cpp
   src/xam/user_manager.cpp
   src/xam/locale_manager.cpp
   src/xam/content_manager.cpp
@@ -194,12 +197,31 @@ endif()
 add_library(Xenon::CPU ALIAS xenon_cpu)
 
 # Whole-game static recompilation driver and its diagnostic utilities.
+# Gen 10 producer identities follow implementation changes even if a developer
+# forgets a manual ABI bump. CMake reconfigures when any producer input changes.
+file(GLOB_RECURSE _graph_ir_inputs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ppc/*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ir/*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/optimizer/*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/xenon/cpu/*.hpp")
+list(APPEND _graph_ir_inputs "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/function_compiler.cpp")
+set(_graph_ir_identity "")
+foreach(_input IN LISTS _graph_ir_inputs)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_input}")
+  file(SHA256 "${_input}" _hash)
+  string(APPEND _graph_ir_identity "${_hash};")
+endforeach()
+string(SHA256 XENON_GRAPH_IR_PRODUCER "${_graph_ir_identity}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/backend_cpp_aot.cpp")
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/backend_cpp_aot.cpp" XENON_GRAPH_CODEGEN_PRODUCER)
 find_package(Threads REQUIRED)
 
 add_library(xenon_recomp STATIC
   src/recomp/driver.cpp
   src/recomp/ppc_value_analysis.cpp
   src/recomp/knowledge_base.cpp
+  src/recomp/compilation_graph.cpp
+  src/recomp/game_intake.cpp
   src/recomp/analysis_schema.cpp
   src/recomp/analysis_schema_json.cpp
   src/recomp/native_replacements.cpp
@@ -208,6 +230,10 @@ add_library(xenon_recomp STATIC
   src/recomp/artifact_cache.cpp
   src/recomp/worker_pool.cpp
 )
+target_compile_definitions(xenon_recomp PRIVATE
+  XENON_GRAPH_IR_PRODUCER="${XENON_GRAPH_IR_PRODUCER}"
+  XENON_GRAPH_CODEGEN_PRODUCER="${XENON_GRAPH_CODEGEN_PRODUCER}")
+
 target_include_directories(xenon_recomp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io Threads::Threads)
 target_compile_features(xenon_recomp PUBLIC cxx_std_20)
@@ -243,6 +269,10 @@ xenon_enable_warnings(import-scanner)
 add_executable(xenon-prepare tools/xenon_prepare.cpp)
 target_link_libraries(xenon-prepare PRIVATE xenon_recomp)
 target_compile_definitions(xenon-prepare PRIVATE XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_compile_definitions(xenon-prepare PRIVATE
+  XENON_NATIVE_COMPILER="${CMAKE_CXX_COMPILER}"
+  XENON_CMAKE_COMMAND="${CMAKE_COMMAND}")
+
 if(NOT WIN32)
   target_link_libraries(xenon-prepare PRIVATE ${CMAKE_DL_LIBS})
 endif()
@@ -642,6 +672,19 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_session_tests)
   add_test(NAME xenon_session_tests COMMAND xenon_session_tests)
 
+  # Phase 0 (AC6 Runtime Readiness pass): shared telemetry/diagnostics
+  # foundation - CapabilityReportBuilder aggregation, the Logger's
+  # cheap-when-disabled gate, and RunFingerprint equality/serialization.
+  add_executable(xenon_capability_report_tests tests/core/capability_report_tests.cpp)
+  target_link_libraries(xenon_capability_report_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_capability_report_tests)
+  add_test(NAME xenon_capability_report_tests COMMAND xenon_capability_report_tests)
+
+  add_executable(xenon_run_fingerprint_tests tests/core/run_fingerprint_tests.cpp)
+  target_link_libraries(xenon_run_fingerprint_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_run_fingerprint_tests)
+  add_test(NAME xenon_run_fingerprint_tests COMMAND xenon_run_fingerprint_tests)
+
   add_executable(xenon_session_execution_tests
     tests/core/session_execution_tests.cpp)
   target_link_libraries(xenon_session_execution_tests PRIVATE xenon_core)
@@ -696,6 +739,13 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_kernel_io_tests PRIVATE xenon_kernel)
     xenon_enable_test_asserts(xenon_kernel_io_tests)
     add_test(NAME xenon_kernel_io_tests COMMAND xenon_kernel_io_tests)
+
+    # Phase 3 (AC6 Runtime Readiness pass): mutant owner-id-1 collision and
+    # wait_on_object() mutant thread-identity regressions.
+    add_executable(xenon_kernel_synchronization_tests tests/kernel/synchronization_tests.cpp)
+    target_link_libraries(xenon_kernel_synchronization_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_synchronization_tests)
+    add_test(NAME xenon_kernel_synchronization_tests COMMAND xenon_kernel_synchronization_tests)
   endif()
 
   if(TARGET xenon_xbox_kernel_io)
@@ -776,6 +826,22 @@ if(XENON_BUILD_TESTS)
 
   # Gen 9 universal knowledge base: versioned normalized fingerprints,
   # cross-revision matching, confidence gates, JSONL persistence and replay.
+  find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME xenon_native_cache_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/recomp/native_cache_tests.py")
+  set_tests_properties(xenon_native_cache_tests PROPERTIES ENVIRONMENT "XENON_TEST_CXX=${CMAKE_CXX_COMPILER}")
+  add_executable(xenon_compilation_graph_tests tests/recomp/compilation_graph_tests.cpp)
+  target_link_libraries(xenon_compilation_graph_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_compilation_graph_tests)
+  add_test(NAME xenon_compilation_graph_tests COMMAND xenon_compilation_graph_tests)
+
+  # Gen 11 autonomous game intake: multi-executable discovery over a
+  # directory, a loose .xex file and a synthetic disc image, plus the Game
+  # Compilation Graph's JSON shape.
+  add_executable(xenon_game_intake_tests tests/recomp/game_intake_tests.cpp)
+  target_link_libraries(xenon_game_intake_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_game_intake_tests)
+  add_test(NAME xenon_game_intake_tests COMMAND xenon_game_intake_tests)
+
   add_executable(xenon_knowledge_base_tests tests/recomp/knowledge_base_tests.cpp)
   target_link_libraries(xenon_knowledge_base_tests PRIVATE xenon_recomp)
   xenon_enable_test_asserts(xenon_knowledge_base_tests)
@@ -801,7 +867,9 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_prepare_worker_tests PRIVATE xenon_recomp)
   target_compile_definitions(xenon_prepare_worker_tests PRIVATE
     XENON_PREPARE_EXECUTABLE="$<TARGET_FILE:xenon-prepare>"
-    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    XENON_NATIVE_COMPILER="${CMAKE_CXX_COMPILER}"
+    XENON_CMAKE_COMMAND="${CMAKE_COMMAND}")
   add_dependencies(xenon_prepare_worker_tests xenon-prepare)
   xenon_enable_test_asserts(xenon_prepare_worker_tests)
   add_test(NAME xenon_prepare_worker_tests COMMAND xenon_prepare_worker_tests)

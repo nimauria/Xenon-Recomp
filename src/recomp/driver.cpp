@@ -559,6 +559,8 @@ struct AnalysisContext {
   const std::map<GuestAddress, std::string>& known_names;
   const std::vector<analysis::RuntimeHelper>& expanded_runtime_helpers;
   bool allow_partial;
+  std::filesystem::path graph_cache;
+  graph::Versions graph_versions;
   std::uint64_t configuration_hash;
   // Part 1 (Recomp Analysis V3): every DiscoverySource ever attached to a
   // runtime-discovered (non-seed) candidate address, accumulated by the
@@ -1496,7 +1498,6 @@ FunctionAnalysisResult analyze_function_candidate(GuestAddress start, const Anal
     // allow_partial: fall through and still accept this (uncompiled)
     // function, matching the previous algorithm exactly.
   } else {
-    cpu::StaticFunctionCompiler compiler;
     std::vector<cpu::FunctionCodeRange> compile_ranges;
     compile_ranges.reserve(1u + child_ranges.size() + inferred_local_ranges.size());
     compile_ranges.push_back({start, words});
@@ -1505,7 +1506,10 @@ FunctionAnalysisResult analyze_function_candidate(GuestAddress start, const Anal
     for (const auto& range : inferred_local_ranges)
       compile_ranges.push_back({range.start, range.words});
 
-    const auto compile_result = compiler.compile_ranges(start, compile_ranges);
+    auto region = graph::compile_region(graph::Store(ctx.graph_cache), ctx.graph_versions, start, compile_ranges);
+    function.compilation_nodes = std::move(region.nodes);
+    function.ir_cache_hit = region.ir_hit;
+    const auto& compile_result = region.compiled;
     if (!compile_result.ok) {
       // NOTE: a compile failure (as opposed to a decode failure above) is
       // always recorded as an uncompiled DiscoveredFunction entry
@@ -2271,6 +2275,8 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
                             known_names,
                             expanded_runtime_helpers,
                             effective.allow_partial,
+                            effective.graph_cache.empty() ? effective.output / ".graph" : effective.graph_cache,
+                            effective.graph_versions,
                             report.configuration_hash,
                             discovered_evidence};
 
@@ -3025,26 +3031,7 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
     error = "unable to create generation staging directory: " + ec.message();
     return fail_generation("staging");
   }
-  const auto cache_directory = options.output / ".cache";
-  std::filesystem::create_directories(cache_directory, ec);
-  // Shard the cache into 256 subdirectories (first 2 hex characters of each
-  // function's content hash), created once up front here rather than
-  // per-file inside the parallel loop below. Measured during development: a
-  // single flat directory receiving thousands of concurrent small-file
-  // creates from many worker threads showed real filesystem-level
-  // contention (NTFS directory metadata locking, likely compounded by
-  // antivirus real-time scanning on typical Windows dev/CI machines) severe
-  // enough to make parallel codegen slower than serial on an I/O-dominated
-  // synthetic benchmark. Sharding removes the single shared hot directory;
-  // pre-creating every shard here (idempotent, cheap, serial) means no
-  // worker ever needs to create a directory itself.
-  for (unsigned high = 0; high < 16; ++high)
-    for (unsigned low = 0; low < 16; ++low) {
-      std::ostringstream shard_name;
-      shard_name << std::hex << high << low;
-      std::filesystem::create_directories(cache_directory / shard_name.str(), ec);
-    }
-
+  const graph::Store graph_store(options.graph_cache.empty() ? options.output / ".graph" : options.graph_cache);
   // Phase K (Part 2/16): parallel native code generation. Native-replacement
   // entries have no IR/guest bytes to emit (only a registry.cpp
   // lookup_compiled() case, handled below), so they never occupy a codegen
@@ -3083,6 +3070,8 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
   const auto worker_count = resolve_worker_count(options.codegen_jobs);
   const WorkerPool pool(worker_count);
   std::vector<std::string> function_sources(codegen_items.size());
+  std::vector<graph::Node> source_nodes(codegen_items.size());
+  std::vector<unsigned> source_hits(codegen_items.size());
   pool.parallel_for(codegen_items.size(), [&](std::size_t i) {
     // cpu::backend::CppAotBackend is stateless (no members, every method
     // const - see include/xenon/cpu/backend/cpp_aot.hpp), so a fresh
@@ -3095,47 +3084,24 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
         aliases_it == alternate_entries_by_owner.end()
             ? std::span<const GuestAddress>{}
             : std::span<const GuestAddress>(aliases_it->second);
-    auto codegen_hash = function.source_hash;
-    for (const auto entry : alternate_entries)
-      codegen_hash = hash_bytes(std::as_bytes(std::span(&entry, 1)), codegen_hash);
-    const auto hash_text = hash_name(codegen_hash);
-    // Codegen cache key fix (generated-code deduplication / shard ownership
-    // fix): the cache MUST be keyed by this function's own canonical
-    // identity (guest_start), not by content hash alone. source_hash is
-    // derived only from guest instruction bytes + FunctionChunk words +
-    // configuration - it says nothing about WHICH address those bytes came
-    // from, so two different, unrelated functions with byte-identical
-    // machine code (extremely common for trivial stub bodies - a bare
-    // `blr`, a `li r3,0; blr` return-0 thunk, etc. - across a real title's
-    // tens of thousands of functions) previously hashed to the exact same
-    // cache_path. Whichever function reached that path first won: every
-    // other colliding function's `function_source` became a cache HIT
-    // containing the FIRST function's own emitted text - literally defining
-    // the first function's `_dispatch_v2`/`_v2`/base symbols a second time
-    // (wherever the colliding function landed in shard order), while the
-    // colliding function's OWN symbols were never emitted at all despite
-    // registry.cpp still declaring and referencing them. This is the actual
-    // root cause of the "function already has a body" (C2084) duplicate-
-    // definition errors this fix addresses - not a duplicate
-    // DiscoveredFunction, but a cache entry silently shared by two unrelated
-    // ones. Including guest_start in the key makes that collision
-    // impossible while still letting the exact same function hit its own
-    // cache entry across incremental runs (same address + same bytes/config
-    // -> same key -> valid, intentional reuse).
-    const auto cache_path =
-        cache_directory / hash_text.substr(0, 2) / (hash_text + "_" + hex_string(function.guest_start) + ".cpp");
-    std::ifstream cached(cache_path);
-    std::string function_source((std::istreambuf_iterator<char>(cached)), {});
-    cached.close();
-    if (function_source.empty()) {
+    std::string aliases;
+    for (auto entry : alternate_entries) aliases += std::to_string(entry) + ";";
+    // Exact canonical IR, emitted symbol and aliases are all backend inputs.
+    // Whole-image configuration/knowledge identity is intentionally absent.
+    graph::Node node{"source", options.graph_versions.codegen,
+        {{"ir", graph::digest(graph::serialize_ir(function.ir))},
+         {"symbol", function.name}, {"aliases", aliases},
+         {"producer_build", graph::producer_identity("source")},
+         {"cpu_semantics", options.graph_versions.semantics}}, {}};
+    // Output-based dependency permits cutoff when analysis changes but IR does not.
+    node.dependencies.push_back(graph::digest(graph::serialize_ir(function.ir)));
+    source_nodes[i] = node;
+    auto cached = graph_store.lookup(node);
+    std::string function_source;
+    if (cached) { function_source = std::move(cached->bytes); source_hits[i] = 1; }
+    else {
       function_source = backend.emit_translation_unit(function.ir, function.name, {}, alternate_entries);
-      // Each function's cache file is now keyed by (content hash, guest
-      // address), which is unique per function by construction (report.
-      // functions is address-deduplicated before codegen ever runs - see
-      // deduplicate_functions_by_address()), so concurrent writes from
-      // different workers never target the same path - no lock needed here.
-      std::ofstream cache(cache_path);
-      cache << function_source;
+      (void)graph_store.publish(node, function_source);
     }
     function_sources[i] = std::move(function_source);
   });
@@ -3169,7 +3135,7 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
         }
       }
       const auto path = options.output / "functions" / ("shard_" + [&] {
-        std::ostringstream s; s << std::setfill('0') << std::setw(3) << (index / options.shard_function_count); return s.str();
+        std::ostringstream s; s << std::setfill('0') << std::setw(3) << (options.shard_function_count == 1 ? codegen_items[index]->guest_start : index / options.shard_function_count); return s.str();
       }() + ".cpp");
       shards.push_back(path);
       shard_path = path;
@@ -3467,6 +3433,10 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
            "add_library(xenon_game_module SHARED module_export.cpp)\n"
            "target_link_libraries(xenon_game_module PRIVATE xenon_game)\n"
            "target_include_directories(xenon_game_module PRIVATE ${XENON_RECOMP_ROOT}/include)\n";
+  build << "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
+           "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
+           "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
+           "set_property(TARGET xenon_game PROPERTY CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n";
   // Close every staged root file before promotion (important on Windows,
   // where an open stream prevents replacement).
   registry_header.close();
@@ -3492,8 +3462,13 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
     const auto source = generation_stage / file_name;
     const auto destination = options.output / file_name;
     ec.clear();
-    std::filesystem::copy_file(source, destination,
-                               std::filesystem::copy_options::overwrite_existing, ec);
+    std::ifstream previous_file(destination, std::ios::binary), next_file(source, std::ios::binary);
+    const std::string previous((std::istreambuf_iterator<char>(previous_file)), {});
+    const std::string next((std::istreambuf_iterator<char>(next_file)), {});
+    previous_file.close(); next_file.close();
+    if (previous != next || !std::filesystem::exists(destination))
+      std::filesystem::copy_file(source, destination,
+                                 std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
       error = std::string("unable to promote generated ") + file_name + ": " + ec.message();
       return fail_generation("promoting");
@@ -3506,6 +3481,23 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
           std::chrono::steady_clock::now() - codegen_start)
           .count();
   write_generation_status(true, "complete", {});
+  // Deterministic topology is separate from run-specific hit/timing diagnostics.
+  std::ofstream graph_manifest(options.output / "compilation-graph.json", std::ios::binary);
+  graph_manifest << "{\"schema\":1,\"regions\":[";
+  std::size_t hits = 0, ir_hits = 0, reused_bytes = 0;
+  for (std::size_t i=0;i<source_nodes.size();++i) {
+    if(i) graph_manifest << ',';
+    graph_manifest << "{\"address\":" << codegen_items[i]->guest_start << ",\"nodes\":[";
+    for (const auto& n : codegen_items[i]->compilation_nodes) graph_manifest << n.canonical() << ',';
+    graph_manifest << source_nodes[i].canonical() << "]}";
+    hits += source_hits[i]; ir_hits += codegen_items[i]->ir_cache_hit;
+    if(source_hits[i]) reused_bytes += function_sources[i].size();
+  }
+  graph_manifest << "]}"; graph_manifest.close();
+  if (!graph_manifest) { error="failed to write compilation graph"; return false; }
+  if(options.progress) options.progress("[Graph] IR hits="+std::to_string(ir_hits)+
+      " source hits="+std::to_string(hits)+" misses="+std::to_string(source_nodes.size()-hits)+
+      " reused bytes="+std::to_string(reused_bytes)+" workers="+std::to_string(worker_count));
   if (options.progress) options.progress("[Codegen] complete");
   return true;
 }

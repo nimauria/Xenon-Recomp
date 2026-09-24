@@ -18,13 +18,16 @@
 #include <string>
 #include <vector>
 
+#include "xenon/core/json.hpp"
 #include "xenon/recomp/analysis_schema_json.hpp"
 #include "xenon/recomp/artifact_cache.hpp"
+#include "xenon/recomp/compilation_graph.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
 using namespace xenon::recomp;
 using namespace xenon::recomp::analysis;
+using xenon::core::JsonValue;
 namespace xbox = xenon::xbox;
 
 namespace {
@@ -152,9 +155,12 @@ ArtifactCacheKey expected_key(const xbox::XexEffectiveIdentity& identity,
   key.title_id = identity.title_id;
   key.media_id = identity.media_id;
   key.effective_image_hash = xbox::format_effective_image_hash(identity.effective_image_hash);
+  key.xex_relative_path = "default.xex";
   key.module_id = "xenon_test_module";
   key.module_compatibility_version = "1";
   key.hint_set_hash = hash_hint_set(hints);
+  key.preparation_identity = xenon::recomp::graph::preparation_identity(
+      std::filesystem::path(XENON_SOURCE_ROOT), XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
   key.target_arch = default_target_arch();
   key.build_config = "Release";
   return key;
@@ -163,8 +169,9 @@ ArtifactCacheKey expected_key(const xbox::XexEffectiveIdentity& identity,
 }  // namespace
 
 int main() {
-#if !defined(XENON_PREPARE_EXECUTABLE) || !defined(XENON_SOURCE_ROOT)
-#error "XENON_PREPARE_EXECUTABLE and XENON_SOURCE_ROOT must be defined for this test"
+#if !defined(XENON_PREPARE_EXECUTABLE) || !defined(XENON_SOURCE_ROOT) || \
+    !defined(XENON_NATIVE_COMPILER) || !defined(XENON_CMAKE_COMMAND)
+#error "XENON_PREPARE_EXECUTABLE, XENON_SOURCE_ROOT, XENON_NATIVE_COMPILER and XENON_CMAKE_COMMAND must be defined for this test"
 #endif
   std::cout << "Testing xenon-prepare worker end to end...\n";
 
@@ -302,6 +309,108 @@ int main() {
   }
   assert(staging_entries == 0);
   std::cout << "  [PASS] A pre-signalled cancellation exits cleanly and disturbs nothing\n";
+
+  // ---------------------------------------------------------------------
+  // Gen 11 (Autonomous Game Intake): a content directory shipping a second
+  // executable XEX module alongside the mandatory default.xex must have both
+  // independently analyzed, compiled and cached - never colliding on one
+  // cache entry even though both fixtures share byte-identical content here -
+  // and the outcome of both must be recorded in a deterministic Game
+  // Compilation Graph manifest. Uses its own fixture root, entirely separate
+  // from every test above.
+  // ---------------------------------------------------------------------
+  {
+    const auto multi_root = std::filesystem::temp_directory_path() / "xenon_prepare_worker_test_multi";
+    std::filesystem::remove_all(multi_root);
+    std::filesystem::create_directories(multi_root);
+
+    const auto multi_content = multi_root / "content";
+    std::filesystem::create_directories(multi_content / "media");
+    write_file(multi_content / "default.xex", xex_bytes);
+    write_file(multi_content / "media" / "secondary.xex", xex_bytes);
+
+    const auto multi_cache = multi_root / "cache";
+    const auto multi_status = multi_root / "status.json";
+    const auto run_multi_prepare = [&](bool query) {
+      std::ostringstream command;
+      command << quote(prepare_exe) << " --content " << quote(multi_content) << " --cache-root "
+              << quote(multi_cache) << " --status-file " << quote(multi_status) << " --recomp-root "
+              << quote(std::filesystem::path(XENON_SOURCE_ROOT));
+      if (query) command << " --query";
+      return run_system(command.str());
+    };
+
+    const auto read_graph = [&] {
+      JsonValue graph;
+      std::string parse_error;
+      const auto text = read_text_file(multi_cache / "game-compilation-graph.json");
+      assert(JsonValue::parse(text, graph, &parse_error) && parse_error.empty());
+      return graph;
+    };
+
+    const auto find_module = [](const JsonValue& graph, const std::string& relative_path) -> JsonValue {
+      const auto* modules_value = graph.find("modules");
+      assert(modules_value != nullptr);
+      const auto* modules = modules_value->as_array();
+      assert(modules != nullptr);
+      for (const auto& module : *modules) {
+        if (module.get_string("relativePath") == relative_path) return module;
+      }
+      assert(false && "expected module missing from game-compilation-graph.json");
+      return {};
+    };
+
+    assert(run_multi_prepare(/*query=*/false) == 0);
+    {
+      const auto graph = read_graph();
+      assert(graph.get_number("schemaVersion") == 1.0);
+      const auto* modules_value = graph.find("modules");
+      assert(modules_value != nullptr);
+      const auto* modules = modules_value->as_array();
+      assert(modules != nullptr && modules->size() == 2);
+
+      const auto primary = find_module(graph, "default.xex");
+      assert(primary.get_bool("isPrimary"));
+      assert(primary.get_string("status") == "Prepared");
+      const auto primary_path = primary.get_string("nativeExtensionPath");
+      assert(!primary_path.empty());
+      assert(std::filesystem::exists(primary_path));
+
+      const auto secondary = find_module(graph, "media/secondary.xex");
+      assert(!secondary.get_bool("isPrimary"));
+      assert(secondary.get_string("status") == "Prepared");
+      const auto secondary_path = secondary.get_string("nativeExtensionPath");
+      assert(!secondary_path.empty());
+      assert(std::filesystem::exists(secondary_path));
+
+      // Two distinct entries, never one module silently reusing the other's
+      // compiled artifact.
+      assert(primary_path != secondary_path);
+    }
+    std::cout << "  [PASS] A secondary discovered XEX module is independently analyzed, compiled and cached\n";
+
+    const auto first_primary_mtime =
+        std::filesystem::last_write_time(find_module(read_graph(), "default.xex").get_string("nativeExtensionPath"));
+    const auto first_secondary_mtime = std::filesystem::last_write_time(
+        find_module(read_graph(), "media/secondary.xex").get_string("nativeExtensionPath"));
+
+    assert(run_multi_prepare(/*query=*/false) == 0);
+    {
+      const auto graph = read_graph();
+      assert(find_module(graph, "default.xex").get_string("status") == "Fresh");
+      assert(find_module(graph, "media/secondary.xex").get_string("status") == "Fresh");
+      assert(std::filesystem::last_write_time(
+                 find_module(graph, "default.xex").get_string("nativeExtensionPath")) == first_primary_mtime);
+      assert(std::filesystem::last_write_time(find_module(graph, "media/secondary.xex")
+                                              .get_string("nativeExtensionPath")) == first_secondary_mtime);
+    }
+    std::cout << "  [PASS] A second Play with both modules already fresh rebuilds neither\n";
+
+    assert(run_multi_prepare(/*query=*/true) == 0);
+    std::cout << "  [PASS] Query mode succeeds for a multi-module content source\n";
+
+    std::filesystem::remove_all(multi_root);
+  }
 
   std::filesystem::remove_all(root);
   std::cout << "All xenon-prepare worker tests passed!\n";

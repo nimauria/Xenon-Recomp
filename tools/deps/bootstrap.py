@@ -557,6 +557,13 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, qu
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
 
+    # This pinned fork tracks config.h for its premake build. FFmpeg's
+    # configure refuses an out-of-tree build when that file is present.
+    # Use an isolated source copy, preserving the pinned checkout verbatim.
+    configured_source = build / "source"
+    shutil.copytree(source, configured_source, ignore=shutil.ignore_patterns(".git", "config.h"))
+    source = configured_source
+
     # Convert Windows paths to MSYS-style paths without requiring cygpath.
     def msys_path(p: Path) -> str:
         s = str(p.resolve()).replace("\\", "/")

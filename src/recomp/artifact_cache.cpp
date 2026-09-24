@@ -1,4 +1,5 @@
 #include "xenon/recomp/artifact_cache.hpp"
+#include "xenon/recomp/compilation_graph.hpp"
 
 #include "xenon/xbox/xex_crypto.hpp"
 
@@ -53,6 +54,7 @@ struct ManifestData {
   std::string key_digest;
   std::string native_extension_relative;
   std::string built_at;
+  std::string native_sha256;
 };
 
 bool write_manifest(const std::filesystem::path& dir, const std::string& key_digest,
@@ -66,6 +68,12 @@ bool write_manifest(const std::filesystem::path& dir, const std::string& key_dig
   out << "key_digest=" << key_digest << "\n";
   out << "native_extension_relative=" << native_extension_relative.generic_string() << "\n";
   out << "built_at=" << built_at << "\n";
+  std::ifstream module(dir / native_extension_relative, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(module)), {});
+  out << "native_sha256=" << graph::digest(bytes) << "\n";
+  out.flush();
+  if (!out) { error="failed to flush artifact manifest"; return false; }
+
   return true;
 }
 
@@ -78,6 +86,7 @@ bool read_manifest(const std::filesystem::path& dir, ManifestData& out) {
     if (pos == std::string::npos) continue;
     const auto key = line.substr(0, pos);
     const auto value = line.substr(pos + 1);
+    if (key == "native_sha256") out.native_sha256 = value;
     if (key == "key_digest") out.key_digest = value;
     else if (key == "native_extension_relative") out.native_extension_relative = value;
     else if (key == "built_at") out.built_at = value;
@@ -98,18 +107,20 @@ std::string ArtifactCacheKey::digest() const {
   const auto append = [&](std::string_view label, std::string_view value) {
     canonical += label;
     canonical += '=';
-    canonical += value;
+    canonical += std::to_string(value.size()) + ":" + std::string(value);
     canonical += ';';
   };
   append("title_id", std::to_string(title_id));
   append("media_id", std::to_string(media_id));
   append("effective_image_hash", effective_image_hash);
+  append("xex_relative_path", xex_relative_path);
   append("module_id", module_id);
   append("module_compatibility_version", module_compatibility_version);
   append("hint_set_hash", std::to_string(hint_set_hash));
   append("adaptive_observation_hash", std::to_string(adaptive_observation_hash));
   append("knowledge_base_hash", std::to_string(knowledge_base_hash));
   append("abi_version", std::to_string(abi_version));
+  append("preparation_identity", preparation_identity);
   append("target_arch", target_arch);
   append("build_config", build_config);
 
@@ -290,8 +301,11 @@ ArtifactCacheEntry ArtifactCacheStore::lookup(const ArtifactCacheKey& key) const
   }
 
   const auto module_path = entry_dir / std::filesystem::path(manifest.native_extension_relative);
+  std::ifstream module(module_path, std::ios::binary);
+  const std::string module_bytes((std::istreambuf_iterator<char>(module)), {});
+  module.close();
   std::string validate_error;
-  if (!validate_native_module(module_path, validate_error)) {
+  if (manifest.native_sha256 != graph::digest(module_bytes) || !validate_native_module(module_path, validate_error)) {
     entry.status = ArtifactCacheStatus::Invalid;
     return entry;
   }

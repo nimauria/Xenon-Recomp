@@ -32,7 +32,7 @@ namespace xenon::recomp {
 // exported entry points, or CPU V2's codegen would make an already-compiled
 // xenon_game_module unsafe to keep using even though nothing about the game
 // itself changed.
-inline constexpr std::uint32_t kArtifactAbiVersion = 3;
+inline constexpr std::uint32_t kArtifactAbiVersion = 5;
 
 // Everything that determines whether a previously prepared native module can
 // still be used, or must be rebuilt. Two keys with identical field values are
@@ -47,6 +47,14 @@ struct ArtifactCacheKey {
   // differently whenever the patch changes code/data), so no separate title-
   // update identity field is needed.
   std::string effective_image_hash;
+  // Gen 11: which executable inside the content source this artifact was
+  // built from (game_intake.hpp's DiscoveredExecutable::relative_path) -
+  // "default.xex" for every prior single-module preparation and for a
+  // title's primary module. A title with more than one discovered XEX
+  // module gets one independently cached artifact per module; this field is
+  // what keeps two different modules from ever colliding on the same cache
+  // entry even if they otherwise share every other identity field.
+  std::string xex_relative_path{"default.xex"};
   std::string module_id;
   // The module's EXPLICIT preparation/codegen compatibility identity
   // (FileModuleHintProvider::compatibility_version(), manifest.json's
@@ -74,6 +82,7 @@ struct ArtifactCacheKey {
   // like a hint/adaptive-control-flow change does.
   std::uint64_t knowledge_base_hash{};
   std::uint32_t abi_version{kArtifactAbiVersion};
+  std::string preparation_identity; // exact producer/toolchain/header/library environment
   std::string target_arch;   // e.g. "x86_64", "arm64"
   std::string build_config;  // e.g. "Release", "Debug"
 

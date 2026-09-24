@@ -8,12 +8,14 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "xenon/recomp/driver.hpp"
@@ -23,6 +25,24 @@ using namespace xenon::recomp::analysis;
 namespace xbox = xenon::xbox;
 
 namespace {
+
+// generate_project() writes many small files across worker threads; on
+// Windows a just-closed file can still be transiently held open by realtime
+// antivirus scanning for a few milliseconds (the exact contention this
+// project's own shard-cache directory sharding comment in driver.cpp already
+// documents), which makes the throwing std::filesystem::remove_all() overload
+// occasionally raise an uncaught filesystem_error out of test cleanup and
+// hard-crash the whole binary instead of reporting a normal failure. Retry a
+// handful of times before giving up for real.
+void remove_all_tolerant(const std::filesystem::path& path) {
+  std::error_code ec;
+  for (int attempt = 0; attempt < 20; ++attempt) {
+    std::filesystem::remove_all(path, ec);
+    if (!ec || !std::filesystem::exists(path)) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+  std::filesystem::remove_all(path);  // let the real error surface if it never clears
+}
 
 void be32(std::vector<std::byte>& bytes, std::size_t offset, std::uint32_t value) {
   bytes[offset] = static_cast<std::byte>(value >> 24);
@@ -150,7 +170,7 @@ bool run(const std::vector<std::byte>& xex_bytes, const std::optional<AnalysisHi
         AnalysisReport& report, const std::filesystem::path& root,
         const std::optional<xbox::XexTls>& tls = std::nullopt,
         std::optional<std::size_t> jobs = std::nullopt) {
-  std::filesystem::remove_all(root);
+  remove_all_tolerant(root);
   std::filesystem::create_directories(root);
   DriverOptions options{};
   options.input = root / "fixture.xex";
@@ -175,7 +195,7 @@ bool run(const std::vector<std::byte>& xex_bytes, const std::optional<AnalysisHi
   std::string error;
   const bool ok = load_and_analyze(options, report, error);
   if (!ok) std::cerr << "load_and_analyze failed: " << error << "\n";
-  std::filesystem::remove_all(root);
+  remove_all_tolerant(root);
   return ok;
 }
 
@@ -204,6 +224,7 @@ bool owns_address(const DiscoveredFunction& function, std::uint32_t address) {
 }  // namespace
 
 int main() {
+  std::cout.setf(std::ios::unitbuf);
   std::cout << "Testing Recomp Analysis V3 discovery quality...\n";
   const auto root = std::filesystem::temp_directory_path() / "xenon_discovery_quality_test";
   const std::uint32_t base = kLoadAddress + kTextRva;
@@ -426,7 +447,7 @@ int main() {
     AnalysisReport report;
     // allow_partial so the (deliberately) data-shaped table word doesn't
     // abort compilation of whatever function happens to scan into it.
-    std::filesystem::remove_all(root / "switch_with_compare");
+    remove_all_tolerant(root / "switch_with_compare");
     std::filesystem::create_directories(root / "switch_with_compare");
     DriverOptions options{};
     options.input = root / "switch_with_compare" / "fixture.xex";
@@ -441,7 +462,7 @@ int main() {
                    [](const auto& w) { return w.find("recovered possible jump-table target") != std::string::npos; });
     assert(recovered && "a bounds check shortly before an unresolved indirect branch must enable recovery");
     (void)table_word_addr;
-    std::filesystem::remove_all(root / "switch_with_compare");
+    remove_all_tolerant(root / "switch_with_compare");
   }
   std::cout << "  [PASS] Jump-table recovery fires when a bounds check appears shortly before the branch\n";
 
@@ -467,7 +488,7 @@ int main() {
     hints.identity = xbox::compute_effective_identity(image);
     hints.functions.push_back(fn);
     AnalysisReport report;
-    std::filesystem::remove_all(root / "switch_without_compare");
+    remove_all_tolerant(root / "switch_without_compare");
     std::filesystem::create_directories(root / "switch_without_compare");
     DriverOptions options{};
     options.input = root / "switch_without_compare" / "fixture.xex";
@@ -483,7 +504,7 @@ int main() {
                    [](const auto& w) { return w.find("recovered possible jump-table target") != std::string::npos; });
     assert(!recovered &&
            "with no bounds check nearby, pointer-shaped data must NOT be promoted to a discovered target");
-    std::filesystem::remove_all(root / "switch_without_compare");
+    remove_all_tolerant(root / "switch_without_compare");
   }
   std::cout << "  [PASS] Jump-table recovery does NOT fire without a nearby bounds check\n";
 
@@ -756,7 +777,7 @@ int main() {
         kBlr,
     };
     const auto xex_bytes = make_xex(words);
-    std::filesystem::remove_all(root / "resolved_indirect_jump_table");
+    remove_all_tolerant(root / "resolved_indirect_jump_table");
     std::filesystem::create_directories(root / "resolved_indirect_jump_table");
     DriverOptions options{};
     options.input = root / "resolved_indirect_jump_table" / "fixture.xex";
@@ -778,7 +799,7 @@ int main() {
     assert(report.diagnostics.resolved_indirect_via_dataflow == 0u);
     assert(report.diagnostics.functions_with_resolved_indirect_provenance == 0u &&
            "resolved branch targets absorbed into an owner are entries, not functions");
-    std::filesystem::remove_all(root / "resolved_indirect_jump_table");
+    remove_all_tolerant(root / "resolved_indirect_jump_table");
   }
   std::cout << "  [PASS] Jump-table-resolved-indirect provenance and diagnostics agree, distinctly from dataflow\n";
 
@@ -791,7 +812,7 @@ int main() {
     const std::vector<std::uint32_t> words = {kBlr, kBlr};
     const auto xex_bytes = make_xex(words);
     const auto test_root = root / "codegen_control_flow_invariant";
-    std::filesystem::remove_all(test_root);
+    remove_all_tolerant(test_root);
     std::filesystem::create_directories(test_root);
 
     DriverOptions options{};
@@ -814,7 +835,7 @@ int main() {
     assert(!generate_project(options, report, error));
     assert(error.find("without a materialized local CFG block or dispatchable compiled entry") !=
            std::string::npos);
-    std::filesystem::remove_all(test_root);
+    remove_all_tolerant(test_root);
   }
   std::cout << "  [PASS] Codegen rejects unmaterialized external direct-control-flow targets\n";
 
@@ -834,7 +855,7 @@ int main() {
     const auto xex_bytes = make_xex(words);
     const auto alternate = base + 3u * 4u;
     const auto test_root = root / "region_entry_runtime_observation";
-    std::filesystem::remove_all(test_root);
+    remove_all_tolerant(test_root);
     std::filesystem::create_directories(test_root);
 
     DriverOptions options{};
@@ -873,8 +894,11 @@ int main() {
       value << std::hex << std::uppercase << alternate;
       return value.str();
     }() + "_v2";
-    std::ifstream registry(options.output / "registry.cpp");
-    const std::string registry_text((std::istreambuf_iterator<char>(registry)), {});
+    std::string registry_text;
+    {
+      std::ifstream registry(options.output / "registry.cpp");
+      registry_text.assign(std::istreambuf_iterator<char>(registry), std::istreambuf_iterator<char>());
+    }
     assert(registry_text.find(wrapper_symbol) != std::string::npos &&
            "alternate entry must be published by generated registry.cpp");
     bool wrapper_emitted = false;
@@ -888,7 +912,7 @@ int main() {
       }
     }
     assert(wrapper_emitted && "the canonical function's shard must define the alternate-entry wrapper");
-    std::filesystem::remove_all(test_root);
+    remove_all_tolerant(test_root);
   }
   std::cout << "  [PASS] Runtime-observed interior blocks collapse into generated alternate entries\n";
 
@@ -990,7 +1014,7 @@ int main() {
     assert(load_and_analyze(options, repeated_report, error) && error.empty());
     assert(repeated_report.diagnostics.pointer_tables_discovered == 0u);
     assert(repeated_report.diagnostics.pointer_table_targets_discovered == 0u);
-    std::filesystem::remove_all(test_root);
+    remove_all_tolerant(test_root);
   }
   std::cout << "  [PASS] Static pointer-table scanning requires diverse executable-entry structure\n";
 
@@ -1168,7 +1192,7 @@ int main() {
     assert(has_source(*entry_function, DiscoverySource::PointerTable));
     assert(has_source(*entry_function, DiscoverySource::RuntimeObservation));
     assert(entry_function->authority == FunctionAuthority::EntryPoint);
-    std::filesystem::remove_all(options.output);
+    remove_all_tolerant(options.output);
   }
   std::cout << "  [PASS] Initial seeds accumulate evidence without weak-source downgrades\n";
 
@@ -1201,7 +1225,7 @@ int main() {
     assert(has_source(*recovered, DiscoverySource::RuntimeObservation));
     assert(has_source(*recovered, DiscoverySource::ResolvedIndirectCall));
     assert(recovered->authority == FunctionAuthority::DirectCall);
-    std::filesystem::remove_all(options.output);
+    remove_all_tolerant(options.output);
   }
   std::cout << "  [PASS] Runtime indirect-call observations become strong callable evidence\n";
 
@@ -1240,8 +1264,8 @@ int main() {
     AnalysisReport second_report;
     assert(load_and_analyze(second, second_report, error) && error.empty());
     assert(first_report.configuration_hash == second_report.configuration_hash);
-    std::filesystem::remove_all(first.output);
-    std::filesystem::remove_all(second.output);
+    remove_all_tolerant(first.output);
+    remove_all_tolerant(second.output);
   }
   std::cout << "  [PASS] Adaptive configuration hashing is order- and hit-count-independent\n";
 

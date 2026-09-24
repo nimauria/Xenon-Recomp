@@ -1,4 +1,5 @@
 #pragma once
+#include "xenon/recomp/compilation_graph.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -260,6 +261,8 @@ struct DiscoveredFunction {
   bool compiled{};
   std::string error;
   cpu::ir::Function ir;
+  std::vector<graph::Node> compilation_nodes;
+  bool ir_cache_hit{};
 
   // Gen 6 return/no-return analysis. has_explicit_return is a local decode fact
   // (an unconditional bclrx/blr-style return was observed). The fixed-point
@@ -439,6 +442,9 @@ struct AnalysisReport {
 };
 
 struct DriverOptions {
+  // Empty selects output/.graph; preparation supplies a persistent shared root.
+  std::filesystem::path graph_cache;
+  graph::Versions graph_versions;
   std::filesystem::path input;
   // Automatic game preparation (Part 11): an already-parsed XexImage - e.g.
   // the result of xbox::apply_title_update(), or simply xbox::parse_xex_image()

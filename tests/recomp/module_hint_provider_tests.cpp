@@ -60,7 +60,12 @@ std::vector<std::byte> make_xex(std::uint32_t salt) {
   constexpr std::size_t coff = pe + 4;
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
-  constexpr std::size_t text_raw = 0x600;
+  // Xenon's XEX loader reads section bytes directly by RVA (effective_image
+  // subspan(section_rva, length) in xex_loader.cpp) - PointerToRawData is
+  // parsed but never consulted for sourcing bytes. Section content must
+  // therefore live at (embedded-PE-relative) offset == RVA, not at whatever
+  // offset a real PE's PointerToRawData would independently declare.
+  constexpr std::size_t text_raw = kTextRva;
   constexpr std::size_t data_raw = kDataRva;
   constexpr std::size_t file_size = header + data_raw + 0x40;
 
