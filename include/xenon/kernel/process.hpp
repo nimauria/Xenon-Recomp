@@ -8,6 +8,7 @@
 
 #include "xenon/kernel/heap.hpp"
 
+#include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/module.hpp"
 #include "xenon/kernel/object.hpp"
@@ -32,6 +33,18 @@ class KernelProcess final : public KernelObject {
   [[nodiscard]] GuestHeapManager& guest_heap() noexcept { return guest_heap_; }
   [[nodiscard]] const GuestHeapManager& guest_heap() const noexcept { return guest_heap_; }
 
+  // Shared dispatcher-object handle table: threads, events, semaphores,
+  // mutants and timers created via the xboxkrnl thread/sync/timer exports
+  // (ExCreateThread, NtCreateEvent, NtCreateSemaphore, NtCreateMutant, ...)
+  // all publish their guest-visible Handle through this one table, matching
+  // real Xbox 360 semantics where every kernel object - not just files -
+  // shares one per-process handle namespace. KernelIoManager keeps its own
+  // separate HandleTable for file objects (see io_manager.hpp) rather than
+  // sharing this one, since it predates this table and its handle values are
+  // already load-bearing for existing filesystem callers.
+  [[nodiscard]] HandleTable& handle_table() noexcept { return handle_table_; }
+  [[nodiscard]] const HandleTable& handle_table() const noexcept { return handle_table_; }
+
   [[nodiscard]] std::shared_ptr<KernelThread> main_thread() const;
   void set_main_thread(std::shared_ptr<KernelThread> thread);
 
@@ -53,6 +66,7 @@ class KernelProcess final : public KernelObject {
   ThreadManager thread_manager_;
   ModuleManager module_manager_;
   std::shared_ptr<KernelThread> main_thread_;
+  HandleTable handle_table_{};
 
   mutable std::mutex env_mutex_;
   std::unordered_map<std::string, std::string> environment_;

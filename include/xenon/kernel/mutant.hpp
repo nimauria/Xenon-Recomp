@@ -12,7 +12,13 @@ namespace xenon::kernel {
 // Xbox mutant (similar to Windows mutex but with abandon semantics)
 class KernelMutant final : public KernelObject {
  public:
-  explicit KernelMutant(bool initial_owner = false);
+  // owner_thread_id identifies the creating thread and is only meaningful
+  // when initial_owner is true; the caller (the NtCreateMutant export
+  // handler) must pass the real creating thread's id - there is no safe
+  // default, since guest thread ids start at 1 (see ThreadManager) and a
+  // hardcoded placeholder would make a fresh mutant appear pre-owned by an
+  // unrelated thread.
+  explicit KernelMutant(bool initial_owner = false, std::uint32_t owner_thread_id = 0);
 
   [[nodiscard]] bool acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout);
   [[nodiscard]] bool release(std::uint32_t owner_thread_id);

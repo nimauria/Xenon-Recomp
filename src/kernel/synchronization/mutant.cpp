@@ -2,10 +2,10 @@
 
 namespace xenon::kernel {
 
-KernelMutant::KernelMutant(bool initial_owner)
+KernelMutant::KernelMutant(bool initial_owner, std::uint32_t owner_thread_id)
     : KernelObject(ObjectType::Mutant) {
   if (initial_owner) {
-    owner_thread_id_ = 1;  // Placeholder; caller should set proper thread ID
+    owner_thread_id_ = owner_thread_id;
     recursion_count_ = 1;
   }
 }

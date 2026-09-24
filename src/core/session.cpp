@@ -27,6 +27,8 @@
 
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
+#include "xenon/xbox/xboxkrnl_sync_exports.hpp"
+#include "xenon/xbox/xboxkrnl_time_exports.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -774,6 +776,56 @@ bool XenonSession::init_exports() {
     return false;
   }
 
+  // Register xboxkrnl guest timebase/timing exports (Phase 1 of the AC6
+  // Runtime Readiness pass): KeQueryPerformanceFrequency, KeQuerySystemTime,
+  // KeDelayExecutionThread, KeStallExecutionProcessor.
+  if (!xbox::register_xboxkrnl_time_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl time exports");
+    return false;
+  }
+
+  // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1 of
+  // the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
+  // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
+  // NtWaitForSingleObjectEx, NtWaitForMultipleObjectsEx. kernel_process_
+  // does not exist yet at this point in a fresh session (it is created later
+  // by create_guest_process(), once a title is loaded) - like io_bridge_
+  // above, these lambdas capture `this` and dereference kernel_process_ at
+  // CALL time, not at registration time; by the time guest code can actually
+  // invoke one of these exports, create_guest_process() has already run.
+  {
+    using SyncHandler = bool (*)(kernel::KernelProcess&, ExportCallContext&);
+    struct SyncExportBinding {
+      std::uint32_t ordinal;
+      const char* name;
+      SyncHandler handler;
+    };
+    static constexpr SyncExportBinding kSyncBindings[] = {
+        {0x0D1u, "NtCreateEvent", &xbox::nt_create_event_export},
+        {0x0D5u, "NtCreateSemaphore", &xbox::nt_create_semaphore_export},
+        {0x0F3u, "NtReleaseSemaphore", &xbox::nt_release_semaphore_export},
+        {0x0D4u, "NtCreateMutant", &xbox::nt_create_mutant_export},
+        {0x0F2u, "NtReleaseMutant", &xbox::nt_release_mutant_export},
+        {0x0FDu, "NtWaitForSingleObjectEx", &xbox::nt_wait_for_single_object_ex_export},
+        {0x0FEu, "NtWaitForMultipleObjectsEx", &xbox::nt_wait_for_multiple_objects_ex_export},
+    };
+    for (const auto& binding : kSyncBindings) {
+      core::ExportDescriptor descriptor{};
+      descriptor.library = "xboxkrnl.exe";
+      descriptor.name = binding.name;
+      descriptor.ordinal = binding.ordinal;
+      descriptor.requirement = ExportRequirement::Required;
+      descriptor.handler = [this, fn = binding.handler](ExportCallContext& ctx) -> bool {
+        if (!kernel_process_) return false;
+        return fn(*kernel_process_, ctx);
+      };
+      if (!export_registry_.register_export(std::move(descriptor))) {
+        set_error(std::string("Failed to register xboxkrnl sync export: ") + binding.name);
+        return false;
+      }
+    }
+  }
+
   // Register XAM exports
   if (xam_ && !xam_->register_exports(export_registry_)) {
     set_error("Failed to register XAM exports");
@@ -1330,6 +1382,45 @@ bool XenonSession::resolve_xex_imports() {
     }
   }
   return true;
+}
+
+namespace {
+
+std::string format_xex_version(const xbox::XexVersion& version) {
+  std::ostringstream out;
+  out << static_cast<unsigned>(version.major()) << '.'
+      << static_cast<unsigned>(version.minor()) << '.' << version.build() << '.'
+      << static_cast<unsigned>(version.qfe());
+  return out.str();
+}
+
+}  // namespace
+
+JsonValue XenonSession::capability_report() const {
+  RunFingerprint fingerprint{};
+  if (effective_identity_) {
+    fingerprint.effective_xex_sha1 =
+        xbox::format_effective_image_hash(effective_identity_->effective_image_hash);
+    fingerprint.tu_identity =
+        effective_identity_->title_update_applied
+            ? (format_xex_version(effective_identity_->base_version) + "+" +
+               format_xex_version(effective_identity_->effective_version))
+            : "none";
+  } else {
+    fingerprint.tu_identity = "none";
+  }
+  fingerprint.gpu_backend = config_.graphics_backend;
+  fingerprint.host_os = host_os_identifier();
+  fingerprint.host_cpu_arch = host_cpu_arch_identifier();
+  fingerprint.diagnostic_mode = config_.enable_export_diagnostics ? "verbose" : "default";
+
+  // Copy rather than mutate capability_report_builder_ in place: producing a
+  // report is logically const (it does not change what any subsystem has
+  // published), even though attaching the fingerprint uses the same
+  // set_section() call a subsystem would use to publish its own section.
+  CapabilityReportBuilder report = capability_report_builder_;
+  report.set_run_fingerprint(fingerprint);
+  return report.build();
 }
 
 bool XenonSession::bind_compiled_code() {

@@ -21,7 +21,8 @@ bool is_waitable_object(ObjectType type) {
   }
 }
 
-bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout) {
+bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout,
+                    std::uint32_t waiting_thread_id) {
   switch (object.type()) {
     case ObjectType::Event:
       return static_cast<KernelEvent&>(object).wait_for(timeout);
@@ -30,9 +31,7 @@ bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout) {
     case ObjectType::Timer:
       return static_cast<KernelTimer&>(object).wait_for(timeout);
     case ObjectType::Mutant:
-      // For mutants, we need the current thread ID, which we don't have here
-      // In a real implementation, this would get it from thread-local storage
-      return static_cast<KernelMutant&>(object).acquire(0, timeout);
+      return static_cast<KernelMutant&>(object).acquire(waiting_thread_id, timeout);
     case ObjectType::Thread: {
       // Waiting on a thread means waiting for it to terminate
       auto& thread = static_cast<KernelThread&>(object);
@@ -46,12 +45,13 @@ bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout) {
 
 WaitResult wait_for_single_object(
     const std::shared_ptr<KernelObject>& object,
-    std::chrono::milliseconds timeout) {
+    std::chrono::milliseconds timeout,
+    std::uint32_t waiting_thread_id) {
   if (!object || !is_waitable_object(object->type())) {
     return WaitResult::Failed;
   }
 
-  if (wait_on_object(*object, timeout)) {
+  if (wait_on_object(*object, timeout, waiting_thread_id)) {
     return WaitResult::Success;
   }
 
@@ -62,8 +62,9 @@ WaitResult wait_for_multiple_objects(
     std::span<const std::shared_ptr<KernelObject>> objects,
     bool wait_all,
     std::chrono::milliseconds timeout,
-    std::uint32_t* signaled_index) {
-  
+    std::uint32_t* signaled_index,
+    std::uint32_t waiting_thread_id) {
+
   if (objects.empty() || objects.size() > 64) {
     return WaitResult::Failed;
   }
@@ -90,7 +91,7 @@ WaitResult wait_for_multiple_objects(
         }
       }
 
-      if (!wait_on_object(*objects[i], remaining_timeout)) {
+      if (!wait_on_object(*objects[i], remaining_timeout, waiting_thread_id)) {
         return WaitResult::Timeout;
       }
     }
@@ -100,7 +101,7 @@ WaitResult wait_for_multiple_objects(
     // Simple polling implementation - a full implementation would use condition variables
     while (true) {
       for (std::size_t i = 0; i < objects.size(); ++i) {
-        if (wait_on_object(*objects[i], std::chrono::milliseconds(0))) {
+        if (wait_on_object(*objects[i], std::chrono::milliseconds(0), waiting_thread_id)) {
           if (signaled_index) {
             *signaled_index = static_cast<std::uint32_t>(i);
           }

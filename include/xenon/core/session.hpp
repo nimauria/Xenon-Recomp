@@ -14,6 +14,7 @@
 #include <tuple>
 #include <vector>
 
+#include "xenon/core/capability_report.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/guest_thread_context.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
@@ -265,6 +266,19 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] const std::optional<xbox::XexEffectiveIdentity>& effective_identity() const noexcept {
     return effective_identity_;
   }
+  // Builds the current capability/diagnostic report (Phase 0 of the AC6
+  // Runtime Readiness pass): every section any subsystem has published to
+  // capability_report_builder() so far, tagged with a run fingerprint
+  // computed from this session's current identity/config. Safe to call at
+  // any point in the session's lifetime, including before a title is loaded
+  // (fingerprint fields default to empty strings rather than throwing).
+  [[nodiscard]] JsonValue capability_report() const;
+  // Direct access to the underlying builder so subsystems (import capability
+  // audit, fallback accounting, GPU telemetry, ...) can publish their own
+  // named sections without XenonSession needing to know about each one.
+  [[nodiscard]] CapabilityReportBuilder& capability_report_builder() noexcept {
+    return capability_report_builder_;
+  }
   // The canonical owner/context for the running title once load_game()
   // succeeds: null before that. Normal execution is
   // XenonSession -> KernelProcess -> KernelThread -> CPU V2, not a bare
@@ -431,6 +445,7 @@ class XenonSession final : public cpu::RuntimeServices {
   bool native_extension_bound_{false};
   std::string native_extension_error_{};
   std::vector<UnresolvedImport> unresolved_imports_{};
+  CapabilityReportBuilder capability_report_builder_{};
 
   // Guest stack allocated for the main thread's CpuState (r1) in
   // create_guest_process().

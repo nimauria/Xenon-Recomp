@@ -451,6 +451,9 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/imports/import_registry.cpp
     src/xbox/exports/xboxkrnl_io_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
+    src/xbox/exports/xboxkrnl_time_exports.cpp
+    src/xbox/exports/xboxkrnl_sync_exports.cpp
+    src/xbox/xbox_time_convert.cpp
     src/xbox/rtl.cpp
     src/xbox/export_metadata.cpp
     src/xbox/xex/xex_loader.cpp
@@ -780,6 +783,34 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_rtl_tests PRIVATE xenon_xbox_kernel_io)
     xenon_enable_test_asserts(xenon_rtl_tests)
     add_test(NAME xenon_rtl_tests COMMAND xenon_rtl_tests)
+  endif()
+
+  # Phase 1/4 (AC6 Runtime Readiness pass): xboxkrnl time exports, driven
+  # through the real core::ExportRegistry - link xenon_core (which links
+  # xenon_xbox_kernel_io PUBLIC) rather than xenon_xbox_kernel_io alone, since
+  # ExportRegistry's out-of-line methods live in xenon_core's own sources
+  # (see xenon_audio_export_tests above for the same pattern).
+  if(TARGET xenon_core)
+    add_executable(xenon_xboxkrnl_time_export_tests tests/xbox/time_export_tests.cpp)
+    target_link_libraries(xenon_xboxkrnl_time_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xboxkrnl_time_export_tests)
+    add_test(NAME xenon_xboxkrnl_time_export_tests COMMAND xenon_xboxkrnl_time_export_tests)
+  endif()
+
+  # Phase 1/3 (AC6 Runtime Readiness pass): xboxkrnl handle-based (Nt*) sync
+  # exports - NtCreateEvent/Semaphore/Mutant, release, and the Ex wait
+  # variants - driven through the real core::ExportRegistry against a real
+  # kernel::KernelProcess. Links xenon_core (which links xenon_xbox_kernel_io
+  # PUBLIC) rather than xenon_xbox_kernel_io alone: ExportRegistry's
+  # out-of-line methods live in xenon_core's own sources, and a STATIC
+  # library like xenon_xbox_kernel_io does not itself resolve the symbols its
+  # translation units reference - see xenon_xboxkrnl_time_export_tests above
+  # for the identical reasoning.
+  if(TARGET xenon_core)
+    add_executable(xenon_xboxkrnl_sync_export_tests tests/xbox/sync_export_tests.cpp)
+    target_link_libraries(xenon_xboxkrnl_sync_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xboxkrnl_sync_export_tests)
+    add_test(NAME xenon_xboxkrnl_sync_export_tests COMMAND xenon_xboxkrnl_sync_export_tests)
   endif()
 
   add_executable(xenon_recomp_driver_tests tests/recomp/recomp_driver_tests.cpp)
