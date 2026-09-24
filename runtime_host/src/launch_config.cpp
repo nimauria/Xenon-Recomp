@@ -73,6 +73,7 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
     out.runtime_api_requirements_json = requirements->dump();
   }
   out.native_extension_path = root.get_string("nativeExtensionPath");
+  out.adaptive_observation_path = root.get_string("adaptiveObservationPath");
 
   out.profile_id = root.get_string("profileId");
   out.profile_name = root.get_string("profileName");

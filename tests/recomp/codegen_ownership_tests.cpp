@@ -67,7 +67,7 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words, st
   constexpr std::size_t coff = pe + 4;
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
-  constexpr std::size_t text_raw = 0x600;
+  constexpr std::size_t text_raw = kTextRva;
   const std::size_t data_raw = kDataRva;
   const std::size_t file_size = header + data_raw + std::max<std::size_t>(data_size, 0x10);
 
@@ -139,6 +139,11 @@ std::size_t occurrences(const std::string& haystack, const std::string& needle) 
   std::size_t count = 0, pos = 0;
   while ((pos = haystack.find(needle, pos)) != std::string::npos) { ++count; pos += needle.size(); }
   return count;
+}
+
+std::string read_file(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(input), {});
 }
 
 std::string read_all_shards(const std::filesystem::path& output) {
@@ -404,6 +409,63 @@ int main() {
   }
   std::cout << "  [PASS] Two legacy known_symbols aliases at the same guest address compile as exactly "
                "one canonical function\n";
+
+  // Test 5: executable direct control flow must not reach codegen without a
+  // local block or a separately compiled entry. This simulates a malformed
+  // analysis result at the exact boundary where the runtime would otherwise
+  // emit an unmaterialized branch.
+  {
+    const auto xex_bytes = make_xex({kBlr}, 0x40);
+    const auto fixture = make_fixture("unmaterialized_control_flow", xex_bytes);
+    DriverOptions options{};
+    options.input = fixture.input;
+    options.output = fixture.output;
+
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(!report.functions.empty());
+    report.functions.front().ir.blocks.front().successors.push_back(
+        {kLoadAddress + kTextRva + 0x100u, xenon::cpu::ir::EdgeKind::Branch, false});
+    assert(!generate_project(options, report, error));
+    assert(error.find("without a materialized local CFG block or dispatchable compiled entry") !=
+           std::string::npos);
+    std::filesystem::remove_all(fixture.root);
+  }
+  std::cout << "  [PASS] Unmaterialized executable control flow fails before code generation\n";
+
+  // Test 6: failed regeneration must never make stale analysis.json look like
+  // current output. Root project files are staged and generation-status.json
+  // explicitly marks the failed attempt incomplete while preserving the last
+  // successfully promoted analysis.
+  {
+    const auto xex_bytes = make_xex({kBlr}, 0x40);
+    const auto fixture = make_fixture("transactional_generation_status", xex_bytes);
+    DriverOptions options{};
+    options.input = fixture.input;
+    options.output = fixture.output;
+
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(generate_project(options, report, error) && error.empty());
+    const auto analysis_before = read_file(fixture.output / "analysis.json");
+    const auto status_before = read_file(fixture.output / "generation-status.json");
+    assert(status_before.find("\"complete\": true") != std::string::npos);
+
+    report.functions.front().ir.blocks.front().successors.push_back(
+        {kLoadAddress + kTextRva + 0x100u, xenon::cpu::ir::EdgeKind::Branch, false});
+    error.clear();
+    assert(!generate_project(options, report, error));
+    const auto analysis_after = read_file(fixture.output / "analysis.json");
+    const auto status_after = read_file(fixture.output / "generation-status.json");
+    assert(analysis_after == analysis_before &&
+           "a failed generation must preserve the last successfully promoted analysis.json");
+    assert(status_after.find("\"complete\": false") != std::string::npos);
+    assert(status_after.find("\"phase\": \"control-flow\"") != std::string::npos);
+    std::filesystem::remove_all(fixture.root);
+  }
+  std::cout << "  [PASS] Failed regeneration is transactional and explicitly marked incomplete\n";
 
   std::cout << "All generated-code deduplication / shard ownership tests passed!\n";
   return 0;

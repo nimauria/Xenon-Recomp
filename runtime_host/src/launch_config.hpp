@@ -55,6 +55,9 @@ struct LaunchConfig {
   // empty if the module supplies none (session still loads; it just cannot
   // run - see XenonSession::native_extension_bound()).
   std::string native_extension_path;
+  // Stable adaptive-analysis JSONL path supplied by the launcher. Optional;
+  // the runtime host still mirrors observations into its per-session folder.
+  std::string adaptive_observation_path;
 
   std::string profile_id;
   std::string profile_name;

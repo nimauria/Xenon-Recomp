@@ -24,6 +24,9 @@ struct LaunchConfiguration {
   // (see docs/runtime/RUNTIME_HOST.md), or empty if the module declares none. The
   // runtime host cannot run guest code without this.
   QString native_extension_path;
+  // Stable runtime-learning trace used by automatic preparation. Empty for
+  // modules that do not participate in Xenon's adaptive preparation pipeline.
+  QString adaptive_observation_path;
 
   QString profile_id;
   QString profile_name;

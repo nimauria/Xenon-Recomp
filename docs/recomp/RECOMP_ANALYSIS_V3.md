@@ -258,7 +258,10 @@ validated-tail-call` pattern dominating the discovered set).
      (conditional branches, and any non-terminal encoding of an
      "unconditional" opcode); its target is still recorded in
      `branch_references` for diagnostics/cross-referencing, just never
-     independently claimed.
+     independently claimed. A terminal direct branch whose forward target was
+     excluded only because the scan stopped at the branch is instead scanned
+     through that target so the target becomes a local block; ordinary
+     inferred tail-call targets remain independently discovered.
    - **Target inside the function's own established extent** (including its
      chunks): never promoted, regardless of terminal-ness - covers short
      "infinite loop" back-edges and any other jump that lands in bytes the
@@ -282,6 +285,28 @@ validated-tail-call` pattern dominating the discovered set).
    *claim time*, before the post-wave `ValidatedTailCall` cross-reference
    pass ever runs (that pass is retroactive and global, not available
    mid-analysis).
+
+## CFG closure and code-generation ownership
+
+The exclusive end of a function is not a proof that a reachable direct
+successor is another function. While a candidate is being scanned, a direct
+executable target equal to the current tentative end is materialized and
+decoded into the candidate unless that address already has independent
+function evidence (a seed, unwind entry, or explicit `FunctionHint`). The
+scan reaches that successor before `guest_end` and `ranges` are finalized.
+This closes the CFG before ownership boundaries become hard; it prevents an
+emitted branch from pointing at the exclusive end of its own function with no
+owner. A target with independent evidence remains a cross-function transfer.
+
+Tail-call promotion is separate from this closure step. Crossing an inferred
+boundary is not evidence of a tail call; promotion still requires the target
+to be independently established by the normal discovery evidence model.
+
+Immediately before native code generation, Xenon validates every non-local
+branch or fallthrough edge in compiled IR. Each target must be a local CFG
+block or the entry of a compiled function/chunk. A speculative unresolved
+candidate is not fatal merely because it appears in analysis; it becomes fatal
+only if code generation would emit executable control flow to it.
 4. **Unresolved diagnostic deduplication**: `report.unresolved` is sorted
    and deduplicated by `(kind, address, target, detail)` identity once, after
    every entry is final, before diagnostics counters are computed. The same
@@ -330,13 +355,10 @@ what remains" (not faked, not silently dropped):
   table from coincidental data (the task's own repeated warning against
   promoting data to code applies most strongly here); deserves a dedicated
   pass with real-title validation, not a rushed heuristic.
-- **Part 12 (function fingerprint foundation)**: not implemented. A stable,
-  address-independent fingerprint scheme (for future cross-title CRT/SDK-
-  helper recognition) needs real design work on what's actually invariant
-  across relocated/differently-linked builds (opcode sequence with
-  relocatable immediates normalized, CFG shape, or canonical IR - each has
-  different stability/collision tradeoffs) before committing to a versioned
-  format; committing to the wrong one now would be worse than deferring.
+- **Part 12 (function fingerprint foundation)**: this was deferred during the
+  V3 pass. It is now implemented by **Gen 9 - Universal Knowledge Base**; see
+  `docs/recomp/UNIVERSAL_KNOWLEDGE_GEN9.md` for the versioned normalized
+  instruction/entry/CFG/constant/call-neighbourhood fingerprint design.
 - **Part 13 (analysis cache)**: not implemented. Xenon already has two
   adjacent, working caches at different granularities - the whole-module
   `ArtifactCacheStore` (compiled shared library, keyed by executable+hint
@@ -345,8 +367,10 @@ what remains" (not faked, not silently dropped):
   discovery-metadata cache (function starts/provenance/diagnostics, skipping
   re-*discovery* on an unchanged input) is real, additive work distinct from
   either; not attempted here given the size of everything else in this pass.
-- **Part 16 (cross-title learning prep)**: no structures defined - blocked
-  on Part 12's fingerprint design being settled first.
+- **Part 16 (cross-title learning prep)**: this was deferred during the V3
+  pass and is now implemented by Gen 9's JSONL knowledge records,
+  confidence-scored matching, cross-revision anchor nomination and source
+  provenance.
 - **Part 18 (real-title validation)**: blocked. The AC6 baseline analysis
   was running for this entire pass and was deliberately left untouched.
   Should be run as a direct follow-up: compare `analysis.json`'s

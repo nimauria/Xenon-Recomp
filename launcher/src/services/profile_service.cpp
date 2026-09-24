@@ -20,6 +20,7 @@ constexpr int kProfileNameLimit = 48;
 constexpr int kDescriptionLimit = 180;
 // The crop editor's own upper bound on how far a user may zoom in past the
 // minimum cover scale; kept in sync with AvatarCropEditor.qml's slider range.
+constexpr double kMinAvatarZoom = 0.55;
 constexpr double kMaxAvatarZoom = 3.0;
 
 QString limited(QString value, int limit) {
@@ -104,7 +105,7 @@ ServiceResult ProfileService::create(const QVariantMap& data) {
   // saved alongside avatarPath rather than destructively re-encoding it.
   item.insert(QStringLiteral("avatarFocalX"), qBound(0.0, data.value(QStringLiteral("avatarFocalX"), 0.5).toDouble(), 1.0));
   item.insert(QStringLiteral("avatarFocalY"), qBound(0.0, data.value(QStringLiteral("avatarFocalY"), 0.5).toDouble(), 1.0));
-  item.insert(QStringLiteral("avatarZoom"), qBound(1.0, data.value(QStringLiteral("avatarZoom"), 1.0).toDouble(), kMaxAvatarZoom));
+  item.insert(QStringLiteral("avatarZoom"), qBound(kMinAvatarZoom, data.value(QStringLiteral("avatarZoom"), 1.0).toDouble(), kMaxAvatarZoom));
   item.insert(QStringLiteral("gamePath"), data.value(QStringLiteral("gamePath")).toString());
   item.insert(QStringLiteral("savePath"), data.value(QStringLiteral("savePath")).toString());
   item.insert(QStringLiteral("screenshotPath"), data.value(QStringLiteral("screenshotPath")).toString());
@@ -144,7 +145,7 @@ ServiceResult ProfileService::update(int index, const QVariantMap& data) {
   if (data.contains(QStringLiteral("avatarFocalY")))
     item.insert(QStringLiteral("avatarFocalY"), qBound(0.0, data.value(QStringLiteral("avatarFocalY")).toDouble(), 1.0));
   if (data.contains(QStringLiteral("avatarZoom")))
-    item.insert(QStringLiteral("avatarZoom"), qBound(1.0, data.value(QStringLiteral("avatarZoom")).toDouble(), kMaxAvatarZoom));
+    item.insert(QStringLiteral("avatarZoom"), qBound(kMinAvatarZoom, data.value(QStringLiteral("avatarZoom")).toDouble(), kMaxAvatarZoom));
   item.insert(QStringLiteral("gamePath"), data.value(QStringLiteral("gamePath")).toString());
   item.insert(QStringLiteral("savePath"), data.value(QStringLiteral("savePath")).toString());
   item.insert(QStringLiteral("screenshotPath"), data.value(QStringLiteral("screenshotPath")).toString());
@@ -486,6 +487,15 @@ void ProfileService::normalizeLoadedProfiles(const QVariantList& parsed, const Q
                             QStringLiteral("lastUsedAt"), QStringLiteral("lastUsed")}) {
       if (source.contains(key)) item.insert(key, source.value(key));
     }
+    // Clamp legacy or manually edited crop metadata to the same bounds as
+    // create()/update(). Zoom values below 1.0 are intentional: they let a
+    // logo/badge fit inside the profile crop without destructive re-encoding.
+    item.insert(QStringLiteral("avatarFocalX"),
+                qBound(0.0, item.value(QStringLiteral("avatarFocalX"), 0.5).toDouble(), 1.0));
+    item.insert(QStringLiteral("avatarFocalY"),
+                qBound(0.0, item.value(QStringLiteral("avatarFocalY"), 0.5).toDouble(), 1.0));
+    item.insert(QStringLiteral("avatarZoom"),
+                qBound(kMinAvatarZoom, item.value(QStringLiteral("avatarZoom"), 1.0).toDouble(), kMaxAvatarZoom));
     for (const auto& key : {QStringLiteral("games"), QStringLiteral("modules"), QStringLiteral("saveSets")})
       if (source.contains(key)) item.insert(key, source.value(key).toInt());
     item.insert(QStringLiteral("offline"), source.contains(QStringLiteral("offline"))

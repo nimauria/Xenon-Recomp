@@ -160,6 +160,12 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   config.audio_latency_profile = launch.audio_latency_profile;
 
   config.native_extension_path = launch.native_extension_path;
+  if (!launch.adaptive_observation_path.empty())
+    config.adaptive_observation_path = launch.adaptive_observation_path;
+  if (!launch.session_dir.empty()) {
+    config.adaptive_observation_mirror_path =
+        std::filesystem::path(launch.session_dir) / "adaptive-observations.jsonl";
+  }
   return config;
 }
 

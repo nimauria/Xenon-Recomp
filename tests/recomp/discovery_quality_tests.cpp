@@ -6,6 +6,7 @@
 // synthetic XEX2 fixture technique as tests/recomp/analysis_v2_consumption_tests.cpp.
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <filesystem>
@@ -78,6 +79,11 @@ std::uint32_t mflr_word(std::uint32_t rd) {
   const std::uint32_t enc = ((kLrSpr & 0x1Fu) << 5) | ((kLrSpr >> 5) & 0x1Fu);
   return (31u << 26) | (rd << 21) | (enc << 11) | (339u << 1);
 }
+// lwz rt, disp(ra)
+std::uint32_t lwz_word(std::uint32_t rt, std::uint32_t ra, std::int16_t disp) {
+  return (32u << 26) | (rt << 21) | (ra << 16) | static_cast<std::uint16_t>(disp);
+}
+
 // stwu rs, disp(ra)
 std::uint32_t stwu_word(std::uint32_t rs, std::uint32_t ra, std::int16_t disp) {
   return (37u << 26) | (rs << 21) | (ra << 16) | static_cast<std::uint16_t>(disp);
@@ -99,7 +105,8 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
   constexpr std::size_t text_raw = 0x600;
-  const std::size_t file_size = header + text_raw + text_words.size() * 4u + 0x100u;
+  const std::size_t file_size =
+      header + static_cast<std::size_t>(kTextRva) + text_words.size() * 4u + 0x100u;
 
   std::vector<std::byte> bytes(file_size, std::byte{0});
   bytes[0] = std::byte{'X'}; bytes[1] = std::byte{'E'};
@@ -131,10 +138,10 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   le32(bytes, section + 4, text_size);
   le32(bytes, section + 0xC, kTextRva);
   le32(bytes, section + 0x10, text_size);
-  le32(bytes, section + 0x14, static_cast<std::uint32_t>(text_raw));
+  le32(bytes, section + 0x14, kTextRva);
   le32(bytes, section + 0x24, 0x60000020);
 
-  const std::size_t text_file_base = header + text_raw;
+  const std::size_t text_file_base = header + static_cast<std::size_t>(kTextRva);
   for (std::size_t i = 0; i < text_words.size(); ++i) be32(bytes, text_file_base + i * 4u, text_words[i]);
   return bytes;
 }
@@ -178,8 +185,20 @@ const DiscoveredFunction* find_function(const AnalysisReport& report, std::uint3
   return it == report.functions.end() ? nullptr : &*it;
 }
 
+const GuestEntryPoint* find_entry(const AnalysisReport& report, std::uint32_t address) {
+  const auto it = std::find_if(report.entries.begin(), report.entries.end(),
+                               [address](const auto& entry) { return entry.address == address; });
+  return it == report.entries.end() ? nullptr : &*it;
+}
+
 bool has_source(const DiscoveredFunction& function, DiscoverySource source) {
   return std::find(function.sources.begin(), function.sources.end(), source) != function.sources.end();
+}
+
+bool owns_address(const DiscoveredFunction& function, std::uint32_t address) {
+  for (std::size_t i = 0; i + 1u < function.ranges.size(); i += 2u)
+    if (address >= function.ranges[i] && address < function.ranges[i + 1u]) return true;
+  return false;
 }
 
 }  // namespace
@@ -276,7 +295,7 @@ int main() {
     const auto* callee = find_function(report, target);
     assert(callee != nullptr && callee->compiled &&
            "a target resolved purely by generic CTR dataflow must be discovered and compiled");
-    assert(has_source(*callee, DiscoverySource::ResolvedIndirect));
+    assert(has_source(*callee, DiscoverySource::ResolvedIndirectCall));
     assert(report.diagnostics.resolved_indirect_via_dataflow == 1u);
     assert(std::none_of(report.unresolved.begin(), report.unresolved.end(), [&](const auto& item) {
       return item.kind == "indirect-call";
@@ -548,7 +567,9 @@ int main() {
            "a loop's terminal back-edge to a mid-function address must not spawn a duplicate function");
     assert(find_function(report, base + 1u * 4u) == nullptr);
     const auto* entry = find_function(report, base);
-    assert(entry != nullptr && entry->compiled && entry->guest_end == base + 5u * 4u);
+    assert(entry != nullptr && entry->compiled && entry->guest_end == base + 6u * 4u &&
+           owns_address(*entry, base + 5u * 4u) &&
+           "the loop exit block at the tentative end must be folded into the final extent");
   }
   std::cout << "  [PASS] A loop's terminal back-edge to a mid-function address stays internal\n";
 
@@ -580,6 +601,9 @@ int main() {
     FunctionHint caller_b{};
     caller_b.address = base + 1u * 4u;
     hints.functions.push_back(caller_b);
+    FunctionHint shared_epilogue{};
+    shared_epilogue.address = base + 4u * 4u;
+    hints.functions.push_back(shared_epilogue);
     AnalysisReport report;
     assert(run(xex_bytes, hints, report, root / "shared_epilogue"));
     const auto matching = [&](std::uint32_t address) {
@@ -596,81 +620,70 @@ int main() {
   }
   std::cout << "  [PASS] A shared epilogue reached by two strong callers stays a single, corroborated function\n";
 
-  // Test 13 (recursive-explosion guard): a candidate reached ONLY via a
-  // plain direct branch (no seed, no prologue match - "weak" provenance)
-  // must still be preserved as a real function (never silently dropped),
-  // but must NOT itself get full discovery authority: its own terminal
-  // branch to a further, otherwise-unreachable address must not spawn yet
-  // another function. The rejected target still surfaces via the existing
-  // branch-into-unknown-code diagnostic, never silently lost. Also proves
-  // this is deterministic: jobs=1 and jobs=8 must agree exactly.
+  // Test 13 (CFG closure): a conditional direct branch target that lands
+  // exactly at the primary range's tentative exclusive end is still
+  // intra-procedural reachable code. It must extend the owning function's
+  // CFG/extent rather than be promoted to a synthetic
+  // function or left as branch-into-unknown-code. This is the generic shape
+  // of the AC6 boundary bug this regression protects against.
   {
-    // word0: entry, terminal branch -> word1 (B: reached ONLY this way)
-    // word1: addi r3,r3,5           (B's body - deliberately not a
-    //                                 recognized prologue opening)
-    // word2: terminal branch -> word4 (C - must NOT be promoted: B has no
-    //                                 independent evidence of its own)
-    // word3: blr                     (padding, never reached)
-    // word4: blr                     (C - must remain undiscovered)
+    // word0: compare
+    // word1: conditional branch -> word3
+    // word2: blr                     (fallthrough arm terminates; primary
+    //                                 scan therefore ends at word3)
+    // word3: addi                    (conditional target == primary end)
+    // word4: blr
     const std::vector<std::uint32_t> words = {
-        b_word(base + 0u * 4u, base + 1u * 4u),
-        addi_word(3u, 3u, 5u),
-        b_word(base + 2u * 4u, base + 4u * 4u),
+        cmplwi_word(3u, 0u),
+        bc_word(base + 1u * 4u, base + 3u * 4u, 4u, 2u),
         kBlr,
+        addi_word(3u, 3u, 5u),
         kBlr,
     };
     const auto xex_bytes = make_xex(words);
-    const auto weak_b = base + 1u * 4u;
-    const auto rejected_c = base + 4u * 4u;
+    const auto local_target = base + 3u * 4u;
 
     AnalysisReport report_serial;
-    assert(run(xex_bytes, std::nullopt, report_serial, root / "weak_chain_serial", std::nullopt, 1u));
+    assert(run(xex_bytes, std::nullopt, report_serial, root / "boundary_cfg_serial", std::nullopt, 1u));
     AnalysisReport report_parallel;
-    assert(run(xex_bytes, std::nullopt, report_parallel, root / "weak_chain_parallel", std::nullopt, 8u));
+    assert(run(xex_bytes, std::nullopt, report_parallel, root / "boundary_cfg_parallel", std::nullopt, 8u));
 
     for (const auto* report : {&report_serial, &report_parallel}) {
-      assert(report->functions.size() == 2u &&
-             "the weak candidate must be preserved, but must not seed a third function");
+      assert(report->functions.size() == 1u &&
+             "a conditional target at the tentative end must not spawn a synthetic function");
       const auto* entry = find_function(*report, base);
       assert(entry != nullptr && entry->compiled);
       assert(has_source(*entry, DiscoverySource::EntryPoint));
-      const auto* weak = find_function(*report, weak_b);
-      assert(weak != nullptr && weak->compiled &&
-             "a weak (direct-branch-only) candidate must still be compiled and reported");
-      // The post-wave cross-reference pass retroactively adds
-      // ValidatedTailCall too (A's branch_references still records this
-      // target regardless of the promotion gate below), so the FINAL
-      // reported evidence is {DirectBranch, ValidatedTailCall} - but both
-      // are exactly the "weak" sources this guard exists for (never
-      // EntryPoint/Export/ModuleHint/UnwindMetadata/TlsCallback/DirectCall/
-      // ResolvedIndirect/PrologueHeuristic). The gating decision itself
-      // (see self_confirmed in analyze_function_candidate()) correctly used
-      // only the evidence available AT CLAIM TIME, before this retroactive
-      // pass ever runs.
-      assert(has_source(*weak, DiscoverySource::DirectBranch) &&
-             std::none_of(weak->sources.begin(), weak->sources.end(),
-                         [](DiscoverySource source) {
-                           return source != DiscoverySource::DirectBranch &&
-                                  source != DiscoverySource::ValidatedTailCall;
-                         }) &&
-             "this candidate's only evidence must be the plain direct branch that found it "
-             "(plus the retroactive validated-tail-call cross-reference)");
-      assert(find_function(*report, rejected_c) == nullptr &&
-             "a weak candidate's own branch target must not gain full discovery authority");
-      assert(std::any_of(report->unresolved.begin(), report->unresolved.end(), [&](const auto& item) {
-        return item.kind == "branch-into-unknown-code" && item.address == weak_b && item.target == rejected_c;
-      }) && "the denied target must still surface as an explicit diagnostic, never silently dropped");
+      assert(entry->guest_end > local_target &&
+             "a reachable target exactly at the tentative end must extend the final function extent");
+      assert(owns_address(*entry, local_target) &&
+             "the conditional target must be materialized as an owned local block");
+      assert(find_function(*report, local_target) == nullptr);
+      assert(std::none_of(report->unresolved.begin(), report->unresolved.end(), [&](const auto& item) {
+        return item.kind == "branch-into-unknown-code" && item.target == local_target;
+      }) && "a materialized local target must not remain branch-into-unknown-code");
+      const auto block = std::find_if(entry->ir.blocks.begin(), entry->ir.blocks.end(), [&](const auto& item) {
+        return item.guest_address == local_target;
+      });
+      assert(block != entry->ir.blocks.end() &&
+             "the recovered local continuation must become a real IR basic block");
+      assert(std::any_of(entry->ir.blocks.begin(), entry->ir.blocks.end(), [&](const auto& source_block) {
+        return std::any_of(source_block.successors.begin(), source_block.successors.end(), [&](const auto& edge) {
+          return edge.target == local_target && edge.local;
+        });
+      }) && "the direct edge to the recovered continuation must be local, never runtime-dispatched");
     }
     assert(report_serial.functions.size() == report_parallel.functions.size());
     assert(report_serial.diagnostics.analysis_waves == report_parallel.diagnostics.analysis_waves &&
            "discovery must be deterministic regardless of worker count");
   }
-  std::cout << "  [PASS] A weak candidate is preserved but denied further discovery authority (deterministic)\n";
+  std::cout << "  [PASS] Conditional targets at tentative range ends materialize as local CFG blocks\n";
 
-  // Test 14 (diagnostics deduplication): the exact same unresolved
-  // branch-into-unknown-code site, referenced by two different branch
-  // instructions within one function, must collapse into a single
-  // unresolved entry, not two.
+  // Test 14 (diagnostic provenance): two different branch instructions to
+  // the same unresolved target are two distinct findings. `address` must be
+  // the ACTUAL PPC branch instruction site, never the containing function's
+  // start address. Exact duplicate emissions for one physical site are still
+  // deduplicated by the final sort+unique pass.
   {
     const auto external_target = base + 10u * 4u;
     std::vector<std::uint32_t> words(11u, 0u);
@@ -684,10 +697,18 @@ int main() {
         report.unresolved.begin(), report.unresolved.end(), [&](const auto& item) {
           return item.kind == "branch-into-unknown-code" && item.target == external_target;
         }));
-    assert(count == 1u &&
-           "the same (kind, address, target, detail) unresolved site must be deduplicated to one entry");
+    assert(count == 2u &&
+           "two physical branch sites to one orphan target must retain both exact source addresses");
+    assert(std::any_of(report.unresolved.begin(), report.unresolved.end(), [&](const auto& item) {
+      return item.kind == "branch-into-unknown-code" && item.target == external_target &&
+             item.address == base;
+    }));
+    assert(std::any_of(report.unresolved.begin(), report.unresolved.end(), [&](const auto& item) {
+      return item.kind == "branch-into-unknown-code" && item.target == external_target &&
+             item.address == base + 4u;
+    }));
   }
-  std::cout << "  [PASS] Duplicate unresolved diagnostics for the same site collapse to one entry\n";
+  std::cout << "  [PASS] Unresolved branch diagnostics preserve exact PPC source sites\n";
 
   // Test 15 (resolved-indirect reconciliation): a target resolved purely via
   // the bounded CTR dataflow tracker (Part 7) increments
@@ -709,7 +730,7 @@ int main() {
     AnalysisReport report;
     assert(run(xex_bytes, std::nullopt, report, root / "resolved_indirect_reconcile"));
     const auto* callee = find_function(report, target);
-    assert(callee != nullptr && callee->compiled && has_source(*callee, DiscoverySource::ResolvedIndirect));
+    assert(callee != nullptr && callee->compiled && has_source(*callee, DiscoverySource::ResolvedIndirectCall));
     assert(report.diagnostics.resolved_indirect_via_dataflow == 1u);
     assert(report.diagnostics.resolved_indirect_via_jump_table == 0u);
     assert(report.diagnostics.functions_with_resolved_indirect_provenance == 1u &&
@@ -747,14 +768,582 @@ int main() {
     std::string error;
     assert(load_and_analyze(options, report, error) && error.empty());
     const auto* callee = find_function(report, target);
-    assert(callee != nullptr && callee->compiled && has_source(*callee, DiscoverySource::ResolvedIndirect));
+    assert(callee == nullptr &&
+           "a switch case reached by non-linked indirect control flow must not be forced into a semantic function");
+    const auto* case_entry = find_entry(report, target);
+    assert(case_entry != nullptr && case_entry->kind == GuestEntryKind::AlternateBlock &&
+           std::find(case_entry->sources.begin(), case_entry->sources.end(),
+                     DiscoverySource::ResolvedIndirectBranch) != case_entry->sources.end());
     assert(report.diagnostics.resolved_indirect_via_jump_table >= 1u);
     assert(report.diagnostics.resolved_indirect_via_dataflow == 0u);
-    assert(report.diagnostics.functions_with_resolved_indirect_provenance == 1u);
+    assert(report.diagnostics.functions_with_resolved_indirect_provenance == 0u &&
+           "resolved branch targets absorbed into an owner are entries, not functions");
     std::filesystem::remove_all(root / "resolved_indirect_jump_table");
   }
   std::cout << "  [PASS] Jump-table-resolved-indirect provenance and diagnostics agree, distinctly from dataflow\n";
 
-  std::cout << "All Recomp Analysis V3 discovery quality tests passed!\n";
+  // Test 17 (pre-codegen direct-control-flow invariant): generation must
+  // fail before native C++ is written if an analyzed function contains a
+  // statically-known external branch/fallthrough whose target is neither a
+  // local CFG block nor a dispatchable compiled entry. This is the final
+  // safety net for any ownership defect that survives analysis.
+  {
+    const std::vector<std::uint32_t> words = {kBlr, kBlr};
+    const auto xex_bytes = make_xex(words);
+    const auto test_root = root / "codegen_control_flow_invariant";
+    std::filesystem::remove_all(test_root);
+    std::filesystem::create_directories(test_root);
+
+    DriverOptions options{};
+    options.input = test_root / "fixture.xex";
+    options.output = test_root / "generated";
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error));
+    assert(report.functions.size() == 1u);
+    assert(report.functions.front().compiled);
+    assert(!report.functions.front().ir.blocks.empty());
+
+    report.functions.front().ir.blocks.front().successors.push_back(
+        {base + 4u, xenon::cpu::ir::EdgeKind::Branch, false});
+    error.clear();
+    assert(!generate_project(options, report, error));
+    assert(error.find("without a materialized local CFG block or dispatchable compiled entry") !=
+           std::string::npos);
+    std::filesystem::remove_all(test_root);
+  }
+  std::cout << "  [PASS] Codegen rejects unmaterialized external direct-control-flow targets\n";
+
+  // Test 18 (Region + Entry): a runtime-observed address that is already an
+  // internal basic block of a stronger semantic function must NOT survive as
+  // a duplicate overlapping function. It becomes a first-class alternate
+  // guest entry and codegen emits a tiny wrapper that dispatches directly to
+  // the owner's existing block switch.
+  {
+    const std::vector<std::uint32_t> words = {
+        cmplwi_word(3u, 0u),
+        bc_word(base + 1u * 4u, base + 3u * 4u, 4u, 2u),
+        kBlr,
+        addi_word(3u, 3u, 5u),
+        kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    const auto alternate = base + 3u * 4u;
+    const auto test_root = root / "region_entry_runtime_observation";
+    std::filesystem::remove_all(test_root);
+    std::filesystem::create_directories(test_root);
+
+    DriverOptions options{};
+    options.input = test_root / "fixture.xex";
+    options.output = test_root / "generated";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation observation{};
+    observation.address = alternate;
+    observation.site = base + 4u;
+    observation.kind = AdaptiveObservationKind::ExecutedEntry;
+    observation.hits = 3u;
+    observation.owner_hint = base;
+    options.adaptive_observations.push_back(observation);
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(report.functions.size() == 1u);
+    assert(find_function(report, alternate) == nullptr &&
+           "a weak observed interior entry must be absorbed, not emitted as an overlapping function");
+    const auto* entry = find_entry(report, alternate);
+    assert(entry != nullptr);
+    assert(entry->kind == GuestEntryKind::AlternateBlock);
+    assert(entry->owner_function == base && entry->block == alternate);
+    assert(std::find(entry->sources.begin(), entry->sources.end(), DiscoverySource::RuntimeObservation) !=
+           entry->sources.end());
+    assert(report.diagnostics.weak_functions_absorbed == 1u);
+    assert(report.diagnostics.alternate_entries_materialized == 1u);
+
+    assert(generate_project(options, report, error) && error.empty());
+    const auto wrapper_symbol = report.functions.front().name + "_entry_" + [&] {
+      std::ostringstream value;
+      value << std::hex << std::uppercase << alternate;
+      return value.str();
+    }() + "_v2";
+    std::ifstream registry(options.output / "registry.cpp");
+    const std::string registry_text((std::istreambuf_iterator<char>(registry)), {});
+    assert(registry_text.find(wrapper_symbol) != std::string::npos &&
+           "alternate entry must be published by generated registry.cpp");
+    bool wrapper_emitted = false;
+    for (const auto& item : std::filesystem::directory_iterator(options.output / "functions")) {
+      if (!item.is_regular_file()) continue;
+      std::ifstream shard(item.path());
+      const std::string text((std::istreambuf_iterator<char>(shard)), {});
+      if (text.find(wrapper_symbol) != std::string::npos) {
+        wrapper_emitted = true;
+        break;
+      }
+    }
+    assert(wrapper_emitted && "the canonical function's shard must define the alternate-entry wrapper");
+    std::filesystem::remove_all(test_root);
+  }
+  std::cout << "  [PASS] Runtime-observed interior blocks collapse into generated alternate entries\n";
+
+  // Test 19 (Dead-Rising-style dropped-edge recovery): two independent
+  // semantic owners branching BACKWARD to the same otherwise-unproven
+  // executable address are enough to recover that orphan after ordinary
+  // local CFG closure. Forward targets are now closed directly as blocks, so
+  // using backward cross-function edges here specifically exercises the
+  // multi-source orphan recovery pass rather than the normal CFG worklist.
+  {
+    const auto orphan = base + 2u * 4u;
+    const auto caller_a = base + 4u * 4u;
+    const auto caller_b = base + 6u * 4u;
+    const std::vector<std::uint32_t> words = {
+        kBlr,
+        0u,
+        addi_word(3u, 3u, 1u),
+        kBlr,
+        b_word(caller_a, orphan),
+        0u,
+        b_word(caller_b, orphan),
+        0u,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    AnalysisHintSetV2 hints{};
+    hints.identity = xbox::compute_effective_identity(image);
+    FunctionHint first_caller{};
+    first_caller.address = caller_a;
+    hints.functions.push_back(first_caller);
+    FunctionHint second_caller{};
+    second_caller.address = caller_b;
+    hints.functions.push_back(second_caller);
+    AnalysisReport report;
+    assert(run(xex_bytes, hints, report, root / "multi_source_orphan"));
+    const auto* recovered = find_function(report, orphan);
+    assert(recovered != nullptr && recovered->compiled);
+    assert(has_source(*recovered, DiscoverySource::GapRecovery));
+    assert(report.diagnostics.orphan_entries_recovered == 1u);
+  }
+  std::cout << "  [PASS] Multi-source orphan edges recover dropped executable regions generically\n";
+
+  // Test 20 (static vtable/function-pointer recovery): a structurally diverse
+  // run of executable pointers in a non-code section seeds dispatchable targets
+  // without a title-specific function list. Repeating one pointer many times is
+  // deliberately NOT sufficient evidence of a table.
+  {
+    const auto target_a = base + 4u * 4u;
+    const auto target_b = base + 8u * 4u;
+    const auto target_c = base + 12u * 4u;
+    const std::vector<std::uint32_t> words = {
+        kBlr, 0u, 0u, 0u,
+        mflr_word(0u), kBlr, 0u, 0u,
+        stwu_word(1u, 1u, -32), kBlr, 0u, 0u,
+        mflr_word(0u), kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    xbox::XexSection pointer_section{};
+    pointer_section.name = ".rdata";
+    pointer_section.virtual_address = kLoadAddress + 0x30000u;
+    pointer_section.virtual_size = 24u;
+    pointer_section.raw_size = 24u;
+    pointer_section.readable = true;
+    pointer_section.executable = false;
+    pointer_section.bytes.resize(24u);
+    const std::array<std::uint32_t, 6> table = {
+        target_a, target_b, target_c, target_a, target_b, target_c};
+    for (std::size_t i = 0; i < table.size(); ++i)
+      be32(pointer_section.bytes, i * 4u, table[i]);
+    image.sections.push_back(pointer_section);
+
+    const auto test_root = root / "static_pointer_table";
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = test_root / "generated";
+    options.analysis_jobs = 1u;
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    for (const auto target : {target_a, target_b, target_c}) {
+      const auto* recovered = find_function(report, target);
+      assert(recovered != nullptr && recovered->compiled);
+      assert(has_source(*recovered, DiscoverySource::PointerTable));
+    }
+    assert(report.diagnostics.pointer_tables_discovered == 1u);
+    assert(report.diagnostics.pointer_table_targets_discovered == 3u);
+
+    // Replace the table with six identical pointer-shaped constants: this must
+    // no longer create a static pointer table by structure alone.
+    for (std::size_t i = 0; i < 6u; ++i)
+      be32(image.sections.back().bytes, i * 4u, target_a);
+    AnalysisReport repeated_report;
+    options.pre_parsed_image = image;
+    assert(load_and_analyze(options, repeated_report, error) && error.empty());
+    assert(repeated_report.diagnostics.pointer_tables_discovered == 0u);
+    assert(repeated_report.diagnostics.pointer_table_targets_discovered == 0u);
+    std::filesystem::remove_all(test_root);
+  }
+  std::cout << "  [PASS] Static pointer-table scanning requires diverse executable-entry structure\n";
+
+  // Test 21 (adaptive trace ingestion): runtime JSONL is crash-safe and may
+  // contain repeated observations. Ingest must merge identical facts and
+  // preserve distinct call/branch evidence.
+  {
+    const auto trace = root / "adaptive-observations.jsonl";
+    std::filesystem::create_directories(root);
+    {
+      std::ofstream out(trace);
+      out << "{\"address\":0x821F7DA8,\"site\":0x821F7D90,\"kind\":\"indirect-branch-target\",\"hits\":1}\n";
+      out << "{\"address\":0x821F7DA8,\"site\":0x821F7D90,\"kind\":\"indirect-branch-target\",\"hits\":2}\n";
+      out << "{\"address\":0x82382A68,\"site\":0x82382000,\"kind\":\"indirect-call-target\",\"hits\":1}\n";
+    }
+    std::vector<AdaptiveObservation> observations;
+    std::string error;
+    assert(load_adaptive_observations(trace, observations, error) && error.empty());
+    assert(observations.size() == 2u);
+    const auto merged = std::find_if(observations.begin(), observations.end(), [](const auto& observation) {
+      return observation.address == 0x821F7DA8u;
+    });
+    assert(merged != observations.end() && merged->hits == 3u);
+    const auto fingerprint = adaptive_observation_fingerprint(observations);
+    auto repeated = observations;
+    repeated.front().hits += 1000u;
+    assert(adaptive_observation_fingerprint(repeated) == fingerprint &&
+           "repeat hit counts must not invalidate a prepared artifact");
+    AdaptiveObservation new_fact{};
+    new_fact.address = 0x82382A6Cu;
+    new_fact.site = 0x82382000u;
+    new_fact.kind = AdaptiveObservationKind::IndirectBranchTarget;
+    repeated.push_back(new_fact);
+    assert(adaptive_observation_fingerprint(repeated) != fingerprint &&
+           "a new adaptive control-flow fact must invalidate preparation cache identity");
+    std::filesystem::remove(trace);
+  }
+  std::cout << "  [PASS] Adaptive runtime observation traces ingest and deduplicate deterministically\n";
+
+  // Test 21b: runtime learning is revision-scoped. A trace from another
+  // effective image may reuse the same guest address and must not seed this
+  // analysis.
+  {
+    const std::vector<std::uint32_t> words = {kBlr};
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "adaptive_revision_scope";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation stale{};
+    stale.address = base;
+    stale.site = base;
+    stale.kind = AdaptiveObservationKind::ExecutedEntry;
+    stale.image_hash = "0000000000000000000000000000000000000000";
+    options.adaptive_observations.push_back(stale);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(report.diagnostics.adaptive_observations_consumed == 0u);
+    assert(report.diagnostics.adaptive_observations_rejected_revision == 1u);
+  }
+  std::cout << "  [PASS] Adaptive observations are scoped to the exact effective executable revision\n";
+
+  // Test 22 (forward terminal branch closure): a non-linked forward `b` must
+  // not become a tail-call/function boundary merely because it crosses the
+  // current tentative extent. This is the generic form of AC6's
+  // 0x821F7D50 -> 0x821F7DA8 failure class.
+  {
+    const auto target = base + 2u * 4u;
+    const std::vector<std::uint32_t> words = {
+        b_word(base, target),
+        0u,
+        addi_word(3u, 3u, 1u),
+        kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    AnalysisReport report;
+    assert(run(xex_bytes, std::nullopt, report, root / "forward_terminal_cfg"));
+    assert(report.functions.size() == 1u);
+    const auto& owner = report.functions.front();
+    assert(owner.guest_start == base && owner.compiled);
+    assert(std::any_of(owner.ir.blocks.begin(), owner.ir.blocks.end(), [&](const auto& block) {
+      return block.guest_address == target;
+    }));
+    assert(std::none_of(report.unresolved.begin(), report.unresolved.end(), [&](const auto& item) {
+      return item.target == target && item.kind == "branch-into-unknown-code";
+    }));
+  }
+  std::cout << "  [PASS] Forward terminal branches extend CFG ownership before tail-call classification\n";
+
+  // Test 23 (generic switch-tail repair): module metadata proving a switch
+  // edge does NOT prove each case body is a function. The case target is
+  // absorbed into the canonical owner and remains externally dispatchable as
+  // an AlternateBlock entry. This replaces title-specific function-bound
+  // widening tables used by older recomp projects.
+  {
+    const auto target = base + 3u * 4u;
+    const std::vector<std::uint32_t> words = {
+        kBctr,
+        0u,
+        0u,
+        addi_word(3u, 3u, 7u),
+        kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    AnalysisHintSetV2 hints{};
+    hints.identity = xbox::compute_effective_identity(image);
+    SwitchTableHint table{};
+    table.site = base;
+    table.explicit_targets.push_back(target);
+    hints.switches.push_back(table);
+
+    AnalysisReport report;
+    assert(run(xex_bytes, hints, report, root / "switch_tail_region_entry"));
+    assert(find_function(report, target) == nullptr &&
+           "switch case targets are entry blocks, not automatic semantic functions");
+    const auto* entry = find_entry(report, target);
+    assert(entry != nullptr && entry->kind == GuestEntryKind::AlternateBlock &&
+           entry->owner_function == base);
+    assert(std::find(entry->sources.begin(), entry->sources.end(), DiscoverySource::ControlFlowHint) !=
+           entry->sources.end());
+  }
+  std::cout << "  [PASS] Switch-tail case bodies become alternate entries in the canonical compiled region\n";
+
+  // Test 24 (evidence accumulation): a strong seed must retain its identity
+  // when weaker adaptive/static evidence names the same address. This prevents
+  // seed insertion order from changing function authority.
+  {
+    const auto target_b = base + 4u * 4u;
+    const auto target_c = base + 8u * 4u;
+    const std::vector<std::uint32_t> words = {
+        mflr_word(0u), kBlr, 0u, 0u,
+        mflr_word(0u), kBlr, 0u, 0u,
+        stwu_word(1u, 1u, -32), kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    xbox::XexSection pointer_section{};
+    pointer_section.name = ".rdata";
+    pointer_section.virtual_address = kLoadAddress + 0x31000u;
+    pointer_section.virtual_size = 24u;
+    pointer_section.raw_size = 24u;
+    pointer_section.readable = true;
+    pointer_section.executable = false;
+    pointer_section.bytes.resize(24u);
+    const std::array<std::uint32_t, 6> table = {
+        base, target_b, target_c, base, target_b, target_c};
+    for (std::size_t i = 0; i < table.size(); ++i)
+      be32(pointer_section.bytes, i * 4u, table[i]);
+    image.sections.push_back(pointer_section);
+
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "seed_evidence_accumulation";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation observation{};
+    observation.address = base;
+    observation.site = base + 4u;
+    observation.kind = AdaptiveObservationKind::ExecutedEntry;
+    options.adaptive_observations.push_back(observation);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    const auto* entry_function = find_function(report, base);
+    assert(entry_function != nullptr);
+    assert(has_source(*entry_function, DiscoverySource::EntryPoint));
+    assert(has_source(*entry_function, DiscoverySource::PointerTable));
+    assert(has_source(*entry_function, DiscoverySource::RuntimeObservation));
+    assert(entry_function->authority == FunctionAuthority::EntryPoint);
+    std::filesystem::remove_all(options.output);
+  }
+  std::cout << "  [PASS] Initial seeds accumulate evidence without weak-source downgrades\n";
+
+  // Test 25 (runtime call evidence): an observed indirect CALL target carries
+  // both runtime-observation and callable-boundary provenance. Executed/branch
+  // observations remain weaker entry facts.
+  {
+    const auto target = base + 4u * 4u;
+    const std::vector<std::uint32_t> words = {
+        kBlr, 0u, 0u, 0u, mflr_word(0u), kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    DriverOptions options{};
+    options.pre_parsed_image = image;
+    options.output = root / "runtime_call_evidence";
+    options.analysis_jobs = 1u;
+    AdaptiveObservation observation{};
+    observation.address = target;
+    observation.site = base;
+    observation.kind = AdaptiveObservationKind::IndirectCallTarget;
+    options.adaptive_observations.push_back(observation);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    const auto* recovered = find_function(report, target);
+    assert(recovered != nullptr && recovered->compiled);
+    assert(has_source(*recovered, DiscoverySource::RuntimeObservation));
+    assert(has_source(*recovered, DiscoverySource::ResolvedIndirectCall));
+    assert(recovered->authority == FunctionAuthority::DirectCall);
+    std::filesystem::remove_all(options.output);
+  }
+  std::cout << "  [PASS] Runtime indirect-call observations become strong callable evidence\n";
+
+  // Test 26 (stable adaptive configuration identity): ordering and duplicate
+  // hit counts are runtime-history details, not different recompilation facts.
+  {
+    const auto xex_bytes = make_xex({kBlr});
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    AdaptiveObservation a{};
+    a.address = base;
+    a.site = base + 4u;
+    a.kind = AdaptiveObservationKind::ExecutedEntry;
+    a.hits = 1u;
+    AdaptiveObservation b{};
+    b.address = base;
+    b.site = base + 8u;
+    b.kind = AdaptiveObservationKind::IndirectBranchTarget;
+    b.hits = 2u;
+
+    DriverOptions first{};
+    first.pre_parsed_image = image;
+    first.output = root / "adaptive_hash_first";
+    first.analysis_jobs = 1u;
+    first.adaptive_observations = {a, b};
+    AnalysisReport first_report;
+    std::string error;
+    assert(load_and_analyze(first, first_report, error) && error.empty());
+
+    a.hits = 999u;
+    b.hits = 123u;
+    DriverOptions second = first;
+    second.output = root / "adaptive_hash_second";
+    second.adaptive_observations = {b, a};
+    AnalysisReport second_report;
+    assert(load_and_analyze(second, second_report, error) && error.empty());
+    assert(first_report.configuration_hash == second_report.configuration_hash);
+    std::filesystem::remove_all(first.output);
+    std::filesystem::remove_all(second.output);
+  }
+  std::cout << "  [PASS] Adaptive configuration hashing is order- and hit-count-independent\n";
+
+  // Test 27 (conservative gap fill): an otherwise unreachable executable code
+  // island may be recovered without a title-specific function list, but only
+  // when a prologue begins on a structural boundary and the island reaches a
+  // real terminator.
+  {
+    const auto hidden = base + 4u * 4u;
+    const std::vector<std::uint32_t> words = {
+        kBlr, 0u, 0u, 0u,
+        mflr_word(0u), addi_word(3u, 3u, 1u), kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    AnalysisReport report;
+    assert(run(xex_bytes, std::nullopt, report, root / "conservative_gap_fill"));
+    const auto* recovered = find_function(report, hidden);
+    assert(recovered != nullptr && recovered->compiled);
+    assert(has_source(*recovered, DiscoverySource::GapRecovery));
+    assert(has_source(*recovered, DiscoverySource::PrologueHeuristic));
+    assert(report.diagnostics.gap_functions_recovered == 1u);
+  }
+  std::cout << "  [PASS] Conservative gap fill recovers bounded unowned code islands\n";
+
+  // Test 28 (Gen 6 return classification): a real BLR is direct evidence that
+  // the function may return normally.
+  {
+    const auto xex_bytes = make_xex({kBlr});
+    AnalysisReport report;
+    assert(run(xex_bytes, std::nullopt, report, root / "gen6_may_return"));
+    const auto* function = find_function(report, base);
+    assert(function != nullptr);
+    assert(function->has_explicit_return);
+    assert(function->return_behavior == ReturnBehavior::MayReturn);
+    assert(report.diagnostics.inferred_may_return_functions >= 1u);
+  }
+  std::cout << "  [PASS] Gen 6 classifies explicit return paths as MayReturn\n";
+
+  // Test 29 (Gen 6 fixed point): explicit NoReturn metadata on a terminal
+  // callee propagates through a tail-call chain without treating ordinary
+  // linked calls as non-returning.
+  {
+    const auto sink = base + 8u;
+    const std::vector<std::uint32_t> words = {
+        b_word(base, sink), 0u, b_word(sink, sink),
+    };
+    const auto xex_bytes = make_xex(words);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+
+    AnalysisHintSetV2 hints{};
+    hints.identity = xbox::compute_effective_identity(image);
+    FunctionHint sink_hint{};
+    sink_hint.address = sink;
+    sink_hint.end = sink + 4u;
+    sink_hint.name = "gen6_noreturn_sink";
+    sink_hint.flags = FunctionFlags::NoReturn;
+    hints.functions.push_back(sink_hint);
+
+    AnalysisReport report;
+    assert(run(xex_bytes, hints, report, root / "gen6_noreturn_fixed_point"));
+    const auto* entry = find_function(report, base);
+    const auto* target = find_function(report, sink);
+    assert(entry != nullptr && target != nullptr);
+    assert(target->return_behavior_explicit);
+    assert(target->return_behavior == ReturnBehavior::NoReturn);
+    assert(entry->return_behavior == ReturnBehavior::NoReturn);
+    assert(report.diagnostics.inferred_no_return_functions >= 2u);
+    assert(report.diagnostics.return_fixed_point_iterations >= 1u);
+  }
+  std::cout << "  [PASS] Gen 6 propagates NoReturn through terminal tail-call chains\n";
+
+  // Test 30 (Gen 6 static pointer-table integration): load a call target from
+  // immutable image bytes, feed it to CTR, and verify the driver carries the
+  // dedicated resolver diagnostic/provenance into the discovered function.
+  {
+    const auto table = base + 8u * 4u;
+    const auto target = base + 10u * 4u;
+    const std::vector<std::uint32_t> words = {
+        lis_word(10u, static_cast<std::uint16_t>(table >> 16u)),
+        ori_word(10u, 10u, static_cast<std::uint16_t>(table)),
+        lwz_word(11u, 10u, 0),
+        mtctr_word(11u),
+        kBctrl,
+        kBlr,
+        0u, 0u,
+        target,
+        0u,
+        kBlr,
+    };
+    const auto xex_bytes = make_xex(words);
+    AnalysisReport report;
+    assert(run(xex_bytes, std::nullopt, report, root / "gen6_readonly_pointer_call"));
+    const auto* recovered = find_function(report, target);
+    assert(recovered != nullptr);
+    assert(has_source(*recovered, DiscoverySource::ResolvedIndirectCall));
+    assert(report.diagnostics.resolved_indirect_via_readonly_table >= 1u);
+    assert(report.diagnostics.resolved_indirect_via_dataflow >= 1u);
+  }
+  std::cout << "  [PASS] Gen 6 resolves immutable pointer-table calls end-to-end\n";
+
+  std::cout << "All Recomp Analysis V3 + Gen 6 discovery quality tests passed!\n";
   return 0;
 }

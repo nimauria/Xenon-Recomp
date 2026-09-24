@@ -167,12 +167,15 @@ function(_xenon_bootstrap_dependency dependency_name out_result)
       "XENON_CMAKE_GENERATOR_INSTANCE=${CMAKE_GENERATOR_INSTANCE}"
       "XENON_CMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
       "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tools/deps/bootstrap.py"
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/deps/bootstrap.py"
       ensure
       --triplet "${XENON_DEPENDENCY_TRIPLET}"
       --root "${XENON_MANAGED_DEPS_ROOT}"
       --only "${dependency_name}"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    # Functions in this module are called from several add_subdirectory()
+    # scopes (notably runtime_host). CMAKE_CURRENT_SOURCE_DIR would therefore
+    # point at the caller and incorrectly look for runtime_host/tools/deps.
+    WORKING_DIRECTORY "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/.."
     RESULT_VARIABLE _bootstrap_result
     COMMAND_ECHO STDOUT)
   set(${out_result} "${_bootstrap_result}" PARENT_SCOPE)

@@ -90,7 +90,7 @@ Item {
         const coverScale = Math.max(root.width / naturalWidth, root.height / naturalHeight)
         const containScale = Math.min(root.width / naturalWidth, root.height / naturalHeight)
         const baseScale = root.fitMode === "contain" ? containScale : coverScale
-        const scale = baseScale * Math.max(1.0, root.zoom)
+        const scale = baseScale * Math.max(0.1, root.zoom)
         const w = naturalWidth * scale
         const h = naturalHeight * scale
         image.width = w
@@ -101,8 +101,15 @@ Item {
         } else {
             const fx = Math.max(0, Math.min(1, root.focalX))
             const fy = Math.max(0, Math.min(1, root.focalY))
-            image.x = Math.min(0, Math.max(root.width - w, root.width / 2 - w * fx))
-            image.y = Math.min(0, Math.max(root.height - h, root.height / 2 - h * fy))
+            // Below 1.0 zoom the source can become smaller than the crop
+            // viewport. Centre that axis rather than pinning it to an edge;
+            // this makes "zoom out to include the whole logo" predictable.
+            image.x = w <= root.width
+                ? (root.width - w) / 2
+                : Math.min(0, Math.max(root.width - w, root.width / 2 - w * fx))
+            image.y = h <= root.height
+                ? (root.height - h) / 2
+                : Math.min(0, Math.max(root.height - h, root.height / 2 - h * fy))
         }
     }
 

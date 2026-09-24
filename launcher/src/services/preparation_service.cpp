@@ -57,6 +57,17 @@ QString PreparationService::hintPackagePath(const QString& module_id) const {
   return QDir(module_path).filePath(QStringLiteral("xenon-analysis"));
 }
 
+QString PreparationService::adaptiveObservationPath(const QString& game_id) const {
+  QString safe_id = game_id;
+  for (auto& ch : safe_id) {
+    if (!ch.isLetterOrNumber() && ch != QLatin1Char('-') && ch != QLatin1Char('_'))
+      ch = QLatin1Char('_');
+  }
+  if (safe_id.isEmpty()) safe_id = QStringLiteral("unknown-game");
+  const auto dir = QDir(paths_.preparationCachePath()).filePath(QStringLiteral("adaptive"));
+  return QDir(dir).filePath(safe_id + QStringLiteral(".jsonl"));
+}
+
 bool PreparationService::usesAutomaticPreparation(const QString& game_id) const {
   const auto game = library_.entry(game_id);
   const auto module_id = game.value(QStringLiteral("moduleId")).toString().trimmed();
@@ -86,7 +97,8 @@ bool PreparationService::buildArguments(const QString& game_id, QStringList& out
   }
 
   const auto status_dir = QDir(paths_.preparationCachePath()).filePath(QStringLiteral("status"));
-  if (!paths_.ensureDirectory(status_dir)) {
+  const auto adaptive_dir = QDir(paths_.preparationCachePath()).filePath(QStringLiteral("adaptive"));
+  if (!paths_.ensureDirectory(status_dir) || !paths_.ensureDirectory(adaptive_dir)) {
     outError = QStringLiteral("Could not create the preparation status directory.");
     return false;
   }
@@ -98,6 +110,7 @@ bool PreparationService::buildArguments(const QString& game_id, QStringList& out
             QStringLiteral("--module"), hintPackagePath(module_id),
             QStringLiteral("--module-id"), module_id,
             QStringLiteral("--cache-root"), paths_.preparationCachePath(),
+            QStringLiteral("--observations"), adaptiveObservationPath(game_id),
             QStringLiteral("--status-file"), outStatusFile,
             QStringLiteral("--stop-signal"), outStopSignal};
   return true;

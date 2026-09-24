@@ -2,11 +2,10 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Interactive crop/position editor for a profile picture. Operates purely on
-// metadata (focal point + zoom) over the untouched source image - see
-// ProfileService::importAvatar(), which copies the original file as-is and
-// never bakes a crop into it - so Reset always returns to a knowable state
-// and re-opening this editor later can start from whatever was last saved.
+// Non-destructive profile picture crop editor. The source image is never
+// rewritten: focal point + zoom are persisted and shared with ProfileAvatar.
+// Zoom may go below the normal cover scale so logos/badges can be fitted in
+// full instead of being forced into an over-cropped portrait treatment.
 Popup {
     id: root
 
@@ -14,6 +13,7 @@ Popup {
     property real initialFocalX: 0.5
     property real initialFocalY: 0.5
     property real initialZoom: 1.0
+    readonly property real minZoom: 0.55
     readonly property real maxZoom: 3.0
     readonly property real nudgeStep: 0.02
 
@@ -24,7 +24,7 @@ Popup {
     signal applied(real focalX, real focalY, real zoom)
 
     parent: Overlay.overlay
-    width: Math.min(420, parent ? parent.width - Theme.space2Xl * 2 : 420)
+    width: Math.min(560, parent ? parent.width - Theme.space2Xl * 2 : 560)
     implicitHeight: contentColumn.implicitHeight + Theme.spaceXl * 2
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
@@ -36,7 +36,7 @@ Popup {
     onOpened: {
         focalX = initialFocalX
         focalY = initialFocalY
-        zoom = initialZoom
+        zoom = Math.max(minZoom, Math.min(maxZoom, initialZoom))
         viewport.forceActiveFocus()
         NavigationGuard.pushModal()
     }
@@ -48,22 +48,21 @@ Popup {
         zoom = 1.0
     }
 
+    function fitImage() {
+        focalX = 0.5
+        focalY = 0.5
+        zoom = minZoom
+    }
+
     function nudge(dx, dy) {
         focalX = Math.max(0, Math.min(1, focalX + dx))
         focalY = Math.max(0, Math.min(1, focalY + dy))
     }
 
     function adjustZoom(delta) {
-        zoom = Math.max(1.0, Math.min(root.maxZoom, zoom + delta))
+        zoom = Math.max(minZoom, Math.min(maxZoom, zoom + delta))
     }
 
-    // Controller support (Part 20): D-pad/stick reposition (the same
-    // navigateUp/Down/Left/Right the rest of the launcher would otherwise
-    // use to move focus - suppressed here via NavigationGuard so this
-    // dialog gets them instead), triggers zoom (the same physical inputs
-    // "page/scroll larger content" uses elsewhere - zooming a crop is this
-    // dialog's equivalent of paging), A applies, B cancels, X (the
-    // launcher's reserved "secondary action" button) resets.
     Connections {
         target: launcherBridge
         enabled: root.visible
@@ -118,34 +117,38 @@ Popup {
             Layout.fillWidth: true
             Layout.leftMargin: Theme.spaceXl
             Layout.rightMargin: Theme.spaceXl
-            text: "Drag to reposition, scroll or use the slider to zoom. Arrow keys nudge position; +/- zoom."
+            text: "Drag the image to reposition it. Zoom out to keep more of the source, or zoom in for a tighter crop. Everything inside the circle becomes your profile picture."
             color: Theme.textMuted
             font.pixelSize: Theme.typeCaption
             wrapMode: Text.WordWrap
         }
 
-        // The crop viewport: WYSIWYG for exactly what ProfileAvatar.qml will
-        // render, since both go through the same CoverImage component with
-        // the same focalX/focalY/zoom values.
-        Item {
+        // A visible crop stage rather than an unexplained image viewport.
+        Rectangle {
             Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 220
-            Layout.preferredHeight: 220
+            Layout.preferredWidth: 336
+            Layout.preferredHeight: 336
+            radius: Theme.panelRadius
+            color: Theme.surfaceAlt
+            border.width: Theme.borderWidth
+            border.color: Theme.divider
 
             Rectangle {
                 id: viewport
-                anchors.fill: parent
+                width: 292
+                height: 292
+                anchors.centerIn: parent
                 radius: width / 2
                 clip: true
-                color: Theme.surfaceAlt
+                color: Theme.window
                 border.width: Theme.focusWidth
-                border.color: activeFocus ? Theme.focusRing : Theme.border
+                border.color: activeFocus ? Theme.focusRing : Theme.accent
                 focus: true
                 activeFocusOnTab: true
 
                 Accessible.role: Accessible.Slider
                 Accessible.name: "Profile picture crop position"
-                Accessible.description: "Drag, or use arrow keys and +/- to reposition and zoom the profile picture."
+                Accessible.description: "Drag or use arrow keys to reposition. Use the slider, wheel, plus or minus to zoom."
 
                 CoverImage {
                     id: cropImage
@@ -155,17 +158,24 @@ Popup {
                     focalX: root.focalX
                     focalY: root.focalY
                     zoom: root.zoom
-                    // Keep one sufficiently detailed texture throughout the crop
-                    // session; zooming must remain a transform-only operation.
                     decodeHeadroom: 6.0
                 }
 
-                // Claims these keys before Qt's shortcut system can - without
-                // this, Main.qml's global Up/Down/Left/Right/PageUp/PageDown
-                // Shortcut items (needed for keyboard-only launcher
-                // navigation elsewhere) would intercept the key event before
-                // it ever reaches Keys.onPressed below, silently breaking
-                // keyboard crop control while this dialog is open.
+                // Subtle guides make the crop boundary explicit without
+                // obscuring the image.
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 1
+                    height: parent.height
+                    color: Qt.rgba(Theme.text.r, Theme.text.g, Theme.text.b, 0.12)
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width
+                    height: 1
+                    color: Qt.rgba(Theme.text.r, Theme.text.g, Theme.text.b, 0.12)
+                }
+
                 Keys.onShortcutOverride: (event) => {
                     switch (event.key) {
                     case Qt.Key_Left: case Qt.Key_Right: case Qt.Key_Up: case Qt.Key_Down:
@@ -209,6 +219,9 @@ Popup {
                         const dy = mouse.y - lastY
                         lastX = mouse.x
                         lastY = mouse.y
+                        // Moving has an immediate effect whenever the image
+                        // extends past the crop on that axis. At fitted sizes
+                        // it remains centred because there is nothing to pan.
                         root.nudge(-dx / cropImage.renderedWidth, -dy / cropImage.renderedHeight)
                     }
                     onWheel: (wheel) => {
@@ -216,6 +229,15 @@ Popup {
                         wheel.accepted = true
                     }
                 }
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Theme.spaceXs
+                text: Math.round(root.zoom * 100) + "%"
+                color: Theme.textMuted
+                font.pixelSize: Theme.typeCaption
             }
         }
 
@@ -235,7 +257,7 @@ Popup {
             XSlider {
                 id: zoomSlider
                 Layout.fillWidth: true
-                from: 1.0
+                from: root.minZoom
                 to: root.maxZoom
                 value: root.zoom
                 accessibleName: "Zoom"
@@ -250,6 +272,25 @@ Popup {
             }
         }
 
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.leftMargin: Theme.spaceXl
+            Layout.rightMargin: Theme.spaceXl
+            spacing: Theme.spaceSm
+
+            XButton {
+                Layout.fillWidth: true
+                text: "Fit image"
+                onClicked: root.fitImage()
+            }
+            XButton {
+                Layout.fillWidth: true
+                automationId: "avatar-crop-reset"
+                text: "Reset crop"
+                onClicked: root.reset()
+            }
+        }
+
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
 
         RowLayout {
@@ -259,11 +300,6 @@ Popup {
             Layout.bottomMargin: Theme.spaceLg
             spacing: Theme.spaceSm
 
-            XButton {
-                automationId: "avatar-crop-reset"
-                text: "Reset"
-                onClicked: root.reset()
-            }
             Item { Layout.fillWidth: true }
             XButton {
                 automationId: "avatar-crop-cancel"
@@ -272,7 +308,7 @@ Popup {
             }
             XButton {
                 automationId: "avatar-crop-apply"
-                text: "Apply"
+                text: "Apply crop"
                 variant: "primary"
                 onClicked: {
                     root.applied(root.focalX, root.focalY, root.zoom)

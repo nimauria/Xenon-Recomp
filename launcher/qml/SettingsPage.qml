@@ -9,6 +9,7 @@ Item {
     property int categoryIndex: 0
     property int settingsRevision: 0
     property int inputRevision: 0
+    property int runtimeRevision: 0
     property var launcherUpdateState: launcherBridge.launcherUpdateState()
 
     // Only the category the user has actually visited gets its body built -
@@ -280,13 +281,43 @@ Item {
     }
 
     function runtimeServiceLabel(service) {
-        if (launcherBridge.runtimeCapability(service)) return "Connected"
-        if (launcherBridge.runtimeCapability(service + "Compiled")) return "Compiled • service pending"
-        return "Backend pending"
+        var r = root.runtimeRevision
+        if (launcherBridge.runtimeCapability(service)) return "Active"
+        if (launcherBridge.runtimeCapability(service + "Compiled"))
+            return launcherBridge.backendConnected ? "Ready" : "Built • runtime host missing"
+        return "Not built"
     }
 
     function runtimeServiceTone(service) {
-        return launcherBridge.runtimeCapability(service) ? Theme.success : Theme.warning
+        var r = root.runtimeRevision
+        if (launcherBridge.runtimeCapability(service)) return Theme.success
+        if (launcherBridge.runtimeCapability(service + "Compiled"))
+            return launcherBridge.backendConnected ? Theme.success : Theme.warning
+        return Theme.textMuted
+    }
+
+    function runtimeServiceDescription(service, friendlyName) {
+        var r = root.runtimeRevision
+        if (launcherBridge.runtimeCapability(service))
+            return friendlyName + " is active in the current game session."
+        if (launcherBridge.runtimeCapability(service + "Compiled"))
+            return launcherBridge.backendConnected
+                ? friendlyName + " is compiled and the Xenon runtime host is ready. It becomes active when a game session uses it."
+                : friendlyName + " is compiled, but xenon_runtime_host is not available beside the launcher."
+        return friendlyName + " is not included in this build."
+    }
+
+    function inputServiceLabel() {
+        var r = root.inputRevision
+        if (launcherBridge.inputAvailable()) return "Ready"
+        if (launcherBridge.runtimeCapability("inputCompiled")) return "Built • initialization failed"
+        return "Not built"
+    }
+
+    function inputServiceTone() {
+        var r = root.inputRevision
+        if (launcherBridge.inputAvailable()) return Theme.success
+        return launcherBridge.runtimeCapability("inputCompiled") ? Theme.warning : Theme.textMuted
     }
 
     onSearchTextChanged: Qt.callLater(function() {
@@ -312,6 +343,16 @@ Item {
         function onCornerStyleChanged() { root.settingsRevision += 1 }
         function onUpdateStateChanged() { root.launcherUpdateState = launcherBridge.launcherUpdateState() }
         function onInputChanged() { root.inputRevision += 1 }
+        function onBackendConnectedChanged() { root.runtimeRevision += 1 }
+        function onSessionChanged() { root.runtimeRevision += 1 }
+    }
+
+    Timer {
+        interval: 1000
+        running: root.visible && (root.categoryIndex === 4 || root.categoryIndex === 5 || root.categoryIndex === 6
+                                  || root.categoryIndex === 7 || root.categoryIndex === 13)
+        repeat: true
+        onTriggered: root.runtimeRevision += 1
     }
 
     ColumnLayout {
@@ -739,9 +780,11 @@ Item {
                         }
                     }
                     XSettingsCard {
-                        title: "Runtime connection"
-                        description: "Launcher Core is isolated from runtime implementation details through RuntimeBridge."
-                        StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Disconnected"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+                        title: "Runtime host"
+                        description: launcherBridge.backendConnected
+                            ? "xenon_runtime_host is installed beside the launcher and ready to start game sessions."
+                            : "The launcher UI is running, but xenon_runtime_host was not found beside it. Rebuild/install the full launcher target."
+                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Runtime host missing"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
                     }
                     XSettingsCard {
                         title: "Reset runtime preferences"
@@ -757,8 +800,8 @@ Item {
                     title: "Graphics"
                     description: "Host graphics preferences are persisted now; renderer-specific device controls will appear when the live graphics service exposes them."
                     XSettingsCard {
-                        title: "Renderer capability detection"
-                        description: "The launcher only presents backends compiled for the current Xenon build and host platform."
+                        title: "Graphics service"
+                        description: root.runtimeServiceDescription("graphics", "Graphics")
                         StatusPill { label: root.runtimeServiceLabel("graphics"); tone: root.runtimeServiceTone("graphics") }
                     }
                     XSettingsCard {
@@ -792,13 +835,22 @@ Item {
                     description: "Xenon Input is connected directly to the launcher. Configure live controllers, Xbox user routing, profiles, HOTAS/multi-source input and module API defaults here."
                     XSettingsCard {
                         title: "Input service"
-                        description: launcherBridge.inputStatus()
+                        description: launcherBridge.inputAvailable()
+                            ? launcherBridge.inputStatus()
+                            : (launcherBridge.runtimeCapability("inputCompiled")
+                                ? "Xenon Input is built, but its host backend did not initialize. Retry without restarting the launcher."
+                                : "Xenon Input is not included in this build.")
                         RowLayout {
                             Layout.fillWidth: true
-                            StatusPill { label: launcherBridge.inputAvailable() ? "Connected" : "Unavailable"; tone: launcherBridge.inputAvailable() ? Theme.success : Theme.warning }
+                            StatusPill { label: root.inputServiceLabel(); tone: root.inputServiceTone() }
                             Item { Layout.fillWidth: true }
                             Text { text: "Module API v" + String(launcherBridge.inputModuleApiInfo().version || 0); color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
-                            XButton { text: "Refresh Devices"; onClicked: launcherBridge.refreshInputDevices() }
+                            XButton {
+                                text: launcherBridge.inputAvailable() ? "Refresh Devices" : "Retry Input"
+                                onClicked: launcherBridge.inputAvailable()
+                                    ? launcherBridge.refreshInputDevices()
+                                    : launcherBridge.reconfigureInput()
+                            }
                         }
                     }
                     XSettingsCard {
@@ -943,7 +995,7 @@ Item {
                     description: "Launcher-side audio policy is ready now; device enumeration remains owned by Xenon Audio."
                     XSettingsCard {
                         title: "Audio service"
-                        description: "Shows whether this build contains and exposes the live audio subsystem."
+                        description: root.runtimeServiceDescription("audio", "Audio")
                         StatusPill { label: root.runtimeServiceLabel("audio"); tone: root.runtimeServiceTone("audio") }
                     }
                     XSettingsCard {
@@ -1303,8 +1355,9 @@ Item {
                     asynchronous: true
                     sourceComponent: Component { XSettingsPage {
                     title: "Developer"
-                    description: "Development-only fixture selection and diagnostics. Hidden from production builds."
+                    description: "Advanced runtime, input, capability and logging diagnostics. This replaces the old separate Developer sidebar page."
                     XSettingsCard {
+                        visible: launcherBridge.testMode
                         title: "Launcher fixture data"
                         description: "Switch between generic fictional data, a Project Gracemeria UI preview, or an empty launcher without recompiling."
                         XComboBox {
@@ -1319,7 +1372,79 @@ Item {
                         description: "Keep extra frontend-backend diagnostics available for development builds."
                         XSwitch { checked: root.getBool("developer/verboseLogging", false); onUserToggled: function(value) { root.save("developer/verboseLogging", value) } }
                     }
-                    XSettingsCard { title: "Runtime service"; description: "Reports whether the launcher is connected to the Xenon backend service registry."; StatusPill { label: launcherBridge.backendConnected ? "Connected" : "Not connected"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning } }
+                    XSettingsCard {
+                        title: "Runtime host"
+                        description: launcherBridge.backendConnected
+                            ? "The runtime host executable is available and ready to start sessions."
+                            : "The runtime host executable is missing from the launcher folder."
+                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Missing"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+                    }
+                    XSettingsCard {
+                        id: developerRuntimeSessionCard
+                        property var runtimeStatus: { var r = root.runtimeRevision; return launcherBridge.gameStatus() }
+                        title: "Runtime session"
+                        description: Boolean(runtimeStatus.running)
+                            ? String(runtimeStatus.stateName || "running")
+                            : "No game session is currently running."
+                        StatusPill {
+                            label: Boolean(developerRuntimeSessionCard.runtimeStatus.running) ? "Active" : "Idle"
+                            tone: Boolean(developerRuntimeSessionCard.runtimeStatus.running) ? Theme.success : Theme.textMuted
+                        }
+                    }
+                    XSettingsCard {
+                        id: developerLoadedXexCard
+                        visible: Boolean(developerRuntimeSessionCard.runtimeStatus.running)
+                                 && Boolean((developerRuntimeSessionCard.runtimeStatus.loadedXex || {}).loaded)
+                        property var loadedXex: developerRuntimeSessionCard.runtimeStatus.loadedXex || ({})
+                        actionWidth: 520
+                        title: "Loaded XEX"
+                        description: "Executable identity reported by the active runtime session."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceXs
+                            XInfoRow { label: "Title ID"; value: String(developerLoadedXexCard.loadedXex.titleId || "Unknown") }
+                            XInfoRow { label: "Entry point"; value: String(developerLoadedXexCard.loadedXex.entryPoint || "") }
+                            XInfoRow { label: "Image base"; value: String(developerLoadedXexCard.loadedXex.imageBase || "") }
+                            XInfoRow { label: "Effective version"; value: String(developerLoadedXexCard.loadedXex.effectiveVersion || "") }
+                        }
+                    }
+                    XSettingsCard {
+                        visible: Boolean(developerRuntimeSessionCard.runtimeStatus.running)
+                                 && (developerRuntimeSessionCard.runtimeStatus.unresolvedImports || []).length > 0
+                        title: "Unresolved kernel imports"
+                        description: String((developerRuntimeSessionCard.runtimeStatus.unresolvedImports || []).length) + " unresolved import(s) are reported by the current session."
+                    }
+                    XSettingsCard {
+                        visible: String(developerRuntimeSessionCard.runtimeStatus.lastError || "").length > 0
+                        title: "Last runtime error"
+                        description: String(developerRuntimeSessionCard.runtimeStatus.lastError || "")
+                    }
+                    XSettingsCard {
+                        actionWidth: 520
+                        title: "Subsystem readiness"
+                        description: "Active means a running game initialized the subsystem. Ready means it is built and the runtime host can start it."
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.spaceXs
+                            XInfoRow { label: "Graphics"; value: root.runtimeServiceLabel("graphics") }
+                            XInfoRow { label: "Audio"; value: root.runtimeServiceLabel("audio") }
+                            XInfoRow { label: "Input"; value: root.inputServiceLabel() }
+                            XInfoRow { label: "Network"; value: root.runtimeServiceLabel("network") }
+                        }
+                    }
+                    XSettingsCard {
+                        title: "Runtime log tail"
+                        description: "Recent xenon_runtime_host output for the current or most recent session."
+                        Text {
+                            Layout.fillWidth: true
+                            text: launcherBridge.runtimeLogTail().length > 0 ? launcherBridge.runtimeLogTail() : "No runtime host log is available yet."
+                            color: Theme.textMuted
+                            font.family: "monospace"
+                            font.pixelSize: Theme.typeCaption
+                            wrapMode: Text.WrapAnywhere
+                            textFormat: Text.PlainText
+                        }
+                    }
                     XPanel {
                         Layout.fillWidth: true
                         implicitHeight: developerColumn.implicitHeight + Theme.spaceLg * 2
@@ -1389,7 +1514,7 @@ Item {
                             XInfoRow { label: "Launcher version"; value: launcherBridge.version }
                             XInfoRow { label: "System"; value: launcherBridge.platformName + " • " + launcherBridge.hostArchitecture }
                             XInfoRow { label: "Qt"; value: launcherBridge.qtVersion }
-                            XInfoRow { label: "Runtime"; value: launcherBridge.backendConnected ? "Connected" : "Front-end only" }
+                            XInfoRow { label: "Runtime"; value: launcherBridge.backendConnected ? "Runtime host ready" : "Runtime host missing" }
                             XInfoRow { label: "Theme"; value: Theme.name + " • " + launcherBridge.accentId }
                             XInfoRow { label: "Active profile"; value: launcherBridge.profileName }
                             RowLayout {
@@ -1514,14 +1639,6 @@ Item {
                                 wrapMode: Text.WordWrap
                                 font.pixelSize: Theme.typeCaption
                             }
-                        }
-                    }
-                    XSettingsCard {
-                        title: "Developer Mode"
-                        description: "Adds a Developer entry to the sidebar with runtime, kernel and input introspection tooling. Off by default."
-                        XSwitch {
-                            checked: root.getBool("developer/modeEnabled", false)
-                            onUserToggled: function(value) { root.save("developer/modeEnabled", value) }
                         }
                     }
                     XSettingsCard {

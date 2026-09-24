@@ -42,7 +42,12 @@ std::vector<std::byte> make_xex() {
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
   constexpr std::uint32_t load_address = 0x80000000u;
-  std::vector<std::byte> bytes(0x800, std::byte{0});
+  constexpr std::uint32_t text_rva = 0x1000u;
+  // The XEX loader exposes PE sections from the effective loaded image, so
+  // section bytes are addressed by RVA rather than the PE raw-file pointer.
+  // Keep a deliberately different raw pointer here to catch regressions.
+  constexpr std::uint32_t text_raw = 0x400u;
+  std::vector<std::byte> bytes(header + text_rva + 0x100, std::byte{0});
   bytes[0] = std::byte{'X'}; bytes[1] = std::byte{'E'};
   bytes[2] = std::byte{'X'}; bytes[3] = std::byte{'2'};
   be32(bytes, 8, header); be32(bytes, 0x10, security); be32(bytes, 0x14, 0);
@@ -61,22 +66,20 @@ std::vector<std::byte> make_xex() {
   le16(bytes, coff, 0x14C); le16(bytes, coff + 2, 1);
   le16(bytes, coff + 0x10, 0xE0); le16(bytes, coff + 0x12, 0x0102);
   le16(bytes, optional, 0x10B);
-  le32(bytes, optional + 0x10, 0x1000);
+  le32(bytes, optional + 0x10, text_rva);
   le32(bytes, optional + 0x1C, load_address);
   le32(bytes, optional + 0x38, 0x2000);
   bytes[section] = std::byte{'.'}; bytes[section + 1] = std::byte{'t'};
   bytes[section + 2] = std::byte{'e'}; bytes[section + 3] = std::byte{'x'};
   bytes[section + 4] = std::byte{'t'};
   le32(bytes, section + 4, 0x20);
-  le32(bytes, section + 0x0C, 0x1000);
+  le32(bytes, section + 0x0C, text_rva);
   le32(bytes, section + 0x10, 0x20);
-  le32(bytes, section + 0x14, 0x400);
+  le32(bytes, section + 0x14, text_raw);
   le32(bytes, section + 0x24, 0x60000020);
-  // section's raw_pointer (0x400) is a file offset within the *effective
-  // image* (the decompressed PE body, which for XEX_COMPRESSION_NONE starts
-  // right at file offset `header`) - not within the outer XEX file - so the
-  // actual bytes live at `header + 0x400`.
-  be32(bytes, header + 0x400, 0x4E800020);
+  // Loaded-image semantics: .text bytes live at effective-image RVA, not at
+  // PointerToRawData. The raw pointer remains metadata only.
+  be32(bytes, header + text_rva, 0x4E800020);
   return bytes;
 }
 

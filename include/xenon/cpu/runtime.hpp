@@ -23,6 +23,20 @@ enum class FlowReason : std::uint8_t {
   LongJump,
 };
 
+[[nodiscard]] constexpr std::string_view flow_reason_name(
+    FlowReason reason) noexcept {
+  switch (reason) {
+    case FlowReason::Fallthrough: return "Fallthrough";
+    case FlowReason::Branch: return "Branch";
+    case FlowReason::Return: return "Return";
+    case FlowReason::Trap: return "Trap";
+    case FlowReason::Syscall: return "Syscall";
+    case FlowReason::Halt: return "Halt";
+    case FlowReason::LongJump: return "LongJump";
+  }
+  return "Unknown";
+}
+
 struct ExecutionResult {
   FlowReason reason{FlowReason::Fallthrough};
   GuestAddress next_address{};
@@ -89,6 +103,25 @@ using CompiledLookupCallback = NativeCompiledEntry (*)(
     void* registry, ExecutionContext& context, GuestAddress target,
     CompiledLookupKind kind);
 
+// Optional Gen 7 safety-net path for executable guest targets that were not
+// present in the static compiled registry. The callback is deliberately
+// separate from compiled_lookup: AOT remains authoritative and pays only one
+// extra null check on a genuine miss.
+struct DynamicFallbackResult {
+  bool handled{};
+  ExecutionResult result{};
+};
+using DynamicFallbackCallback = DynamicFallbackResult (*)(
+    void* executor, ExecutionContext& context, GuestAddress target,
+    CompiledLookupKind kind);
+// Optional observation hook for adaptive static recompilation. It fires only
+// when a compiled lookup misses, so the hot path for already-known compiled
+// edges remains a single null check and projects can persist only genuinely
+// new runtime-discovered targets for the next analysis pass.
+using CompiledLookupMissCallback = void (*)(
+    void* observer, ExecutionContext& context, GuestAddress target,
+    CompiledLookupKind kind);
+
 struct ExecutionContext {
   CpuState& state;
   MemoryPort& memory;
@@ -96,13 +129,28 @@ struct ExecutionContext {
   MemoryAccessContext memory_access;
   void* compiled_registry{};
   CompiledLookupCallback compiled_lookup{};
+  void* compiled_lookup_observer{};
+  CompiledLookupMissCallback compiled_lookup_miss{};
+  void* dynamic_fallback_executor{};
+  DynamicFallbackCallback dynamic_fallback{};
 
   [[nodiscard]] NativeCompiledEntry lookup_compiled(
       GuestAddress target,
       CompiledLookupKind kind = CompiledLookupKind::Branch) {
-    return compiled_lookup ? compiled_lookup(compiled_registry, *this, target,
-                                               kind)
-                           : nullptr;
+    auto* entry = compiled_lookup
+                      ? compiled_lookup(compiled_registry, *this, target, kind)
+                      : nullptr;
+    if (!entry && compiled_lookup_miss)
+      compiled_lookup_miss(compiled_lookup_observer, *this, target, kind);
+    return entry;
+  }
+
+  [[nodiscard]] DynamicFallbackResult try_dynamic_fallback(
+      GuestAddress target,
+      CompiledLookupKind kind = CompiledLookupKind::Branch) {
+    return dynamic_fallback
+               ? dynamic_fallback(dynamic_fallback_executor, *this, target, kind)
+               : DynamicFallbackResult{};
   }
 
   ExecutionContext(CpuState& state_in, MemoryPort& memory_in,

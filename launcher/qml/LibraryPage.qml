@@ -9,6 +9,7 @@ Item {
     property string searchText: ""
     property string localSearchText: ""
     property int selectedGameIndex: -1
+    property bool detailOpen: false
     property int modelRevision: 0
     property bool wrapNavigation: launcherBridge.boolSetting("library/wrapNavigation", true)
     property bool rememberSelection: launcherBridge.boolSetting("library/rememberSelection", true)
@@ -140,12 +141,35 @@ Item {
         return root.currentGame
     }
 
-    function selectGameById(gameId) {
+    function openGameDetails(index) {
+        if (index < 0 || index >= gamesModel.count) return
+        root.selectedGameIndex = index
+        root.detailOpen = true
+        root.populateDlcForSelection()
+        Qt.callLater(function() {
+            if (detailScroll && detailScroll.contentItem)
+                detailScroll.contentItem.contentY = Number(root.detailScrollByGame[root.selectedGame().gameId] || 0)
+        })
+    }
+
+    function closeGameDetails() {
+        root.detailOpen = false
+        Qt.callLater(root.focusSelectedGame)
+    }
+
+    function handleBackNavigation() {
+        if (!root.detailOpen) return false
+        root.closeGameDetails()
+        return true
+    }
+
+    function selectGameById(gameId, showDetails) {
         var target = String(gameId || "")
         if (target.length === 0) return false
         for (var i = 0; i < gamesModel.count; ++i) {
             if (String(gamesModel.get(i).gameId || "") === target) {
                 selectedGameIndex = i
+                if (showDetails !== false) detailOpen = true
                 return true
             }
         }
@@ -263,10 +287,11 @@ Item {
         root.modelRevision += 1
 
         root.selectedGameIndex = gamesModel.count > 0 ? 0 : -1
+        if (gamesModel.count === 0) root.detailOpen = false
         var remembered = root.rememberSelection
             ? launcherBridge.stringSetting("library/lastSelectedGameId", "") : ""
         var target = keep.length > 0 ? keep : remembered
-        if (target.length > 0) root.selectGameById(target)
+        if (target.length > 0) root.selectGameById(target, false)
         root.populateDlcForSelection()
     }
 
@@ -392,6 +417,7 @@ Item {
         gamesModel.clear()
         dlcModel.clear()
         selectedGameIndex = -1
+        detailOpen = false
     }
 
     function populateBackendLibrary() {
@@ -692,12 +718,18 @@ Item {
 
         XPanel {
             id: librarySelectorPanel
-            Layout.preferredWidth: root.libraryView === "Grid"
-                ? Math.max(440, Math.min(760, parent.width * 0.47))
-                : Math.max(300, Math.min(400, parent.width * 0.30))
-            Layout.minimumWidth: root.libraryView === "Grid" ? 400 : 280
+            Layout.fillWidth: !root.detailOpen
+            Layout.preferredWidth: root.detailOpen
+                ? (root.libraryView === "Grid"
+                    ? Math.max(440, Math.min(760, parent.width * 0.47))
+                    : Math.max(300, Math.min(400, parent.width * 0.30)))
+                : parent.width
+            Layout.minimumWidth: root.detailOpen ? (root.libraryView === "Grid" ? 400 : 280) : 0
             Layout.fillHeight: true
             clip: true
+            decorated: root.detailOpen
+            border.width: root.detailOpen ? Theme.borderWidth : 0
+            panelOpacity: root.detailOpen ? Theme.panelOpacity : Math.max(0.28, Theme.panelOpacity * 0.42)
 
             ColumnLayout {
                 anchors.fill: parent
@@ -914,11 +946,11 @@ Item {
                             focusPolicy: Qt.StrongFocus
                             Accessible.name: root.selectedGame().title
                             Accessible.description: root.selectedGame().moduleName + ", " + root.selectedGame().status
-                            onClicked: forceActiveFocus()
+                            onClicked: { root.openGameDetails(root.selectedGameIndex); forceActiveFocus() }
                             Keys.onUpPressed: function(event) { root.selectRelative(-1); event.accepted = true }
                             Keys.onDownPressed: function(event) { root.selectRelative(1); event.accepted = true }
-                            Keys.onReturnPressed: function(event) { root.activateSelectedGameSession(); event.accepted = true }
-                            Keys.onEnterPressed: function(event) { root.activateSelectedGameSession(); event.accepted = true }
+                            Keys.onReturnPressed: function(event) { root.openGameDetails(root.selectedGameIndex); event.accepted = true }
+                            Keys.onEnterPressed: function(event) { root.openGameDetails(root.selectedGameIndex); event.accepted = true }
 
                             contentItem: Item {
                                 clip: true
@@ -1108,7 +1140,7 @@ Item {
                             focusPolicy: Qt.StrongFocus
                             hoverEnabled: true
                             Accessible.name: title
-                            onClicked: { root.selectedGameIndex = index; forceActiveFocus() }
+                            onClicked: { root.openGameDetails(index); forceActiveFocus() }
                             onActiveFocusChanged: if (activeFocus) root.selectedGameIndex = index
                             Keys.onLeftPressed: function(event) { root.selectRelative(-1); event.accepted = true }
                             Keys.onRightPressed: function(event) { root.selectRelative(1); event.accepted = true }
@@ -1196,7 +1228,7 @@ Item {
                                 focusPolicy: Qt.StrongFocus
                                 hoverEnabled: true
                                 Accessible.name: gridCell.title
-                                onClicked: { root.selectedGameIndex = gridCell.index; forceActiveFocus() }
+                                onClicked: { root.openGameDetails(gridCell.index); forceActiveFocus() }
                                 onActiveFocusChanged: if (activeFocus) root.selectedGameIndex = gridCell.index
 
                                 contentItem: Item {
@@ -1250,9 +1282,10 @@ Item {
         }
 
         StackLayout {
+            visible: root.detailOpen && root.hasGames && root.selectedGameIndex >= 0
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.hasGames && root.selectedGameIndex >= 0 ? 1 : 0
+            currentIndex: 1
 
             EmptyState {
                 glyph: "X"
@@ -1279,6 +1312,16 @@ Item {
                     // scrollbar / application edge on Windows.
                     width: Math.max(0, detailScroll.availableWidth - Theme.spaceLg)
                     spacing: Theme.spaceMd
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        XButton {
+                            text: "←  Back to Library"
+                            variant: "ghost"
+                            onClicked: root.closeGameDetails()
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
 
                     ArtworkFrame {
                         Layout.fillWidth: true

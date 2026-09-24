@@ -353,6 +353,7 @@ ServiceResult RuntimeBridge::launch(const LaunchConfiguration& configuration) {
   root.set("moduleSettings", variantToJson(configuration.module_settings));
   root.set("runtimeApiRequirements", variantToJson(configuration.runtime_api_requirements));
   root.set("nativeExtensionPath", configuration.native_extension_path.toStdString());
+  root.set("adaptiveObservationPath", configuration.adaptive_observation_path.toStdString());
   root.set("profileId", configuration.profile_id.toStdString());
   root.set("profileName", configuration.profile_name.toStdString());
   root.set("region", configuration.region.toStdString());

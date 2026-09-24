@@ -1,4 +1,5 @@
 #include <array>
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
@@ -147,6 +148,25 @@ int main() {
   assert(external.function.blocks[0].has_external_exit);
   assert(has_edge(external.function.blocks[0], 0x4100u,
                   ir::EdgeKind::Branch, false));
+
+  // A conditional forward branch near the end of an AC6-shaped function must
+  // split both destinations into local blocks. The target is internal to this
+  // declared range; a later function start is intentionally outside it.
+  constexpr GuestAddress ac6_shape_base = 0x8000u;
+  constexpr GuestAddress ac6_shape_target = ac6_shape_base + 0x58u;
+  std::vector<std::uint32_t> ac6_shape_words(24u, 0x38630001u);
+  ac6_shape_words[0x40u / 4u] =
+      (16u << 26) | (4u << 21) | (2u << 16) | (0x18u & 0xFFFCu);
+  ac6_shape_words[0x58u / 4u] = 0x4E800020u;
+  const auto ac6_shape = compiler.compile(ac6_shape_base, ac6_shape_words);
+  assert(ac6_shape.ok);
+  assert(std::any_of(ac6_shape.function.blocks.begin(), ac6_shape.function.blocks.end(),
+                     [ac6_shape_target](const auto& block) {
+                       return block.guest_address == ac6_shape_target;
+                     }));
+  const auto ac6_shape_source =
+      backend.emit_function(ac6_shape.function, "ac6_shape");
+  assert(ac6_shape_source.find("L_00008058: {") != std::string::npos);
 
   std::cout << "xenon_cpu_v2_cfg: ok\n";
   return 0;

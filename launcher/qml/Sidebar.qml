@@ -11,8 +11,6 @@ Rectangle {
     property real backdropIntensity: 0.72
     property string backdropVariant: "default"
     property string backdropSource: ""
-    property bool developerModeEnabled: false
-    readonly property int developerPageIndex: 9
     signal pageRequested(int index)
     signal compactToggleRequested()
 
@@ -109,19 +107,6 @@ Rectangle {
                         onClicked: root.pageRequested(modelData.page)
                     }
                 }
-
-                XNavButton {
-                    visible: root.developerModeEnabled
-                    Layout.fillWidth: !root.compact
-                    Layout.preferredWidth: root.compact ? 44 : -1
-                    Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
-                    text: "Developer"
-                    iconName: "developer"
-                    compact: root.compact
-                    active: root.currentIndex === root.developerPageIndex
-                    automationId: "nav-developer"
-                    onClicked: root.pageRequested(root.developerPageIndex)
-                }
             }
         }
 
@@ -143,14 +128,14 @@ Rectangle {
             Layout.fillWidth: !root.compact
             Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
             spacing: Theme.spaceSm
-            Rectangle { width: 10; height: 10; radius: 5; color: Theme.success }
+            Rectangle { width: 10; height: 10; radius: 5; color: launcherBridge.backendConnected ? Theme.success : Theme.warning }
             ColumnLayout {
                 visible: !root.compact
                 Layout.fillWidth: true
                 spacing: 1
-                Text { text: "Xenon Ready"; color: Theme.success; font.pixelSize: Theme.typeCaption; font.weight: Font.DemiBold }
+                Text { text: launcherBridge.backendConnected ? "Xenon Ready" : "Launcher Ready"; color: launcherBridge.backendConnected ? Theme.success : Theme.warning; font.pixelSize: Theme.typeCaption; font.weight: Font.DemiBold }
                 Text {
-                    text: launcherBridge.backendConnected ? "Runtime connected" : "Front-end ready"
+                    text: launcherBridge.backendConnected ? "Runtime host ready" : "Runtime host missing"
                     color: Theme.textMuted
                     font.pixelSize: Theme.typeCaption
                     elide: Text.ElideRight

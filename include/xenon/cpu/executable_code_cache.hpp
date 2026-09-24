@@ -51,7 +51,8 @@ struct CompiledTranslationV2 {
 // Dynamic translation is optional and callback-driven. The callback must return
 // a source snapshot captured before/while decoding. Registration revalidates it
 // after compilation, so a write racing compilation cannot bless stale native
-// code. No interpreter path is provided or required.
+// code. This cache owns native translations only; the Gen 7 dynamic PPC safety
+// net is a separate ExecutionContext callback used after native lookup misses.
 class ExecutableCodeCache {
  public:
   using CompileCallback =
@@ -113,8 +114,8 @@ class ExecutableCodeCache {
   void bind(ExecutionContext& context) noexcept;
 
   // Convenience for a dispatcher/runtime implementation. std::nullopt means
-  // no current translation could be resolved; Xenon does not interpret PPC as
-  // a fallback.
+  // no current native translation could be resolved. Callers may then invoke
+  // the separately bound Gen 7 dynamic fallback through ExecutionContext.
   [[nodiscard]] std::optional<ExecutionResult> execute(
       GuestAddress entry, CpuState& state, MemoryPort& memory,
       RuntimeServices& runtime);

@@ -1,18 +1,22 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/guest_thread_context.hpp"
+#include "xenon/cpu/dynamic_fallback.hpp"
 #include "xenon/cpu/executable_code_cache.hpp"
 #include "xenon/cpu/external_calls.hpp"
 #include "xenon/cpu/runtime.hpp"
@@ -36,14 +40,6 @@ class AudioSystem;
 
 namespace xenon::core {
 
-// Per-user host input routing supplied by the launcher/runtime host.  Source
-// strings are matched against InputSystem device identity, persistent key,
-// display name, or driver name after setup/hotplug enumeration.
-struct InputUserSourceConfig {
-  std::uint32_t user_index{};
-  std::vector<std::string> sources{};
-};
-
 // Configuration for a Xenon runtime session
 struct SessionConfig {
   bool enable_graphics{false};
@@ -60,7 +56,12 @@ struct SessionConfig {
   bool input_background{false};
   int input_module_api_version{1};
   std::string input_profile_store_path{};
-  std::vector<InputUserSourceConfig> input_user_sources{};
+  // Per-user source selectors. runtime_host indexes this table by the
+  // launch-config userIndex (0..kMaxUsers-1), and XenonSession resolves each
+  // string against enumerated device identity/persistent key/display name/
+  // driver name. A fixed-size table keeps the launcher/core contract
+  // deterministic and prevents duplicate user records.
+  std::array<std::vector<std::string>, input::kMaxUsers> input_user_sources{};
 
   bool enable_audio{false};
   float audio_master_volume{1.0f};
@@ -80,6 +81,9 @@ struct SessionConfig {
   bool enable_network{false};
   memory::GuestTranslationMode memory_mode{memory::GuestTranslationMode::Auto};
   bool enable_dynamic_compilation{false};
+  // Gen 7 correctness/discovery safety net. AOT remains primary; this only
+  // executes a bounded PPC fragment after a compiled lookup genuinely misses.
+  bool enable_dynamic_fallback{true};
   bool enable_logging{true};
   // Mirrors the launcher's "developer/verboseLogging" preference
   // (LaunchConfig::log_verbose). Consumed by the runtime host to decide how
@@ -87,6 +91,16 @@ struct SessionConfig {
   // lifecycle lines (see runtime_host/src/main.cpp).
   bool verbose_logging{false};
   bool enable_export_diagnostics{true};
+
+  // Optional newline-delimited adaptive-analysis trace. Every compiled-code
+  // lookup miss records the exact target, current guest CIA and whether the
+  // transfer was call-like or branch-like. recomp-driver can consume this on
+  // a later pass via --observations; empty disables collection entirely.
+  std::filesystem::path adaptive_observation_path{};
+  // Optional second path used for per-session diagnostics/support bundles.
+  // The stable path above is what feeds the next preparation pass; this mirror
+  // keeps each runtime session self-contained for debugging.
+  std::filesystem::path adaptive_observation_mirror_path{};
 
   // Optional host root for this launch's save data. The launcher already
   // resolves profile/game-specific savePath; wiring it through SessionConfig
@@ -273,6 +287,7 @@ class XenonSession final : public cpu::RuntimeServices {
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
 
  private:
+  friend struct SessionExecutionTestAccess;
   bool init_memory();
   bool init_filesystem();
   bool init_kernel();
@@ -304,6 +319,12 @@ class XenonSession final : public cpu::RuntimeServices {
   // the kernel::KernelThread's ThreadEntry - see create_guest_process()).
   // Returns the guest exit code.
   [[nodiscard]] std::uint32_t run_execution();
+  static void record_compiled_lookup_miss(void* observer,
+                                          cpu::ExecutionContext& context,
+                                          cpu::GuestAddress target,
+                                          cpu::CompiledLookupKind kind);
+  void record_dynamic_fallback_observation(
+      const cpu::DynamicFallbackObservation& observation);
 #if defined(XENON_HAS_AUDIO)
   [[nodiscard]] bool invoke_audio_callback(cpu::GuestAddress callback,
                                            cpu::GuestAddress argument);
@@ -325,6 +346,18 @@ class XenonSession final : public cpu::RuntimeServices {
 
   SessionConfig config_{};
   mutable std::mutex status_mutex_{};
+  // Runtime feedback can be emitted from the main guest thread, audio guest
+  // thread, or future worker callbacks. Serialize JSONL append operations so
+  // individual facts remain line-atomic and ingestible.
+  mutable std::mutex adaptive_observation_mutex_{};
+  // A missing compiled entry may sit on a hot indirect-call path. Record each
+  // (target, site, transfer-kind) fact once per session rather than performing
+  // append-only disk I/O on every execution of the same edge. Cross-session
+  // repetition is still preserved by the JSONL ingest/aggregation layer.
+  std::set<std::tuple<cpu::GuestAddress, cpu::GuestAddress, cpu::CompiledLookupKind>>
+      adaptive_observation_seen_{};
+  std::set<std::pair<cpu::GuestAddress, std::uint64_t>>
+      dynamic_fallback_observation_seen_{};
   SessionState state_{SessionState::Uninitialized};
   std::string last_error_{};
   // shared_ptr: kernel::KernelMemory (owned by kernel_process_ via
@@ -333,6 +366,7 @@ class XenonSession final : public cpu::RuntimeServices {
   // instance or mapping set, just a second reference to this one.
   std::shared_ptr<memory::AddressSpace> memory_{};
   std::unique_ptr<cpu::ExecutableCodeCache> code_cache_{};
+  std::unique_ptr<cpu::DynamicFallbackExecutor> dynamic_fallback_{};
   // shared_ptr: kernel::KernelIoManager takes shared ownership of the VFS.
   std::shared_ptr<filesystem::VirtualFileSystem> filesystem_{};
   std::unique_ptr<kernel::KernelIoManager> kernel_io_{};

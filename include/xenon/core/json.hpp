@@ -119,6 +119,18 @@ class JsonValue {
   // Parsing. Returns false and sets *error on malformed input.
   [[nodiscard]] static bool parse(std::string_view text, JsonValue& out,
                                   std::string* error = nullptr) {
+    // Accept an optional UTF-8 BOM. Windows PowerShell 5.1's
+    // `Set-Content -Encoding UTF8` writes one by default, and JSON producers
+    // in the wild commonly preserve it. Treating those three bytes as JSON
+    // syntax made otherwise-valid module manifests / analysis files fail at
+    // byte zero. Keep BOM handling at the parser boundary so every JSON
+    // consumer gets the same behaviour.
+    if (text.size() >= 3u &&
+        static_cast<unsigned char>(text[0]) == 0xEFu &&
+        static_cast<unsigned char>(text[1]) == 0xBBu &&
+        static_cast<unsigned char>(text[2]) == 0xBFu) {
+      text.remove_prefix(3u);
+    }
     Parser parser{text};
     parser.skip_ws();
     if (!parser.parse_value(out)) {

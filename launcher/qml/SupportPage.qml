@@ -13,18 +13,46 @@ Item {
 
     property int libraryRevision: 0
     property int moduleRevision: 0
+    property int runtimeRevision: 0
     readonly property var libraryEntries: { var r = libraryRevision; return launcherBridge.libraryEntries() }
     readonly property var moduleEntries: { var r = moduleRevision; return launcherBridge.moduleEntries() }
 
     function refresh() {
         libraryRevision += 1
         moduleRevision += 1
+        runtimeRevision += 1
+    }
+
+    function serviceLabel(service) {
+        var r = root.runtimeRevision
+        if (launcherBridge.runtimeCapability(service)) return "Active"
+        if (launcherBridge.runtimeCapability(service + "Compiled"))
+            return launcherBridge.backendConnected ? "Ready" : "Built • host missing"
+        return service === "network" ? "In development" : "Not built"
+    }
+
+    function serviceTone(service) {
+        var r = root.runtimeRevision
+        if (launcherBridge.runtimeCapability(service)) return Theme.success
+        if (launcherBridge.runtimeCapability(service + "Compiled"))
+            return launcherBridge.backendConnected ? Theme.success : Theme.warning
+        return Theme.textMuted
     }
 
     Connections {
         target: launcherBridge
         function onLibraryChanged() { root.libraryRevision += 1 }
         function onModulesChanged() { root.moduleRevision += 1 }
+        function onBackendConnectedChanged() { root.runtimeRevision += 1 }
+        function onSessionChanged() { root.runtimeRevision += 1 }
+        function onInputChanged() { root.runtimeRevision += 1 }
+    }
+
+    Timer {
+        interval: 1000
+        running: root.visible
+        repeat: true
+        onTriggered: root.runtimeRevision += 1
     }
 
     XSettingsPage {
@@ -34,9 +62,11 @@ Item {
 
         XSettingsCard {
             title: "System check"
-            description: "Whether the launcher frontend is connected to the Xenon backend service registry."
+            description: launcherBridge.backendConnected
+                ? "The launcher found xenon_runtime_host beside the UI and can start real game sessions."
+                : "The launcher UI is running, but the runtime host executable is missing from this build/output folder."
             StatusPill {
-                label: launcherBridge.backendConnected ? "Connected" : "Front-end only"
+                label: launcherBridge.backendConnected ? "Runtime host ready" : "Launcher only"
                 tone: launcherBridge.backendConnected ? Theme.success : Theme.warning
             }
             XButton { text: "Copy system summary"; onClicked: { launcherBridge.copyText(launcherBridge.userDiagnostics()); launcherBridge.notify("Summary copied", "A system summary was copied to the clipboard.") } }
@@ -44,15 +74,34 @@ Item {
 
         XSettingsCard {
             title: "Controller diagnostics"
-            description: launcherBridge.inputAvailable() ? "Xenon Input is connected." : "Xenon Input is not currently available."
-            StatusPill { label: launcherBridge.inputAvailable() ? "Connected" : "Unavailable"; tone: launcherBridge.inputAvailable() ? Theme.success : Theme.warning }
+            description: launcherBridge.inputAvailable()
+                ? "Xenon Input initialized successfully. No connected controller is required for the service itself to be ready."
+                : (launcherBridge.runtimeCapability("inputCompiled")
+                    ? "Xenon Input is built, but the host input backend did not initialize."
+                    : "Xenon Input is not included in this build.")
+            StatusPill {
+                label: launcherBridge.inputAvailable() ? "Ready"
+                    : (launcherBridge.runtimeCapability("inputCompiled") ? "Built • unavailable" : "Not built")
+                tone: launcherBridge.inputAvailable() ? Theme.success
+                    : (launcherBridge.runtimeCapability("inputCompiled") ? Theme.warning : Theme.textMuted)
+            }
+            XButton {
+                text: launcherBridge.inputAvailable() ? "Refresh input" : "Retry input"
+                onClicked: launcherBridge.inputAvailable() ? launcherBridge.refreshInputDevices() : launcherBridge.reconfigureInput()
+            }
             XButton { text: "Copy input diagnostics"; onClicked: { launcherBridge.copyText(JSON.stringify(launcherBridge.inputDiagnostics(), null, 2)); launcherBridge.notify("Copied", "Controller diagnostics were copied to the clipboard.") } }
         }
 
         XSettingsCard {
-            title: "Graphics / audio / network diagnostics"
-            description: "Live device and adapter diagnostics for these areas are not implemented yet."
-            StatusPill { label: "Not available"; tone: Theme.textMuted }
+            title: "Runtime subsystem readiness"
+            description: "Active means the current game session initialized the subsystem. Ready means it is compiled and the runtime host can start it. Detailed adapter/device inspectors can be added independently later."
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Theme.spaceXs
+                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Graphics"; color: Theme.text }; StatusPill { label: root.serviceLabel("graphics"); tone: root.serviceTone("graphics") } }
+                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Audio"; color: Theme.text }; StatusPill { label: root.serviceLabel("audio"); tone: root.serviceTone("audio") } }
+                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Network"; color: Theme.text }; StatusPill { label: root.serviceLabel("network"); tone: root.serviceTone("network") } }
+            }
         }
 
         XSettingsCard {

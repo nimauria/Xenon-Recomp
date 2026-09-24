@@ -9,6 +9,7 @@
 
 #include "xenon/cpu/ir.hpp"
 #include "xenon/recomp/analysis_schema.hpp"
+#include "xenon/recomp/knowledge_base.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
 namespace xenon::recomp {
@@ -58,11 +59,19 @@ enum class DiscoverySource : std::uint8_t {
   // docs/recomp/RECOMP_ANALYSIS_V3.md for the full provenance/confidence model.
   TlsCallback,         // XEX TLS directory callback address (Part 2) - a real,
                        // generic loader-exposed entry point, not title-specific.
-  ResolvedIndirect,    // statically resolved indirect call/branch target via
-                       // Xenon's own generic bounded dataflow (Part 7) or
-                       // validated switch-table pattern (Part 8) - distinct
-                       // from ModuleHint, which means a module *told* Xenon
-                       // the target rather than Xenon proving it.
+  ResolvedIndirect,    // legacy/coarse indirect-target provenance retained for
+                       // report compatibility. New analysis records the more
+                       // precise call/branch variants below; this source alone
+                       // is NOT proof of a semantic function boundary.
+  ResolvedIndirectCall,   // statically resolved linked/indirect call target.
+                          // Strong callable evidence and eligible to anchor a
+                          // semantic function boundary.
+  ResolvedIndirectBranch, // statically resolved non-linked indirect branch or
+                          // switch target. Dispatchable entry evidence only;
+                          // never self-promotes an internal block to a function.
+  ControlFlowHint,        // module-provided branch/switch target. The hint proves
+                          // the edge/entry, not that the target begins a distinct
+                          // semantic function.
   ValidatedTailCall,   // a non-linked branch whose target's control-flow
                        // shape corroborates it being a genuine tail call to a
                        // separate function rather than an internal jump
@@ -70,6 +79,17 @@ enum class DiscoverySource : std::uint8_t {
   PrologueHeuristic,   // recognized compiler prologue/epilogue pattern (Part
                        // 4) - supporting evidence only; Xenon never creates a
                        // function candidate from this alone.
+  PointerTable,        // target recovered from a generic static function-pointer/vtable
+                       // run in non-executable image data. Entry evidence, not by itself
+                       // authoritative proof of a semantic function boundary.
+  RuntimeObservation,  // executable guest entry observed by a prior runtime/trace pass.
+                       // Strong evidence that the address must be dispatchable, but not
+                       // necessarily that it begins a distinct semantic function.
+  GapRecovery,         // orphan executable branch target recovered after graph closure
+  KnowledgeMatch,      // Gen 9 normalized cross-revision fingerprint corroboration.
+                       // Never a semantic boundary on its own.
+                       // because multiple independent owners reference it. Low authority;
+                       // eligible for absorption into a stronger overlapping owner.
 };
 
 // Part 11: confidence is derived from evidence (DiscoverySource), not an
@@ -144,6 +164,86 @@ struct UnresolvedReference {
   std::string detail;
 };
 
+// Function identity and dispatchable guest entry identity are deliberately
+// separate. Xbox 360 code routinely has shared suffixes, outlined blocks,
+// funclets and indirect-entry blocks that are valid control-flow destinations
+// without being independent C/C++ functions.
+enum class FunctionAuthority : std::uint8_t {
+  GapRecovery,
+  InferredBranch,
+  PointerTable,
+  RuntimeObservation,
+  ResolvedIndirect,
+  DirectCall,
+  Metadata,
+  ModuleHint,
+  EntryPoint,
+};
+
+enum class GuestEntryKind : std::uint8_t {
+  Function,
+  AlternateBlock,
+  RuntimeHelper,
+  NativeReplacement,
+};
+
+// Gen 6 call/return fixed-point result. MayReturn means at least one proven
+// normal return path exists; NoReturn means all currently-known terminal exits
+// are proven non-returning (or the module explicitly declared NoReturn).
+enum class ReturnBehavior : std::uint8_t {
+  Unknown,
+  MayReturn,
+  NoReturn,
+};
+
+struct BranchReference {
+  std::uint32_t site{};
+  std::uint32_t target{};
+  // `terminal` means the edge terminates the current basic block without a
+  // fallthrough path. It is deliberately separate from `conditional`: a
+  // conditional branch ends a block for CFG purposes but is not a semantic
+  // tail call. Keeping these facts separate prevents post-analysis
+  // reconciliation from re-promoting loop headers / shared suffixes into
+  // functions merely because they cross a tentative function extent.
+  bool terminal{};
+  bool indirect{};
+  bool linked{};
+  bool conditional{};
+  bool fallthrough{};
+};
+
+struct GuestEntryPoint {
+  std::uint32_t address{};
+  std::uint32_t owner_function{};
+  std::uint32_t block{};
+  GuestEntryKind kind{GuestEntryKind::Function};
+  std::vector<DiscoverySource> sources;
+  std::uint32_t confidence{};
+};
+
+enum class AdaptiveObservationKind : std::uint8_t {
+  ExecutedEntry,
+  IndirectCallTarget,
+  IndirectBranchTarget,
+};
+
+// Generic feedback record suitable for future runtime/coverage/network
+// learning. It contains facts only: an executable guest address was observed
+// as an entry/indirect target. Analysis decides whether that address is a new
+// semantic function or an alternate entry into an existing compiled region.
+struct AdaptiveObservation {
+  std::uint32_t address{};
+  std::uint32_t site{};
+  AdaptiveObservationKind kind{AdaptiveObservationKind::ExecutedEntry};
+  std::uint32_t hits{1};
+  std::optional<std::uint32_t> owner_hint;
+  // Optional lowercase effective-image SHA-1. Runtime-generated records set
+  // this so observations from an old title update/revision cannot poison a
+  // new executable that happens to reuse the same guest address. Empty keeps
+  // hand-authored/developer traces backwards-compatible.
+  std::string image_hash;
+};
+
 struct DiscoveredFunction {
   std::uint32_t guest_start{};
   std::uint32_t guest_end{};
@@ -152,12 +252,27 @@ struct DiscoveredFunction {
   std::vector<DiscoverySource> sources;
   std::vector<std::uint32_t> calls;
   std::vector<std::uint32_t> callers;
-  std::vector<std::uint32_t> branch_references;
+  std::vector<std::uint32_t> branch_references; // compatibility/summary target list
+  std::vector<BranchReference> branches;          // exact source-site control-flow facts
+  FunctionAuthority authority{FunctionAuthority::InferredBranch};
   std::uint32_t confidence{};
   std::uint64_t source_hash{};
   bool compiled{};
   std::string error;
   cpu::ir::Function ir;
+
+  // Gen 6 return/no-return analysis. has_explicit_return is a local decode fact
+  // (an unconditional bclrx/blr-style return was observed). The fixed-point
+  // pass may then propagate MayReturn/NoReturn through terminal tail calls.
+  ReturnBehavior return_behavior{ReturnBehavior::Unknown};
+  bool return_behavior_explicit{};
+  bool has_explicit_return{};
+
+  // Gen 9 universal knowledge-base identity and any confidence-scored
+  // matches accepted for this function. These are report/evidence data; a
+  // knowledge label never silently replaces a module-provided symbol name.
+  FunctionFingerprint fingerprint{};
+  std::vector<KnowledgeMatchReport> knowledge_matches;
 
   // Reserved for a FunctionChunk hint's declared parent address; currently
   // unset by every production path. A FunctionChunk's bytes ARE stitched
@@ -239,8 +354,13 @@ struct AnalysisDiagnostics {
   // ResolvedIndirect to that target's `sources` once (add_source() dedupes
   // by kind). `functions_with_resolved_indirect_provenance` below is the
   // directly comparable distinct-function count.
-  std::size_t resolved_indirect_via_dataflow{};    // Part 7: bounded CTR constant-propagation hits (generic, no hint)
+  std::size_t resolved_indirect_via_dataflow{};    // Gen 6: generic PPC value/dataflow resolutions (compatibility aggregate)
+  std::size_t resolved_indirect_via_backward_slice{}; // Gen 6: expensive bounded slice used only after fast state failed
+  std::size_t resolved_indirect_via_readonly_table{}; // Gen 6: static non-writable table/vtable load resolved a target
   std::size_t resolved_indirect_via_jump_table{};  // Part 8: switch/jump-table recovery hits (generic, no hint)
+  std::size_t return_fixed_point_iterations{};      // Gen 6: iterations required for call/return behavior convergence
+  std::size_t inferred_no_return_functions{};      // Gen 6: final NoReturn functions (explicit + propagated)
+  std::size_t inferred_may_return_functions{};     // Gen 6: final MayReturn functions
   // Distinct discovered functions whose `sources` contains
   // DiscoverySource::ResolvedIndirect - the number to cross-check against
   // resolved_indirect_via_dataflow/_via_jump_table above (always <= their
@@ -278,11 +398,36 @@ struct AnalysisDiagnostics {
                                                       // renamed/suppressed/worked around)
   std::size_t codegen_shards{};                      // functions/shard_*.cpp files written
   std::size_t codegen_max_functions_per_shard{};     // largest function count in any one shard
+
+  // Region + Entry / adaptive-analysis diagnostics.
+  std::size_t pointer_tables_discovered{};
+  std::size_t pointer_table_targets_discovered{};
+  std::size_t adaptive_observations_consumed{};
+  std::size_t alternate_entries_materialized{};
+  std::size_t weak_functions_absorbed{};
+  std::size_t orphan_entries_recovered{};
+  std::size_t gap_functions_recovered{};
+  std::size_t adaptive_observations_rejected_revision{};
+  std::size_t adaptive_observations_rejected_invalid{};
+  std::size_t entry_integrity_checks{};
+  std::size_t entry_integrity_failures{};
+
+  // Gen 9 universal knowledge-base diagnostics.
+  std::size_t knowledge_records_loaded{};
+  std::size_t knowledge_functions_fingerprinted{};
+  std::size_t knowledge_matches_considered{};
+  std::size_t knowledge_matches_accepted{};
+  std::size_t knowledge_cross_revision_matches{};
+  std::size_t knowledge_seed_candidates{};
 };
 
 struct AnalysisReport {
   xbox::XexImage image;
   std::vector<DiscoveredFunction> functions;
+  // Complete dispatch map. Canonical function starts and alternate entry
+  // blocks live in one address-indexed model, while semantic function
+  // identity remains in `functions`.
+  std::vector<GuestEntryPoint> entries;
   std::vector<UnresolvedReference> unresolved;
   std::vector<std::string> warnings;
   std::uint64_t configuration_hash{};
@@ -331,6 +476,26 @@ struct DriverOptions {
   std::optional<std::size_t> analysis_jobs;
   std::optional<std::size_t> codegen_jobs;
 
+  // Generic adaptive-analysis inputs. These are intentionally title-agnostic
+  // execution facts, not hard-coded addresses in Xenon. Pointer-table scanning
+  // recovers static vtable/function-pointer entries; runtime observations allow
+  // a later execution/coverage pass to feed back targets that static analysis
+  // could not prove (for example runtime-built tables).
+  std::vector<AdaptiveObservation> adaptive_observations;
+
+  // Gen 9 universal knowledge base. Records are versioned, address-independent
+  // fingerprints. Matching is confidence-scored and can corroborate a function
+  // across title updates without blindly trusting the old guest address.
+  std::vector<KnowledgeRecord> knowledge_records;
+  std::uint32_t knowledge_match_min_score{70u};
+  bool enable_knowledge_seeding{true};
+  bool scan_static_pointer_tables{true};
+  bool recover_multi_source_orphans{true};
+  // Conservative executable-gap recovery: only seeds an unowned region when
+  // it begins at a plausible function prologue on a structural boundary and
+  // reaches a real terminator before colliding with already-owned code.
+  bool recover_unowned_gaps{true};
+
   // Progress milestones (Part 18). Invoked synchronously from whichever
   // thread is driving the current phase - load_and_analyze()/
   // generate_project() never call it concurrently from two threads at once
@@ -346,9 +511,26 @@ struct DriverOptions {
 [[nodiscard]] bool generate_project(const DriverOptions& options,
                                     AnalysisReport& report,
                                     std::string& error);
+// Loads Xenon's newline-delimited runtime observation trace (the
+// adaptive-observations.jsonl emitted by runtime_host). Records are
+// deduplicated by address/site/kind/owner-hint and hit counts are accumulated.
+// The parser also accepts hexadecimal integer literals to make hand-authored
+// developer traces convenient.
+[[nodiscard]] bool load_adaptive_observations(
+    const std::filesystem::path& path,
+    std::vector<AdaptiveObservation>& observations,
+    std::string& error);
+// Stable fingerprint of the DISTINCT adaptive facts consumed by analysis.
+// Hit counts are deliberately excluded: seeing the same target again must not
+// invalidate a prepared artifact; learning a new address/site/kind/owner fact must.
+[[nodiscard]] std::uint64_t adaptive_observation_fingerprint(
+    std::span<const AdaptiveObservation> observations) noexcept;
 [[nodiscard]] std::string format_report(const AnalysisReport& report);
 [[nodiscard]] std::string format_report_json(const AnalysisReport& report);
 [[nodiscard]] std::string format_ir(const DiscoveredFunction& function);
 [[nodiscard]] const char* discovery_source_name(DiscoverySource source) noexcept;
+[[nodiscard]] const char* function_authority_name(FunctionAuthority authority) noexcept;
+[[nodiscard]] const char* guest_entry_kind_name(GuestEntryKind kind) noexcept;
+[[nodiscard]] const char* return_behavior_name(ReturnBehavior behavior) noexcept;
 
 }  // namespace xenon::recomp

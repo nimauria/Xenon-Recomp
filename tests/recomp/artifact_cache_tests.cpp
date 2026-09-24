@@ -168,6 +168,14 @@ int main() {
     hint_changed_key.hint_set_hash = key.hint_set_hash + 1;
     assert(hint_changed_key.digest() != key.digest());
 
+    auto adaptive_changed_key = key;
+    adaptive_changed_key.adaptive_observation_hash = 0x12345678u;
+    assert(adaptive_changed_key.digest() != key.digest());
+
+    auto knowledge_changed_key = key;
+    knowledge_changed_key.knowledge_base_hash = 0xABCDEFu;
+    assert(knowledge_changed_key.digest() != key.digest());
+
     auto abi_changed_key = key;
     abi_changed_key.abi_version = key.abi_version + 1;
     assert(abi_changed_key.digest() != key.digest());

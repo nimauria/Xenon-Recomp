@@ -59,10 +59,13 @@ std::optional<LaunchConfiguration> LaunchService::configurationFor(const QString
   // fast, bounded, non-blocking cache lookup only (never compiles); an empty
   // result here means SessionController::preparePhase() still needs to run
   // (or re-run) preparation before this configuration is launch-ready.
-  if (config.native_extension_path.isEmpty() && preparation_.usesAutomaticPreparation(game_id)) {
-    QString cached_path;
-    (void)preparation_.checkCache(game_id, cached_path);
-    if (!cached_path.isEmpty()) config.native_extension_path = cached_path;
+  if (preparation_.usesAutomaticPreparation(game_id)) {
+    config.adaptive_observation_path = preparation_.adaptiveObservationPath(game_id);
+    if (config.native_extension_path.isEmpty()) {
+      QString cached_path;
+      (void)preparation_.checkCache(game_id, cached_path);
+      if (!cached_path.isEmpty()) config.native_extension_path = cached_path;
+    }
   }
   config.profile_id = profile.value(QStringLiteral("profileId")).toString();
   config.profile_name = profile.value(QStringLiteral("profileName")).toString();

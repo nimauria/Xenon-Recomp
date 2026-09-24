@@ -553,6 +553,26 @@ int main() {
   std::cout << "  [PASS] RuntimeHelper.register_start/instruction_patterns round-trip through JSON; "
                "legacy JSON without either still loads\n";
 
+  // Test 27: UTF-8 BOM handling is centralized in JsonValue::parse so
+  // PowerShell 5.1-generated JSON is accepted by every Xenon consumer.
+  {
+    const std::string bom_json = std::string("\xEF\xBB\xBF") +
+                                 "{\"schemaVersion\":2,\"moduleName\":\"bom\",\"identity\":{"
+                                 "\"titleId\":1,\"mediaId\":1,\"baseVersion\":1,\"effectiveVersion\":1,"
+                                 "\"effectiveImageHash\":\"0202020202020202020202020202020202020202\","
+                                 "\"titleUpdateApplied\":false},\"functions\":[],\"chunks\":[],\"switches\":[],"
+                                 "\"indirectCalls\":[],\"indirectBranches\":[],\"nativeReplacements\":[],"
+                                 "\"runtimeHelpers\":[],\"regions\":[],\"symbols\":[],\"patches\":[],\"hooks\":[]}";
+    core::JsonValue parsed;
+    std::string parse_error;
+    assert(core::JsonValue::parse(bom_json, parsed, &parse_error));
+    AnalysisHintSetV2 restored{};
+    std::string from_json_error;
+    assert(from_json(parsed, restored, from_json_error));
+    assert(restored.module_name == "bom");
+  }
+  std::cout << "  [PASS] UTF-8 BOM-prefixed JSON parses normally\n";
+
   std::cout << "All Analysis Hint Schema V2 tests passed!\n";
   return 0;
 }

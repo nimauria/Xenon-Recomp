@@ -1,4 +1,4 @@
-#include <algorithm>
+﻿#include <algorithm>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
@@ -23,7 +23,10 @@ int main(int argc, char** argv) {
     std::cout << tool << " - Xenon recompilation utility\n";
     if (tool == "recomp-driver")
       std::cout << "usage: recomp-driver <game.xex> [output-directory] [--hints file] "
-                   "[--module <module-directory>] [--jobs auto|N] [--quiet] [--json]\n"
+                   "[--module <module-directory>] [--observations <adaptive-observations.jsonl>] "
+                   "[--knowledge <knowledge.jsonl>] [--knowledge-export <knowledge.jsonl>] "
+                   "[--knowledge-min-score N] [--no-knowledge-seed] "
+                   "[--jobs auto|N] [--quiet] [--json]\n"
                    "  --module points at an installed Project Gracemeria module package\n"
                    "  (manifest.json + revisions/<effective-image-hash>/analysis.json - see\n"
                    "  docs/recomp/ANALYSIS_HINT_SCHEMA_V2.md). The Recomp Driver selects and validates\n"
@@ -47,6 +50,7 @@ int main(int argc, char** argv) {
   xenon::recomp::DriverOptions options;
   options.input = argv[1];
   std::unique_ptr<xenon::recomp::FileModuleHintProvider> module_provider;
+  std::filesystem::path knowledge_export_path;
   bool quiet = false;
   for (int index = 2; index < argc; ++index) {
     if (std::string(argv[index]) == "--json") {
@@ -55,6 +59,33 @@ int main(int argc, char** argv) {
       quiet = true;
     } else if (std::string(argv[index]) == "--hints" && index + 1 < argc) {
       options.hints_file = argv[++index];
+    } else if (std::string(argv[index]) == "--observations" && index + 1 < argc) {
+      std::string observation_error;
+      if (!xenon::recomp::load_adaptive_observations(
+              argv[++index], options.adaptive_observations, observation_error)) {
+        std::cerr << tool << ": --observations: " << observation_error << "\n";
+        return 1;
+      }
+    } else if (std::string(argv[index]) == "--knowledge" && index + 1 < argc) {
+      std::string knowledge_error;
+      if (!xenon::recomp::load_knowledge_base(
+              argv[++index], options.knowledge_records, knowledge_error)) {
+        std::cerr << tool << ": --knowledge: " << knowledge_error << "\n";
+        return 1;
+      }
+    } else if (std::string(argv[index]) == "--knowledge-export" && index + 1 < argc) {
+      knowledge_export_path = argv[++index];
+    } else if (std::string(argv[index]) == "--knowledge-min-score" && index + 1 < argc) {
+      try {
+        const auto score = static_cast<std::uint32_t>(std::stoul(argv[++index]));
+        if (score > 100u) throw std::out_of_range("score");
+        options.knowledge_match_min_score = score;
+      } catch (const std::exception&) {
+        std::cerr << tool << ": --knowledge-min-score must be an integer from 0 to 100\n";
+        return 1;
+      }
+    } else if (std::string(argv[index]) == "--no-knowledge-seed") {
+      options.enable_knowledge_seeding = false;
     } else if (std::string(argv[index]) == "--jobs" && index + 1 < argc) {
       // Part 3/16: shared --jobs flag controls both analysis and codegen
       // worker counts. "auto" leaves both at their DriverOptions default
@@ -102,6 +133,18 @@ int main(int argc, char** argv) {
   if (!xenon::recomp::load_and_analyze(options, report, error)) {
     std::cerr << tool << ": " << error << "\n";
     return 2;
+  }
+  if (!knowledge_export_path.empty()) {
+    const auto image_hash = xenon::xbox::format_effective_image_hash(
+        xenon::xbox::compute_effective_image_hash(report.image));
+    const auto learned = xenon::recomp::export_analysis_knowledge(report, image_hash);
+    auto accumulated = options.knowledge_records;
+    accumulated.insert(accumulated.end(), learned.begin(), learned.end());
+    std::string knowledge_error;
+    if (!xenon::recomp::save_knowledge_base(knowledge_export_path, accumulated, knowledge_error)) {
+      std::cerr << tool << ": --knowledge-export: " << knowledge_error << "\n";
+      return 2;
+    }
   }
   bool json = false;
   for (int index = 2; index < argc; ++index)
@@ -201,6 +244,145 @@ int main(int argc, char** argv) {
       std::cout << item.module << "!" << item.symbol << " ordinal=" << item.ordinal << " thunk=0x" << std::hex << item.guest_thunk << "\n";
 #endif
   } else if (tool == "module-inspector") {
+    // ENTRY BYTE LAYOUT DIAGNOSTIC
+    const auto read_be32_at =
+        [](const std::vector<std::byte>& bytes,
+           std::size_t offset) -> std::uint32_t {
+      if (offset + 4u > bytes.size()) return 0u;
+
+      return
+          (static_cast<std::uint32_t>(
+               std::to_integer<unsigned char>(bytes[offset])) << 24u) |
+          (static_cast<std::uint32_t>(
+               std::to_integer<unsigned char>(bytes[offset + 1u])) << 16u) |
+          (static_cast<std::uint32_t>(
+               std::to_integer<unsigned char>(bytes[offset + 2u])) << 8u) |
+          static_cast<std::uint32_t>(
+               std::to_integer<unsigned char>(bytes[offset + 3u]));
+    };
+
+    {
+      const auto entry = report.image.entry_point;
+      const auto base = report.image.image_base;
+
+      std::cout << "\n=== ENTRY BYTE LAYOUT DIAGNOSTIC ===\n";
+      std::cout << std::hex;
+      std::cout << "image_base=0x" << base << "\n";
+      std::cout << "entry=0x" << entry << "\n";
+
+      if (entry >= base) {
+        const auto entry_rva =
+            static_cast<std::size_t>(entry - base);
+
+        std::cout << "entry_rva=0x" << entry_rva << "\n";
+
+        if (entry_rva + 4u <=
+            report.image.effective_image.size()) {
+          std::cout
+              << "loaded_image_word=0x"
+              << read_be32_at(
+                     report.image.effective_image,
+                     entry_rva)
+              << "\n";
+        } else {
+          std::cout
+              << "loaded_image_word=<out-of-range>\n";
+        }
+      }
+
+      for (const auto& section : report.image.sections) {
+        const auto section_begin =
+            static_cast<std::uint64_t>(
+                section.virtual_address);
+
+        const auto section_size =
+            std::max<std::uint64_t>(
+                section.virtual_size,
+                section.raw_size);
+
+        const auto section_end =
+            section_begin + section_size;
+
+        if (static_cast<std::uint64_t>(entry) <
+                section_begin ||
+            static_cast<std::uint64_t>(entry) >=
+                section_end) {
+          continue;
+        }
+
+        const auto delta =
+            static_cast<std::size_t>(
+                entry -
+                static_cast<std::uint32_t>(
+                    section.virtual_address));
+
+        std::cout << "\nentry_section="
+                  << section.name << "\n";
+
+        std::cout
+            << "section_va=0x"
+            << static_cast<std::uint32_t>(
+                   section.virtual_address)
+            << "\n";
+
+        std::cout
+            << "virtual_size=0x"
+            << section.virtual_size << "\n";
+
+        std::cout
+            << "raw_pointer=0x"
+            << section.raw_pointer << "\n";
+
+        std::cout
+            << "raw_size=0x"
+            << section.raw_size << "\n";
+
+        std::cout
+            << "entry_section_delta=0x"
+            << delta << "\n";
+
+        if (delta + 4u <= section.bytes.size()) {
+          std::cout
+              << "section_bytes_word=0x"
+              << read_be32_at(
+                     section.bytes,
+                     delta)
+              << "\n";
+        } else {
+          std::cout
+              << "section_bytes_word=<out-of-range>\n";
+        }
+
+        const auto raw_offset =
+            static_cast<std::size_t>(
+                section.raw_pointer) +
+            delta;
+
+        std::cout
+            << "raw_pointer_offset=0x"
+            << raw_offset << "\n";
+
+        if (raw_offset + 4u <=
+            report.image.effective_image.size()) {
+          std::cout
+              << "raw_pointer_word=0x"
+              << read_be32_at(
+                     report.image.effective_image,
+                     raw_offset)
+              << "\n";
+        } else {
+          std::cout
+              << "raw_pointer_word=<out-of-range>\n";
+        }
+
+        break;
+      }
+
+      std::cout
+          << "=== END ENTRY BYTE LAYOUT DIAGNOSTIC ===\n\n";
+      std::cout << std::dec;
+    }
+
     std::cout << "format=" << static_cast<unsigned>(report.image.format) << " entry=0x" << std::hex << report.image.entry_point
               << " sections=" << std::dec << report.image.sections.size() << " imports=" << report.image.imports.size()
               << " exports=" << report.image.exports.size()

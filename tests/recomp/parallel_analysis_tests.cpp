@@ -60,7 +60,10 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   constexpr std::size_t coff = pe + 4;
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
-  constexpr std::size_t text_raw = 0x600;
+  // XEX Loader V2 exposes sections from the effective loaded image using RVA
+  // semantics.  Keep the synthetic fixture aligned with that contract rather
+  // than placing .text at its legacy PE raw-file pointer.
+  constexpr std::size_t text_raw = kTextRva;
   const std::size_t file_size = header + text_raw + text_words.size() * 4u + 0x100u;
 
   std::vector<std::byte> bytes(file_size, std::byte{0});

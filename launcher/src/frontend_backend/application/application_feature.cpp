@@ -45,8 +45,12 @@ int ApplicationFeature::rememberedPage() const {
 
 int ApplicationFeature::initialPage() const {
   if (settings_.boolValue(QStringLiteral("frontend/general/restoreLastPage"), false)) {
-    const auto max_page = settings_.boolValue(QStringLiteral("developer/modeEnabled"), false) ? 9 : 8;
-    return qBound(0, rememberedPage(), max_page);
+    const auto remembered = rememberedPage();
+    // Page 9 used to be the standalone Developer page. It now lives under
+    // Settings, so migrate that persisted destination instead of dumping the
+    // user onto an unrelated top-level page.
+    if (remembered == 9) return 3;
+    return qBound(0, remembered, 8);
   }
 
   const auto startup = settings_.stringValue(QStringLiteral("frontend/general/startupPage"),
@@ -63,8 +67,7 @@ int ApplicationFeature::initialPage() const {
 }
 
 void ApplicationFeature::rememberPage(int page_index) {
-  const auto max_page = settings_.boolValue(QStringLiteral("developer/modeEnabled"), false) ? 9 : 8;
-  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, max_page));
+  settings_.setValue(QStringLiteral("ui/page"), qBound(0, page_index, 8));
 }
 
 bool ApplicationFeature::featureEnabled(const QString& feature) const noexcept {

@@ -3,7 +3,7 @@ import QtQuick
 Rectangle {
     id: root
 
-    property bool decorated: false
+    property bool decorated: true
     property real panelOpacity: Theme.highContrast ? 1.0 : Theme.panelOpacity
 
     radius: Theme.panelRadius

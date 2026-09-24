@@ -458,6 +458,8 @@ struct Options {
   std::filesystem::path status_file;
   std::filesystem::path stop_signal;
   std::filesystem::path recomp_root;
+  std::filesystem::path observations;
+  std::filesystem::path knowledge;
   std::string config{"Release"};
   bool force{false};
   bool query{false};
@@ -469,6 +471,8 @@ void print_usage() {
       "                     [--module <hint-package-dir>] [--module-id <id>]\n"
       "                     [--title-update <path>] [--config Release|Debug]\n"
       "                     [--status-file <path>] [--stop-signal <path>]\n"
+      "                     [--observations <adaptive-observations.jsonl>]\n"
+      "                     [--knowledge <knowledge.jsonl>]\n"
       "                     [--recomp-root <path>] [--force] [--query]\n";
 }
 
@@ -486,6 +490,8 @@ bool parse_args(int argc, char** argv, Options& options, std::string& error) {
     else if (arg == "--status-file") options.status_file = next();
     else if (arg == "--stop-signal") options.stop_signal = next();
     else if (arg == "--recomp-root") options.recomp_root = next();
+    else if (arg == "--observations") options.observations = next();
+    else if (arg == "--knowledge") options.knowledge = next();
     else if (arg == "--config") options.config = next();
     else if (arg == "--force") options.force = true;
     else if (arg == "--query") options.query = true;
@@ -591,6 +597,57 @@ int main(int argc, char** argv) {
       hint_set = std::move(resolved);
     }
 
+    // Runtime-learning feedback is part of preparation identity. The trace is
+    // append-only and may not exist before the first launch; absence means an
+    // empty fact set. Repeated hits are aggregated by the loader and excluded
+    // from the cache fingerprint, so only NEW control-flow facts cause a
+    // rebuild on the next Play.
+    std::vector<xenon::recomp::AdaptiveObservation> adaptive_observations;
+    if (!options.observations.empty()) {
+      std::error_code observation_ec;
+      if (std::filesystem::exists(options.observations, observation_ec) && !observation_ec) {
+        std::string observation_error;
+        if (!xenon::recomp::load_adaptive_observations(
+                options.observations, adaptive_observations, observation_error)) {
+          const auto message = "adaptive observation trace could not be loaded: " +
+                               observation_error;
+          status.report(Phase::Failed, 5, "Loading adaptive analysis feedback", message);
+          std::cerr << "xenon-prepare: " << message << "\n";
+          return 2;
+        }
+      }
+    }
+    adaptive_observations.erase(
+        std::remove_if(adaptive_observations.begin(), adaptive_observations.end(),
+                       [&](const auto& observation) {
+                         return !observation.image_hash.empty() &&
+                                observation.image_hash != effective_hash_hex;
+                       }),
+        adaptive_observations.end());
+    const auto adaptive_observation_hash =
+        xenon::recomp::adaptive_observation_fingerprint(adaptive_observations);
+
+    // Gen 9 universal knowledge base. Unlike address-scoped adaptive traces,
+    // knowledge records are intentionally allowed to originate from another
+    // executable revision; the matcher validates normalized code/CFG identity
+    // before any record becomes evidence.
+    std::vector<xenon::recomp::KnowledgeRecord> knowledge_records;
+    if (!options.knowledge.empty()) {
+      std::error_code knowledge_ec;
+      if (std::filesystem::exists(options.knowledge, knowledge_ec) && !knowledge_ec) {
+        std::string knowledge_error;
+        if (!xenon::recomp::load_knowledge_base(
+                options.knowledge, knowledge_records, knowledge_error)) {
+          const auto message = "knowledge base could not be loaded: " + knowledge_error;
+          status.report(Phase::Failed, 5, "Loading universal analysis knowledge", message);
+          std::cerr << "xenon-prepare: " << message << "\n";
+          return 2;
+        }
+      }
+    }
+    const auto knowledge_base_hash =
+        xenon::recomp::knowledge_base_fingerprint(knowledge_records);
+
     xenon::recomp::ArtifactCacheKey key;
     key.title_id = identity.title_id;
     key.media_id = identity.media_id;
@@ -598,6 +655,8 @@ int main(int argc, char** argv) {
     key.module_id = module_id;
     key.module_compatibility_version = module_compatibility_version;
     key.hint_set_hash = hint_set_hash;
+    key.adaptive_observation_hash = adaptive_observation_hash;
+    key.knowledge_base_hash = knowledge_base_hash;
     key.target_arch = default_target_arch();
     key.build_config = options.config;
     status.set_cache_key(key.digest());
@@ -617,6 +676,10 @@ int main(int argc, char** argv) {
       root.set("titleId", title_id_hex);
       root.set("mediaId", media_id_hex);
       root.set("effectiveImageHash", effective_hash_hex);
+      root.set("adaptiveObservationHash", static_cast<double>(adaptive_observation_hash));
+      root.set("adaptiveObservationCount", static_cast<double>(adaptive_observations.size()));
+      root.set("knowledgeBaseHash", std::to_string(knowledge_base_hash));
+      root.set("knowledgeRecordCount", static_cast<double>(knowledge_records.size()));
       root.set("nativeExtensionPath", json_string_or_empty(existing.native_extension_path));
       std::cout << root.dump() << "\n";
       return 0;
@@ -640,6 +703,8 @@ int main(int argc, char** argv) {
     xenon::recomp::DriverOptions driver_options;
     driver_options.pre_parsed_image = effective_image;
     driver_options.hint_set_v2 = hint_set;
+    driver_options.adaptive_observations = adaptive_observations;
+    driver_options.knowledge_records = knowledge_records;
     // Progress milestones (Part 18 of the Recomp Analysis V2 pass): a large
     // real-title analysis used to leave this tool's status file (and so any
     // UI reading it, e.g. the launcher) frozen at "15%" for the entire

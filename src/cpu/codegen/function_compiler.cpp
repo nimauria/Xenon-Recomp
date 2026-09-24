@@ -141,6 +141,24 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
     return out;
   }
 
+  const auto in_declared_range = [&](GuestAddress address) {
+    return std::any_of(ranges.begin(), ranges.end(), [address](const auto& range) {
+      const auto end = static_cast<std::uint64_t>(range.base) +
+                       static_cast<std::uint64_t>(range.words.size()) * 4u;
+      return address >= range.base && static_cast<std::uint64_t>(address) < end;
+    });
+  };
+  for (const auto& [address, instruction] : decoded) {
+    if (!is_direct_branch(instruction) || instruction.lk()) continue;
+    const auto target = instruction.direct_branch_target();
+    if (in_declared_range(target) && !decoded.contains(target)) {
+      out.error_address = address;
+      out.error_word = instruction.word;
+      out.error = "direct branch target is inside a declared range but has no decoded local block";
+      return out;
+    }
+  }
+
   std::map<GuestAddress, bool> leader;
   leader[entry] = true;
   for (const auto start : range_starts) leader[start] = true;

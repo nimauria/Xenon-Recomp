@@ -16,10 +16,9 @@ ApplicationWindow {
     flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint | Qt.WindowCloseButtonHint
 
     property int currentPage: 0
-    // Page 9 (Developer) only exists in the pageForward/pageBack cycle order
-    // while Developer Mode is actually on, matching it not existing in the
-    // sidebar either.
-    readonly property int pageCount: developerModeEnabled ? 10 : 9
+    // Developer diagnostics now live under Settings > Advanced > Developer,
+    // so top-level navigation is always the same stable 0..8 range.
+    readonly property int pageCount: 9
     property alias globalSearchText: topBar.searchText
     property bool compactLayout: launcherBridge.safeMode ? false : settingBool("general/compact", false)
     property string sidebarMode: launcherBridge.safeMode ? "Expanded" : launcherBridge.stringSetting("general/sidebarMode", "Auto")
@@ -49,8 +48,6 @@ ApplicationWindow {
     property bool capturesLoaded: false
     property bool networkLoaded: false
     property bool supportLoaded: false
-    property bool developerLoaded: false
-    property bool developerModeEnabled: launcherBridge.safeMode ? false : settingBool("developer/modeEnabled", false)
     property bool launcherReadyMarked: false
     property int prewarmStep: 0
     property int pendingNavigationPage: -1
@@ -184,7 +181,6 @@ ApplicationWindow {
         if (page === 6) return capturesLoader
         if (page === 7) return networkLoader
         if (page === 8) return supportLoader
-        if (page === 9) return developerLoader
         return homeLoader
     }
 
@@ -304,7 +300,6 @@ ApplicationWindow {
         else if (page === 6) capturesLoaded = true
         else if (page === 7) networkLoaded = true
         else if (page === 8) supportLoaded = true
-        else if (page === 9) developerLoaded = true
     }
 
     function pageName(page) {
@@ -316,7 +311,6 @@ ApplicationWindow {
         if (page === 6) return "Captures"
         if (page === 7) return "Network"
         if (page === 8) return "Support"
-        if (page === 9) return "Developer"
         return "Library"
     }
 
@@ -508,13 +502,6 @@ ApplicationWindow {
                     root.settingBool("accessibility/highContrast", false),
                     root.settingBool("accessibility/enhancedFocus", false),
                     root.settingBool("accessibility/reduceMotion", false))
-            else if (key === "developer/modeEnabled" && !launcherBridge.safeMode) {
-                root.developerModeEnabled = root.settingBool(key, false)
-                // The Developer page just lost its sidebar entry - it must
-                // not remain "current" with no way back to it via navigation.
-                if (!root.developerModeEnabled && root.currentPage === 9)
-                    root.currentPage = 4
-            }
         }
     }
 
@@ -566,11 +553,6 @@ ApplicationWindow {
     Component {
         id: supportPageComponent
         SupportPage { }
-    }
-
-    Component {
-        id: developerPageComponent
-        DeveloperPage { }
     }
 
     Component {
@@ -646,7 +628,6 @@ ApplicationWindow {
                 backdropVariant: root.backdropVariant
                 backdropSource: root.backdropSource
                 currentIndex: root.currentPage
-                developerModeEnabled: root.developerModeEnabled
                 onPageRequested: function(index) { root.currentPage = index }
                 onCompactToggleRequested: {
                     var next = root.sidebarCompact ? "Expanded" : "Compact"
@@ -772,16 +753,6 @@ ApplicationWindow {
                         }
                     }
 
-                    Loader {
-                        id: developerLoader
-                        active: root.developerLoaded && root.developerModeEnabled
-                        asynchronous: true
-                        sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : developerPageComponent
-                        onStatusChanged: {
-                            root.markLauncherReadyIfCurrent(9, status)
-                            if (status === Loader.Ready) root.applyPendingNavigation()
-                        }
-                    }
                 }
             }
         }

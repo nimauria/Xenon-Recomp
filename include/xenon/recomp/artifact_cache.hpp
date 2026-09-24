@@ -32,7 +32,7 @@ namespace xenon::recomp {
 // exported entry points, or CPU V2's codegen would make an already-compiled
 // xenon_game_module unsafe to keep using even though nothing about the game
 // itself changed.
-inline constexpr std::uint32_t kArtifactAbiVersion = 1;
+inline constexpr std::uint32_t kArtifactAbiVersion = 3;
 
 // Everything that determines whether a previously prepared native module can
 // still be used, or must be rebuilt. Two keys with identical field values are
@@ -64,6 +64,15 @@ struct ArtifactCacheKey {
   // even if a module author forgets to bump compatibility_version, but never
   // changes for a metadata/artwork-only update, matching Part 16 exactly.
   std::uint64_t hint_set_hash{};
+  // Stable hash of distinct runtime-learned control-flow facts consumed by
+  // analysis. Repeated hits of an already-known fact intentionally do not
+  // change this value, while a newly observed target invalidates the artifact
+  // so the next Play can re-analyze/recompile with that knowledge.
+  std::uint64_t adaptive_observation_hash{};
+  // Gen 9 normalized knowledge/signature facts consumed by analysis. Any
+  // semantic database change must invalidate a prepared native artifact just
+  // like a hint/adaptive-control-flow change does.
+  std::uint64_t knowledge_base_hash{};
   std::uint32_t abi_version{kArtifactAbiVersion};
   std::string target_arch;   // e.g. "x86_64", "arm64"
   std::string build_config;  // e.g. "Release", "Debug"

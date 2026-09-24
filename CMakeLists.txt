@@ -173,8 +173,10 @@ add_library(xenon_cpu STATIC
   src/cpu/optimizer/optimizer.cpp
   src/cpu/codegen/aot_semantics.cpp
   src/cpu/codegen/backend_cpp_aot.cpp
+  src/cpu/codegen/dynamic_fallback.cpp
   src/cpu/codegen/executable_code_cache.cpp
   src/cpu/codegen/function_compiler.cpp
+  src/cpu/verification/semantic_verifier.cpp
 )
 target_include_directories(xenon_cpu
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -196,6 +198,8 @@ find_package(Threads REQUIRED)
 
 add_library(xenon_recomp STATIC
   src/recomp/driver.cpp
+  src/recomp/ppc_value_analysis.cpp
+  src/recomp/knowledge_base.cpp
   src/recomp/analysis_schema.cpp
   src/recomp/analysis_schema_json.cpp
   src/recomp/native_replacements.cpp
@@ -416,6 +420,9 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/kernel/xboxkrnl/xbox_io_guest.cpp
     src/xbox/imports/import_registry.cpp
     src/xbox/exports/xboxkrnl_io_exports.cpp
+    src/xbox/exports/xboxkrnl_rtl_exports.cpp
+    src/xbox/rtl.cpp
+    src/xbox/export_metadata.cpp
     src/xbox/xex/xex_loader.cpp
     src/xbox/xex/xex_crypto.cpp
     src/xbox/xex/xex_lzx.cpp
@@ -635,6 +642,12 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_session_tests)
   add_test(NAME xenon_session_tests COMMAND xenon_session_tests)
 
+  add_executable(xenon_session_execution_tests
+    tests/core/session_execution_tests.cpp)
+  target_link_libraries(xenon_session_execution_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_session_execution_tests)
+  add_test(NAME xenon_session_execution_tests COMMAND xenon_session_execution_tests)
+
   if(TARGET xenon_audio)
     add_executable(xenon_audio_mixer_tests tests/audio/mixer_tests.cpp)
     target_link_libraries(xenon_audio_mixer_tests PRIVATE xenon_audio)
@@ -712,6 +725,11 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_xex_lzx_tests PRIVATE xenon_xbox_kernel_io)
     xenon_enable_test_asserts(xenon_xex_lzx_tests)
     add_test(NAME xenon_xex_lzx_tests COMMAND xenon_xex_lzx_tests)
+
+    add_executable(xenon_rtl_tests tests/xbox/rtl_tests.cpp)
+    target_link_libraries(xenon_rtl_tests PRIVATE xenon_xbox_kernel_io)
+    xenon_enable_test_asserts(xenon_rtl_tests)
+    add_test(NAME xenon_rtl_tests COMMAND xenon_rtl_tests)
   endif()
 
   add_executable(xenon_recomp_driver_tests tests/recomp/recomp_driver_tests.cpp)
@@ -747,6 +765,21 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_discovery_quality_tests PRIVATE xenon_recomp)
   xenon_enable_test_asserts(xenon_discovery_quality_tests)
   add_test(NAME xenon_discovery_quality_tests COMMAND xenon_discovery_quality_tests)
+
+  # Gen 6 PPC value/indirect-flow analysis: bounded abstract-value lattice,
+  # cheap block-local propagation, read-only pointer/vtable folding, and the
+  # selective bounded backward-slice resolver.
+  add_executable(xenon_ppc_value_analysis_tests tests/recomp/ppc_value_analysis_tests.cpp)
+  target_link_libraries(xenon_ppc_value_analysis_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_ppc_value_analysis_tests)
+  add_test(NAME xenon_ppc_value_analysis_tests COMMAND xenon_ppc_value_analysis_tests)
+
+  # Gen 9 universal knowledge base: versioned normalized fingerprints,
+  # cross-revision matching, confidence gates, JSONL persistence and replay.
+  add_executable(xenon_knowledge_base_tests tests/recomp/knowledge_base_tests.cpp)
+  target_link_libraries(xenon_knowledge_base_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_knowledge_base_tests)
+  add_test(NAME xenon_knowledge_base_tests COMMAND xenon_knowledge_base_tests)
 
   # Prepared native-module artifact cache (automatic game preparation
   # pipeline): digest/invalidation semantics and real stage->validate->
@@ -987,6 +1020,37 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_cpu_runtime_helpers_register_range)
   add_test(NAME xenon_cpu_runtime_helpers_register_range COMMAND xenon_cpu_runtime_helpers_register_range)
 
+  # Gen 8 semantic verification: an independent PowerPC reference model is
+  # differentially checked against real generated AOT code using deterministic
+  # randomized CPU/memory states.  The framework test also proves exact-seed
+  # replay, bounded failure minimization, and repro-artifact emission.
+  add_executable(xenon_cpu_semantic_verifier_tests
+    tests/cpu/verification/semantic_verifier_tests.cpp)
+  target_link_libraries(xenon_cpu_semantic_verifier_tests PRIVATE xenon_cpu)
+  xenon_enable_test_asserts(xenon_cpu_semantic_verifier_tests)
+  add_test(NAME xenon_cpu_semantic_verifier_tests COMMAND xenon_cpu_semantic_verifier_tests)
+
+  add_executable(xenon_cpu_codegen_semantic_verification
+    tests/cpu/codegen/codegen_semantic_verification.cpp)
+  target_include_directories(xenon_cpu_codegen_semantic_verification PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpu/verification")
+  target_link_libraries(xenon_cpu_codegen_semantic_verification PRIVATE xenon_cpu)
+  set(XENON_GENERATED_SEMANTIC_VERIFICATION
+    "${CMAKE_CURRENT_BINARY_DIR}/generated_semantic_verification.cpp")
+  add_custom_command(
+    OUTPUT "${XENON_GENERATED_SEMANTIC_VERIFICATION}"
+    COMMAND xenon_cpu_codegen_semantic_verification "${XENON_GENERATED_SEMANTIC_VERIFICATION}"
+    DEPENDS xenon_cpu_codegen_semantic_verification
+    VERBATIM)
+  add_executable(xenon_cpu_semantic_verification
+    tests/cpu/x86_64/semantic_verification.cpp
+    "${XENON_GENERATED_SEMANTIC_VERIFICATION}")
+  target_include_directories(xenon_cpu_semantic_verification PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpu/verification")
+  target_link_libraries(xenon_cpu_semantic_verification PRIVATE xenon_cpu)
+  xenon_enable_test_asserts(xenon_cpu_semantic_verification)
+  add_test(NAME xenon_cpu_semantic_verification COMMAND xenon_cpu_semantic_verification)
+
   xenon_add_generated_cpu_test(function_flow codegen_function_flow.cpp function_flow.cpp)
   xenon_add_generated_cpu_test(branch_matrix codegen_branch_matrix.cpp branch_matrix.cpp)
   xenon_add_generated_cpu_test(control_boundaries codegen_control_boundaries.cpp control_boundaries.cpp)
@@ -1068,6 +1132,20 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_memory_fault_tests PRIVATE xenon_memory)
     xenon_enable_test_asserts(xenon_memory_fault_tests)
     add_test(NAME xenon_memory_fault_tests COMMAND xenon_memory_fault_tests)
+
+    add_executable(xenon_dynamic_fallback_tests
+      tests/cpu/dynamic_fallback_tests.cpp)
+    target_link_libraries(xenon_dynamic_fallback_tests PRIVATE xenon_cpu xenon_memory)
+    xenon_enable_test_asserts(xenon_dynamic_fallback_tests)
+    add_test(NAME xenon_dynamic_fallback_tests COMMAND xenon_dynamic_fallback_tests)
+
+    add_executable(xenon_dynamic_fallback_semantic_tests
+      tests/cpu/verification/dynamic_fallback_semantic_tests.cpp)
+    target_include_directories(xenon_dynamic_fallback_semantic_tests PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpu/verification")
+    target_link_libraries(xenon_dynamic_fallback_semantic_tests PRIVATE xenon_cpu xenon_memory)
+    xenon_enable_test_asserts(xenon_dynamic_fallback_semantic_tests)
+    add_test(NAME xenon_dynamic_fallback_semantic_tests COMMAND xenon_dynamic_fallback_semantic_tests)
 
     add_executable(xenon_executable_code_cache_tests
       tests/memory/executable_code_cache_tests.cpp)
@@ -1349,6 +1427,19 @@ endif()
 if(TARGET xenon_runtime_host AND TARGET xenon_launcher)
   set_target_properties(xenon_runtime_host PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
+  # A launcher-only build still has to be a usable launcher. RuntimeBridge
+  # discovers the host beside xenon_launcher, so make it an explicit runtime
+  # companion rather than relying on an all-target build to happen first.
+  add_dependencies(xenon_launcher xenon_runtime_host)
+endif()
+
+# PreparationService follows the same side-by-side contract for xenon-prepare.
+# Without this dependency a successful `--target xenon_launcher` build can
+# render the UI but cannot prepare a title on first Play.
+if(TARGET xenon-prepare AND TARGET xenon_launcher)
+  set_target_properties(xenon-prepare PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
+  add_dependencies(xenon_launcher xenon-prepare)
 endif()
 # RuntimeBridge tests (xenon_runtime_host_fixture, xenon_runtime_bridge_tests)
 # are declared inside launcher/CMakeLists.txt itself, in the same directory

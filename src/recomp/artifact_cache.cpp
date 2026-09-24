@@ -107,6 +107,8 @@ std::string ArtifactCacheKey::digest() const {
   append("module_id", module_id);
   append("module_compatibility_version", module_compatibility_version);
   append("hint_set_hash", std::to_string(hint_set_hash));
+  append("adaptive_observation_hash", std::to_string(adaptive_observation_hash));
+  append("knowledge_base_hash", std::to_string(knowledge_base_hash));
   append("abi_version", std::to_string(abi_version));
   append("target_arch", target_arch);
   append("build_config", build_config);

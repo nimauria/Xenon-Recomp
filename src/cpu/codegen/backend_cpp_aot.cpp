@@ -10,6 +10,13 @@
 #include <string>
 
 namespace xenon::cpu::backend {
+
+std::string alternate_entry_symbol(std::string_view function_name, GuestAddress entry) {
+  std::ostringstream out;
+  out << function_name << "_entry_" << std::hex << std::uppercase << entry << "_v2";
+  return out.str();
+}
+
 namespace {
 using ir::Instruction;
 using ir::Op;
@@ -221,7 +228,7 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
     case Op::ICacheInvalidate:o<<"  memory_access.instruction_cache_invalidate(static_cast<GuestAddress>("<<arg(i,0)<<"));\n";break;
     case Op::CacheHint:o<<"  (void)"<<arg(i,0)<<";\n";break;
 
-    case Op::Branch:o<<"  return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,0)<<"),0};\n";break;
+    case Op::Branch:o<<"  { const auto branch_target=static_cast<GuestAddress>("<<arg(i,0)<<"); state.nia=branch_target; return {FlowReason::Branch,branch_target,0}; }\n";break;
     // A direct `bl` target is a compile-time constant, so try the local CPU
     // V2 compiled registry first - exactly the same "local lookup, else
     // runtime.call() fallback" pattern already used below for
@@ -239,10 +246,26 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       o<<"  { const auto call_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
        <<"if(auto* native=context.lookup_compiled(call_target,CompiledLookupKind::Call)) { "
        <<"auto rr=native(context); if(rr.terminal()) return rr; } else { "
-       <<"auto rr=runtime.call(call_target,state,memory); if(rr.terminal()) return rr; } }\n";
+       <<"auto fallback=context.try_dynamic_fallback(call_target,CompiledLookupKind::Call); "
+       <<"auto rr=fallback.handled ? fallback.result : runtime.call(call_target,state,memory); "
+       <<"if(rr.terminal()) return rr; } }\n";
       break;
     }
-    case Op::BranchIf:{o<<"  if("<<arg(i,0)<<") { ";if(i.imm0)o<<"auto rr=runtime.call(static_cast<GuestAddress>("<<arg(i,1)<<"),state,memory); if(rr.terminal()) return rr;";else o<<"return {FlowReason::Branch,static_cast<GuestAddress>("<<arg(i,1)<<"),0};";o<<" }\n";break;}
+    case Op::BranchIf:{
+      o<<"  if("<<arg(i,0)<<") { ";
+      if(i.imm0){
+        o<<"const auto call_target=static_cast<GuestAddress>("<<arg(i,1)<<"); "
+         <<"ExecutionResult rr{}; "
+         <<"if(auto* native=context.lookup_compiled(call_target,CompiledLookupKind::Call)) rr=native(context); "
+         <<"else { auto fallback=context.try_dynamic_fallback(call_target,CompiledLookupKind::Call); "
+         <<"rr=fallback.handled ? fallback.result : runtime.call(call_target,state,memory); } "
+         <<"if(rr.terminal()) return rr;";
+      }else{
+        o<<"const auto branch_target=static_cast<GuestAddress>("<<arg(i,1)<<"); state.nia=branch_target; return {FlowReason::Branch,branch_target,0};";
+      }
+      o<<" }\n";
+      break;
+    }
     case Op::BranchIndirect:{
       o<<"  if("<<arg(i,0)<<") { ";
       if(i.imm0){
@@ -251,14 +274,17 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
          <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
          <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
          <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
-         <<expected<<"u) return rr; } else { auto rr=runtime.call(raw_target,state,memory); "
-         <<"if(rr.terminal()) return rr; }";
+         <<expected<<"u) return rr; } else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
+         <<"auto rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); "
+         <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != "<<expected<<"u) return rr; } "
+         <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; }";
       }else if(i.imm1==1){
-        o<<"return {FlowReason::Return,static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull),0};";
+        o<<"const auto return_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); state.nia=return_target; return {FlowReason::Return,return_target,0};";
       }else{
         o<<"const auto guest_target=static_cast<GuestAddress>("<<arg(i,1)<<" & ~3ull); "
          <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) "
-         <<"return native(context); return {FlowReason::Branch,guest_target,0};";
+         <<"return native(context); auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); "
+         <<"if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0};";
       }
       o<<" }\n";break;
     }
@@ -268,9 +294,12 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
        <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
        <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
        <<"static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } else { "
-       <<"auto rr=runtime.call(raw_target,state,memory); if(rr.terminal()) return rr; } }\n";break;
+       <<"auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
+       <<"auto rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); "
+       <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } "
+       <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; } }\n";break;
     }
-    case Op::Return:o<<"  return {FlowReason::Return,static_cast<GuestAddress>(state.lr & ~3ull),0};\n";break;
+    case Op::Return:o<<"  { const auto return_target=static_cast<GuestAddress>(state.lr & ~3ull); state.nia=return_target; return {FlowReason::Return,return_target,0}; }\n";break;
     case Op::Syscall:o<<"  return runtime.syscall("<<i.imm0<<",state,memory);\n";break;
     case Op::Trap:{const std::uint32_t w=i.guest_word;const auto m=guest_mnemonic(i);const bool word=m=="tw"||m=="twi";const bool imm=m=="tdi"||m=="twi";unsigned ra=(w>>16)&31u;unsigned rb=(w>>11)&31u;std::int64_t simm=static_cast<std::int16_t>(w&0xFFFFu);o<<"  if(aot::trap_condition("<<i.imm0<<",state.gpr["<<ra<<"],"<<(imm?("std::uint64_t(std::int64_t("+std::to_string(simm)+"))"):("state.gpr["+std::to_string(rb)+"]"))<<","<<(word?"true":"false")<<")) return runtime.trap("<<i.imm0<<",state,memory);\n";break;}
     default:
@@ -457,7 +486,9 @@ std::string emit_one_in_function(const Instruction& i,
       }
       o << "  { ExecutionResult rr{}; if(auto* native=context.lookup_compiled("
         << guest_target << "u,CompiledLookupKind::Call)) rr=native(context); "
-        << "else rr=runtime.call(" << guest_target << "u,state,memory);\n";
+        << "else { auto fallback=context.try_dynamic_fallback(" << guest_target
+        << "u,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call("
+        << guest_target << "u,state,memory); }\n";
       emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
       o << "  }\n";
       return o.str();
@@ -477,7 +508,9 @@ std::string emit_one_in_function(const Instruction& i,
       } else {
         o << "    ExecutionResult rr{}; if(auto* native=context.lookup_compiled("
           << guest_target << "u,CompiledLookupKind::Call)) rr=native(context); "
-          << "else rr=runtime.call(" << guest_target << "u,state,memory);\n";
+          << "else { auto fallback=context.try_dynamic_fallback(" << guest_target
+          << "u,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call("
+          << guest_target << "u,state,memory); }\n";
       }
       emit_call_result_check(o, "rr", expected_return, local_targets, "    ");
       o << "  }\n";
@@ -513,7 +546,7 @@ std::string emit_one_in_function(const Instruction& i,
       o << "case " << target << "u: rr=" << local_dispatch_symbol
         << "(context,guest_target); handled_local=true; break; ";
     o << "default: break; }\n";
-    o << indent << "if(!handled_local) { if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) rr=native(context); else rr=runtime.call(raw_target,state,memory); }\n";
+    o << indent << "if(!handled_local) { if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) rr=native(context); else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); } }\n";
     emit_call_result_check(o, "rr", expected_return, local_targets, indent);
     if (!condition.empty()) o << "  }\n";
     return o.str();
@@ -525,7 +558,7 @@ std::string emit_one_in_function(const Instruction& i,
     for (const auto target : local_targets)
       o << "case " << target << "u: state.nia=" << target << "u; goto "
         << local_label(target) << "; ";
-    o << "default: break; } if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) return native(context); return {FlowReason::Branch,guest_target,0}; }\n";
+    o << "default: break; } if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Branch)) return native(context); auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Branch); if(fallback.handled) return fallback.result; state.nia=guest_target; return {FlowReason::Branch,guest_target,0}; }\n";
     return o.str();
   }
 
@@ -554,6 +587,11 @@ std::string CppAotBackend::emit_function(const ir::Block& block,std::string_view
     o<<emit_one(i,value_types);
   }
   emit_exit_pc(o,current_guest,materialized_guest);
+  // Final CIA is an architectural property of the guest block, not of the
+  // last IR node that survived optimization.  An optimizer may fold the last
+  // guest instruction while preserving its state effect in earlier IR.
+  if (block.end_address && block.end_address >= block.guest_address + 4u)
+    o << "  state.cia=" << static_cast<GuestAddress>(block.end_address - 4u) << "u;\n";
   GuestAddress fallthrough = block.end_address;
   if (!fallthrough) {
     fallthrough = current_guest ? static_cast<GuestAddress>(*current_guest + 4u)
@@ -579,11 +617,21 @@ std::string CppAotBackend::emit_translation_unit(const ir::Block& block,std::str
 
 std::string CppAotBackend::emit_function(
     const ir::Function& function, std::string_view name,
-    std::span<const DirectCallBinding> direct_calls) const {
+    std::span<const DirectCallBinding> direct_calls,
+    std::span<const GuestAddress> alternate_entries) const {
   if (function.blocks.empty()) throw std::runtime_error("CppAotBackend: empty function");
 
   std::unordered_set<GuestAddress> local_targets;
   for (const auto& block : function.blocks) local_targets.insert(block.guest_address);
+  for (const auto& block : function.blocks) {
+    for (const auto& edge : block.successors) {
+      if ((edge.kind == ir::EdgeKind::Branch || edge.kind == ir::EdgeKind::Fallthrough) &&
+          edge.local && !local_targets.contains(edge.target)) {
+        throw std::logic_error(
+            "CppAotBackend: local control-flow edge has no materialized basic block");
+      }
+    }
+  }
 
   std::ostringstream o;
   std::unordered_set<std::string> declared_symbols;
@@ -628,6 +676,8 @@ std::string CppAotBackend::emit_function(
 
     if (!is_guaranteed_terminal(block)) {
       emit_exit_pc(o, current_guest, materialized_guest);
+      if (block.end_address && block.end_address >= block.guest_address + 4u)
+        o << "  state.cia=" << static_cast<GuestAddress>(block.end_address - 4u) << "u;\n";
       if (const auto fallthrough = local_fallthrough(block)) {
         o << "  state.nia=" << *fallthrough << "u;\n";
         o << "  goto " << local_label(*fallthrough) << ";\n";
@@ -654,6 +704,14 @@ std::string CppAotBackend::emit_function(
   o << "}\n";
   o << "ExecutionResult " << name << "_v2([[maybe_unused]] ExecutionContext& context) {\n";
   o << "  return " << dispatch_symbol << "(context," << function.guest_address << "u);\n}\n";
+  for (const auto entry : alternate_entries) {
+    if (entry == function.guest_address) continue;
+    if (!local_targets.contains(entry))
+      throw std::invalid_argument("CppAotBackend: alternate entry has no local basic block");
+    o << "ExecutionResult " << alternate_entry_symbol(name, entry)
+      << "([[maybe_unused]] ExecutionContext& context) {\n";
+    o << "  return " << dispatch_symbol << "(context," << entry << "u);\n}\n";
+  }
   o << "ExecutionResult " << name
     << "([[maybe_unused]] CpuState& state, [[maybe_unused]] MemoryPort& memory, "
        "[[maybe_unused]] RuntimeServices& runtime) {\n";
@@ -664,12 +722,13 @@ std::string CppAotBackend::emit_function(
 
 std::string CppAotBackend::emit_translation_unit(
     const ir::Function& function, std::string_view name,
-    std::span<const DirectCallBinding> direct_calls) const {
+    std::span<const DirectCallBinding> direct_calls,
+    std::span<const GuestAddress> alternate_entries) const {
   std::ostringstream o;
   o << "#include <bit>\n#include <cmath>\n#include <cfenv>\n#include <cstdint>\n#include <limits>\n";
   o << "#include \"xenon/cpu/aot_semantics.hpp\"\n\n";
   o << "using namespace xenon::cpu;\n";
-  o << emit_function(function, name, direct_calls);
+  o << emit_function(function, name, direct_calls, alternate_entries);
   return o.str();
 }
 

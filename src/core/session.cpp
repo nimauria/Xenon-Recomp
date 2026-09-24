@@ -20,11 +20,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 
 #include "xenon/xam/content_graph.hpp"
+#include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -112,6 +114,97 @@ bool declared_revisions_include(std::string_view declared, const std::string& ef
 
 }  // namespace
 
+void XenonSession::record_compiled_lookup_miss(
+    void* observer, cpu::ExecutionContext& context, cpu::GuestAddress target,
+    cpu::CompiledLookupKind kind) {
+  auto* session = static_cast<XenonSession*>(observer);
+  if (!session) return;
+  std::lock_guard<std::mutex> observation_lock(session->adaptive_observation_mutex_);
+  // Runtime learning is evidence, not an unbounded telemetry sink. A hostile
+  // or badly-corrupted target stream must not grow process memory forever.
+  // 65k distinct misses is already vastly more than a normal title should
+  // need before the next preparation pass incorporates the new entries.
+  constexpr std::size_t kMaxAdaptiveObservationFactsPerSession = 65'536u;
+  if (session->adaptive_observation_seen_.size() >= kMaxAdaptiveObservationFactsPerSession) return;
+  const auto fact = std::make_tuple(target, context.state.cia, kind);
+  if (!session->adaptive_observation_seen_.insert(fact).second) return;
+
+  const auto write_observation = [&](const std::filesystem::path& path) {
+    if (path.empty()) return;
+    std::error_code ec;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+
+    // JSONL is intentionally append-only: if execution terminates abruptly we
+    // still retain every observation written before the failure. The ingest
+    // side deduplicates identical records and accumulates hit counts.
+    std::ofstream out(path, std::ios::out | std::ios::app);
+    if (!out) return;
+    out << "{\"address\":" << target
+        << ",\"site\":" << context.state.cia
+        << ",\"kind\":\""
+        << (kind == cpu::CompiledLookupKind::Call ? "indirect-call-target"
+                                                  : "indirect-branch-target")
+        << "\",\"hits\":1";
+    if (session->effective_identity_)
+      out << ",\"imageHash\":\""
+          << xbox::format_effective_image_hash(session->effective_identity_->effective_image_hash)
+          << "\"";
+    out << "}\n";
+  };
+  write_observation(session->config_.adaptive_observation_path);
+  if (session->config_.adaptive_observation_mirror_path !=
+      session->config_.adaptive_observation_path)
+    write_observation(session->config_.adaptive_observation_mirror_path);
+}
+
+
+void XenonSession::record_dynamic_fallback_observation(
+    const cpu::DynamicFallbackObservation& observation) {
+  std::lock_guard<std::mutex> observation_lock(adaptive_observation_mutex_);
+  constexpr std::size_t kMaxFallbackFactsPerSession = 65'536u;
+  if (dynamic_fallback_observation_seen_.size() >= kMaxFallbackFactsPerSession)
+    return;
+  if (!dynamic_fallback_observation_seen_
+           .emplace(observation.entry, observation.block_fingerprint)
+           .second)
+    return;
+
+  const auto write_observation = [&](const std::filesystem::path& path) {
+    if (path.empty()) return;
+    std::error_code ec;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    std::ofstream out(path, std::ios::out | std::ios::app);
+    if (!out) return;
+    // `executed-entry` is already consumed by Gen 5/6 analysis. The extra Gen
+    // 7 fields are intentionally additive: old readers ignore them, while a
+    // later knowledge-base generation can consume fingerprints/reasons.
+    out << "{\"address\":" << observation.entry
+        << ",\"site\":" << observation.site
+        << ",\"kind\":\"executed-entry\",\"hits\":1"
+        << ",\"fallback\":true"
+        << ",\"exit\":" << observation.exit
+        << ",\"instructions\":" << observation.instructions
+        << ",\"fingerprint\":" << observation.block_fingerprint
+        << ",\"fallbackReason\":\""
+        << cpu::dynamic_fallback_stop_reason_name(observation.reason) << "\""
+        << ",\"transferKind\":\""
+        << (observation.kind == cpu::CompiledLookupKind::Call ? "call" : "branch")
+        << "\"";
+    if (effective_identity_)
+      out << ",\"imageHash\":\""
+          << xbox::format_effective_image_hash(
+                 effective_identity_->effective_image_hash)
+          << "\"";
+    out << "}\n";
+  };
+  write_observation(config_.adaptive_observation_path);
+  if (config_.adaptive_observation_mirror_path !=
+      config_.adaptive_observation_path)
+    write_observation(config_.adaptive_observation_mirror_path);
+}
+
 XenonSession::XenonSession() = default;
 XenonSession::~XenonSession() {
   shutdown();
@@ -176,6 +269,11 @@ SessionResult XenonSession::initialize(const SessionConfig& config) {
 
   set_state(SessionState::Initializing, "Initializing session...");
   config_ = config;
+  {
+    std::lock_guard<std::mutex> observation_lock(adaptive_observation_mutex_);
+    adaptive_observation_seen_.clear();
+    dynamic_fallback_observation_seen_.clear();
+  }
 
   if (!init_memory()) {
     return SessionResult::failure("Failed to initialize memory subsystem");
@@ -276,6 +374,7 @@ void XenonSession::shutdown() {
   }
 
   gpu_.reset();
+  dynamic_fallback_.reset();
   code_cache_.reset();
 
   // Tear down the guest process/thread model before the memory it lives in.
@@ -354,6 +453,13 @@ bool XenonSession::init_kernel() {
 
 bool XenonSession::init_cpu() {
   code_cache_ = std::make_unique<cpu::ExecutableCodeCache>();
+  if (config_.enable_dynamic_fallback) {
+    dynamic_fallback_ = std::make_unique<cpu::DynamicFallbackExecutor>(
+        cpu::DynamicFallbackConfig{},
+        [this](const cpu::DynamicFallbackObservation& observation) {
+          record_dynamic_fallback_observation(observation);
+        });
+  }
   main_cpu_state_ = std::make_unique<cpu::CpuState>();
   return true;
 }
@@ -570,20 +676,22 @@ bool XenonSession::init_input() {
   }
 
   // Add launcher-defined multi-source routes (controller + keyboard/HOTAS,
-  // accessibility devices, etc.).  Unknown selectors are intentionally
+  // accessibility devices, etc.). Unknown selectors are intentionally
   // ignored here so hotplug can be reconciled by a later frontend refresh.
-  for (const auto& route : config_.input_user_sources) {
-    if (route.user_index >= input::kMaxUsers) continue;
-    bool primary_selected = input_->device_for_user(route.user_index).has_value();
-    for (const auto& selector : route.sources) {
+  // SessionConfig stores one selector list per Xbox user; runtime_host fills
+  // the same fixed table by launch-config userIndex.
+  for (std::uint32_t user_index = 0; user_index < input::kMaxUsers; ++user_index) {
+    const auto& sources = config_.input_user_sources[user_index];
+    bool primary_selected = input_->device_for_user(user_index).has_value();
+    for (const auto& selector : sources) {
       const auto device = match_device(selector);
       if (!device) continue;
       if (!primary_selected) {
-        if (input_->assign_user(route.user_index, *device) == input::Result::Success) {
+        if (input_->assign_user(user_index, *device) == input::Result::Success) {
           primary_selected = true;
         }
       } else {
-        static_cast<void>(input_->add_user_source(route.user_index, *device));
+        static_cast<void>(input_->add_user_source(user_index, *device));
       }
     }
   }
@@ -660,6 +768,12 @@ bool XenonSession::init_exports() {
   // Register core exports
   export_registry_.clear();
   
+  // Register xboxkrnl RTL exports (RtlImageXexHeaderField, etc.)
+  if (!xbox::register_xboxkrnl_rtl_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl RTL exports");
+    return false;
+  }
+
   // Register XAM exports
   if (xam_ && !xam_->register_exports(export_registry_)) {
     set_error("Failed to register XAM exports");
@@ -1457,31 +1571,149 @@ std::uint32_t XenonSession::run_execution() {
   const auto entry = loaded_xex_->image.entry_point;
 
   cpu::ExecutionContext context(*main_cpu_state_, *memory_, *this);
+  if (dynamic_fallback_) dynamic_fallback_->bind(context);
+  if (!config_.adaptive_observation_path.empty() ||
+      !config_.adaptive_observation_mirror_path.empty()) {
+    context.compiled_lookup_observer = this;
+    context.compiled_lookup_miss = &XenonSession::record_compiled_lookup_miss;
+  }
   if (compiled_registry_binder_) {
     compiled_registry_binder_(context);
   }
 
-  if (!context.compiled_lookup) {
+  if (!context.compiled_lookup && !context.dynamic_fallback) {
     execution_active_.store(false);
-    set_error("No compiled game code is available to execute");
+    set_error("No compiled game code or dynamic fallback is available to execute");
     return 0xFFFFFFFFu;
   }
 
   auto* entry_fn = context.lookup_compiled(entry, cpu::CompiledLookupKind::Call);
-  if (!entry_fn) {
-    std::ostringstream address;
-    address << std::hex << std::uppercase << entry;
-    execution_active_.store(false);
-    set_error("The native extension's compiled registry has no entry for 0x" + address.str());
-    return 0xFFFFFFFFu;
-  }
 
   cpu::ExecutionResult result{};
   bool crashed = false;
   std::string crash_message;
   std::uint32_t crash_exit_code = 0xC0000005u;  // NTSTATUS-style default (access violation).
+  const auto fail_execution = [&](std::string message, std::uint32_t exit_code) {
+    crashed = true;
+    crash_message = std::move(message);
+    crash_exit_code = exit_code;
+  };
   try {
-    result = entry_fn(context);
+    if (entry_fn) {
+      result = entry_fn(context);
+    } else {
+      const auto fallback =
+          context.try_dynamic_fallback(entry, cpu::CompiledLookupKind::Call);
+      if (!fallback.handled) {
+        std::ostringstream address;
+        address << std::hex << std::uppercase << entry;
+        fail_execution("The compiled registry has no entry for 0x" +
+                           address.str() +
+                           " and the target is not fallback-executable",
+                       0xC000001Du);
+      } else {
+        result = fallback.result;
+      }
+    }
+    if (!crashed && config_.enable_logging) {
+      std::cout << "[XenonSession] Guest entry returned: reason="
+                << cpu::flow_reason_name(result.reason)
+                << " next=0x" << std::hex << std::uppercase << result.next_address
+                << " detail=0x" << result.detail
+                << " cia=0x" << main_cpu_state_->cia
+                << " nia=0x" << main_cpu_state_->nia
+                << " lr=0x" << main_cpu_state_->lr
+                << " ctr=0x" << main_cpu_state_->ctr
+                << " r1=0x" << main_cpu_state_->gpr[1]
+                << " r3=0x" << main_cpu_state_->gpr[3] << std::dec << std::endl;
+    }
+
+    constexpr std::uint32_t kMaxTopLevelDispatches = 1'000'000u;
+    for (std::uint32_t dispatch_count = 0u;
+         !crashed && !stop_requested_.load() &&
+         dispatch_count < kMaxTopLevelDispatches;) {
+      switch (result.reason) {
+        case cpu::FlowReason::Branch:
+        case cpu::FlowReason::Fallthrough: {
+          if (result.next_address == 0u) {
+            fail_execution("Guest execution returned " +
+                               std::string(cpu::flow_reason_name(result.reason)) +
+                               " with a zero next address",
+                           0xC000001Du);
+            break;
+          }
+          auto* next_fn =
+              context.lookup_compiled(result.next_address,
+                                      cpu::CompiledLookupKind::Branch);
+          if (!next_fn) {
+            const auto fallback = context.try_dynamic_fallback(
+                result.next_address, cpu::CompiledLookupKind::Branch);
+            if (!fallback.handled) {
+              std::ostringstream diagnostic;
+              diagnostic << "Guest " << cpu::flow_reason_name(result.reason)
+                         << " target 0x" << std::hex << std::uppercase
+                         << result.next_address
+                         << " is not compiled or fallback-executable";
+              fail_execution(diagnostic.str(), 0xC000001Du);
+              break;
+            }
+            ++dispatch_count;
+            result = fallback.result;
+          } else {
+            ++dispatch_count;
+            result = next_fn(context);
+          }
+          if (config_.enable_logging) {
+            std::cout << "[XenonSession] Guest dispatch returned: reason="
+                      << cpu::flow_reason_name(result.reason)
+                      << " next=0x" << std::hex << std::uppercase
+                      << result.next_address << " detail=0x" << result.detail
+                      << " cia=0x" << main_cpu_state_->cia
+                      << " nia=0x" << main_cpu_state_->nia
+                      << " lr=0x" << main_cpu_state_->lr
+                      << " ctr=0x" << main_cpu_state_->ctr
+                      << " r1=0x" << main_cpu_state_->gpr[1]
+                      << " r3=0x" << main_cpu_state_->gpr[3] << std::dec
+                      << std::endl;
+          }
+          continue;
+        }
+        case cpu::FlowReason::Return:
+          if (result.next_address != 0u || main_cpu_state_->lr != 0u) {
+            std::ostringstream diagnostic;
+            diagnostic << "Guest entry returned from a non-terminal compiled "
+                       << "boundary (next=0x" << std::hex << std::uppercase
+                       << result.next_address << ", lr=0x" << main_cpu_state_->lr
+                       << ')';
+            fail_execution(diagnostic.str(), 0xC000001Du);
+          }
+          break;
+        case cpu::FlowReason::Halt:
+          break;
+        case cpu::FlowReason::Trap:
+          break;
+        case cpu::FlowReason::Syscall:
+          fail_execution("Unhandled guest syscall escaped RuntimeServices::syscall "
+                             "(level " + std::to_string(result.detail) + ")",
+                         0xC000001Du);
+          break;
+        case cpu::FlowReason::LongJump:
+          {
+            std::ostringstream diagnostic;
+            diagnostic << "Guest LongJump escaped the owning compiled function "
+                       << "(target 0x" << std::hex << std::uppercase
+                       << result.next_address << ')';
+            fail_execution(diagnostic.str(), 0xC000001Du);
+          }
+          break;
+      }
+      break;
+    }
+    if (!crashed && !stop_requested_.load() &&
+        result.reason == cpu::FlowReason::Branch) {
+      fail_execution("Guest execution exceeded the top-level dispatch limit",
+                     0xC000001Du);
+    }
   } catch (const memory::MemoryFault& fault) {
     // Real connection to the guest exception path (not a new subsystem):
     // Memory V2 already throws this on a genuine guest memory fault; route
@@ -1684,13 +1916,21 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
   state.gpr[13] = audio_thread_tls_.kpcr_address;
 
   cpu::ExecutionContext context(state, *memory_, *this);
+  if (dynamic_fallback_) dynamic_fallback_->bind(context);
   compiled_registry_binder_(context);
   if (!context.compiled_lookup) return false;
   auto* fn = context.lookup_compiled(callback, cpu::CompiledLookupKind::Call);
-  if (!fn) return false;
 
   try {
-    const auto result = fn(context);
+    cpu::ExecutionResult result{};
+    if (fn) {
+      result = fn(context);
+    } else {
+      const auto fallback = context.try_dynamic_fallback(
+          callback, cpu::CompiledLookupKind::Call);
+      if (!fallback.handled) return false;
+      result = fallback.result;
+    }
     return result.reason != cpu::FlowReason::Trap;
   } catch (...) {
     return false;
@@ -1829,4 +2069,3 @@ bool XenonSession::external_call(std::string_view module,
 }
 
 }  // namespace xenon::core
-

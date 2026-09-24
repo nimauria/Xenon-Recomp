@@ -31,7 +31,7 @@ struct UiFeatures {
   bool settings_updates = true;
   bool settings_community = true;
   bool settings_accessibility = true;
-  bool settings_developer = kTestMode;
+  bool settings_developer = true;
   bool settings_about = true;
 
   bool library_dlc = true;

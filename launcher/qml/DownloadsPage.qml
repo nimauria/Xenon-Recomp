@@ -310,91 +310,83 @@ Item {
             }
         }
 
-        XSectionHeader {
+        XPanel {
             visible: root.showActive
             Layout.fillWidth: true
-            title: "Active"
-            description: "Current downloads, installs, checks and game preparation."
-        }
+            Layout.topMargin: Theme.spaceMd
+            implicitHeight: activeSection.implicitHeight + Theme.spaceLg * 2
 
-        Text {
-            visible: root.showActive && root.activeJobs.length === 0
-            Layout.fillWidth: true
-            text: "No active background jobs."
-            color: Theme.textMuted
-            font.pixelSize: Theme.typeCaption
-        }
+            ColumnLayout {
+                id: activeSection
+                anchors.fill: parent
+                anchors.margins: Theme.spaceLg
+                spacing: Theme.spaceMd
 
-        Repeater {
-            model: root.showActive ? root.activeJobs : []
-            delegate: XPanel {
-                id: activeJobCard
-                required property var modelData
-                Layout.fillWidth: true
-                implicitHeight: activeJobColumn.implicitHeight + Theme.spaceLg * 2
+                XSectionHeader {
+                    Layout.fillWidth: true
+                    title: "Active"
+                    description: "Current downloads, installs, checks and game preparation."
+                }
 
-                ColumnLayout {
-                    id: activeJobColumn
-                    anchors.fill: parent
-                    anchors.margins: Theme.spaceLg
-                    spacing: Theme.spaceSm
+                Text {
+                    visible: root.activeJobs.length === 0
+                    Layout.fillWidth: true
+                    text: "No active background jobs."
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.typeCaption
+                }
 
-                    RowLayout {
+                Repeater {
+                    model: root.activeJobs
+                    delegate: XPanel {
+                        id: activeJobCard
+                        required property var modelData
                         Layout.fillWidth: true
+                        implicitHeight: activeJobColumn.implicitHeight + Theme.spaceMd * 2
+                        decorated: false
+                        color: Theme.highContrast ? Theme.surfaceAlt : Qt.rgba(Theme.surfaceAlt.r, Theme.surfaceAlt.g, Theme.surfaceAlt.b, Theme.panelOpacity)
+
                         ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-                            Text {
-                                text: String(activeJobCard.modelData.title || "Background job")
-                                color: Theme.text
-                                font.pixelSize: Theme.typeBody
-                                font.weight: Font.DemiBold
-                                elide: Text.ElideRight
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: root.progressText(activeJobCard.modelData)
-                                color: Theme.textMuted
-                                font.pixelSize: Theme.typeCaption
-                                elide: Text.ElideRight
-                            }
-                            Text {
-                                visible: String(activeJobCard.modelData.message || "").length > 0
-                                Layout.fillWidth: true
-                                text: String(activeJobCard.modelData.message || "")
-                                color: Theme.textMuted
-                                font.pixelSize: Theme.typeCaption
-                                wrapMode: Text.WordWrap
-                                maximumLineCount: 2
-                                elide: Text.ElideRight
-                            }
-                        }
-                        StatusPill {
-                            label: root.statusLabel(String(activeJobCard.modelData.status || ""))
-                            tone: Theme.accent
-                        }
-                        XButton {
-                            visible: Boolean(activeJobCard.modelData.canCancel)
-                            text: "Cancel"
-                            variant: "danger"
-                            onClicked: root.runJobAction(activeJobCard.modelData, "cancel")
-                        }
-                    }
+                            id: activeJobColumn
+                            anchors.fill: parent
+                            anchors.margins: Theme.spaceMd
+                            spacing: Theme.spaceSm
 
-                    Rectangle {
-                        visible: Number(activeJobCard.modelData.progress || -1) >= 0
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 8
-                        radius: 4
-                        color: Theme.surfaceAlt
-                        Rectangle {
-                            width: parent.width * Math.max(0, Math.min(1, Number(activeJobCard.modelData.progress || 0)))
-                            height: parent.height
-                            radius: parent.radius
-                            color: Theme.accent
-                            Behavior on width {
-                                enabled: !Theme.reduceMotion
-                                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text { text: String(activeJobCard.modelData.title || "Background job"); color: Theme.text; font.pixelSize: Theme.typeBody; font.weight: Font.DemiBold; elide: Text.ElideRight }
+                                    Text { Layout.fillWidth: true; text: root.progressText(activeJobCard.modelData); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
+                                    Text {
+                                        visible: String(activeJobCard.modelData.message || "").length > 0
+                                        Layout.fillWidth: true
+                                        text: String(activeJobCard.modelData.message || "")
+                                        color: Theme.textMuted
+                                        font.pixelSize: Theme.typeCaption
+                                        wrapMode: Text.WordWrap
+                                        maximumLineCount: 2
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                StatusPill { label: root.statusLabel(String(activeJobCard.modelData.status || "")); tone: Theme.accent }
+                                XButton { visible: Boolean(activeJobCard.modelData.canCancel); text: "Cancel"; variant: "danger"; onClicked: root.runJobAction(activeJobCard.modelData, "cancel") }
+                            }
+
+                            Rectangle {
+                                visible: Number(activeJobCard.modelData.progress || -1) >= 0
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 8
+                                radius: 4
+                                color: Theme.surfaceAlt
+                                Rectangle {
+                                    width: parent.width * Math.max(0, Math.min(1, Number(activeJobCard.modelData.progress || 0)))
+                                    height: parent.height
+                                    radius: parent.radius
+                                    color: Theme.accent
+                                    Behavior on width { enabled: !Theme.reduceMotion; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                                }
                             }
                         }
                     }
@@ -402,123 +394,112 @@ Item {
             }
         }
 
-        XSectionHeader {
+        XPanel {
             visible: root.showIssues
             Layout.fillWidth: true
-            title: "Needs attention"
-            description: "Failed jobs that can be retried or checked again."
-        }
+            Layout.topMargin: Theme.spaceLg
+            implicitHeight: issueSection.implicitHeight + Theme.spaceLg * 2
 
-        Text {
-            visible: root.showIssues && root.failedJobs.length === 0
-            Layout.fillWidth: true
-            text: "No failed jobs."
-            color: Theme.textMuted
-            font.pixelSize: Theme.typeCaption
-        }
+            ColumnLayout {
+                id: issueSection
+                anchors.fill: parent
+                anchors.margins: Theme.spaceLg
+                spacing: Theme.spaceMd
 
-        Repeater {
-            model: root.showIssues ? root.failedJobs : []
-            delegate: XSettingsCard {
-                id: failedJobCard
-                required property var modelData
-                Layout.fillWidth: true
-                title: String(modelData.title || "Background job")
-                description: String(modelData.message || "The operation failed.")
-                actionWidth: 220
-                XButton {
-                    text: root.primaryActionLabel(failedJobCard.modelData)
-                    visible: root.primaryAction(failedJobCard.modelData).length > 0
-                    variant: "primary"
-                    onClicked: root.runJobAction(failedJobCard.modelData, root.primaryAction(failedJobCard.modelData))
+                XSectionHeader { Layout.fillWidth: true; title: "Needs attention"; description: "Failed jobs that can be retried or checked again." }
+                Text { visible: root.failedJobs.length === 0; Layout.fillWidth: true; text: "No failed jobs."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                Repeater {
+                    model: root.failedJobs
+                    delegate: XSettingsCard {
+                        id: failedJobCard
+                        required property var modelData
+                        Layout.fillWidth: true
+                        decorated: false
+                        title: String(modelData.title || "Background job")
+                        description: String(modelData.message || "The operation failed.")
+                        actionWidth: 220
+                        XButton { text: root.primaryActionLabel(failedJobCard.modelData); visible: root.primaryAction(failedJobCard.modelData).length > 0; variant: "primary"; onClicked: root.runJobAction(failedJobCard.modelData, root.primaryAction(failedJobCard.modelData)) }
+                    }
                 }
             }
         }
 
-        XSectionHeader {
+        XPanel {
             visible: root.showReady
             Layout.fillWidth: true
-            title: "Ready"
-            description: "Updates discovered by Xenon that are ready to download or install."
-        }
+            Layout.topMargin: Theme.spaceLg
+            implicitHeight: readySection.implicitHeight + Theme.spaceLg * 2
 
-        Text {
-            visible: root.showReady && root.readyJobs.length === 0
-            Layout.fillWidth: true
-            text: "No updates are waiting for action."
-            color: Theme.textMuted
-            font.pixelSize: Theme.typeCaption
-        }
+            ColumnLayout {
+                id: readySection
+                anchors.fill: parent
+                anchors.margins: Theme.spaceLg
+                spacing: Theme.spaceMd
 
-        Repeater {
-            model: root.showReady ? root.readyJobs : []
-            delegate: XSettingsCard {
-                id: readyJobCard
-                required property var modelData
-                Layout.fillWidth: true
-                title: String(modelData.title || "Update")
-                description: {
-                    var version = String(modelData.subtitle || "")
-                    var message = String(modelData.message || "")
-                    return (version.length > 0 ? "Version " + version + (message.length > 0 ? " • " : "") : "") + message
-                }
-                actionWidth: 240
-                XButton {
-                    text: root.primaryActionLabel(readyJobCard.modelData)
-                    visible: root.primaryAction(readyJobCard.modelData).length > 0
-                    variant: "primary"
-                    onClicked: root.runJobAction(readyJobCard.modelData, root.primaryAction(readyJobCard.modelData))
+                XSectionHeader { Layout.fillWidth: true; title: "Ready"; description: "Updates discovered by Xenon that are ready to download or install." }
+                Text { visible: root.readyJobs.length === 0; Layout.fillWidth: true; text: "No updates are waiting for action."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                Repeater {
+                    model: root.readyJobs
+                    delegate: XSettingsCard {
+                        id: readyJobCard
+                        required property var modelData
+                        Layout.fillWidth: true
+                        decorated: false
+                        title: String(modelData.title || "Update")
+                        description: {
+                            var version = String(modelData.subtitle || "")
+                            var message = String(modelData.message || "")
+                            return (version.length > 0 ? "Version " + version + (message.length > 0 ? " • " : "") : "") + message
+                        }
+                        actionWidth: 240
+                        XButton { text: root.primaryActionLabel(readyJobCard.modelData); visible: root.primaryAction(readyJobCard.modelData).length > 0; variant: "primary"; onClicked: root.runJobAction(readyJobCard.modelData, root.primaryAction(readyJobCard.modelData)) }
+                    }
                 }
             }
         }
 
-        RowLayout {
+        XPanel {
             visible: root.showHistory
             Layout.fillWidth: true
-            spacing: Theme.spaceSm
-            XSectionHeader {
-                Layout.fillWidth: true
-                title: "Recent activity"
-                description: "Bounded module update history."
-            }
-            XButton {
-                visible: root.historyEntries.length > 0
-                text: "Clear History"
-                variant: "ghost"
-                onClicked: launcherBridge.clearModuleUpdateHistory("")
-            }
-        }
+            Layout.topMargin: Theme.spaceLg
+            implicitHeight: historySection.implicitHeight + Theme.spaceLg * 2
 
-        Text {
-            visible: root.showHistory && root.historyEntries.length === 0
-            Layout.fillWidth: true
-            text: "No completed module update activity has been recorded yet."
-            color: Theme.textMuted
-            font.pixelSize: Theme.typeCaption
-        }
+            ColumnLayout {
+                id: historySection
+                anchors.fill: parent
+                anchors.margins: Theme.spaceLg
+                spacing: Theme.spaceMd
 
-        Repeater {
-            model: root.showHistory ? root.historyEntries.slice(0, 20) : []
-            delegate: XSettingsCard {
-                required property var modelData
-                compact: true
-                Layout.fillWidth: true
-                title: String(modelData.moduleName || modelData.moduleId || "Module")
-                description: {
-                    var action = String(modelData.action || "Update")
-                    var message = String(modelData.message || "")
-                    var version = String(modelData.toVersion || "")
-                    var stamp = String(modelData.timestamp || "")
-                    var suffix = version.length > 0 ? " • " + version : ""
-                    if (stamp.length > 0) suffix += " • " + stamp
-                    return action + suffix + (message.length > 0 ? "\n" + message : "")
+                RowLayout {
+                    Layout.fillWidth: true
+                    XSectionHeader { Layout.fillWidth: true; title: "Recent activity"; description: "Bounded module update history." }
+                    XButton { visible: root.historyEntries.length > 0; text: "Clear History"; variant: "ghost"; onClicked: launcherBridge.clearModuleUpdateHistory("") }
                 }
-                actionWidth: 140
-                StatusPill {
-                    label: String(modelData.outcome || "recorded")
-                    tone: String(modelData.outcome || "").toLowerCase() === "success" ? Theme.success
-                        : (String(modelData.outcome || "").toLowerCase() === "failed"
-                           || String(modelData.outcome || "").toLowerCase() === "failure") ? Theme.danger : Theme.textMuted
+                Text { visible: root.historyEntries.length === 0; Layout.fillWidth: true; text: "No completed module update activity has been recorded yet."; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
+                Repeater {
+                    model: root.historyEntries.slice(0, 20)
+                    delegate: XSettingsCard {
+                        required property var modelData
+                        compact: true
+                        decorated: false
+                        Layout.fillWidth: true
+                        title: String(modelData.moduleName || modelData.moduleId || "Module")
+                        description: {
+                            var action = String(modelData.action || "Update")
+                            var message = String(modelData.message || "")
+                            var version = String(modelData.toVersion || "")
+                            var stamp = String(modelData.timestamp || "")
+                            var suffix = version.length > 0 ? " • " + version : ""
+                            if (stamp.length > 0) suffix += " • " + stamp
+                            return action + suffix + (message.length > 0 ? "\n" + message : "")
+                        }
+                        actionWidth: 140
+                        StatusPill {
+                            label: String(modelData.outcome || "recorded")
+                            tone: String(modelData.outcome || "").toLowerCase() === "success" ? Theme.success
+                                : (String(modelData.outcome || "").toLowerCase() === "failed" || String(modelData.outcome || "").toLowerCase() === "failure") ? Theme.danger : Theme.textMuted
+                        }
+                    }
                 }
             }
         }

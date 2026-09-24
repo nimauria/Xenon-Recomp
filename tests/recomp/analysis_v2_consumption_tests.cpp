@@ -57,7 +57,7 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words, st
   constexpr std::size_t coff = pe + 4;
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
-  constexpr std::size_t text_raw = 0x600;
+  constexpr std::size_t text_raw = kTextRva;
   const std::size_t data_raw = kDataRva;
   const std::size_t file_size = header + data_raw + std::max<std::size_t>(data_size, 0x10);
 
@@ -201,11 +201,13 @@ int main() {
     std::string error;
     assert(load_and_analyze(options, report, error) && error.empty());
 
-    bool target_discovered = false;
-    for (const auto& function : report.functions)
-      if (function.guest_start == kLoadAddress + kTextRva + switch_target_offset) target_discovered = true;
-    assert(target_discovered &&
-           "an explicit SwitchTableHint target must be seeded/discovered, not merely recorded");
+    const auto switch_target = kLoadAddress + kTextRva + switch_target_offset;
+    const bool target_dispatchable = std::any_of(
+        report.entries.begin(), report.entries.end(),
+        [switch_target](const auto& entry) { return entry.address == switch_target; });
+    assert(target_dispatchable &&
+           "an explicit SwitchTableHint target must become a dispatchable guest entry, "
+           "whether it is a semantic function or an alternate block");
 
     for (const auto& item : report.unresolved)
       assert(item.kind != "indirect-branch" &&
@@ -214,7 +216,7 @@ int main() {
     assert(report.diagnostics.switch_tables_resolved == 1);
     std::filesystem::remove_all(root);
   }
-  std::cout << "  [PASS] Explicit SwitchTableHint target is discovered; site is not double-reported\n";
+  std::cout << "  [PASS] Explicit SwitchTableHint target is dispatchable; site is not double-reported\n";
 
   // Test 3: a KnownIndirectCall (bctrl) with an empty target list is
   // reported as "acknowledged" rather than a generic unresolved indirect

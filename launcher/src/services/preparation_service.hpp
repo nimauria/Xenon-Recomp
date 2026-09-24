@@ -38,6 +38,11 @@ class PreparationService final : public QObject {
   // extension) for a traditional module and for a game with no module yet.
   [[nodiscard]] bool usesAutomaticPreparation(const QString& game_id) const;
 
+  // Stable per-library-entry runtime-learning trace consumed by xenon-prepare
+  // on the next cache check/build. This lives outside ephemeral runtime
+  // session directories so observations survive launcher/game restarts.
+  [[nodiscard]] QString adaptiveObservationPath(const QString& game_id) const;
+
   // Fast, bounded, synchronous check (parses the XEX header and consults the
   // artifact cache only - never compiles) - safe to call from the UI thread.
   // On success with an empty result, `outNativeExtensionPath` is left empty
