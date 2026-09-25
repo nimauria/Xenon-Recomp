@@ -107,6 +107,44 @@ ExecutionResult trapping_entry(ExecutionContext&) {
   return {FlowReason::Trap, 0u, 0xBADu};
 }
 
+// Phase 3 (AC6 Runtime Readiness pass, Part 13): two concurrently-running
+// guest threads created through the real ExCreateThread production path
+// (not the setjmp/longjmp test's manually-constructed single KernelThread)
+// must each get their own independent KPCR/TLS allocation from
+// setup_guest_thread_tls_context(), and one thread's writes into its own
+// KPCR-relative guest memory must never be visible through - or clobbered
+// by - the other thread's concurrently-running instance of the *same*
+// compiled entry function.
+std::atomic<xenon::cpu::GuestAddress> g_tls_probe_kpcr_a{0};
+std::atomic<xenon::cpu::GuestAddress> g_tls_probe_kpcr_b{0};
+std::atomic<std::uint32_t> g_tls_probe_final_a{0};
+std::atomic<std::uint32_t> g_tls_probe_final_b{0};
+std::atomic<int> g_tls_probe_writers_ready{0};
+
+ExecutionResult tls_isolation_probe_entry(ExecutionContext& context) {
+  const auto kpcr = static_cast<xenon::cpu::GuestAddress>(context.state.gpr[13]);
+  const auto tag = static_cast<std::uint32_t>(context.state.gpr[3]);
+  const bool is_a = tag == 0xAAAA0000u;
+
+  (is_a ? g_tls_probe_kpcr_a : g_tls_probe_kpcr_b).store(kpcr);
+  context.memory.write32_be(kpcr, tag);
+
+  // Let both threads' writes land before either re-reads, so a genuine
+  // aliasing bug (both threads resolving to the same guest address) would
+  // manifest as one thread observing the other's tag.
+  g_tls_probe_writers_ready.fetch_add(1, std::memory_order_relaxed);
+  while (g_tls_probe_writers_ready.load(std::memory_order_relaxed) < 2) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  const auto observed = context.memory.read32_be(kpcr);
+  (is_a ? g_tls_probe_final_a : g_tls_probe_final_b).store(observed);
+
+  context.state.gpr[3] = tag;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
 std::atomic<std::uint64_t> g_loop_iterations{0};
 
 // Branches to itself forever - a synthetic tight guest loop, so the
@@ -349,6 +387,62 @@ void test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit() {
          "a crashing created thread must not silently report success");
 }
 
+void test_two_concurrent_created_threads_have_independent_tls() {
+  g_tls_probe_kpcr_a.store(0);
+  g_tls_probe_kpcr_b.store(0);
+  g_tls_probe_final_a.store(0);
+  g_tls_probe_final_b.store(0);
+  g_tls_probe_writers_ready.store(0);
+
+  ThreadCreationHarness harness(&tls_isolation_probe_entry);
+
+  xenon::memory::GuestAddress handle_out_a{};
+  xenon::memory::GuestAddress handle_out_b{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out_a));
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out_b));
+
+  xenon::cpu::CpuState cpu_a{};
+  cpu_a.gpr[3] = handle_out_a;
+  cpu_a.gpr[7] = 0x3000u;
+  cpu_a.gpr[8] = 0xAAAA0000u;
+  auto call_a = make_call(cpu_a, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call_a));
+  assert(cpu_a.gpr[3] == 0u);
+
+  xenon::cpu::CpuState cpu_b{};
+  cpu_b.gpr[3] = handle_out_b;
+  cpu_b.gpr[7] = 0x3000u;
+  cpu_b.gpr[8] = 0xBBBB0000u;
+  auto call_b = make_call(cpu_b, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call_b));
+  assert(cpu_b.gpr[3] == 0u);
+
+  const auto handle_a = harness.session.memory()->read32_be(handle_out_a);
+  const auto handle_b = harness.session.memory()->read32_be(handle_out_b);
+
+  kernel::HandleView view_a{};
+  kernel::HandleView view_b{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle_a, view_a) ==
+         kernel::KernelIoCode::Success);
+  assert(harness.session.kernel_process()->handle_table().lookup(handle_b, view_b) ==
+         kernel::KernelIoCode::Success);
+  auto& thread_a = static_cast<kernel::KernelThread&>(*view_a.object);
+  auto& thread_b = static_cast<kernel::KernelThread&>(*view_b.object);
+
+  assert(thread_a.join(2000) && "TLS isolation probe thread A must complete");
+  assert(thread_b.join(2000) && "TLS isolation probe thread B must complete");
+
+  const auto kpcr_a = g_tls_probe_kpcr_a.load();
+  const auto kpcr_b = g_tls_probe_kpcr_b.load();
+  assert(kpcr_a != 0u && kpcr_b != 0u);
+  assert(kpcr_a != kpcr_b &&
+         "each ExCreateThread-created thread must get its own KPCR/TLS allocation");
+  assert(g_tls_probe_final_a.load() == 0xAAAA0000u &&
+         "thread A must read back its own tag, not thread B's - proves no KPCR aliasing");
+  assert(g_tls_probe_final_b.load() == 0xBBBB0000u &&
+         "thread B must read back its own tag, not thread A's - proves no KPCR aliasing");
+}
+
 void test_ex_create_thread_rejects_null_start_address() {
   ThreadCreationHarness harness(&echo_increment_entry);
   xenon::memory::GuestAddress handle_out{};
@@ -402,6 +496,7 @@ int main() {
   test_ex_create_thread_honors_create_suspended();
   test_preemptive_safepoint_terminates_a_running_created_thread();
   test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread();
+  test_two_concurrent_created_threads_have_independent_tls();
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();
   test_ex_create_thread_rejects_null_start_address();
   test_external_call_resolves_real_calling_thread_identity();
