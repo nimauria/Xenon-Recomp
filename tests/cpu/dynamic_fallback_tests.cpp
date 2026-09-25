@@ -158,6 +158,43 @@ int main() {
   assert(loop.result.reason == FlowReason::Trap);
   assert(bounded.executed_instructions() == 8u);
 
+  // Reviewer feedback on the AC6 Runtime Readiness pass's Part 14 fallback
+  // accounting: fallback_unique_pc_count()/fallback_hot_pcs() must
+  // distinguish "many instructions from a few hot entries" from "the same
+  // total spread across many distinct entries" - executed_blocks() alone
+  // cannot tell those apart. Uses its own executor/context so it is
+  // independent of the shared mutable state exercised above.
+  seed_simple_return(memory);
+  write_instruction(memory, kCode + 0x100u, 0x38600000u);  // li r3,0
+  write_instruction(memory, kCode + 0x104u, 0x4E800020u);  // blr
+  DynamicFallbackExecutor telemetry_fallback;
+  ExecutionContext telemetry_context(state, memory, runtime);
+  telemetry_fallback.bind(telemetry_context);
+  assert(telemetry_fallback.fallback_unique_pc_count() == 0u);
+
+  state = {};
+  state.lr = kReturn;
+  assert(telemetry_context.try_dynamic_fallback(kCode, CompiledLookupKind::Call).handled);
+  state = {};
+  state.lr = kReturn;
+  assert(telemetry_context.try_dynamic_fallback(kCode, CompiledLookupKind::Call).handled);
+  state = {};
+  state.lr = kReturn;
+  assert(telemetry_context
+             .try_dynamic_fallback(kCode + 0x100u, CompiledLookupKind::Call)
+             .handled);
+
+  assert(telemetry_fallback.fallback_unique_pc_count() == 2u);
+  const auto hot_pcs = telemetry_fallback.fallback_hot_pcs(10u);
+  assert(hot_pcs.size() == 2u);
+  assert(hot_pcs.front().first == kCode);
+  assert(hot_pcs.front().second == 2u);
+  assert(hot_pcs.back().first == kCode + 0x100u);
+  assert(hot_pcs.back().second == 1u);
+  const auto top_one = telemetry_fallback.fallback_hot_pcs(1u);
+  assert(top_one.size() == 1u);
+  assert(top_one.front().first == kCode);
+
   std::cout << "dynamic fallback tests passed\n";
   return 0;
 }

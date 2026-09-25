@@ -138,6 +138,40 @@ int main() {
     assert(!session.is_initialized() && "Session should not be initialized after shutdown");
   }
 
+  // Part 14 of the AC6 Runtime Readiness pass ("Runtime Fallback
+  // Accounting") + reviewer feedback (fallback_unique_pc_count/
+  // fallback_hot_pc_top_n): XenonSession::capability_report() must publish a
+  // real "fallback" section built from the live AOT/fallback counters, not
+  // merely have the plumbing exist untested. No game is loaded here, so the
+  // counters are all real, honest zeros - not a fake "PASS" precisely
+  // because nothing has executed yet.
+  {
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    assert(session.initialize(config).success);
+
+    const auto report = session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    const auto* fallback = sections->find("fallback");
+    assert(fallback != nullptr && fallback->is_object());
+    assert(fallback->get_number("aotBlocksExecuted") == 0.0);
+    assert(fallback->get_number("fallbackBlocksExecuted") == 0.0);
+    assert(fallback->get_number("fallbackInstructionsExecuted") == 0.0);
+    assert(fallback->get_number("unsupportedPpcInstructions") == 0.0);
+    assert(fallback->get_number("fallbackSourceInvalidations") == 0.0);
+    assert(fallback->get_number("newIndirectTargetsDiscovered") == 0.0);
+    assert(fallback->get_number("fallbackUniquePcCount") == 0.0);
+    const auto* hot_pcs = fallback->find("fallbackHotPcTopN");
+    assert(hot_pcs != nullptr && hot_pcs->is_array() && hot_pcs->as_array()->empty());
+    assert(sections->find("runFingerprint") != nullptr);
+
+    session.shutdown();
+  }
+
   // Regression: content mounting must create an absolute physical VFS device
   // and expose game:/d:/dvd: as aliases. Passing "game:" directly into a
   // Device constructor throws std::invalid_argument and previously crashed

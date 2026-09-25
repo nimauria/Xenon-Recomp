@@ -589,9 +589,21 @@ std::string CppAotBackend::emit_function(const ir::Block& block,std::string_view
   emit_exit_pc(o,current_guest,materialized_guest);
   // Final CIA is an architectural property of the guest block, not of the
   // last IR node that survived optimization.  An optimizer may fold the last
-  // guest instruction while preserving its state effect in earlier IR.
-  if (block.end_address && block.end_address >= block.guest_address + 4u)
-    o << "  state.cia=" << static_cast<GuestAddress>(block.end_address - 4u) << "u;\n";
+  // guest instruction while preserving its state effect in earlier IR - so
+  // this must still run even when emit_exit_pc() already materialized
+  // something. But when nothing was folded, emit_exit_pc() above already
+  // materialized this EXACT address (the last real guest instruction is
+  // always at block.end_address-4u), and re-emitting the identical
+  // "state.cia=<same value>u;" a second time is pure dead-code bloat, not a
+  // second, distinct fact - guard on materialized_guest exactly as
+  // emit_guest_pc()/emit_exit_pc() already do for every other redundant case.
+  if (block.end_address && block.end_address >= block.guest_address + 4u) {
+    const auto final_cia = static_cast<GuestAddress>(block.end_address - 4u);
+    if (materialized_guest != final_cia) {
+      materialized_guest = final_cia;
+      o << "  state.cia=" << final_cia << "u;\n";
+    }
+  }
   GuestAddress fallthrough = block.end_address;
   if (!fallthrough) {
     fallthrough = current_guest ? static_cast<GuestAddress>(*current_guest + 4u)
@@ -676,8 +688,18 @@ std::string CppAotBackend::emit_function(
 
     if (!is_guaranteed_terminal(block)) {
       emit_exit_pc(o, current_guest, materialized_guest);
-      if (block.end_address && block.end_address >= block.guest_address + 4u)
-        o << "  state.cia=" << static_cast<GuestAddress>(block.end_address - 4u) << "u;\n";
+      // See emit_function(const ir::Block&, ...)'s identical guard: only
+      // re-emit "state.cia=" here if it differs from what emit_exit_pc()
+      // (or the per-instruction loop above) already materialized - otherwise
+      // this duplicates the exact same statement for the common case where
+      // the optimizer folded nothing.
+      if (block.end_address && block.end_address >= block.guest_address + 4u) {
+        const auto final_cia = static_cast<GuestAddress>(block.end_address - 4u);
+        if (materialized_guest != final_cia) {
+          materialized_guest = final_cia;
+          o << "  state.cia=" << final_cia << "u;\n";
+        }
+      }
       if (const auto fallthrough = local_fallthrough(block)) {
         o << "  state.nia=" << *fallthrough << "u;\n";
         o << "  goto " << local_label(*fallthrough) << ";\n";

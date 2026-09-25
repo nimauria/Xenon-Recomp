@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "xenon/memory/fault.hpp"
@@ -44,29 +46,69 @@ struct ExceptionRecord {
 // Returns true if the exception was handled, false to continue searching
 using ExceptionHandler = std::function<bool(const ExceptionRecord&)>;
 
-// Exception dispatcher - connects Memory V2 faults to guest exception behavior
+// Exception dispatcher - connects Memory V2 faults to guest exception behavior.
+//
+// Per-thread independent exception-handler chains (AC6 Runtime Readiness
+// pass, Phase 5): real Xbox 360/PPC structured exception handling searches a
+// chain rooted at the FAULTING thread's own current try/except frame before
+// ever considering anything process-wide. Reproducing the exact guest-memory
+// EXCEPTION_REGISTRATION_RECORD frame-chain layout (walked via compiler-
+// generated .pdata/unwind info) is Part 13 work and is not attempted here -
+// see docs/kernel/THREADING_V2.md. What IS implemented here, at the layer
+// Xenon's exception dispatch actually operates at (a host-side C++ handler
+// chain, not compiled-in guest frames), is the same search *order*: a
+// handler registered for one specific guest thread is tried first and only
+// for that thread's own exceptions, before falling back to the process-wide
+// chain every thread shares - so one thread's handler can no longer
+// silently see or swallow another thread's fault, which the previous
+// single, global handlers_ vector could not guarantee.
 class ExceptionDispatcher {
  public:
   ExceptionDispatcher() = default;
 
-  // Register an exception handler
+  // Registers a process-wide handler, tried for every guest thread's
+  // exceptions once that thread's own handlers (if any) decline to handle
+  // it. Thread-safe: may be called from any guest-executing host thread.
   void register_handler(ExceptionHandler handler);
 
-  // Remove all handlers
+  // Removes every process-wide handler.
   void clear_handlers();
 
-  // Dispatch a memory fault as an exception
-  [[nodiscard]] bool dispatch_memory_fault(const memory::MemoryFaultInfo& fault);
+  // Registers a handler scoped to one specific guest thread id (see
+  // kernel::KernelThread::thread_id() - ids start at 1, so 0 is never a
+  // real thread and is reserved to mean "no specific thread" at dispatch
+  // call sites that have none). Tried before the process-wide chain, and
+  // only for that thread's own exceptions.
+  void register_thread_handler(std::uint32_t thread_id, ExceptionHandler handler);
 
-  // Dispatch a generic exception
-  [[nodiscard]] bool dispatch_exception(const ExceptionRecord& record);
+  // Removes every handler registered for this thread id. Callers release a
+  // guest thread's per-thread chain once the thread has fully exited (see
+  // XenonSession::run_created_guest_thread()) so a stale handler can never
+  // outlive - or be silently inherited by - a different, later thread.
+  void clear_thread_handlers(std::uint32_t thread_id);
+
+  // Dispatch a memory fault as an exception, scoped to faulting_thread_id
+  // (0 = no specific thread; searches the process-wide chain only).
+  [[nodiscard]] bool dispatch_memory_fault(const memory::MemoryFaultInfo& fault,
+                                           std::uint32_t faulting_thread_id = 0u);
+
+  // Dispatch a generic exception, scoped to faulting_thread_id (0 = no
+  // specific thread; searches the process-wide chain only).
+  [[nodiscard]] bool dispatch_exception(const ExceptionRecord& record,
+                                        std::uint32_t faulting_thread_id = 0u);
 
   // Convert memory fault to exception record
   [[nodiscard]] static ExceptionRecord fault_to_exception(
       const memory::MemoryFaultInfo& fault);
 
  private:
-  std::vector<ExceptionHandler> handlers_;
+  // Handler registration/removal can race real concurrent guest thread
+  // creation/exit; dispatch itself (memory faults, traps) already happens
+  // off the safepoint-checked guest dispatch path, so this stays a plain
+  // mutex rather than anything lock-free.
+  std::mutex mutex_{};
+  std::vector<ExceptionHandler> handlers_{};
+  std::unordered_map<std::uint32_t, std::vector<ExceptionHandler>> thread_handlers_{};
 };
 
 }  // namespace xenon::kernel

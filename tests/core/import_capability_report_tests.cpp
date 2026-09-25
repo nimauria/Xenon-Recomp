@@ -65,6 +65,32 @@ void test_partial_takes_priority_over_requirement() {
   assert(to_string(ImportClassification::Partial) == "PARTIAL");
 }
 
+void test_verdict_is_pass_only_when_fully_gap_free() {
+  assert(compute_import_capability_verdict(10, 0, 0, 0) == ImportCapabilityVerdict::Pass);
+  assert(to_string(ImportCapabilityVerdict::Pass) == "PASS");
+}
+
+void test_verdict_is_pass_with_fallback_for_stub_or_partial_with_no_missing() {
+  // Reviewer feedback: everything a title needs resolves, but not every
+  // resolution is a complete, gap-free implementation - distinct from a
+  // clean PASS, but still not a FAIL (nothing is actually missing).
+  assert(compute_import_capability_verdict(9, 1, 0, 0) ==
+         ImportCapabilityVerdict::PassWithFallback);
+  assert(compute_import_capability_verdict(9, 0, 1, 0) ==
+         ImportCapabilityVerdict::PassWithFallback);
+  assert(compute_import_capability_verdict(8, 1, 1, 0) ==
+         ImportCapabilityVerdict::PassWithFallback);
+  assert(to_string(ImportCapabilityVerdict::PassWithFallback) == "PASS_WITH_FALLBACK");
+}
+
+void test_verdict_is_fail_whenever_anything_is_missing() {
+  // Missing always wins, even alongside safe stubs/partials - a single
+  // unresolved required import must never be masked by unrelated successes.
+  assert(compute_import_capability_verdict(10, 0, 0, 1) == ImportCapabilityVerdict::Fail);
+  assert(compute_import_capability_verdict(0, 5, 5, 1) == ImportCapabilityVerdict::Fail);
+  assert(to_string(ImportCapabilityVerdict::Fail) == "FAIL");
+}
+
 }  // namespace
 
 int main() {
@@ -75,6 +101,9 @@ int main() {
   test_implemented_for_optional_and_diagnostic_only_too();
   test_safe_stub_for_a_non_partial_stub();
   test_partial_takes_priority_over_requirement();
+  test_verdict_is_pass_only_when_fully_gap_free();
+  test_verdict_is_pass_with_fallback_for_stub_or_partial_with_no_missing();
+  test_verdict_is_fail_whenever_anything_is_missing();
 
   std::cout << "All import capability classification tests passed!\n";
   return 0;

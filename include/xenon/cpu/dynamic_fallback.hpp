@@ -3,7 +3,11 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "xenon/cpu/decoder.hpp"
 #include "xenon/cpu/runtime.hpp"
@@ -86,6 +90,19 @@ class DynamicFallbackExecutor {
     return source_invalidations_.load(std::memory_order_relaxed);
   }
 
+  // Reviewer feedback on the AC6 Runtime Readiness pass's Part 14 fallback
+  // accounting: 500,000 fallback instructions from three hot entry points is
+  // a completely different problem than the same total spread over 20,000
+  // distinct entries, but executed_blocks()/executed_instructions() alone
+  // cannot distinguish the two. Tracked per top-level try_execute() dispatch
+  // target (not per nested call), so it reflects distinct guest entry
+  // addresses the safety net has had to run - not the hot per-instruction
+  // compiled-code path, so a mutex here does not violate the "no large locks
+  // on hot paths" constraint (dynamic fallback is already the slow path).
+  [[nodiscard]] std::size_t fallback_unique_pc_count() const;
+  [[nodiscard]] std::vector<std::pair<GuestAddress, std::uint64_t>> fallback_hot_pcs(
+      std::size_t top_n) const;
+
  private:
   struct RunResult {
     DynamicFallbackResult public_result{};
@@ -107,6 +124,9 @@ class DynamicFallbackExecutor {
   std::atomic<std::uint64_t> executed_instructions_{};
   std::atomic<std::uint64_t> unsupported_instructions_{};
   std::atomic<std::uint64_t> source_invalidations_{};
+
+  mutable std::mutex pc_hits_mutex_{};
+  std::unordered_map<GuestAddress, std::uint64_t> pc_hits_{};
 };
 
 }  // namespace xenon::cpu

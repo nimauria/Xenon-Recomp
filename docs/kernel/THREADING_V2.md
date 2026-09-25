@@ -137,27 +137,38 @@ as stopped while continuing in the background).
 
 ## Known, tracked gaps (explicitly incomplete, not silently assumed done)
 
-### `Ke*` (kernel-mode) synchronization exports
+### `Ke*` (kernel-mode) synchronization exports - RESOLVED
 
-`KeSetEvent`, `KeResetEvent`, `KeWaitForSingleObject`,
-`KeWaitForMultipleObjects` are not implemented. On real Xbox 360, these
-operate on a raw `KEVENT`/`KMUTANT`/... object (`DISPATCHER_HEADER`-based)
+`KeSetEvent`, `KeResetEvent`, `KeReleaseSemaphore`, `KeWaitForSingleObject`,
+`KeWaitForMultipleObjects`, `KeInitializeEvent`, `KeInitializeSemaphore` are
+now implemented (`include/xenon/xbox/xboxkrnl_ke_sync_exports.hpp`,
+`include/xenon/xbox/xex_dispatcher_header.hpp`). On real Xbox 360, these
+operate on a raw `KEVENT`/`KSEMAPHORE`/... object (`DISPATCHER_HEADER`-based)
 embedded directly in guest memory as part of the game's own data structures,
-addressed by a guest pointer - not a `Handle`. Xenon's
-`KernelEvent`/`KernelSemaphore`/`KernelMutant` are host-side C++ objects
-reached only through `kernel::HandleTable`. Supporting the `Ke*` variants
-correctly requires:
+addressed by a guest pointer - not a `Handle`. This is solved with:
 
-1. A verified `DISPATCHER_HEADER`/`KEVENT`/`KMUTANT` guest-memory layout
-   (offsets, type/size tags) for Xbox 360 specifically - not assumed from
-   PC Windows NT, which is not guaranteed to match.
-2. A mechanism correlating a guest address holding such a structure with a
-   host-side kernel object.
+1. A verified `DISPATCHER_HEADER`/`KSEMAPHORE` guest-memory layout (type
+   byte at offset 0x0, signal state at 0x4, wait-list linkage at
+   0x8/0xC, `KSEMAPHORE`'s extra `Limit` field at 0x10) - the real,
+   documented Windows NT `DISPATCHER_HEADER` 32-bit layout, matching the
+   Xbox 360's 32-bit PPC guest ABI, not an Xbox-specific unknown.
+2. `resolve_dispatcher_object()`, which lazily creates a host-side kernel
+   object for a guest address on first use and stashes its `Handle` in the
+   header's own (guest-code-unused) `wait_list_flink`/`wait_list_blink`
+   fields - independently verified against the xenia-project/xenia
+   `xobject.cc` `GetNativeObject`/`StashHandle` approach, not copied from
+   it - so a repeat `Ke*` call on the same address resolves the SAME host
+   object in O(1) rather than recreating (and resetting) a fresh one.
 
-Neither was attempted without a verified reference for (1) - fabricating a
-struct layout would risk misinterpreting or corrupting real guest memory
-silently, a materially worse outcome than the export simply not existing
-yet.
+Mutant (`DISPATCHER_HEADER` type 2) is deliberately **not** supported by
+this resolver: real `KMUTANT` has extra fields beyond the base header
+(owner-thread pointer, abandoned/APC-disable bytes) whose exact Xbox 360
+offsets are not independently verified - fabricating that part of the
+layout would risk misinterpreting or corrupting real guest memory, a
+materially worse outcome than the export simply not existing yet for that
+one object type. `KeWaitForSingleObject`/`KeWaitForMultipleObjects` return
+a clear, diagnosable "unsupported type" error for it rather than guessing.
+Regression-tested end to end in `tests/xbox/ke_sync_export_tests.cpp`.
 
 ### Timer dispatch thread / `NtCreateTimer`/`NtCancelTimer`/`NtSetTimerEx` - RESOLVED
 
@@ -204,11 +215,26 @@ existence as real Xbox 360 xboxkrnl exports (as opposed to PC-only NT
 functions) needs independent confirmation, not assumption from the original
 task's function-name list.
 
-### Per-thread exception dispatch
+### Per-thread exception dispatch - RESOLVED (at the layer Xenon operates at)
 
-`kernel::ExceptionDispatcher` remains a single, session-wide (not
-per-thread) dispatcher - reused generically for both the main thread and
-created threads' faults/traps via `dispatch_guest_thread()`, which is
-correct as far as it goes, but does not give each guest thread its own
-independent exception-handler chain. Tracked as Phase 5 of the AC6 Runtime
-Readiness plan, not attempted in this pass.
+`kernel::ExceptionDispatcher` now supports a handler chain scoped to one
+specific guest thread id (`register_thread_handler()`/
+`clear_thread_handlers()`), tried before falling back to the process-wide
+chain every thread still shares (`dispatch_exception()`/
+`dispatch_memory_fault()` take an explicit `faulting_thread_id`, threaded
+through from `XenonSession::dispatch_guest_thread()`'s own `thread`
+parameter for both the main thread and every `ExCreateThread`-spawned
+thread). A handler registered for one guest thread is never even consulted
+for a different thread's exception, and `run_created_guest_thread()` clears
+a thread's chain once it has fully exited, so it cannot outlive the thread
+or be silently inherited by a later one.
+
+This resolves the gap at the layer Xenon's exception dispatch actually
+operates at today: a host-side C++ handler chain, not compiled-in guest
+frames. It deliberately does **not** attempt to walk a real guest
+`EXCEPTION_REGISTRATION_RECORD` chain rooted in guest memory (the compiler-
+generated `.pdata`/unwind-info-driven SEH frames a real Xbox 360 title's own
+`__try`/`__except` compiles to) - that is Part 13 (exception/EH/setjmp/
+longjmp) work, requires its own verified guest-memory layout, and is a
+substantially larger, separate undertaking. Nothing here fabricates that
+layout. Regression-tested in `tests/kernel/exception_tests.cpp`.

@@ -212,6 +212,7 @@ NativeGuestFunction ExecutableCodeCache::lookup(MemoryPort& memory,
     const auto it = entries_.find(entry);
     if (it == entries_.end()) return nullptr;
     if (snapshot_matches(memory, it->second.source)) {
+      aot_lookup_hits_.fetch_add(1u, std::memory_order_relaxed);
       return it->second.function;
     }
     serial = it->second.serial;
@@ -259,6 +260,7 @@ NativeCompiledEntry ExecutableCodeCache::lookup_v2(ExecutionContext& context,
     if (key_after == key_before && function && call_allowed) {
       const auto current = context.memory_access.executable_page_stamp(entry);
       if (current == decode_stamp(stamp_bits)) {
+        aot_lookup_hits_.fetch_add(1u, std::memory_order_relaxed);
         return function;
       }
     }
@@ -273,6 +275,7 @@ NativeCompiledEntry ExecutableCodeCache::lookup_v2(ExecutionContext& context,
       return nullptr;
     if (snapshot_matches(context.memory_access, it->second.source)) {
       publish_hot(it->second);
+      aot_lookup_hits_.fetch_add(1u, std::memory_order_relaxed);
       return it->second.function_v2;
     }
     serial = it->second.serial;

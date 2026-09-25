@@ -45,6 +45,10 @@ int main() {
   assert(cache.register_current(memory, kCode, kCode, 4u, native_v1));
   assert(cache.size() == 1u);
   assert(cache.lookup(memory, kCode) == native_v1);
+  // Part 14 of the AC6 Runtime Readiness pass ("Runtime Fallback
+  // Accounting"): every successful lookup hit is the AOT-side half of the
+  // AOT-vs-fallback ratio a capability report needs.
+  assert(cache.aot_lookup_hits() == 1u);
 
   CpuState state{};
   NullRuntimeServices runtime;
@@ -63,14 +67,19 @@ int main() {
   v2_cache.bind(v2_context);
   assert(v2_context.lookup_compiled(kCode, CompiledLookupKind::Branch) ==
          native_context);
+  assert(v2_cache.aot_lookup_hits() == 1u);
   assert(v2_context.lookup_compiled(kCode, CompiledLookupKind::Call) ==
          nullptr);
+  // A rejected call-unsafe lookup must not count as an AOT hit.
+  assert(v2_cache.aot_lookup_hits() == 1u);
   assert(v2_cache.register_current_v2(memory, kCode, kCode, 4u,
                                       native_context, true));
   assert(v2_context.lookup_compiled(kCode, CompiledLookupKind::Call) ==
          native_context);
+  assert(v2_cache.aot_lookup_hits() == 2u);
   auto v2_result = v2_cache.execute_v2(kCode, v2_context);
   assert(v2_result && state.gpr[4] == 1u);
+  assert(v2_cache.aot_lookup_hits() == 3u);
 
   // The lock-free hot entry never bypasses executable-generation validation.
   // SMC makes the next hot lookup miss and lazily evicts the authoritative

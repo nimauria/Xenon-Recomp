@@ -134,6 +134,14 @@ class ExecutableCodeCache {
   [[nodiscard]] std::uint64_t compilation_rejections() const noexcept {
     return compilation_rejections_.load(std::memory_order_relaxed);
   }
+  // Part 14 of the AC6 Runtime Readiness pass ("Runtime Fallback
+  // Accounting"): the AOT-side half of the AOT-vs-fallback ratio. Counted on
+  // every successful lookup()/lookup_v2() hit (the lock-free hot path
+  // included) - a single relaxed atomic increment, so this stays cheap on
+  // the hot compiled-code dispatch path.
+  [[nodiscard]] std::uint64_t aot_lookup_hits() const noexcept {
+    return aot_lookup_hits_.load(std::memory_order_relaxed);
+  }
 
  private:
   struct Entry {
@@ -184,6 +192,7 @@ class ExecutableCodeCache {
   std::uint64_t next_serial_{1u};
   std::atomic<std::uint64_t> stale_evictions_{0u};
   std::atomic<std::uint64_t> compilation_rejections_{0u};
+  std::atomic<std::uint64_t> aot_lookup_hits_{0u};
 };
 
 }  // namespace xenon::cpu

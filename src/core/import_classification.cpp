@@ -25,4 +25,22 @@ std::string_view to_string(ImportClassification classification) noexcept {
   return "MISSING";
 }
 
+ImportCapabilityVerdict compute_import_capability_verdict(
+    std::size_t implemented, std::size_t safe_stub, std::size_t partial,
+    std::size_t missing) noexcept {
+  static_cast<void>(implemented);
+  if (missing > 0u) return ImportCapabilityVerdict::Fail;
+  if (safe_stub > 0u || partial > 0u) return ImportCapabilityVerdict::PassWithFallback;
+  return ImportCapabilityVerdict::Pass;
+}
+
+std::string_view to_string(ImportCapabilityVerdict verdict) noexcept {
+  switch (verdict) {
+    case ImportCapabilityVerdict::Pass: return "PASS";
+    case ImportCapabilityVerdict::PassWithFallback: return "PASS_WITH_FALLBACK";
+    case ImportCapabilityVerdict::Fail: return "FAIL";
+  }
+  return "FAIL";
+}
+
 }  // namespace xenon::core

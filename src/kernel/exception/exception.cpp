@@ -3,26 +3,62 @@
 namespace xenon::kernel {
 
 void ExceptionDispatcher::register_handler(ExceptionHandler handler) {
-  if (handler) {
-    handlers_.push_back(std::move(handler));
-  }
+  if (!handler) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  handlers_.push_back(std::move(handler));
 }
 
 void ExceptionDispatcher::clear_handlers() {
+  std::lock_guard<std::mutex> lock(mutex_);
   handlers_.clear();
 }
 
-bool ExceptionDispatcher::dispatch_memory_fault(const memory::MemoryFaultInfo& fault) {
-  auto record = fault_to_exception(fault);
-  return dispatch_exception(record);
+void ExceptionDispatcher::register_thread_handler(std::uint32_t thread_id,
+                                                   ExceptionHandler handler) {
+  if (!handler || thread_id == 0u) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  thread_handlers_[thread_id].push_back(std::move(handler));
 }
 
-bool ExceptionDispatcher::dispatch_exception(const ExceptionRecord& record) {
-  // Try each handler in reverse order (most recently registered first)
-  for (auto it = handlers_.rbegin(); it != handlers_.rend(); ++it) {
-    if ((*it)(record)) {
-      return true;  // Exception was handled
+void ExceptionDispatcher::clear_thread_handlers(std::uint32_t thread_id) {
+  if (thread_id == 0u) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  thread_handlers_.erase(thread_id);
+}
+
+bool ExceptionDispatcher::dispatch_memory_fault(const memory::MemoryFaultInfo& fault,
+                                                std::uint32_t faulting_thread_id) {
+  auto record = fault_to_exception(fault);
+  return dispatch_exception(record, faulting_thread_id);
+}
+
+bool ExceptionDispatcher::dispatch_exception(const ExceptionRecord& record,
+                                             std::uint32_t faulting_thread_id) {
+  // Snapshot the relevant chains under the lock, then invoke handlers
+  // outside it: a handler may itself register/clear handlers (e.g. logging
+  // and then reinstalling itself), which would otherwise re-enter mutex_.
+  std::vector<ExceptionHandler> thread_chain;
+  std::vector<ExceptionHandler> process_chain;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (faulting_thread_id != 0u) {
+      const auto it = thread_handlers_.find(faulting_thread_id);
+      if (it != thread_handlers_.end()) thread_chain = it->second;
     }
+    process_chain = handlers_;
+  }
+
+  // Real per-thread SEH search order: the faulting thread's own handlers
+  // are tried first (most recently registered first), and only if none of
+  // them claim the exception does the search fall back to the process-wide
+  // chain every thread shares. This is what makes the chains "independent"
+  // - a handler registered for thread A is never even consulted for thread
+  // B's fault, and vice versa.
+  for (auto it = thread_chain.rbegin(); it != thread_chain.rend(); ++it) {
+    if ((*it)(record)) return true;
+  }
+  for (auto it = process_chain.rbegin(); it != process_chain.rend(); ++it) {
+    if ((*it)(record)) return true;
   }
   return false;  // No handler handled the exception
 }

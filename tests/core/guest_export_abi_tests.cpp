@@ -143,6 +143,7 @@ constexpr std::uint32_t kAnsiStringRva = kDataRva + 0x3Cu;          // 8 bytes: 
 constexpr std::uint32_t kPathBytesRva = kDataRva + 0x44u;           // 16 bytes: "nonexistent.bin\0"
 constexpr std::uint32_t kIoStatusBlockRva = kDataRva + 0x54u;       // 8 bytes: status,information
 constexpr std::uint32_t kResultCreateFileRva = kDataRva + 0x5Cu;    // 4 bytes
+constexpr std::uint32_t kSavedLrRva = kDataRva + 0x60u;             // 4 bytes
 
 constexpr std::uint32_t kAudioUnderrunOrdinal = 0x35Au;
 constexpr std::uint32_t kXamInputCapabilitiesOrdinal = 0x190u;
@@ -235,12 +236,12 @@ std::vector<std::byte> make_import_calling_xex() {
   le32(bytes, optional + 0x38, kDataRva + 0x10000u);  // SizeOfImage
 
   // Section 0: .text, executable, containing the entry point and the local
-  // helper function it calls (37 words total = 0x94 bytes; 0xA0 leaves a
+  // helper function it calls (45 words total = 0xB4 bytes; 0xC0 leaves a
   // little slack).
   write_str(bytes, section, ".text");
-  le32(bytes, section + 4, 0xA0);           // VirtualSize
+  le32(bytes, section + 4, 0xC0);           // VirtualSize
   le32(bytes, section + 0xC, kTextRva);     // VirtualAddress
-  le32(bytes, section + 0x10, 0xA0);        // SizeOfRawData
+  le32(bytes, section + 0x10, 0xC0);        // SizeOfRawData
   le32(bytes, section + 0x14, static_cast<std::uint32_t>(text_raw));  // PointerToRawData
   le32(bytes, section + 0x24, 0x60000020);  // CODE | MEM_EXECUTE | MEM_READ
 
@@ -253,9 +254,9 @@ std::vector<std::byte> make_import_calling_xex() {
   // sits at each import's guest_thunk address.
   const std::size_t data_section = section + 0x28;
   write_str(bytes, data_section, ".data");
-  le32(bytes, data_section + 4, 0x60);
+  le32(bytes, data_section + 4, 0x64);
   le32(bytes, data_section + 0xC, kDataRva);
-  le32(bytes, data_section + 0x10, 0x60);
+  le32(bytes, data_section + 0x10, 0x64);
   le32(bytes, data_section + 0x14, static_cast<std::uint32_t>(data_raw));
   le32(bytes, data_section + 0x24, 0xC0000040);  // INITIALIZED_DATA | MEM_READ | MEM_WRITE
 
@@ -294,49 +295,67 @@ std::vector<std::byte> make_import_calling_xex() {
   be32(bytes, data_file_base + 0x54, 0xCCCCCCCCu);
   be32(bytes, data_file_base + 0x58, 0xCCCCCCCCu);
   be32(bytes, data_file_base + 0x5C, 0xDEADBEEFu);  // result_create_file sentinel
+  be32(bytes, data_file_base + 0x60, 0xCCCCCCCCu);  // saved_lr sentinel
 
   // .text: real PPC instructions (verified by hand against the P-series ISA
   // encoding - D-form addi/addis/ori/stw, I-form bl):
-  //   0:  li   r3, 41
-  //   1:  bl   local_add_one        (genuine LOCAL guest-to-guest call - not
+  //   0:  mflr r0                    ; standard PPC prologue: this function
+  //   1:  lis  r6, hi16(saved_lr)    ; both calls other functions (bl clobbers
+  //   2:  ori  r6, r6, lo16(saved_lr); LR) AND itself returns via blr, so it
+  //   3:  stw  r0, 0(r6)             ; must save ITS OWN incoming LR before
+  //                                  ; making any bl, exactly like real
+  //                                  ; compiler-generated code - without
+  //                                  ; this, LR is still the address of
+  //                                  ; whichever bl ran last (the NtCreateFile
+  //                                  ; thunk call below) by the time this
+  //                                  ; function's own final blr runs, so it
+  //                                  ; "returns" into the middle of itself
+  //                                  ; instead of to its real caller.
+  //   4:  li   r3, 41
+  //   5:  bl   local_add_one        (genuine LOCAL guest-to-guest call - not
   //                                  an import; proves Op::Call actually
   //                                  runs a locally compiled callee)
-  //   2:  lis  r6, hi16(result_local)
-  //   3:  ori  r6, r6, lo16(result_local)
-  //   4:  stw  r3, 0(r6)
-  //   5:  bl   xboxkrnl_thunk        (XAudioGetUnderrunCount, no args)
-  //   6:  lis  r6, hi16(result_underrun)
-  //   7:  ori  r6, r6, lo16(result_underrun)
+  //   6:  lis  r6, hi16(result_local)
+  //   7:  ori  r6, r6, lo16(result_local)
   //   8:  stw  r3, 0(r6)
-  //   9:  li   r3, 0                 ; user_index
-  //  10:  li   r4, 0                 ; flags
-  //  11:  lis  r5, hi16(out_caps)
-  //  12:  ori  r5, r5, lo16(out_caps)
-  //  13:  bl   xam_thunk             (XamInputGetCapabilities)
-  //  14:  lis  r6, hi16(result_xam)
-  //  15:  ori  r6, r6, lo16(result_xam)
-  //  16:  stw  r3, 0(r6)
-  //  17:  li   r11, 0                ; create_options (9th arg, on the stack)
-  //  18:  stw  r11, 0x54(r1)
-  //  19:  lis  r3, hi16(handle_out)
-  //  20:  ori  r3, r3, lo16(handle_out)
-  //  21:  li   r4, 0                 ; desired_access
-  //  22:  lis  r5, hi16(object_attributes)
-  //  23:  ori  r5, r5, lo16(object_attributes)
-  //  24:  lis  r6, hi16(io_status_block)
-  //  25:  ori  r6, r6, lo16(io_status_block)
-  //  26:  li   r7, 0                 ; allocation_size ptr = NULL
-  //  27:  li   r8, 0                 ; file_attributes
-  //  28:  li   r9, 0                 ; share_access
-  //  29:  li   r10, 1                ; creation_disposition = FILE_OPEN
-  //  30:  bl   nt_create_file_thunk  (xboxkrnl:NtCreateFile)
-  //  31:  lis  r6, hi16(result_create_file)
-  //  32:  ori  r6, r6, lo16(result_create_file)
-  //  33:  stw  r3, 0(r6)
-  //  34:  blr
+  //   9:  bl   xboxkrnl_thunk        (XAudioGetUnderrunCount, no args)
+  //  10:  lis  r6, hi16(result_underrun)
+  //  11:  ori  r6, r6, lo16(result_underrun)
+  //  12:  stw  r3, 0(r6)
+  //  13:  li   r3, 0                 ; user_index
+  //  14:  li   r4, 0                 ; flags
+  //  15:  lis  r5, hi16(out_caps)
+  //  16:  ori  r5, r5, lo16(out_caps)
+  //  17:  bl   xam_thunk             (XamInputGetCapabilities)
+  //  18:  lis  r6, hi16(result_xam)
+  //  19:  ori  r6, r6, lo16(result_xam)
+  //  20:  stw  r3, 0(r6)
+  //  21:  li   r11, 0                ; create_options (9th arg, on the stack)
+  //  22:  stw  r11, 0x54(r1)
+  //  23:  lis  r3, hi16(handle_out)
+  //  24:  ori  r3, r3, lo16(handle_out)
+  //  25:  li   r4, 0                 ; desired_access
+  //  26:  lis  r5, hi16(object_attributes)
+  //  27:  ori  r5, r5, lo16(object_attributes)
+  //  28:  lis  r6, hi16(io_status_block)
+  //  29:  ori  r6, r6, lo16(io_status_block)
+  //  30:  li   r7, 0                 ; allocation_size ptr = NULL
+  //  31:  li   r8, 0                 ; file_attributes
+  //  32:  li   r9, 0                 ; share_access
+  //  33:  li   r10, 1                ; creation_disposition = FILE_OPEN
+  //  34:  bl   nt_create_file_thunk  (xboxkrnl:NtCreateFile)
+  //  35:  lis  r6, hi16(result_create_file)
+  //  36:  ori  r6, r6, lo16(result_create_file)
+  //  37:  stw  r3, 0(r6)
+  //  38:  lis  r6, hi16(saved_lr)    ; epilogue: restore the LR this function
+  //  39:  ori  r6, r6, lo16(saved_lr); was actually entered with, undoing
+  //  40:  lwz  r0, 0(r6)             ; whatever the last bl above left in LR,
+  //  41:  mtlr r0                    ; so this function returns to its real
+  //                                  ; caller instead of into its own body.
+  //  42:  blr
   //  -- local_add_one (a genuinely separate compiled function) --
-  //  35:  addi r3, r3, 1
-  //  36:  blr
+  //  43:  addi r3, r3, 1
+  //  44:  blr
   const std::uint32_t entry = kLoadAddress + kTextRva;
   const std::uint32_t audio_thunk = kLoadAddress + kThunkAudioRva;
   const std::uint32_t xam_thunk = kLoadAddress + kThunkXamRva;
@@ -349,7 +368,8 @@ std::vector<std::byte> make_import_calling_xex() {
   const std::uint32_t object_attributes = kLoadAddress + kObjectAttributesRva;
   const std::uint32_t io_status_block = kLoadAddress + kIoStatusBlockRva;
   const std::uint32_t result_create_file = kLoadAddress + kResultCreateFileRva;
-  const std::uint32_t local_add_one = entry + 35u * 4u;
+  const std::uint32_t saved_lr = kLoadAddress + kSavedLrRva;
+  const std::uint32_t local_add_one = entry + 43u * 4u;
 
   const auto hi16 = [](std::uint32_t v) { return static_cast<std::uint16_t>(v >> 16); };
   const auto lo16 = [](std::uint32_t v) { return static_cast<std::uint16_t>(v & 0xFFFFu); };
@@ -362,47 +382,71 @@ std::vector<std::byte> make_import_calling_xex() {
     assert((delta & 0x3u) == 0 && "branch target must be word-aligned");
     return 0x48000001u | (delta & 0x03FFFFFCu);
   };
+  constexpr std::uint32_t kMflrR0 = 0x7C0802A6u;
+  constexpr std::uint32_t kMtlrR0 = 0x7C0803A6u;
 
-  std::array<std::uint32_t, 37> words{};
-  words[0] = d_form(14, 3, 0, 41);                              // li r3,41
-  words[1] = bl_rel(entry + 1 * 4u, local_add_one);
-  words[2] = d_form(15, 6, 0, hi16(result_local));              // lis r6,hi16
-  words[3] = d_form(24, 6, 6, lo16(result_local));              // ori r6,r6,lo16
-  words[4] = d_form(36, 3, 6, 0);                               // stw r3,0(r6)
-  words[5] = bl_rel(entry + 5 * 4u, audio_thunk);
-  words[6] = d_form(15, 6, 0, hi16(result_underrun));           // lis r6,hi16
-  words[7] = d_form(24, 6, 6, lo16(result_underrun));           // ori r6,r6,lo16
+  std::array<std::uint32_t, 45> words{};
+  words[0] = kMflrR0;                                           // mflr r0
+  words[1] = d_form(15, 6, 0, hi16(saved_lr));                  // lis r6,hi16
+  words[2] = d_form(24, 6, 6, lo16(saved_lr));                  // ori r6,r6,lo16
+  words[3] = d_form(36, 0, 6, 0);                               // stw r0,0(r6)
+  words[4] = d_form(14, 3, 0, 41);                              // li r3,41
+  words[5] = bl_rel(entry + 5 * 4u, local_add_one);
+  words[6] = d_form(15, 6, 0, hi16(result_local));              // lis r6,hi16
+  words[7] = d_form(24, 6, 6, lo16(result_local));              // ori r6,r6,lo16
   words[8] = d_form(36, 3, 6, 0);                               // stw r3,0(r6)
-  words[9] = d_form(14, 3, 0, 0);                               // li r3,0
-  words[10] = d_form(14, 4, 0, 0);                              // li r4,0
-  words[11] = d_form(15, 5, 0, hi16(out_caps));                 // lis r5,hi16
-  words[12] = d_form(24, 5, 5, lo16(out_caps));                 // ori r5,r5,lo16
-  words[13] = bl_rel(entry + 13 * 4u, xam_thunk);
-  words[14] = d_form(15, 6, 0, hi16(result_xam));
-  words[15] = d_form(24, 6, 6, lo16(result_xam));
-  words[16] = d_form(36, 3, 6, 0);
-  words[17] = d_form(14, 11, 0, 0);                             // li r11,0 (create_options)
-  words[18] = d_form(36, 11, 1, 0x54);                          // stw r11,0x54(r1)
-  words[19] = d_form(15, 3, 0, hi16(handle_out));               // lis r3,hi16
-  words[20] = d_form(24, 3, 3, lo16(handle_out));               // ori r3,r3,lo16
-  words[21] = d_form(14, 4, 0, 0);                              // li r4,0 (desired_access)
-  words[22] = d_form(15, 5, 0, hi16(object_attributes));        // lis r5,hi16
-  words[23] = d_form(24, 5, 5, lo16(object_attributes));        // ori r5,r5,lo16
-  words[24] = d_form(15, 6, 0, hi16(io_status_block));          // lis r6,hi16
-  words[25] = d_form(24, 6, 6, lo16(io_status_block));          // ori r6,r6,lo16
-  words[26] = d_form(14, 7, 0, 0);                              // li r7,0 (allocation_size)
-  words[27] = d_form(14, 8, 0, 0);                              // li r8,0 (file_attributes)
-  words[28] = d_form(14, 9, 0, 0);                              // li r9,0 (share_access)
-  words[29] = d_form(14, 10, 0, 1);                             // li r10,1 (creation_disposition=FILE_OPEN)
-  words[30] = bl_rel(entry + 30 * 4u, create_file_thunk);
-  words[31] = d_form(15, 6, 0, hi16(result_create_file));       // lis r6,hi16
-  words[32] = d_form(24, 6, 6, lo16(result_create_file));       // ori r6,r6,lo16
-  words[33] = d_form(36, 3, 6, 0);                              // stw r3,0(r6)
-  words[34] = 0x4E800020u;                                      // blr
-  words[35] = d_form(14, 3, 3, 1);                              // addi r3,r3,1  (local_add_one)
-  words[36] = 0x4E800020u;                                      // blr
+  words[9] = bl_rel(entry + 9 * 4u, audio_thunk);
+  words[10] = d_form(15, 6, 0, hi16(result_underrun));          // lis r6,hi16
+  words[11] = d_form(24, 6, 6, lo16(result_underrun));          // ori r6,r6,lo16
+  words[12] = d_form(36, 3, 6, 0);                              // stw r3,0(r6)
+  words[13] = d_form(14, 3, 0, 0);                              // li r3,0
+  words[14] = d_form(14, 4, 0, 0);                              // li r4,0
+  words[15] = d_form(15, 5, 0, hi16(out_caps));                 // lis r5,hi16
+  words[16] = d_form(24, 5, 5, lo16(out_caps));                 // ori r5,r5,lo16
+  words[17] = bl_rel(entry + 17 * 4u, xam_thunk);
+  words[18] = d_form(15, 6, 0, hi16(result_xam));
+  words[19] = d_form(24, 6, 6, lo16(result_xam));
+  words[20] = d_form(36, 3, 6, 0);
+  words[21] = d_form(14, 11, 0, 0);                             // li r11,0 (create_options)
+  words[22] = d_form(36, 11, 1, 0x54);                          // stw r11,0x54(r1)
+  words[23] = d_form(15, 3, 0, hi16(handle_out));               // lis r3,hi16
+  words[24] = d_form(24, 3, 3, lo16(handle_out));               // ori r3,r3,lo16
+  words[25] = d_form(14, 4, 0, 0);                              // li r4,0 (desired_access)
+  words[26] = d_form(15, 5, 0, hi16(object_attributes));        // lis r5,hi16
+  words[27] = d_form(24, 5, 5, lo16(object_attributes));        // ori r5,r5,lo16
+  words[28] = d_form(15, 6, 0, hi16(io_status_block));          // lis r6,hi16
+  words[29] = d_form(24, 6, 6, lo16(io_status_block));          // ori r6,r6,lo16
+  words[30] = d_form(14, 7, 0, 0);                              // li r7,0 (allocation_size)
+  words[31] = d_form(14, 8, 0, 0);                              // li r8,0 (file_attributes)
+  words[32] = d_form(14, 9, 0, 0);                              // li r9,0 (share_access)
+  words[33] = d_form(14, 10, 0, 1);                             // li r10,1 (creation_disposition=FILE_OPEN)
+  words[34] = bl_rel(entry + 34 * 4u, create_file_thunk);
+  words[35] = d_form(15, 6, 0, hi16(result_create_file));       // lis r6,hi16
+  words[36] = d_form(24, 6, 6, lo16(result_create_file));       // ori r6,r6,lo16
+  words[37] = d_form(36, 3, 6, 0);                              // stw r3,0(r6)
+  words[38] = d_form(15, 6, 0, hi16(saved_lr));                 // lis r6,hi16
+  words[39] = d_form(24, 6, 6, lo16(saved_lr));                 // ori r6,r6,lo16
+  words[40] = d_form(32, 0, 6, 0);                              // lwz r0,0(r6)
+  words[41] = kMtlrR0;                                          // mtlr r0
+  words[42] = 0x4E800020u;                                      // blr
+  words[43] = d_form(14, 3, 3, 1);                              // addi r3,r3,1  (local_add_one)
+  words[44] = 0x4E800020u;                                      // blr
 
-  const std::size_t text_file_base = header + text_raw;
+  // docs/xbox/XEX_LOADER_V2.md's "Imports / exports / TLS / relocations"
+  // section is explicit: "the byte at image offset N is the byte at guest
+  // image_base + N. PE PointerToRawData values are retained only as section
+  // metadata and are never used to translate an RVA." try_parse_pe_sections()
+  // (xex_loader.cpp) reads every section's bytes as effective_image's
+  // subspan at its VirtualAddress (RVA), never at PointerToRawData. So
+  // .text's instruction words must be written at the RVA-based file offset
+  // (header + kTextRva), matching .data's own already-RVA-based
+  // data_file_base below - not at header + text_raw (a PointerToRawData
+  // offset the loader never consults for byte extraction, only retains as
+  // metadata). Writing them at text_raw here previously landed the real
+  // instruction bytes outside where the analyzer ever looks, so it decoded
+  // whatever (zeroed) bytes happened to sit at RVA kTextRva instead - word
+  // 0 there decodes to opcode 0, which is unconditionally "invalid-ppc".
+  const std::size_t text_file_base = header + kTextRva;
   for (std::size_t i = 0; i < words.size(); ++i) {
     be32(bytes, text_file_base + i * 4u, words[i]);
   }
@@ -460,7 +504,7 @@ int main() {
       entry_compiled = true;
       assert(function.compiled && "entry function must compile despite branching to import thunks");
     }
-    if (function.guest_start == kLoadAddress + kTextRva + 35u * 4u) {
+    if (function.guest_start == kLoadAddress + kTextRva + 43u * 4u) {
       local_add_one_compiled = true;
       assert(function.compiled && "the locally-called helper function must compile");
     }

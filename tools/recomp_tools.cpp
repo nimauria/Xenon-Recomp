@@ -49,10 +49,13 @@ int main(int argc, char** argv) {
                                                      "    SAFE_STUB   - registered, a deliberate safe no-op.\n"
                                                      "    PARTIAL     - registered but has a real, documented behavior gap.\n"
                                                      "    MISSING     - not registered at all.\n"
-                                                     "  Prints a per-library and overall PASS/FAIL summary; exits nonzero\n"
-                                                     "  if any import is MISSING. --json emits the same data as JSON.\n"
-                                                     "  Used by Project Gracemeria to audit a title's imports before the\n"
-                                                     "  expensive native module build.\n";
+                                                     "  Prints a per-library summary and an overall PASS / PASS_WITH_FALLBACK\n"
+                                                     "  / FAIL verdict: FAIL if any import is MISSING, PASS_WITH_FALLBACK if\n"
+                                                     "  every import resolves but at least one is SAFE_STUB/PARTIAL, PASS\n"
+                                                     "  only when every import is a complete IMPLEMENTED. Exits nonzero only\n"
+                                                     "  on FAIL. --json emits the same data as JSON. Used by Project\n"
+                                                     "  Gracemeria to audit a title's imports before the expensive native\n"
+                                                     "  module build.\n";
     else std::cout << "usage: module-inspector <game.xex> [--json]\n";
     return argc < 2 ? 1 : 0;
   }
@@ -263,7 +266,15 @@ int main(int argc, char** argv) {
         }
       }
     }
-    const bool overall_pass = total_missing == 0;
+    // Reviewer feedback on the AC6 Runtime Readiness pass's capability
+    // report: a binary PASS/FAIL hides the difference between "every
+    // required import resolves with zero known gaps" and "every required
+    // import resolves, but some rely on a safe stub or a documented partial
+    // behavior gap" - the latter may still boot, just not gap-free. See
+    // xenon::core::compute_import_capability_verdict().
+    const auto overall_verdict = xenon::core::compute_import_capability_verdict(
+        total_implemented, total_safe_stub, total_partial, total_missing);
+    const bool overall_pass = overall_verdict != xenon::core::ImportCapabilityVerdict::Fail;
 
     if (json) {
       xenon::core::JsonValue root = xenon::core::JsonValue::make_object();
@@ -303,7 +314,7 @@ int main(int argc, char** argv) {
       overall.set("safeStub", static_cast<std::int64_t>(total_safe_stub));
       overall.set("partial", static_cast<std::int64_t>(total_partial));
       overall.set("missing", static_cast<std::int64_t>(total_missing));
-      overall.set("result", std::string(overall_pass ? "PASS" : "FAIL"));
+      overall.set("result", std::string(xenon::core::to_string(overall_verdict)));
       root.set("overall", std::move(overall));
       std::cout << root.dump(2) << "\n";
     } else {
@@ -341,7 +352,7 @@ int main(int argc, char** argv) {
                 << "  safe_stub: " << total_safe_stub << "\n"
                 << "  partial: " << total_partial << "\n"
                 << "  missing: " << total_missing << "\n"
-                << "  result: " << (overall_pass ? "PASS" : "FAIL") << "\n";
+                << "  result: " << xenon::core::to_string(overall_verdict) << "\n";
     }
 
     if (session_ready) session.shutdown();

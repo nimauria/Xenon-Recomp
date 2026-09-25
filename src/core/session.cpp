@@ -28,6 +28,7 @@
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
+#include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
 
@@ -789,7 +790,11 @@ bool XenonSession::init_exports() {
   // of the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
   // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
   // NtWaitForSingleObjectEx, NtWaitForMultipleObjectsEx, NtCreateTimer,
-  // NtCancelTimer, NtSetTimerEx. kernel_process_
+  // NtCancelTimer, NtSetTimerEx - plus the raw-guest-memory-object (Ke*)
+  // variants (Event/Semaphore only - see xex_dispatcher_header.hpp for why
+  // Mutant is not supported here): KeInitializeEvent, KeInitializeSemaphore,
+  // KeResetEvent, KeReleaseSemaphore, KeSetEvent, KeWaitForMultipleObjects,
+  // KeWaitForSingleObject. kernel_process_
   // does not exist yet at this point in a fresh session (it is created later
   // by create_guest_process(), once a title is loaded) - like io_bridge_
   // above, these lambdas capture `this` and dereference kernel_process_ at
@@ -813,6 +818,13 @@ bool XenonSession::init_exports() {
         {0x0D7u, "NtCreateTimer", &xbox::nt_create_timer_export},
         {0x0CDu, "NtCancelTimer", &xbox::nt_cancel_timer_export},
         {0x0FAu, "NtSetTimerEx", &xbox::nt_set_timer_ex_export},
+        {0x070u, "KeInitializeEvent", &xbox::ke_initialize_event_export},
+        {0x074u, "KeInitializeSemaphore", &xbox::ke_initialize_semaphore_export},
+        {0x08Fu, "KeResetEvent", &xbox::ke_reset_event_export},
+        {0x088u, "KeReleaseSemaphore", &xbox::ke_release_semaphore_export},
+        {0x09Du, "KeSetEvent", &xbox::ke_set_event_export},
+        {0x0AFu, "KeWaitForMultipleObjects", &xbox::ke_wait_for_multiple_objects_export},
+        {0x0B0u, "KeWaitForSingleObject", &xbox::ke_wait_for_single_object_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -1446,6 +1458,64 @@ JsonValue XenonSession::capability_report() const {
   // set_section() call a subsystem would use to publish its own section.
   CapabilityReportBuilder report = capability_report_builder_;
   report.set_run_fingerprint(fingerprint);
+
+  // Part 14 of the AC6 Runtime Readiness pass ("Runtime Fallback
+  // Accounting"), plus the reviewer's fallback_unique_pc_count/
+  // fallback_hot_pc_top_n addition: a title can "run" while secretly
+  // executing a large share of its guest code through the Gen 7 dynamic
+  // fallback safety net rather than AOT-compiled code. Computed fresh here
+  // (pull, not push) from the live atomics/sets each subsystem already
+  // maintains for its own purposes - no subsystem needs to proactively call
+  // set_section() on every fallback event, and nothing here is paid for
+  // unless a caller actually requests a report.
+  {
+    JsonValue fallback = JsonValue::make_object();
+    const std::uint64_t aot_blocks = code_cache_ ? code_cache_->aot_lookup_hits() : 0u;
+    const std::uint64_t fallback_blocks =
+        dynamic_fallback_ ? dynamic_fallback_->executed_blocks() : 0u;
+    const std::uint64_t fallback_instructions =
+        dynamic_fallback_ ? dynamic_fallback_->executed_instructions() : 0u;
+    const std::uint64_t unsupported_instructions =
+        dynamic_fallback_ ? dynamic_fallback_->unsupported_instructions() : 0u;
+    const std::uint64_t source_invalidations =
+        dynamic_fallback_ ? dynamic_fallback_->source_invalidations() : 0u;
+    fallback.set("aotBlocksExecuted", static_cast<std::int64_t>(aot_blocks));
+    fallback.set("fallbackBlocksExecuted", static_cast<std::int64_t>(fallback_blocks));
+    fallback.set("fallbackInstructionsExecuted",
+                 static_cast<std::int64_t>(fallback_instructions));
+    fallback.set("unsupportedPpcInstructions",
+                 static_cast<std::int64_t>(unsupported_instructions));
+    fallback.set("fallbackSourceInvalidations",
+                 static_cast<std::int64_t>(source_invalidations));
+
+    std::size_t new_indirect_targets_discovered = 0u;
+    {
+      std::lock_guard<std::mutex> observation_lock(adaptive_observation_mutex_);
+      new_indirect_targets_discovered = adaptive_observation_seen_.size();
+    }
+    fallback.set("newIndirectTargetsDiscovered",
+                 static_cast<std::int64_t>(new_indirect_targets_discovered));
+
+    if (dynamic_fallback_) {
+      fallback.set("fallbackUniquePcCount",
+                   static_cast<std::int64_t>(dynamic_fallback_->fallback_unique_pc_count()));
+      JsonValue hot_pcs = JsonValue::make_array();
+      constexpr std::size_t kHotPcTopN = 16u;
+      for (const auto& [pc, hits] : dynamic_fallback_->fallback_hot_pcs(kHotPcTopN)) {
+        JsonValue entry = JsonValue::make_object();
+        entry.set("pc", static_cast<std::int64_t>(pc));
+        entry.set("hits", static_cast<std::int64_t>(hits));
+        hot_pcs.append(std::move(entry));
+      }
+      fallback.set("fallbackHotPcTopN", std::move(hot_pcs));
+    } else {
+      fallback.set("fallbackUniquePcCount", static_cast<std::int64_t>(0));
+      fallback.set("fallbackHotPcTopN", JsonValue::make_array());
+    }
+
+    report.set_section("fallback", std::move(fallback));
+  }
+
   return report.build();
 }
 
@@ -1854,7 +1924,12 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     const auto& info = fault.info();
     const auto record = kernel::ExceptionDispatcher::fault_to_exception(info);
     crash_exit_code = static_cast<std::uint32_t>(record.code);
-    static_cast<void>(exception_dispatcher_.dispatch_exception(record));
+    // Phase 5 of the AC6 Runtime Readiness pass: scope this dispatch to the
+    // actual faulting thread (0 if none, e.g. a test harness invoking
+    // dispatch_guest_thread() directly) so a handler registered for one
+    // guest thread is never consulted for a different thread's fault.
+    static_cast<void>(exception_dispatcher_.dispatch_exception(
+        record, thread ? thread->thread_id() : 0u));
 
     const auto access_name = [](memory::AccessKind access) {
       switch (access) {
@@ -1943,7 +2018,8 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   if (!crashed && result.reason == cpu::FlowReason::Trap) {
     static_cast<void>(exception_dispatcher_.dispatch_exception(
         kernel::ExceptionRecord{kernel::ExceptionCode::IllegalInstruction, 0,
-                                static_cast<std::uint32_t>(state.cia), {}}));
+                                static_cast<std::uint32_t>(state.cia), {}},
+        thread ? thread->thread_id() : 0u));
   }
 
   return outcome;
@@ -2052,6 +2128,13 @@ std::uint32_t XenonSession::run_created_guest_thread(
     release_guest_thread_tls_context(*memory_, tls);
     static_cast<void>(memory_->release(stack_base));
   }
+
+  // This thread id will never execute guest code again (KernelThread cannot
+  // restart once terminated, and ids are never reused - see thread.cpp's
+  // monotonic g_next_thread_id). A per-thread exception handler chain
+  // registered for it must not linger forever in exception_dispatcher_,
+  // and must never be silently inherited by a different, later thread.
+  exception_dispatcher_.clear_thread_handlers(thread ? thread->thread_id() : 0u);
 
   return exit_code;
 }

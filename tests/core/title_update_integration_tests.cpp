@@ -141,8 +141,16 @@ std::vector<std::byte> make_identity_xex(std::uint32_t module_flags, const ExecI
   le32(bytes, section + 0x10, 0x10);
   le32(bytes, section + 0x14, static_cast<std::uint32_t>(text_raw));
   le32(bytes, section + 0x24, 0x60000020);
-  be32(bytes, header + text_raw, 0x4E800020u);  // blr - never actually reached by these tests
-  bytes[header + text_raw + 4] = content_marker;
+  // docs/xbox/XEX_LOADER_V2.md: the loader reads every section's bytes by
+  // RVA from the effective image, never by PE PointerToRawData (retained
+  // only as metadata) - so both the (unreached) blr and, critically, the
+  // content_marker the tests below actually read back through guest memory
+  // must be written at the RVA-based file offset (header + kTextRva), not
+  // at header + text_raw. Writing them at text_raw put the marker where
+  // effective_image never looks, so mapped guest memory always read 0
+  // regardless of content_marker's value.
+  be32(bytes, header + kTextRva, 0x4E800020u);  // blr - never actually reached by these tests
+  bytes[header + kTextRva + 4] = content_marker;
 
   const std::size_t data_section = section + 0x28;
   write_str(bytes, data_section, ".data");

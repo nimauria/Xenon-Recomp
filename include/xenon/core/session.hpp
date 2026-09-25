@@ -279,6 +279,16 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] CapabilityReportBuilder& capability_report_builder() noexcept {
     return capability_report_builder_;
   }
+  // Direct access to the exception dispatcher (Phase 5 of the AC6 Runtime
+  // Readiness pass) so a caller (tests, a native extension, a future
+  // guest-callable exception-registration export) can install a handler
+  // scoped to one specific guest thread via
+  // ExceptionDispatcher::register_thread_handler() - see that class's own
+  // doc comment for why this is the "independent per-thread chain" the
+  // previous single, session-wide handlers_ vector could not provide.
+  [[nodiscard]] kernel::ExceptionDispatcher& exception_dispatcher() noexcept {
+    return exception_dispatcher_;
+  }
   // The canonical owner/context for the running title once load_game()
   // succeeds: null before that. Normal execution is
   // XenonSession -> KernelProcess -> KernelThread -> CPU V2, not a bare

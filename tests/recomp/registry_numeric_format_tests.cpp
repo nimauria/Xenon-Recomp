@@ -83,9 +83,14 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   constexpr std::uint32_t data_rva = 0x02000000u;  // far past any text_words size we use
   const std::size_t data_size = 0x40;
   const std::size_t text_bytes = text_words.size() * 4u;
-  // Round the data section's file offset up to a page boundary strictly
-  // after the text bytes, regardless of how large text_words is.
-  const std::size_t data_raw = ((header + text_raw + text_bytes + 0x1000u) / 0x1000u) * 0x1000u - header;
+  // docs/xbox/XEX_LOADER_V2.md: the loader reads every PE section's bytes by
+  // RVA from the effective image, never by PointerToRawData (retained only
+  // as section metadata) - so .text's real instruction bytes must actually
+  // live at file offset (header + kTextRva), not (header + text_raw). Round
+  // the data section's file offset up to a page boundary strictly after
+  // THAT, regardless of how large text_words is.
+  const std::size_t data_raw =
+      ((header + kTextRva + text_bytes + 0x1000u) / 0x1000u) * 0x1000u - header;
   const std::size_t file_size = header + data_raw + std::max<std::size_t>(data_size, 0x10);
 
   std::vector<std::byte> bytes(file_size, std::byte{0});
@@ -132,7 +137,7 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   le32(bytes, data_section + 0x14, static_cast<std::uint32_t>(data_raw));
   le32(bytes, data_section + 0x24, 0xC0000040);
 
-  const std::size_t text_file_base = header + text_raw;
+  const std::size_t text_file_base = header + kTextRva;
   for (std::size_t i = 0; i < text_words.size(); ++i) be32(bytes, text_file_base + i * 4u, text_words[i]);
 
   return bytes;

@@ -489,7 +489,9 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
+    src/xbox/exports/xboxkrnl_ke_sync_exports.cpp
     src/xbox/xbox_time_convert.cpp
+    src/xbox/xex_dispatcher_header.cpp
     src/xbox/rtl.cpp
     src/xbox/export_metadata.cpp
     src/xbox/xex/xex_loader.cpp
@@ -894,6 +896,14 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_xboxkrnl_sync_export_tests PRIVATE xenon_core)
     xenon_enable_test_asserts(xenon_xboxkrnl_sync_export_tests)
     add_test(NAME xenon_xboxkrnl_sync_export_tests COMMAND xenon_xboxkrnl_sync_export_tests)
+
+    # Phase 3 (AC6 Runtime Readiness pass): xboxkrnl Ke* raw-guest-memory
+    # dispatcher-object exports (X_DISPATCH_HEADER resolution, lazy
+    # host-object stashing, Event/Semaphore semantics).
+    add_executable(xenon_xboxkrnl_ke_sync_export_tests tests/xbox/ke_sync_export_tests.cpp)
+    target_link_libraries(xenon_xboxkrnl_ke_sync_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xboxkrnl_ke_sync_export_tests)
+    add_test(NAME xenon_xboxkrnl_ke_sync_export_tests COMMAND xenon_xboxkrnl_ke_sync_export_tests)
   endif()
 
   add_executable(xenon_recomp_driver_tests tests/recomp/recomp_driver_tests.cpp)

@@ -220,7 +220,13 @@ std::vector<std::byte> make_audio_callback_xex() {
   words[17] = d_form(14, 3, 3, 1);                       // addi r3,r3,1
   words[18] = 0x4E800020u;                               // blr
 
-  const std::size_t text_file_base = header + text_raw;
+  // See tests/core/guest_export_abi_tests.cpp's identical fix: the loader
+  // (docs/xbox/XEX_LOADER_V2.md's "Imports / exports / TLS / relocations")
+  // reads every section's bytes by RVA from the effective image, never by
+  // PE PointerToRawData - that field is retained only as metadata. Writing
+  // the instruction words at header + text_raw (a PointerToRawData offset)
+  // put them where the analyzer never looks; it must be header + kTextRva.
+  const std::size_t text_file_base = header + kTextRva;
   for (std::size_t i = 0; i < words.size(); ++i) {
     be32(bytes, text_file_base + i * 4u, words[i]);
   }

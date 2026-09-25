@@ -462,6 +462,10 @@ DynamicFallbackResult DynamicFallbackExecutor::try_execute(
     executed_blocks_.fetch_add(1u, std::memory_order_relaxed);
     executed_instructions_.fetch_add(run_result.instructions,
                                      std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(pc_hits_mutex_);
+      ++pc_hits_[target];
+    }
     if (observer_) {
       observer_(DynamicFallbackObservation{
           target, site, run_result.exit, kind, run_result.reason,
@@ -469,6 +473,27 @@ DynamicFallbackResult DynamicFallbackExecutor::try_execute(
     }
   }
   return run_result.public_result;
+}
+
+std::size_t DynamicFallbackExecutor::fallback_unique_pc_count() const {
+  std::lock_guard<std::mutex> lock(pc_hits_mutex_);
+  return pc_hits_.size();
+}
+
+std::vector<std::pair<GuestAddress, std::uint64_t>>
+DynamicFallbackExecutor::fallback_hot_pcs(std::size_t top_n) const {
+  std::vector<std::pair<GuestAddress, std::uint64_t>> hits;
+  {
+    std::lock_guard<std::mutex> lock(pc_hits_mutex_);
+    hits.reserve(pc_hits_.size());
+    for (const auto& [pc, count] : pc_hits_) hits.emplace_back(pc, count);
+  }
+  std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second > b.second;
+    return a.first < b.first;  // Deterministic tie-break for reproducible reports.
+  });
+  if (hits.size() > top_n) hits.resize(top_n);
+  return hits;
 }
 
 DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
