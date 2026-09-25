@@ -16,6 +16,7 @@ Button {
     implicitHeight: Theme.controlHeight
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
+    scale: down && enabled ? 0.94 : 1.0
 
     Accessible.name: tooltip.length > 0 ? tooltip : (iconName.length > 0 ? iconName : glyph)
     Accessible.role: Accessible.Button
@@ -41,7 +42,8 @@ Button {
 
     background: Rectangle {
         radius: Theme.controlRadius
-        color: control.hovered ? Theme.surfaceHover
+        color: control.down ? Theme.surfaceRaised
+             : control.hovered ? Theme.surfaceHover
              : control.variant === "filled" ? Theme.surfaceAlt
              : "transparent"
         border.width: control.activeFocus ? Theme.focusWidth
@@ -52,4 +54,9 @@ Button {
     ToolTip.visible: tooltip.length > 0 && hovered
     ToolTip.text: tooltip
     ToolTip.delay: 500
+
+    Behavior on scale {
+        enabled: Theme.motionFast > 0
+        NumberAnimation { duration: Theme.motionFast; easing.type: Easing.OutCubic }
+    }
 }

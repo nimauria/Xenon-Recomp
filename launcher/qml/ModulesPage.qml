@@ -313,6 +313,7 @@ Item {
         XSectionHeader {
             Layout.fillWidth: true
             title: "Modules"
+            prominent: true
             description: "Install, configure and update game-specific Xenon modules without coupling games to the runtime."
         }
 

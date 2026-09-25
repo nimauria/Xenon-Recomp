@@ -35,6 +35,7 @@ ScrollView {
             Layout.fillWidth: true
             title: root.title
             description: root.description
+            prominent: true
         }
 
         Rectangle {

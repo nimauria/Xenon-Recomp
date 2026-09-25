@@ -6,15 +6,16 @@ ColumnLayout {
 
     property string title: ""
     property string description: ""
+    property bool prominent: false
 
     Layout.fillWidth: true
-    spacing: 4
+    spacing: Theme.spaceXs
 
     Text {
         Layout.fillWidth: true
         text: root.title
         color: Theme.text
-        font.pixelSize: Theme.typeSubtitle
+        font.pixelSize: root.prominent ? Theme.typeTitle : Theme.typeSubtitle
         font.weight: Font.DemiBold
         wrapMode: Text.WordWrap
     }
@@ -24,7 +25,7 @@ ColumnLayout {
         Layout.fillWidth: true
         text: root.description
         color: Theme.textMuted
-        font.pixelSize: Theme.typeCaption
+        font.pixelSize: root.prominent ? Theme.typeBody : Theme.typeCaption
         lineHeight: 1.3
         wrapMode: Text.WordWrap
     }

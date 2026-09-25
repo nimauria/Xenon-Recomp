@@ -161,19 +161,23 @@ Current conventions:
 - **Semantic theme tokens** live in `Theme.qml`. Pages consume `surface`, `text`, `accent`, `success`, `warning`, `danger`, spacing, radius, and typography tokens instead of hard-coded colours and sizes.
 - **System appearance is the default**. The `System` theme follows the host light/dark colour scheme. On Qt 6.10+, supported system contrast hints are also reflected in the launcher.
 - **Typography follows a restrained desktop type ramp**: 12 px captions, 14 px normal UI text, 18/20 px section hierarchy, and 28 px page titles, with user-selectable text scaling.
-- **Spacing uses a 4/8/12/16/24/32 scale**. This prevents each page from inventing its own padding and produces more predictable alignment.
+- **Spacing uses a 4/8/12/16/24/32/48 scale**. Shared opacity, icon-size, radius and reduced-motion-aware duration tokens prevent controls from inventing near-duplicate presentation values.
 - **Settings apply immediately**. There is no global Save button for ordinary preferences. Destructive operations such as deleting a profile still require confirmation.
 - **Settings content is constrained to a readable width** and scrolls vertically on large pages rather than stretching controls across the full window.
 - **Settings is pinned at the bottom of primary navigation** while Library, Modules, and Profiles remain the main destinations.
 - **Navigation adapts at narrower window widths** to an icon-only compact rail so content receives priority without removing access to top-level destinations.
 - **Pages are lazy-loaded once** when first visited. Expensive future backend work must remain asynchronous and must not block the QML/render thread.
+- **Page changes use a short interruptible reveal**. Reduced Motion collapses its duration to zero, and rapid navigation replaces rather than queues transitions.
 - **Keyboard focus is explicit** on custom controls, navigation items, profile selection, menus, game tiles, and window controls. Interactive custom components expose `Accessible` metadata.
 - **Status is never colour-only**. Labels, icons, or text accompany success/warning/error colours.
 - **Game/module lists use lightweight delegates**. Rich detail UI is created only for the selected item.
 - **Module-provided artwork is optional presentation data**, not a layout requirement. Empty and missing-artwork states remain usable.
+- **Artwork changes retain the last valid decoded frame** while an asynchronous replacement loads. Capture browsing stays virtualized and offers a bounded-zoom in-app viewer without decoding every source at full size.
 - **Front-end state and backend logic remain separate**. QML owns presentation and immediate interaction; C++/future runtime services own discovery, validation, persistence, launch, and other substantive work.
 
 When adding new UI, prefer extending the reusable `X*` components and semantic tokens instead of adding one-off raw `Rectangle`, `TextField`, `ComboBox`, or hard-coded colour implementations to individual pages.
+
+A launcher UI-only configuration may disable `XENON_BUILD_RUNTIME_HOST` (the default when required runtime subsystems are disabled). Full/default builds continue to produce and deploy `xenon_runtime_host` beside the launcher.
 
 ## Windows launcher build helper
 

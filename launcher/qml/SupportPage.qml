@@ -67,7 +67,7 @@ Item {
                 : "The launcher UI is running, but the runtime host executable is missing from this build/output folder."
             StatusPill {
                 label: launcherBridge.backendConnected ? "Runtime host ready" : "Launcher only"
-                tone: launcherBridge.backendConnected ? Theme.accent : Theme.warning
+                status: launcherBridge.backendConnected ? "ready" : "degraded"
             }
             XButton { text: "Copy system summary"; onClicked: { launcherBridge.copyText(launcherBridge.userDiagnostics()); launcherBridge.notify("Summary copied", "A system summary was copied to the clipboard.") } }
         }

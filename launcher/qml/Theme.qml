@@ -72,6 +72,20 @@ QtObject {
     readonly property int spaceLg: 16
     readonly property int spaceXl: 24
     readonly property int space2Xl: 32
+    readonly property int space3Xl: 48
+
+    // Shared presentation values keep interaction feedback and container
+    // hierarchy coherent without turning Theme into a second styling engine.
+    readonly property real disabledOpacity: 0.58
+    readonly property real secondaryOpacity: 0.78
+    readonly property real hoverOpacity: 0.10
+    readonly property real pressedOpacity: 0.16
+    readonly property int motionFast: reduceMotion ? 0 : 100
+    readonly property int motionNormal: reduceMotion ? 0 : 150
+    readonly property int motionSlow: reduceMotion ? 0 : 180
+    readonly property int iconSizeSmall: 16
+    readonly property int iconSize: 20
+    readonly property int iconSizeLarge: 24
 
     readonly property real captionScale: 1.0 + Math.max(0, textScale - 1.0) * 0.80
     readonly property real bodyScale: 1.0 + Math.max(0, textScale - 1.0) * 0.66
@@ -94,6 +108,9 @@ QtObject {
 
     readonly property real panelRadius: cornerStyle === "square" ? 4
                                             : cornerStyle === "soft" ? 8 : 12
+    readonly property real cardRadius: panelRadius
+    readonly property real dialogRadius: cornerStyle === "square" ? 6
+                                             : cornerStyle === "soft" ? 10 : 14
     readonly property real controlRadius: cornerStyle === "square" ? 4
                                               : cornerStyle === "soft" ? 7 : 9
     readonly property real borderWidth: highContrast ? 2 : 1

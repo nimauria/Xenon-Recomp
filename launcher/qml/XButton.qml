@@ -14,6 +14,7 @@ Button {
     implicitWidth: Math.max(104, contentItem.implicitWidth + 30)
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
+    scale: down && enabled ? 0.985 : 1.0
 
     Accessible.name: text
     Accessible.description: accessibleDescription
@@ -45,6 +46,11 @@ Button {
                     : control.variant === "danger" ? Theme.danger
                     : control.hovered ? Theme.accentStrong
                     : Theme.border
-        opacity: control.enabled ? 1.0 : 0.58
+        opacity: control.enabled ? 1.0 : Theme.disabledOpacity
+    }
+
+    Behavior on scale {
+        enabled: Theme.motionFast > 0
+        NumberAnimation { duration: Theme.motionFast; easing.type: Easing.OutCubic }
     }
 }

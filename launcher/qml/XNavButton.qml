@@ -21,6 +21,7 @@ Button {
     bottomPadding: 0
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
+    scale: down && enabled ? 0.985 : 1.0
     Accessible.name: text
     Accessible.role: Accessible.Button
 
@@ -85,7 +86,22 @@ Button {
         border.color: control.activeFocus ? Theme.focusRing : Theme.accent
     }
 
+    Rectangle {
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        width: control.active ? 3 : 0
+        height: control.compact ? 24 : 28
+        radius: 2
+        color: Theme.accent
+        visible: control.active
+    }
+
     ToolTip.visible: control.compact && control.hovered
     ToolTip.text: control.text
     ToolTip.delay: 450
+
+    Behavior on scale {
+        enabled: Theme.motionFast > 0
+        NumberAnimation { duration: Theme.motionFast; easing.type: Easing.OutCubic }
+    }
 }

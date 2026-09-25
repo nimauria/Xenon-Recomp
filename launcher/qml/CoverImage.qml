@@ -29,6 +29,7 @@ Item {
     property int maximumDecodeDimension: 3072
     property int decodeWidth: 64
     property int decodeHeight: 64
+    property url lastReadySource: ""
 
     readonly property bool imageReady: image.status === Image.Ready
     readonly property size sourceSize: image.sourceSize
@@ -66,8 +67,25 @@ Item {
         onTriggered: root.updateDecodeSize()
     }
 
+    // Keep the last successfully decoded frame underneath the next request.
+    // This avoids the white/black flash that otherwise occurs when hero art
+    // changes or an image provider briefly returns Loading.
+    Image {
+        id: retainedImage
+        z: 0
+        asynchronous: true
+        smooth: root.smooth
+        cache: true
+        fillMode: Image.Pad
+        sourceSize.width: root.decodeWidth
+        sourceSize.height: root.decodeHeight
+        visible: source.toString().length > 0 && opacity > 0
+        opacity: image.status === Image.Ready ? 1.0 - image.opacity : 1.0
+    }
+
     Image {
         id: image
+        z: 1
         source: root.source
         asynchronous: root.asynchronous
         smooth: root.smooth
@@ -75,42 +93,52 @@ Item {
         fillMode: Image.Pad
         sourceSize.width: root.decodeWidth
         sourceSize.height: root.decodeHeight
+        opacity: status === Image.Ready ? 1.0 : 0.0
+
+        Behavior on opacity {
+            NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic }
+        }
     }
 
-    function relayout() {
-        if (!image.sourceSize.width || !image.sourceSize.height || root.width <= 0 || root.height <= 0) {
-            image.width = root.width
-            image.height = root.height
-            image.x = 0
-            image.y = 0
+    function relayoutImage(target) {
+        if (!target.sourceSize.width || !target.sourceSize.height || root.width <= 0 || root.height <= 0) {
+            target.width = root.width
+            target.height = root.height
+            target.x = 0
+            target.y = 0
             return
         }
-        const naturalWidth = image.sourceSize.width
-        const naturalHeight = image.sourceSize.height
+        const naturalWidth = target.sourceSize.width
+        const naturalHeight = target.sourceSize.height
         const coverScale = Math.max(root.width / naturalWidth, root.height / naturalHeight)
         const containScale = Math.min(root.width / naturalWidth, root.height / naturalHeight)
         const baseScale = root.fitMode === "contain" ? containScale : coverScale
         const scale = baseScale * Math.max(0.1, root.zoom)
         const w = naturalWidth * scale
         const h = naturalHeight * scale
-        image.width = w
-        image.height = h
+        target.width = w
+        target.height = h
         if (root.fitMode === "contain") {
-            image.x = (root.width - w) / 2
-            image.y = (root.height - h) / 2
+            target.x = (root.width - w) / 2
+            target.y = (root.height - h) / 2
         } else {
             const fx = Math.max(0, Math.min(1, root.focalX))
             const fy = Math.max(0, Math.min(1, root.focalY))
             // Below 1.0 zoom the source can become smaller than the crop
             // viewport. Centre that axis rather than pinning it to an edge;
             // this makes "zoom out to include the whole logo" predictable.
-            image.x = w <= root.width
+            target.x = w <= root.width
                 ? (root.width - w) / 2
                 : Math.min(0, Math.max(root.width - w, root.width / 2 - w * fx))
-            image.y = h <= root.height
+            target.y = h <= root.height
                 ? (root.height - h) / 2
                 : Math.min(0, Math.max(root.height - h, root.height / 2 - h * fy))
         }
+    }
+
+    function relayout() {
+        root.relayoutImage(image)
+        root.relayoutImage(retainedImage)
     }
 
     onWidthChanged: {
@@ -122,6 +150,11 @@ Item {
         scheduleDecodeSizeUpdate()
     }
     onSourceChanged: {
+        if (root.lastReadySource.toString().length > 0
+                && root.lastReadySource.toString() !== root.source.toString())
+            retainedImage.source = root.lastReadySource
+        else if (root.source.toString().length === 0)
+            retainedImage.source = ""
         updateDecodeSize()
         relayout()
     }
@@ -135,7 +168,17 @@ Item {
     Connections {
         target: image
         function onStatusChanged() {
-            if (image.status === Image.Ready) root.relayout()
+            if (image.status === Image.Ready) {
+                root.lastReadySource = root.source
+                root.relayout()
+            }
+        }
+    }
+
+    Connections {
+        target: retainedImage
+        function onStatusChanged() {
+            if (retainedImage.status === Image.Ready) root.relayout()
         }
     }
 

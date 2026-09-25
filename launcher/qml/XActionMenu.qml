@@ -72,6 +72,8 @@ Popup {
     modal: false
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionFast } }
+    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: Theme.motionFast } }
 
     // Keeps this menu's Up/Down/Enter/Escape (keyboard) and
     // navigate/confirm/back (gamepad) entirely self-contained instead of

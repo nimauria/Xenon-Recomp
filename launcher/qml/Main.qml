@@ -601,7 +601,7 @@ ApplicationWindow {
                 anchors.rightMargin: Theme.spaceLg
                 spacing: Theme.spaceSm
 
-                StatusPill { label: "SAFE MODE"; tone: Theme.warning }
+                StatusPill { label: "SAFE MODE"; status: "degraded" }
                 Text {
                     Layout.fillWidth: true
                     text: "Production launcher state and runtime services are not loaded. Use Settings or diagnostics to recover, then restart normally."
@@ -658,6 +658,9 @@ ApplicationWindow {
                         id: libraryLoader
                         active: root.libraryLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: libraryLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : libraryPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(0, status)
@@ -669,6 +672,9 @@ ApplicationWindow {
                         id: modulesLoader
                         active: root.modulesLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: modulesLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : modulesPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(1, status)
@@ -680,6 +686,9 @@ ApplicationWindow {
                         id: profilesLoader
                         active: root.profilesLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: profilesLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : profilesPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(2, status)
@@ -691,6 +700,9 @@ ApplicationWindow {
                         id: settingsLoader
                         active: root.settingsLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: settingsLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: settingsPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(3, status)
@@ -702,6 +714,9 @@ ApplicationWindow {
                         id: homeLoader
                         active: root.homeLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: homeLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : homePageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(4, status)
@@ -713,6 +728,9 @@ ApplicationWindow {
                         id: downloadsLoader
                         active: root.downloadsLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: downloadsLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : downloadsPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(5, status)
@@ -724,6 +742,9 @@ ApplicationWindow {
                         id: capturesLoader
                         active: root.capturesLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: capturesLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : capturesPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(6, status)
@@ -735,6 +756,9 @@ ApplicationWindow {
                         id: networkLoader
                         active: root.networkLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: networkLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : networkPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(7, status)
@@ -746,6 +770,9 @@ ApplicationWindow {
                         id: supportLoader
                         active: root.supportLoaded
                         asynchronous: true
+                        opacity: StackLayout.isCurrentItem ? 1.0 : 0.0
+                        transform: Translate { y: supportLoader.StackLayout.isCurrentItem ? 0 : 6; Behavior on y { NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } } }
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionNormal } }
                         sourceComponent: launcherBridge.safeMode ? safeModeBlockedPage : supportPageComponent
                         onStatusChanged: {
                             root.markLauncherReadyIfCurrent(8, status)

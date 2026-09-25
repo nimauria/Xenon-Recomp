@@ -18,14 +18,14 @@ Item {
     ColumnLayout {
         id: content
         anchors.centerIn: parent
-        width: Math.min(parent.width - 48, 560)
-        spacing: 14
+        width: Math.min(parent.width - Theme.space3Xl, 560)
+        spacing: Theme.spaceMd
 
         Rectangle {
             Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: 76
-            Layout.preferredHeight: 76
-            radius: 38
+            Layout.preferredWidth: 64
+            Layout.preferredHeight: 64
+            radius: 32
             color: Theme.accentSoft
             border.width: 1
             border.color: Theme.accent
@@ -34,7 +34,7 @@ Item {
                 anchors.centerIn: parent
                 text: root.glyph
                 color: Theme.accent
-                font.pixelSize: 32
+                font.pixelSize: Theme.typeTitle
                 font.weight: Font.Light
             }
         }
@@ -45,7 +45,7 @@ Item {
             color: Theme.text
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
-            font.pixelSize: 24
+            font.pixelSize: Theme.typeSubtitle
             font.weight: Font.DemiBold
         }
 
@@ -57,7 +57,7 @@ Item {
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
             lineHeight: 1.25
-            font.pixelSize: 12
+            font.pixelSize: Theme.typeBody
         }
 
         GridLayout {

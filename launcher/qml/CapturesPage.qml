@@ -13,6 +13,8 @@ Item {
     property bool refreshing: false
     property string pendingDeletePath: ""
     property string pendingDeleteName: ""
+    property int viewerIndex: -1
+    property real viewerZoom: 1.0
 
     readonly property string capturesPath: String(launcherBridge.defaultScreenshotsPath())
     readonly property string capturesUrl: "file:///" + root.capturesPath.replace(/\\/g, "/")
@@ -104,6 +106,15 @@ Item {
         while (visibleCaptures.count > desired.length)
             visibleCaptures.remove(visibleCaptures.count - 1)
 
+        if (captureViewer.visible) {
+            if (visibleCaptures.count === 0) {
+                captureViewer.close()
+                root.viewerIndex = -1
+            } else {
+                root.viewerIndex = Math.max(0, Math.min(visibleCaptures.count - 1, root.viewerIndex))
+            }
+        }
+
         Qt.callLater(function() {
             var maximum = Math.max(0, captureGrid.contentHeight - captureGrid.height)
             captureGrid.contentY = Math.max(0, Math.min(maximum, previousOffset))
@@ -123,6 +134,58 @@ Item {
         root.pendingDeletePath = String(path || "")
         root.pendingDeleteName = String(name || "Capture")
         deleteConfirm.open()
+    }
+
+    function currentCapture() {
+        return root.viewerIndex >= 0 && root.viewerIndex < visibleCaptures.count
+            ? visibleCaptures.get(root.viewerIndex) : ({})
+    }
+
+    function openViewer(index) {
+        if (index < 0 || index >= visibleCaptures.count) return
+        root.viewerIndex = index
+        root.viewerZoom = 1.0
+        captureViewer.open()
+    }
+
+    function stepViewer(delta) {
+        if (visibleCaptures.count === 0) return
+        root.viewerIndex = Math.max(0, Math.min(visibleCaptures.count - 1, root.viewerIndex + delta))
+        root.viewerZoom = 1.0
+        captureGrid.currentIndex = root.viewerIndex
+        captureGrid.positionViewAtIndex(root.viewerIndex, GridView.Contain)
+    }
+
+    function adjustViewerZoom(delta) {
+        root.viewerZoom = Math.max(1.0, Math.min(4.0, root.viewerZoom + delta))
+    }
+
+    function focusedCapture() {
+        var index = Math.max(0, Math.min(visibleCaptures.count - 1, captureGrid.currentIndex))
+        return visibleCaptures.count > 0 ? visibleCaptures.get(index) : ({})
+    }
+
+    function openContextMenuForFocusedItem() {
+        if (visibleCaptures.count === 0) return
+        captureMenu.openAt(captureGrid, Math.max(0, captureGrid.width - captureMenu.menuWidth - Theme.spaceSm), Theme.spaceSm)
+    }
+
+    function triggerSecondaryAction() {
+        var capture = root.focusedCapture()
+        if (String(capture.filePath || "").length > 0)
+            root.requestDelete(capture.filePath, capture.fileName)
+    }
+
+    function runCaptureAction(actionId) {
+        var capture = root.focusedCapture()
+        if (String(capture.filePath || "").length === 0) return
+        if (actionId === "view") root.openViewer(captureGrid.currentIndex)
+        else if (actionId === "external") Qt.openUrlExternally(root.fileUrl(capture.filePath))
+        else if (actionId === "copy") {
+            launcherBridge.copyText(capture.filePath)
+            launcherBridge.notify("Copied", "The capture path was copied to the clipboard.")
+        } else if (actionId === "folder") launcherBridge.openFolder(root.capturesPath)
+        else if (actionId === "delete") root.requestDelete(capture.filePath, capture.fileName)
     }
 
     function handleDirectionalNavigation(direction) {
@@ -183,6 +246,7 @@ Item {
 
         XSectionHeader {
             title: "Captures"
+            prominent: true
             description: "Screenshots saved to " + root.capturesPath + ". Video capture is not implemented yet."
         }
 
@@ -257,6 +321,10 @@ Item {
                     keyNavigationEnabled: true
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+                    Keys.onReturnPressed: root.openViewer(currentIndex)
+                    Keys.onEnterPressed: root.openViewer(currentIndex)
+                    Keys.onDeletePressed: root.triggerSecondaryAction()
+
                     delegate: Item {
                         id: captureCell
                         required property int index
@@ -313,9 +381,9 @@ Item {
                                     spacing: Theme.spaceXs
                                     XButton {
                                         Layout.fillWidth: true
-                                        text: "Open"
+                                        text: "View"
                                         variant: "primary"
-                                        onClicked: Qt.openUrlExternally(root.fileUrl(captureCell.filePath))
+                                        onClicked: root.openViewer(captureCell.index)
                                     }
                                     XButton {
                                         text: "Copy Path"
@@ -331,8 +399,182 @@ Item {
                                     }
                                 }
                             }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: function(mouse) {
+                                    captureGrid.currentIndex = captureCell.index
+                                    captureMenu.openAt(captureCell, mouse.x, mouse.y)
+                                }
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    XActionMenu {
+        id: captureMenu
+        parent: root
+        z: 1001
+        actions: [
+            { id: "view", label: "View capture", icon: "▣" },
+            { id: "external", label: "Open externally", icon: "↗" },
+            { id: "copy", label: "Copy path", icon: "⧉" },
+            { id: "folder", label: "Open captures folder", icon: "□" },
+            { id: "delete", label: "Delete capture", icon: "×", separatorBefore: true, destructive: true }
+        ]
+        onActionTriggered: function(actionId) { root.runCaptureAction(actionId) }
+    }
+
+    Popup {
+        id: captureViewer
+        parent: Overlay.overlay
+        width: Math.min(1180, parent ? parent.width - Theme.space2Xl * 2 : 1180)
+        height: Math.min(820, parent ? parent.height - Theme.space2Xl * 2 : 820)
+        x: parent ? Math.round((parent.width - width) / 2) : 0
+        y: parent ? Math.round((parent.height - height) / 2) : 0
+        modal: true
+        focus: true
+        padding: 0
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionNormal } }
+        exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: Theme.motionFast } }
+        onOpened: {
+            viewerStage.forceActiveFocus()
+            NavigationGuard.pushModal()
+        }
+        onClosed: NavigationGuard.popModal()
+
+        Overlay.modal: Rectangle { color: Theme.overlay }
+        background: Rectangle {
+            color: Theme.surfaceRaised
+            radius: Theme.dialogRadius
+            border.width: Theme.borderWidth
+            border.color: Theme.border
+        }
+
+        Connections {
+            target: launcherBridge
+            enabled: captureViewer.visible
+            function onFrontendAction(action) {
+                if (action === "left" || action === "pageBack") root.stepViewer(-1)
+                else if (action === "right" || action === "pageForward") root.stepViewer(1)
+                else if (action === "scrollUp") root.adjustViewerZoom(0.25)
+                else if (action === "scrollDown") root.adjustViewerZoom(-0.25)
+                else if (action === "secondary") root.viewerZoom = 1.0
+                else if (action === "cancel" || action === "back") captureViewer.close()
+            }
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 0
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.margins: Theme.spaceMd
+                spacing: Theme.spaceSm
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Text {
+                        Layout.fillWidth: true
+                        text: String(root.currentCapture().fileName || "Capture")
+                        color: Theme.text
+                        font.pixelSize: Theme.typeSubtitle
+                        font.weight: Font.DemiBold
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        text: (root.viewerIndex + 1) + " of " + visibleCaptures.count + "  •  " + Math.round(root.viewerZoom * 100) + "%"
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.typeCaption
+                    }
+                }
+                XIconButton { glyph: "−"; tooltip: "Zoom out"; enabled: root.viewerZoom > 1.0; onClicked: root.adjustViewerZoom(-0.25) }
+                XButton { text: "Fit"; variant: "ghost"; enabled: root.viewerZoom !== 1.0; onClicked: root.viewerZoom = 1.0 }
+                XIconButton { glyph: "+"; tooltip: "Zoom in"; enabled: root.viewerZoom < 4.0; onClicked: root.adjustViewerZoom(0.25) }
+                XIconButton { iconName: "close"; glyph: "×"; tooltip: "Close viewer"; onClicked: captureViewer.close() }
+            }
+
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+
+            Item {
+                id: viewerStage
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.margins: Theme.spaceMd
+                clip: true
+                focus: true
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Pane
+                Accessible.name: "Capture viewer"
+
+                CoverImage {
+                    anchors.fill: parent
+                    source: root.fileUrl(root.currentCapture().filePath)
+                    fitMode: "contain"
+                    zoom: root.viewerZoom
+                    asynchronous: true
+                    decodeHeadroom: 1.5
+                    maximumDecodeDimension: 4096
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.NoButton
+                    onWheel: function(wheel) {
+                        root.adjustViewerZoom(wheel.angleDelta.y > 0 ? 0.25 : -0.25)
+                        wheel.accepted = true
+                    }
+                }
+
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Left) { root.stepViewer(-1); event.accepted = true }
+                    else if (event.key === Qt.Key_Right) { root.stepViewer(1); event.accepted = true }
+                    else if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) { root.adjustViewerZoom(0.25); event.accepted = true }
+                    else if (event.key === Qt.Key_Minus) { root.adjustViewerZoom(-0.25); event.accepted = true }
+                    else if (event.key === Qt.Key_0 || event.key === Qt.Key_Home) { root.viewerZoom = 1.0; event.accepted = true }
+                }
+
+                XIconButton {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconName: "chevron-left"
+                    glyph: "‹"
+                    tooltip: "Previous capture"
+                    variant: "filled"
+                    enabled: root.viewerIndex > 0
+                    onClicked: root.stepViewer(-1)
+                }
+                XIconButton {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconName: "chevron-right"
+                    glyph: "›"
+                    tooltip: "Next capture"
+                    variant: "filled"
+                    enabled: root.viewerIndex + 1 < visibleCaptures.count
+                    onClicked: root.stepViewer(1)
+                }
+            }
+
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.divider }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.margins: Theme.spaceMd
+                spacing: Theme.spaceSm
+                XButton { text: "Open externally"; onClicked: Qt.openUrlExternally(root.fileUrl(root.currentCapture().filePath)) }
+                XButton { text: "Copy path"; onClicked: root.runCaptureAction("copy") }
+                Item { Layout.fillWidth: true }
+                XButton {
+                    text: "Delete"
+                    variant: "danger"
+                    onClicked: root.requestDelete(root.currentCapture().filePath, root.currentCapture().fileName)
                 }
             }
         }

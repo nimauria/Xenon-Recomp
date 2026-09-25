@@ -34,28 +34,28 @@ Item {
                 label: root.reachability === "online" ? "Connected"
                      : root.reachability === "offline" ? "Offline"
                      : "Unknown"
-                tone: root.reachability === "online" ? Theme.success
-                    : root.reachability === "offline" ? Theme.danger
-                    : Theme.textMuted
+                status: root.reachability === "online" ? "active"
+                    : root.reachability === "offline" ? "error"
+                    : "unavailable"
             }
         }
 
         XSettingsCard {
             title: "Xenon Network Services"
             description: "Online identity, matchmaking and service-replacement infrastructure for Xbox 360 titles is planned but not implemented."
-            StatusPill { label: "In development"; tone: Theme.warning }
+            StatusPill { label: "In development"; status: "waiting" }
         }
 
         XSettingsCard {
             title: "Multiplayer"
             description: "No title's networking has been reimplemented against a live service yet."
-            StatusPill { label: "Not available"; tone: Theme.textMuted }
+            StatusPill { label: "Not available"; status: "notImplemented" }
         }
 
         XSettingsCard {
             title: "Online identity"
             description: "Xbox Live-equivalent profile/identity services are not implemented."
-            StatusPill { label: "Not available"; tone: Theme.textMuted }
+            StatusPill { label: "Not available"; status: "notImplemented" }
         }
     }
 }

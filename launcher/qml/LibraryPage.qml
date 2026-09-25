@@ -1196,11 +1196,11 @@ Item {
                             opacity: root.selectedGameIndex === index ? 1.0 : 0.52
                             Behavior on scale {
                                 enabled: !Theme.reduceMotion
-                                NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+                                NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic }
                             }
                             Behavior on opacity {
                                 enabled: !Theme.reduceMotion
-                                NumberAnimation { duration: 100 }
+                                NumberAnimation { duration: Theme.motionFast }
                             }
                             focusPolicy: Qt.StrongFocus
                             hoverEnabled: true

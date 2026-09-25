@@ -18,7 +18,7 @@ Dialog {
 
     background: Rectangle {
         color: Theme.surfaceRaised
-        radius: Theme.panelRadius
+        radius: Theme.dialogRadius
         border.width: Math.max(Theme.borderWidth, 1)
         border.color: root.safeMode ? Theme.warning : Theme.border
     }

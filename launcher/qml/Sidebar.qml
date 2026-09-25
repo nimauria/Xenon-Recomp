@@ -128,12 +128,12 @@ Rectangle {
             Layout.fillWidth: !root.compact
             Layout.alignment: root.compact ? Qt.AlignHCenter : Qt.AlignLeft
             spacing: Theme.spaceSm
-            Rectangle { width: 10; height: 10; radius: 5; color: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+            Rectangle { width: 10; height: 10; radius: 5; color: launcherBridge.backendConnected ? Theme.accent : Theme.warning }
             ColumnLayout {
                 visible: !root.compact
                 Layout.fillWidth: true
                 spacing: 1
-                Text { text: launcherBridge.backendConnected ? "Xenon Ready" : "Launcher Ready"; color: launcherBridge.backendConnected ? Theme.success : Theme.warning; font.pixelSize: Theme.typeCaption; font.weight: Font.DemiBold }
+                Text { text: launcherBridge.backendConnected ? "Xenon Ready" : "Launcher Ready"; color: launcherBridge.backendConnected ? Theme.accent : Theme.warning; font.pixelSize: Theme.typeCaption; font.weight: Font.DemiBold }
                 Text {
                     text: launcherBridge.backendConnected ? "Runtime host ready" : "Runtime host missing"
                     color: Theme.textMuted

@@ -362,6 +362,7 @@ Item {
 
         XSectionHeader {
             title: "Settings"
+            prominent: true
             description: root.searchText.trim().length > 0
                 ? "Showing settings categories related to “" + root.searchText.trim() + "”."
                 : "Launcher preferences are validated and persisted by Launcher Core. Runtime-owned controls activate as their Xenon services become available."

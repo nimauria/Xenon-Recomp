@@ -98,7 +98,7 @@ Popup {
 
     background: Rectangle {
         color: Theme.surfaceRaised
-        radius: Theme.panelRadius
+        radius: Theme.dialogRadius
         border.width: Theme.borderWidth
         border.color: Theme.border
     }

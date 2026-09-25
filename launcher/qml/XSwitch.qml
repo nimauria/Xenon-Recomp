@@ -41,7 +41,7 @@ Switch {
 
             Behavior on x {
                 NumberAnimation {
-                    duration: (!launcherBridge.boolSetting("general/animations", true) || Theme.reduceMotion) ? 0 : 100
+                    duration: launcherBridge.boolSetting("general/animations", true) ? Theme.motionFast : 0
                     easing.type: Easing.OutCubic
                 }
             }

@@ -28,17 +28,44 @@ Popup {
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     onOpened: {
+        NavigationGuard.pushModal()
         if (root.destructive)
             cancelButton.forceActiveFocus()
         else
             confirmButton.forceActiveFocus()
+    }
+    onClosed: NavigationGuard.popModal()
+
+    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionNormal } }
+    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: Theme.motionFast } }
+
+    Connections {
+        target: launcherBridge
+        enabled: root.visible
+        function onFrontendAction(action) {
+            if (action === "left" || action === "up")
+                cancelButton.forceActiveFocus()
+            else if (action === "right" || action === "down")
+                confirmButton.forceActiveFocus()
+            else if (action === "confirm") {
+                if (cancelButton.activeFocus)
+                    cancelButton.click()
+                else if (secondaryButton.visible && secondaryButton.activeFocus)
+                    secondaryButton.click()
+                else
+                    confirmButton.click()
+            } else if (action === "cancel" || action === "back") {
+                root.close()
+                root.cancelled()
+            }
+        }
     }
 
     Overlay.modal: Rectangle { color: Theme.overlay }
 
     background: Rectangle {
         color: Theme.surfaceRaised
-        radius: Theme.panelRadius
+        radius: Theme.dialogRadius
         border.width: Theme.borderWidth
         border.color: root.destructive ? Theme.danger : Theme.border
     }

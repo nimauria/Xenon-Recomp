@@ -44,6 +44,20 @@ option(XENON_ENABLE_NETWORK "Enable networking subsystem" OFF)
 option(XENON_ENABLE_FILESYSTEM "Build the Xenon virtual filesystem subsystem" ON)
 option(XENON_ENABLE_KERNEL "Build the Xenon host-side kernel object/I/O layer" ${XENON_ENABLE_FILESYSTEM})
 
+# A UI-only configuration deliberately disables the subsystems XenonSession
+# requires. Do not still force its process host into that build: static-library
+# link failures there previously made an otherwise independent launcher target
+# impossible to build. Full/default configurations retain the companion.
+set(_xenon_runtime_host_default ON)
+if(NOT XENON_ENABLE_MEMORY OR NOT XENON_ENABLE_FILESYSTEM OR
+   NOT XENON_ENABLE_KERNEL OR NOT XENON_ENABLE_INPUT)
+  set(_xenon_runtime_host_default OFF)
+endif()
+option(XENON_BUILD_RUNTIME_HOST
+  "Build the guest-executing xenon_runtime_host companion"
+  ${_xenon_runtime_host_default})
+unset(_xenon_runtime_host_default)
+
 if(XENON_ENABLE_GRAPHICS AND NOT XENON_ENABLE_MEMORY)
   message(FATAL_ERROR "XENON_ENABLE_GRAPHICS requires XENON_ENABLE_MEMORY")
 endif()
@@ -1483,7 +1497,18 @@ endif()
 # Generic runtime/game-host process. The launcher spawns this to actually run
 # a game; it never executes guest code itself. See runtime_host/CMakeLists.txt
 # and docs/runtime/RUNTIME_HOST.md.
-add_subdirectory(runtime_host)
+if(XENON_BUILD_RUNTIME_HOST)
+  if(NOT XENON_ENABLE_MEMORY OR NOT XENON_ENABLE_FILESYSTEM OR
+     NOT XENON_ENABLE_KERNEL OR NOT XENON_ENABLE_INPUT)
+    message(FATAL_ERROR
+      "XENON_BUILD_RUNTIME_HOST requires Memory, Filesystem, Kernel and Input. "
+      "Disable XENON_BUILD_RUNTIME_HOST for a launcher UI-only build.")
+  endif()
+  add_subdirectory(runtime_host)
+elseif(XENON_BUILD_LAUNCHER)
+  message(STATUS
+    "Xenon runtime host disabled: launcher will build in UI-only mode and report the companion as unavailable")
+endif()
 
 if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
   # LaunchConfig parsing/validation, isolated from process-spawning and Qt
@@ -1575,10 +1600,14 @@ endif()
 # PreparationService follows the same side-by-side contract for xenon-prepare.
 # Without this dependency a successful `--target xenon_launcher` build can
 # render the UI but cannot prepare a title on first Play.
-if(TARGET xenon-prepare AND TARGET xenon_launcher)
+if(TARGET xenon-prepare AND TARGET xenon_launcher AND
+   XENON_ENABLE_MEMORY AND XENON_ENABLE_KERNEL)
   set_target_properties(xenon-prepare PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
   add_dependencies(xenon_launcher xenon-prepare)
+elseif(TARGET xenon_launcher AND NOT XENON_BUILD_RUNTIME_HOST)
+  message(STATUS
+    "Xenon preparation companion disabled for the launcher UI-only target")
 endif()
 # RuntimeBridge tests (xenon_runtime_host_fixture, xenon_runtime_bridge_tests)
 # are declared inside launcher/CMakeLists.txt itself, in the same directory

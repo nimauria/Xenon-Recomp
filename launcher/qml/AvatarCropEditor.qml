@@ -33,6 +33,8 @@ Popup {
     focus: true
     padding: 0
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionNormal } }
+    exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: Theme.motionFast } }
 
     onOpened: {
         focalX = initialFocalX
@@ -93,7 +95,7 @@ Popup {
 
     background: Rectangle {
         color: Theme.surfaceRaised
-        radius: Theme.panelRadius
+        radius: Theme.dialogRadius
         border.width: Theme.borderWidth
         border.color: Theme.border
     }

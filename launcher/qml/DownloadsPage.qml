@@ -385,7 +385,7 @@ Item {
                                     height: parent.height
                                     radius: parent.radius
                                     color: Theme.accent
-                                    Behavior on width { enabled: !Theme.reduceMotion; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                                    Behavior on width { enabled: Theme.motionNormal > 0; NumberAnimation { duration: Theme.motionNormal; easing.type: Easing.OutCubic } }
                                 }
                             }
                         }
