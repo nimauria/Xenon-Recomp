@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include <vulkan/vulkan.h>
@@ -27,6 +28,14 @@ class TextureImage {
   [[nodiscard]] VkSampler sampler() const noexcept { return sampler_; }
   [[nodiscard]] VkFormat format() const noexcept { return format_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // Part 7 of the AC6 Runtime Readiness pass: structured signals alongside
+  // error(), set exactly when initialize() failed/degraded for that
+  // specific, distinguishable reason - without the caller having to
+  // string-match error().
+  [[nodiscard]] bool unsupported_format() const noexcept { return unsupported_format_; }
+  [[nodiscard]] std::uint64_t unsupported_sampler_behaviors() const noexcept {
+    return unsupported_sampler_behaviors_;
+  }
 
  private:
   VkDevice device_{VK_NULL_HANDLE};
@@ -36,6 +45,8 @@ class TextureImage {
   VkSampler sampler_{VK_NULL_HANDLE};
   VkFormat format_{VK_FORMAT_UNDEFINED};
   std::string error_{};
+  bool unsupported_format_{};
+  std::uint64_t unsupported_sampler_behaviors_{};
 };
 
 }  // namespace xenon::gpu::vulkan

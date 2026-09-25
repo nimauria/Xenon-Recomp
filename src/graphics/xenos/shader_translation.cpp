@@ -655,11 +655,13 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     result.diagnostics.emplace_back("cannot lower an incomplete decoded shader");
     result.diagnostics.insert(result.diagnostics.end(), shader.diagnostics.begin(),
                               shader.diagnostics.end());
+    ++result.unsupported_features;
     return result;
   }
   if (shader.reflection.temporary_register_count > options.temporary_register_limit ||
       options.temporary_register_limit > 64) {
     result.diagnostics.emplace_back("shader temporary register usage exceeds the Xenos limit");
+    ++result.unsupported_features;
     return result;
   }
 
@@ -670,9 +672,11 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       const auto& alu = instruction.alu;
       if (alu.vector_opcode > 29) {
         result.diagnostics.emplace_back("reserved Xenos vector ALU opcode");
+        ++result.unsupported_instructions;
       }
       if (alu.scalar_opcode == 41 || alu.scalar_opcode > 50) {
         result.diagnostics.emplace_back("reserved Xenos scalar ALU opcode");
+        ++result.unsupported_instructions;
       }
     } else if (instruction.kind == ShaderInstructionKind::VertexFetch) {
       const auto format = instruction.vertex_fetch.data_format;
@@ -683,12 +687,14 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       if (!supported) {
         result.diagnostics.emplace_back(
             "vertex format requires a lowering implementation");
+        ++result.unsupported_fetch_formats;
       }
     } else {
       const auto& fetch = instruction.texture_fetch;
       if (fetch.opcode != 1) {
         result.diagnostics.emplace_back(
             "texture state/query opcode requires a lowering implementation");
+        ++result.unsupported_fetch_formats;
       }
     }
   }

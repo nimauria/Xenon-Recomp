@@ -59,6 +59,15 @@ class CommandProcessor {
     std::uint64_t viz_query_visible_results{};
     std::uint64_t interrupt_packets{};
     std::uint64_t interrupt_dispatches{};
+    // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+    // fallback audit"): a guest register write whose index is outside the
+    // known register file. emit_register_write() still throws for this (a
+    // deliberate, pre-existing hard-fail for corrupt/invalid command
+    // streams - not something this pass changes), but the count is
+    // incremented immediately beforehand so it is observable in a
+    // capability report even when a caller only sees the resulting
+    // exception, not this object.
+    std::uint64_t unknown_register_writes{};
   };
 
   CommandProcessor(memory::AddressSpace& memory, RegisterFile& registers,

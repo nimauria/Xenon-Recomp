@@ -23,6 +23,7 @@
 #include "xenon/gpu/edram_ownership.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/memory/types.hpp"
 #ifdef XENON_HAS_DXC
 #include "xenon/gpu/dxc_shader_compiler.hpp"
@@ -69,6 +70,10 @@ class Backend::Impl {
   std::size_t draw_count{};
   std::size_t compiled_shader_count{};
   GpuPerformanceCounters performance{};
+  // Part 7 of the AC6 Runtime Readiness pass - see GpuUnsupportedCounters's
+  // doc comment. Incremented at the point each category is actually
+  // detected, never inferred after the fact from error strings.
+  GpuUnsupportedCounters unsupported{};
   std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
@@ -249,6 +254,7 @@ class Backend::Impl {
     }
     if (!edram_ownership.commit(plan)) {
       error = "Vulkan EDRAM ownership plan became stale";
+      ++unsupported.unexpected_ownership_transitions;
       return false;
     }
     return true;
@@ -299,6 +305,7 @@ class Backend::Impl {
     }
     if (!edram_ownership.commit(plan)) {
       error = "Vulkan depth EDRAM ownership plan became stale";
+      ++unsupported.unexpected_ownership_transitions;
       return false;
     }
     return true;
@@ -444,6 +451,20 @@ void Backend::consume(const ir::Command& command) {
   impl_->collect_retired_resources();
   ++impl_->command_count;
   ++impl_->performance.commands;
+  // Part 7 of the AC6 Runtime Readiness pass: see the identical guard in
+  // d3d12/backend.cpp's consume() - RegisterWrite/DrawPacket/ShaderLoad are
+  // the only Command variants this backend actually consumes below.
+  if (!std::holds_alternative<ir::RegisterWrite>(command) &&
+      !std::holds_alternative<ir::DrawPacket>(command) &&
+      !std::holds_alternative<ir::ShaderLoad>(command)) {
+    ++impl_->unsupported.unknown_packets;
+    xenon::logging::Logger::instance().log_if_enabled(
+        xenon::logging::Level::Warning, "gpu", [&] {
+          return "unhandled GPU command variant (index=" +
+                 std::to_string(command.index()) + ")";
+        });
+    return;
+  }
   if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
     impl_->resource_state.apply(*write);
   }
@@ -491,6 +512,7 @@ void Backend::consume(const ir::Command& command) {
       if (state.copy.command != CopyCommand::Raw &&
           state.copy.command != CopyCommand::Convert) {
         impl_->error = "Vulkan Xenos resolve command is unsupported";
+        ++impl_->unsupported.unhandled_resolve_modes;
         return;
       }
       const auto samples = resolve_plan.samples;
@@ -671,6 +693,7 @@ void Backend::consume(const ir::Command& command) {
           }
         } else {
           impl_->error = "Vulkan Xenos resolve selected an unsupported sample set";
+          ++impl_->unsupported.unhandled_resolve_modes;
           return;
         }
       }
@@ -902,11 +925,17 @@ void Backend::consume(const ir::Command& command) {
             return;
           }
           auto image = std::make_unique<TextureImage>();
-          if (!image->initialize(impl_->context.physical_device(), impl_->context.device(),
-                                 impl_->queue, decoded) ||
+          const bool image_initialized = image->initialize(
+              impl_->context.physical_device(), impl_->context.device(), impl_->queue, decoded);
+          // Fold in regardless of overall success/failure: a texture can
+          // successfully bind while its sampler still substituted an
+          // unsupported clamp mode.
+          impl_->unsupported.unsupported_sampler_behaviors += image->unsupported_sampler_behaviors();
+          if (!image_initialized ||
               !impl_->resources.bind_texture(slot, descriptor.dimension,
                                              image->view(), image->sampler())) {
             impl_->error = image->error().empty() ? impl_->resources.error() : image->error();
+            if (image->unsupported_format()) ++impl_->unsupported.unsupported_texture_formats;
             return;
           }
           impl_->texture_dirty.track_clean(key, decoded.layout, dirty_epoch);
@@ -1001,6 +1030,9 @@ void Backend::consume(const ir::Command& command) {
         ShaderLoweringOptions lowering_options{};
         lowering_options.force_guest_memory_rw = true;
         const auto lowered = HlslShaderLowerer::lower(decoded, lowering_options);
+        impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+        impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+        impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
         if (!lowered.complete) {
           impl_->error = lowered.diagnostics.empty()
                              ? "Vulkan writable guest-memory shader lowering failed"
@@ -1044,6 +1076,9 @@ void Backend::consume(const ir::Command& command) {
           lowering_options.force_guest_memory_rw = memexport_writable;
           const auto lowered =
               HlslShaderLowerer::lower(decoded_pixel->second, lowering_options);
+          impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+          impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+          impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
           if (!lowered.complete) {
             impl_->error = lowered.diagnostics.empty()
                                ? "D24FS8 pixel shader lowering failed"
@@ -1109,19 +1144,23 @@ void Backend::consume(const ir::Command& command) {
         impl_->error = batch.error;
         return;
       }
-      if (batch.requires_rectangle_expansion &&
-          !impl_->rectangle_list_shader) {
-        ShaderCompileOptions options{};
-        options.format = ShaderBinaryFormat::Spirv;
-        impl_->rectangle_list_shader = impl_->shader_cache.get_or_compile(
-            make_rectangle_list_geometry_shader(), options);
-        if (!impl_->rectangle_list_shader->succeeded) {
-          impl_->error = impl_->rectangle_list_shader->diagnostics.empty()
-                             ? "Vulkan RectangleList shader compilation failed"
-                             : impl_->rectangle_list_shader->diagnostics.front();
-          return;
+      if (batch.requires_rectangle_expansion) {
+        // A host-only fallback geometry shader, not the title's own - see
+        // the identical comment in d3d12/backend.cpp.
+        ++impl_->unsupported.fallback_shader_uses;
+        if (!impl_->rectangle_list_shader) {
+          ShaderCompileOptions options{};
+          options.format = ShaderBinaryFormat::Spirv;
+          impl_->rectangle_list_shader = impl_->shader_cache.get_or_compile(
+              make_rectangle_list_geometry_shader(), options);
+          if (!impl_->rectangle_list_shader->succeeded) {
+            impl_->error = impl_->rectangle_list_shader->diagnostics.empty()
+                               ? "Vulkan RectangleList shader compilation failed"
+                               : impl_->rectangle_list_shader->diagnostics.front();
+            return;
+          }
+          ++impl_->compiled_shader_count;
         }
-        ++impl_->compiled_shader_count;
       }
       // D3D12 has no FRONT_AND_BACK cull mode and Vulkan does, but the common
       // result is simpler: once Xenos has requested both faces culled, no
@@ -1370,15 +1409,30 @@ void Backend::consume(const ir::Command& command) {
 #ifdef XENON_HAS_DXC
     impl_->decoded_shaders[load->program.hash()] = load->decoded;
     const auto lowered = HlslShaderLowerer::lower(load->decoded);
-    ShaderCompileOptions options{};
-    options.format = ShaderBinaryFormat::Spirv;
-    const auto compiled = impl_->shader_cache.get_or_compile(lowered, options);
-    if (compiled->succeeded) {
-      ++impl_->compiled_shader_count;
-      impl_->shaders[load->program.hash()] = compiled;
+    impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+    impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+    impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
+    if (!lowered.complete) {
+      // Do not even attempt to compile an incomplete lowering - see the
+      // identical fix in d3d12/backend.cpp's consume().
+      impl_->error = lowered.diagnostics.empty() ? "SPIR-V shader lowering failed"
+                                                 : lowered.diagnostics.front();
+      xenon::logging::Logger::instance().log_if_enabled(
+          xenon::logging::Level::Warning, "gpu", [&] {
+            return "shader lowering failed (hash=" + std::to_string(load->program.hash()) +
+                   "): " + impl_->error;
+          });
     } else {
-      impl_->error = compiled->diagnostics.empty() ? "SPIR-V shader compilation failed"
-                                                   : compiled->diagnostics.front();
+      ShaderCompileOptions options{};
+      options.format = ShaderBinaryFormat::Spirv;
+      const auto compiled = impl_->shader_cache.get_or_compile(lowered, options);
+      if (compiled->succeeded) {
+        ++impl_->compiled_shader_count;
+        impl_->shaders[load->program.hash()] = compiled;
+      } else {
+        impl_->error = compiled->diagnostics.empty() ? "SPIR-V shader compilation failed"
+                                                     : compiled->diagnostics.front();
+      }
     }
 #endif
   }
@@ -1504,6 +1558,10 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
   result.shader_cache_misses = impl_->compiled_shader_count;
   result.pipeline_cache_misses = impl_->pipelines.size();
   return result;
+}
+
+GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
+  return impl_->unsupported;
 }
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }

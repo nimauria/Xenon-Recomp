@@ -24,6 +24,39 @@ struct GpuPerformanceCounters {
   std::uint64_t submission_time_ns{};
 };
 
+// Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+// fallback audit"): every unsupported GPU operation must be observable, not
+// silently approximated. Each field here corresponds to one category from
+// that audit. These counters must reflect reality - never suppressed,
+// reclassified, or downgraded just to make a report read as "0" (see the
+// reviewer's explicit warning on this point). A correct, fully-supported run
+// against a title Xenon genuinely handles end to end should read all zeros;
+// any nonzero value is real, actionable evidence of a gap, not noise to be
+// hidden.
+struct GpuUnsupportedCounters {
+  std::uint64_t unknown_packets{};                 // IR command variant consume() has no handler for.
+  std::uint64_t unknown_registers{};                // Xenos register index outside the known register file.
+  std::uint64_t unsupported_fetch_formats{};        // Vertex/texture fetch format the shader lowerer rejects.
+  std::uint64_t unsupported_texture_formats{};      // Guest texture format with no host equivalent.
+  std::uint64_t unsupported_sampler_behaviors{};    // Sampler state (address mode, filter, ...) with no host mapping.
+  std::uint64_t unsupported_shader_instructions{};  // Xenos ALU/CF opcode the translator does not lower.
+  std::uint64_t unsupported_shader_features{};      // A recognized-but-unimplemented shader capability.
+  std::uint64_t unhandled_resolve_modes{};          // EDRAM->texture resolve configuration with no host path.
+  std::uint64_t unhandled_depth_stencil_paths{};    // Depth/stencil format or transfer with no host path.
+  std::uint64_t unexpected_ownership_transitions{}; // EDRAM/render-target ownership handoff the planner rejected.
+  std::uint64_t failed_resource_barriers{};         // A requested resource barrier/transition that could not be satisfied.
+  std::uint64_t fallback_shader_uses{};             // Draws that ran through a generic fallback shader, not the title's own.
+
+  [[nodiscard]] std::uint64_t total() const noexcept {
+    return unknown_packets + unknown_registers + unsupported_fetch_formats +
+           unsupported_texture_formats + unsupported_sampler_behaviors +
+           unsupported_shader_instructions + unsupported_shader_features +
+           unhandled_resolve_modes + unhandled_depth_stencil_paths +
+           unexpected_ownership_transitions + failed_resource_barriers +
+           fallback_shader_uses;
+  }
+};
+
 // Host graphics backends consume Xenon graphics IR, never PM4 directly. Vulkan
 // and D3D12 implementations therefore remain replaceable without changing the
 // Xenos frontend or Project Gracemeria.
@@ -55,6 +88,13 @@ class Backend {
                                                  std::uint32_t height) = 0;
   [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;
   [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
+    return {};
+  }
+  // See GpuUnsupportedCounters's doc comment. Queryable at any point during
+  // or after a run (not just at backend construction, unlike error()), so a
+  // capability report can include a live, honest "GPU unsupported
+  // operations: N" figure.
+  [[nodiscard]] virtual GpuUnsupportedCounters unsupported_counters() const noexcept {
     return {};
   }
 };

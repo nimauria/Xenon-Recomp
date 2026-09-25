@@ -944,6 +944,13 @@ void test_graphics_system_backend(AddressSpace& memory) {
   assert(counters.draws == 1);
   assert(graphics.stream().size() == 0);
   assert(graphics.registers().read(0x44) == 0x12345678);
+  // Part 7 of the AC6 Runtime Readiness pass: the Backend base class default
+  // (NullBackend does not override it) must report a real, honest zero -
+  // not because a title triggered nothing unsupported, but because a
+  // backend with no telemetry of its own must never fabricate a nonzero-
+  // looking-clean total either.
+  const auto unsupported = backend.unsupported_counters();
+  assert(unsupported.total() == 0u);
 }
 
 void test_frontend_capture_replay(AddressSpace& memory) {
@@ -1082,6 +1089,23 @@ void test_frontend_ring_capture(AddressSpace& memory) {
   assert(capture.commands.size() == 2u);
 }
 
+void test_gpu_unsupported_counters_total() {
+  xenon::gpu::GpuUnsupportedCounters counters{};
+  counters.unknown_packets = 1;
+  counters.unknown_registers = 2;
+  counters.unsupported_fetch_formats = 3;
+  counters.unsupported_texture_formats = 4;
+  counters.unsupported_sampler_behaviors = 5;
+  counters.unsupported_shader_instructions = 6;
+  counters.unsupported_shader_features = 7;
+  counters.unhandled_resolve_modes = 8;
+  counters.unhandled_depth_stencil_paths = 9;
+  counters.unexpected_ownership_transitions = 10;
+  counters.failed_resource_barriers = 11;
+  counters.fallback_shader_uses = 12;
+  assert(counters.total() == 78u);  // 1+2+...+12
+}
+
 void test_truncation_fault(AddressSpace& memory, CommandProcessor& cp) {
   constexpr std::uint32_t base = 0x01008000;
   store_be32(memory, base, make_packet_type0(0x100, 2));
@@ -1094,10 +1118,32 @@ void test_truncation_fault(AddressSpace& memory, CommandProcessor& cp) {
   assert(threw);
 }
 
+// Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+// fallback audit"): a register index outside RegisterFile::kRegisterCount
+// must be observable in Statistics::unknown_register_writes even though
+// emit_register_write() still throws for it (a deliberate, pre-existing
+// hard-fail this pass does not change - see command_processor.cpp).
+void test_unknown_register_write_is_counted(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t base = 0x01009000;
+  constexpr std::uint32_t out_of_range_register = RegisterFile::kRegisterCount;
+  write_words(memory, base,
+             {make_packet_type0(out_of_range_register, 1), 0xDEADBEEFu});
+  const auto before = cp.statistics().unknown_register_writes;
+  bool threw = false;
+  try {
+    cp.execute_buffer(base, 2);
+  } catch (const std::out_of_range&) {
+    threw = true;
+  }
+  assert(threw && "an out-of-range register index must still fail loudly");
+  assert(cp.statistics().unknown_register_writes == before + 1u);
+}
+
 }  // namespace
 
 int main() {
   test_headers();
+  test_gpu_unsupported_counters_total();
 
   AddressSpace memory;
   assert(memory.initialize());
@@ -1140,6 +1186,7 @@ int main() {
   test_portable_capture_round_trip(memory);
   test_frontend_ring_capture(memory);
   test_truncation_fault(memory, cp);
+  test_unknown_register_write_is_counted(memory, cp);
 
   std::cout << "xenon_gpu_frontend_tests: ok (PM4 + shared memory + graphics IR)\n";
   return 0;

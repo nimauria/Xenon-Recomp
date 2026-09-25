@@ -352,6 +352,7 @@ std::vector<std::uint32_t> CommandProcessor::read_payload(Reader& reader,
 void CommandProcessor::emit_register_write(std::uint32_t index,
                                            std::uint32_t value) {
   if (!registers_.write(index, value)) {
+    ++stats_.unknown_register_writes;
     throw std::out_of_range("Xenos register index outside register file");
   }
   stream_.emit(ir::RegisterWrite{index, value});

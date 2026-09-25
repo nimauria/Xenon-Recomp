@@ -244,13 +244,19 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   resource_handle.ptr += std::uint64_t(descriptor_index) * resource_increment_;
   device_->CreateShaderResourceView(resource, &view, resource_handle);
 
-  const auto address_mode = [](std::uint8_t clamp) {
+  const auto address_mode = [this](std::uint8_t clamp) {
     switch (clamp) {
       case 0: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
       case 1: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
       case 2: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
       case 3: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
-      default: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+      default:
+        // Real Xenos clamp mode is 0-3; anything else is guest-visible
+        // garbage or a value this backend does not yet map. Previously
+        // silently defaulted to BORDER with zero observability - Part 7 of
+        // the AC6 Runtime Readiness pass requires this be counted.
+        ++unsupported_sampler_behaviors_;
+        return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
     }
   };
   D3D12_SAMPLER_DESC sampler{};

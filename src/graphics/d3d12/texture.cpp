@@ -56,6 +56,7 @@ bool TextureImage::initialize(ID3D12Device* device, CommandQueue& queue,
   format_ = host_texture_format(texture.layout.format.host_format);
   if (format_ == DXGI_FORMAT_UNKNOWN) {
     error_ = "Xenos texture format has no D3D12 image mapping";
+    unsupported_format_ = true;
     return false;
   }
   const auto dimension_support = descriptor.dimension == TextureDimension::OneD
@@ -170,6 +171,7 @@ bool TextureImage::initialize(ID3D12Device* device, CommandQueue& queue,
 void TextureImage::reset() noexcept {
   resource_.Reset();
   format_ = DXGI_FORMAT_UNKNOWN;
+  unsupported_format_ = false;
 }
 
 }  // namespace xenon::gpu::d3d12

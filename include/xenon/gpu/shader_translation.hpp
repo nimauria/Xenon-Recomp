@@ -40,6 +40,15 @@ struct LoweredShader {
   ShaderReflection reflection{};
   std::vector<std::string> diagnostics{};
   bool complete{};
+  // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+  // fallback audit"): structured counts alongside the human-readable
+  // diagnostics above, filled in at the exact point lower() recognizes each
+  // case, so a caller can fold specific unsupported-operation categories
+  // into GpuUnsupportedCounters without fragile string matching on
+  // diagnostics' free-text messages.
+  std::uint32_t unsupported_instructions{};
+  std::uint32_t unsupported_features{};
+  std::uint32_t unsupported_fetch_formats{};
 };
 
 class HlslShaderLowerer {

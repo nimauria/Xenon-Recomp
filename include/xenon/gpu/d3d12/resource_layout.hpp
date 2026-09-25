@@ -68,6 +68,13 @@ class ResourceLayout {
   [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE memory_export_handle(
       std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept;
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // Part 7 of the AC6 Runtime Readiness pass: count of bind_texture() calls
+  // whose guest sampler clamp mode fell outside Xenos's real 0-3 range and
+  // silently mapped to D3D12_TEXTURE_ADDRESS_MODE_BORDER instead of erroring
+  // - previously not observable at all.
+  [[nodiscard]] std::uint64_t unsupported_sampler_behaviors() const noexcept {
+    return unsupported_sampler_behaviors_;
+  }
 
  private:
   struct DrawBindings {
@@ -89,6 +96,7 @@ class ResourceLayout {
   std::uint32_t resource_increment_{};
   std::uint32_t sampler_increment_{};
   std::string error_{};
+  std::uint64_t unsupported_sampler_behaviors_{};
 };
 
 }  // namespace xenon::gpu::d3d12

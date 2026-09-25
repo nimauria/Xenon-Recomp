@@ -38,13 +38,19 @@ VkImageType image_type(TextureDimension dimension) {
          dimension == TextureDimension::ThreeD ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
 }
 
-VkSamplerAddressMode address_mode(std::uint8_t clamp) {
+VkSamplerAddressMode address_mode(std::uint8_t clamp, std::uint64_t& unsupported_counter) {
   switch (clamp) {
     case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
     case 1: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
     case 2: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
-    default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    default:
+      // Real Xenos clamp mode is 0-3; anything else is guest-visible
+      // garbage or a value this backend does not yet map. Previously
+      // silently defaulted to CLAMP_TO_BORDER with zero observability -
+      // Part 7 of the AC6 Runtime Readiness pass requires this be counted.
+      ++unsupported_counter;
+      return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
   }
 }
 
@@ -110,6 +116,8 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
                               const DecodedTexture& texture) {
   reset();
   error_.clear();
+  unsupported_format_ = false;
+  unsupported_sampler_behaviors_ = 0;
   if (!texture.valid || !physical_device || !device) {
     error_ = "Vulkan texture image requires decoded texture data and a device";
     return false;
@@ -118,6 +126,7 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
   format_ = host_texture_format(texture.layout.format.host_format);
   if (format_ == VK_FORMAT_UNDEFINED) {
     error_ = "Xenos texture format has no Vulkan image mapping";
+    unsupported_format_ = true;
     reset();
     return false;
   }
@@ -261,9 +270,9 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
   sampler_info.minFilter = descriptor.min_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
   sampler_info.mipmapMode = descriptor.mip_filter ? VK_SAMPLER_MIPMAP_MODE_LINEAR
                                                    : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-  sampler_info.addressModeU = address_mode(descriptor.clamps[0]);
-  sampler_info.addressModeV = address_mode(descriptor.clamps[1]);
-  sampler_info.addressModeW = address_mode(descriptor.clamps[2]);
+  sampler_info.addressModeU = address_mode(descriptor.clamps[0], unsupported_sampler_behaviors_);
+  sampler_info.addressModeV = address_mode(descriptor.clamps[1], unsupported_sampler_behaviors_);
+  sampler_info.addressModeW = address_mode(descriptor.clamps[2], unsupported_sampler_behaviors_);
   sampler_info.mipLodBias = float(descriptor.lod_bias) / 32.0f;
   sampler_info.minLod = float(descriptor.mip_min_level);
   sampler_info.maxLod = float(descriptor.mip_max_level);

@@ -69,6 +69,21 @@ if(XENON_ENABLE_AUDIO AND NOT XENON_ENABLE_MEMORY)
 endif()
 
 # -----------------------------------------------------------------------------
+# Logging: the AC6 Runtime Readiness pass's shared diagnostic backbone (Phase
+# 0). A standalone library (not folded directly into xenon_core) so any other
+# static library that needs it - GPU/graphics included - can link it
+# directly without depending on the rest of xenon_core, and without risking an
+# ODR violation from two libraries each compiling their own copy of
+# Logger::instance()'s function-local static singleton.
+add_library(xenon_logging STATIC
+  src/logging/logger.cpp
+)
+target_include_directories(xenon_logging PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_features(xenon_logging PUBLIC cxx_std_20)
+xenon_enable_warnings(xenon_logging)
+add_library(Xenon::Logging ALIAS xenon_logging)
+
+# -----------------------------------------------------------------------------
 # Core runtime
 add_library(xenon_core STATIC
   src/core/runtime.cpp
@@ -79,7 +94,6 @@ add_library(xenon_core STATIC
   src/core/run_fingerprint.cpp
   src/core/capability_report.cpp
   src/core/import_classification.cpp
-  src/logging/logger.cpp
   src/xam/user_manager.cpp
   src/xam/locale_manager.cpp
   src/xam/content_manager.cpp
@@ -99,6 +113,10 @@ add_library(xenon_core STATIC
 target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(xenon_core PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_core)
+# xenon_logging is unconditional (declared just above, no optional
+# dependency), unlike every other subsystem xenon_core links - see the
+# comment below for why those wait until further down the file.
+target_link_libraries(xenon_core PUBLIC xenon_logging)
 # Session depends on all major subsystems, but none of those subsystem
 # targets (xenon_memory, xenon_cpu, xenon_filesystem, xenon_kernel,
 # xenon_input, xenon_graphics, xenon_xbox_kernel_io) exist yet at this point
@@ -547,7 +565,7 @@ if(XENON_ENABLE_GRAPHICS)
     src/graphics/xenos/graphics_system.cpp
     src/graphics/windows/backend_capabilities.cpp
   )
-  target_link_libraries(xenon_graphics PUBLIC xenon_memory)
+  target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(WIN32)
     # Runtime capability discovery lives in the common layer and calls DXGI
     # and D3D12 even when the optional renderer target is disabled.

@@ -248,6 +248,41 @@ int main() {
     auto result = session.initialize(config);
     assert(result.success && "Explicit Null graphics backend should be accepted");
     assert(session.gpu() != nullptr && "gpu() should be populated for an explicit Null backend");
+
+    // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+    // fallback audit"): once a GPU backend exists, capability_report() must
+    // publish a real "gpu" section built from its live unsupported/
+    // performance counters - not fabricated, not omitted.
+    const auto report = session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    const auto* gpu_section = sections->find("gpu");
+    assert(gpu_section != nullptr && gpu_section->is_object());
+    assert(gpu_section->get_number("unsupportedOperationsTotal") == 0.0);
+    assert(gpu_section->get_number("unknownPackets") == 0.0);
+    assert(gpu_section->get_number("unsupportedTextureFormats") == 0.0);
+    assert(gpu_section->get_number("fallbackShaderUses") == 0.0);
+
+    session.shutdown();
+  }
+
+  // Test: capability_report() must NOT publish a "gpu" section when no GPU
+  // backend has been created (enable_graphics=false) - "not measured" must
+  // stay distinguishable from "measured and clean".
+  {
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    assert(session.initialize(config).success);
+
+    const auto report = session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    assert(sections->find("gpu") == nullptr &&
+           "no gpu section should be published when no GPU backend exists");
+
     session.shutdown();
   }
 

@@ -1516,6 +1516,48 @@ JsonValue XenonSession::capability_report() const {
     report.set_section("fallback", std::move(fallback));
   }
 
+  // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+  // fallback audit"): a "gpu" section built from the live backend counters
+  // - see GpuUnsupportedCounters's doc comment on why these must reflect
+  // reality rather than being tuned to read as zero. Omitted entirely (not
+  // reported as zero) when no GPU backend exists yet, so a caller can tell
+  // "not measured" apart from "measured and clean".
+  if (gpu_) {
+    JsonValue gpu_section = JsonValue::make_object();
+    const auto unsupported = gpu_->unsupported_counters();
+    gpu_section.set("unknownPackets", static_cast<std::int64_t>(unsupported.unknown_packets));
+    gpu_section.set("unknownRegisters", static_cast<std::int64_t>(unsupported.unknown_registers));
+    gpu_section.set("unsupportedFetchFormats",
+                    static_cast<std::int64_t>(unsupported.unsupported_fetch_formats));
+    gpu_section.set("unsupportedTextureFormats",
+                    static_cast<std::int64_t>(unsupported.unsupported_texture_formats));
+    gpu_section.set("unsupportedSamplerBehaviors",
+                    static_cast<std::int64_t>(unsupported.unsupported_sampler_behaviors));
+    gpu_section.set("unsupportedShaderInstructions",
+                    static_cast<std::int64_t>(unsupported.unsupported_shader_instructions));
+    gpu_section.set("unsupportedShaderFeatures",
+                    static_cast<std::int64_t>(unsupported.unsupported_shader_features));
+    gpu_section.set("unhandledResolveModes",
+                    static_cast<std::int64_t>(unsupported.unhandled_resolve_modes));
+    gpu_section.set("unhandledDepthStencilPaths",
+                    static_cast<std::int64_t>(unsupported.unhandled_depth_stencil_paths));
+    gpu_section.set("unexpectedOwnershipTransitions",
+                    static_cast<std::int64_t>(unsupported.unexpected_ownership_transitions));
+    gpu_section.set("failedResourceBarriers",
+                    static_cast<std::int64_t>(unsupported.failed_resource_barriers));
+    gpu_section.set("fallbackShaderUses",
+                    static_cast<std::int64_t>(unsupported.fallback_shader_uses));
+    gpu_section.set("unsupportedOperationsTotal", static_cast<std::int64_t>(unsupported.total()));
+
+    const auto performance = gpu_->performance_counters();
+    gpu_section.set("submissions", static_cast<std::int64_t>(performance.submissions));
+    gpu_section.set("draws", static_cast<std::int64_t>(performance.draws));
+    gpu_section.set("shaderCacheMisses", static_cast<std::int64_t>(performance.shader_cache_misses));
+    gpu_section.set("resolveOperations", static_cast<std::int64_t>(performance.resolve_operations));
+
+    report.set_section("gpu", std::move(gpu_section));
+  }
+
   return report.build();
 }
 

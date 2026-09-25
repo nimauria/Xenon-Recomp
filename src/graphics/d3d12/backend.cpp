@@ -23,6 +23,7 @@
 #include "xenon/gpu/edram_ownership.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/memory/types.hpp"
 #ifdef XENON_HAS_DXC
 #include "xenon/gpu/dxc_shader_compiler.hpp"
@@ -70,6 +71,10 @@ class Backend::Impl {
   std::size_t draw_count{};
   std::size_t compiled_shader_count{};
   GpuPerformanceCounters performance{};
+  // Part 7 of the AC6 Runtime Readiness pass - see GpuUnsupportedCounters's
+  // doc comment. Incremented at the point each category is actually
+  // detected, never inferred after the fact from error strings.
+  GpuUnsupportedCounters unsupported{};
   std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
@@ -250,6 +255,7 @@ class Backend::Impl {
     }
     if (!edram_ownership.commit(plan)) {
       error = "D3D12 EDRAM ownership plan became stale";
+      ++unsupported.unexpected_ownership_transitions;
       return false;
     }
     return true;
@@ -300,6 +306,7 @@ class Backend::Impl {
     }
     if (!edram_ownership.commit(plan)) {
       error = "D3D12 depth EDRAM ownership plan became stale";
+      ++unsupported.unexpected_ownership_transitions;
       return false;
     }
     return true;
@@ -438,6 +445,26 @@ void Backend::consume(const ir::Command& command) {
   impl_->collect_retired_resources();
   ++impl_->command_count;
   ++impl_->performance.commands;
+  // Part 7 of the AC6 Runtime Readiness pass: RegisterWrite/DrawPacket/
+  // ShaderLoad are the only Command variants this backend actually consumes
+  // below. PhysicalMemoryWrite/IndirectBuffer/ShaderPacket/
+  // SynchronizationPacket/EventPacket/StatePacket/Type3Packet reaching here
+  // have no handler at all - previously silently dropped. Type3Packet's own
+  // doc comment (ir.hpp) is explicit that "packets are never silently
+  // discarded merely because the host backend does not consume them yet";
+  // this is the observability half of that promise; consuming them is
+  // separate future work.
+  if (!std::holds_alternative<ir::RegisterWrite>(command) &&
+      !std::holds_alternative<ir::DrawPacket>(command) &&
+      !std::holds_alternative<ir::ShaderLoad>(command)) {
+    ++impl_->unsupported.unknown_packets;
+    xenon::logging::Logger::instance().log_if_enabled(
+        xenon::logging::Level::Warning, "gpu", [&] {
+          return "unhandled GPU command variant (index=" +
+                 std::to_string(command.index()) + ")";
+        });
+    return;
+  }
   if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
     impl_->resource_state.apply(*write);
   }
@@ -485,6 +512,7 @@ void Backend::consume(const ir::Command& command) {
       if (state.copy.command != CopyCommand::Raw &&
           state.copy.command != CopyCommand::Convert) {
         impl_->error = "D3D12 Xenos resolve command is unsupported";
+        ++impl_->unsupported.unhandled_resolve_modes;
         return;
       }
       const auto samples = resolve_plan.samples;
@@ -665,6 +693,7 @@ void Backend::consume(const ir::Command& command) {
           }
         } else {
           impl_->error = "D3D12 Xenos resolve selected an unsupported sample set";
+          ++impl_->unsupported.unhandled_resolve_modes;
           return;
         }
       }
@@ -923,6 +952,7 @@ void Backend::consume(const ir::Command& command) {
                                              image->resource(), image->format(),
                                              descriptor.mip_max_level + 1u, descriptor)) {
             impl_->error = image->error().empty() ? impl_->resources.error() : image->error();
+            if (image->unsupported_format()) ++impl_->unsupported.unsupported_texture_formats;
             return;
           }
           impl_->texture_dirty.track_clean(key, decoded.layout, dirty_epoch);
@@ -1018,6 +1048,9 @@ void Backend::consume(const ir::Command& command) {
         ShaderLoweringOptions lowering_options{};
         lowering_options.force_guest_memory_rw = true;
         const auto lowered = HlslShaderLowerer::lower(decoded, lowering_options);
+        impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+        impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+        impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
         if (!lowered.complete) {
           impl_->error = lowered.diagnostics.empty()
                              ? "D3D12 writable guest-memory shader lowering failed"
@@ -1061,6 +1094,9 @@ void Backend::consume(const ir::Command& command) {
           lowering_options.force_guest_memory_rw = memexport_writable;
           const auto lowered =
               HlslShaderLowerer::lower(decoded_pixel->second, lowering_options);
+          impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+          impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+          impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
           if (!lowered.complete) {
             impl_->error = lowered.diagnostics.empty()
                                ? "D24FS8 pixel shader lowering failed"
@@ -1126,19 +1162,25 @@ void Backend::consume(const ir::Command& command) {
         impl_->error = batch.error;
         return;
       }
-      if (batch.requires_rectangle_expansion &&
-          !impl_->rectangle_list_shader) {
-        ShaderCompileOptions options{};
-        options.format = ShaderBinaryFormat::Dxil;
-        impl_->rectangle_list_shader = impl_->shader_cache.get_or_compile(
-            make_rectangle_list_geometry_shader(), options);
-        if (!impl_->rectangle_list_shader->succeeded) {
-          impl_->error = impl_->rectangle_list_shader->diagnostics.empty()
-                             ? "D3D12 RectangleList shader compilation failed"
-                             : impl_->rectangle_list_shader->diagnostics.front();
-          return;
+      if (batch.requires_rectangle_expansion) {
+        // A host-only fallback geometry shader, not the title's own -
+        // Part 7 of the AC6 Runtime Readiness pass wants every draw that
+        // actually takes this path counted, not merely its (rare) compile
+        // failure.
+        ++impl_->unsupported.fallback_shader_uses;
+        if (!impl_->rectangle_list_shader) {
+          ShaderCompileOptions options{};
+          options.format = ShaderBinaryFormat::Dxil;
+          impl_->rectangle_list_shader = impl_->shader_cache.get_or_compile(
+              make_rectangle_list_geometry_shader(), options);
+          if (!impl_->rectangle_list_shader->succeeded) {
+            impl_->error = impl_->rectangle_list_shader->diagnostics.empty()
+                               ? "D3D12 RectangleList shader compilation failed"
+                               : impl_->rectangle_list_shader->diagnostics.front();
+            return;
+          }
+          ++impl_->compiled_shader_count;
         }
-        ++impl_->compiled_shader_count;
       }
       // D3D12 has no FRONT_AND_BACK cull mode and Vulkan does, but the common
       // result is simpler: once Xenos has requested both faces culled, no
@@ -1352,15 +1394,31 @@ void Backend::consume(const ir::Command& command) {
 #ifdef XENON_HAS_DXC
     impl_->decoded_shaders[load->program.hash()] = load->decoded;
     const auto lowered = HlslShaderLowerer::lower(load->decoded);
-    ShaderCompileOptions options{};
-    options.format = ShaderBinaryFormat::Dxil;
-    const auto compiled = impl_->shader_cache.get_or_compile(lowered, options);
-    if (compiled->succeeded) {
-      ++impl_->compiled_shader_count;
-      impl_->shaders[load->program.hash()] = compiled;
+    impl_->unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
+    impl_->unsupported.unsupported_shader_features += lowered.unsupported_features;
+    impl_->unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
+    if (!lowered.complete) {
+      // Do not even attempt to compile an incomplete lowering - it would
+      // only fail again with a generic "compilation failed" that discards
+      // the specific, already-known reason lower() recorded.
+      impl_->error = lowered.diagnostics.empty() ? "DXIL shader lowering failed"
+                                                 : lowered.diagnostics.front();
+      xenon::logging::Logger::instance().log_if_enabled(
+          xenon::logging::Level::Warning, "gpu", [&] {
+            return "shader lowering failed (hash=" + std::to_string(load->program.hash()) +
+                   "): " + impl_->error;
+          });
     } else {
-      impl_->error = compiled->diagnostics.empty() ? "DXIL shader compilation failed"
-                                                   : compiled->diagnostics.front();
+      ShaderCompileOptions options{};
+      options.format = ShaderBinaryFormat::Dxil;
+      const auto compiled = impl_->shader_cache.get_or_compile(lowered, options);
+      if (compiled->succeeded) {
+        ++impl_->compiled_shader_count;
+        impl_->shaders[load->program.hash()] = compiled;
+      } else {
+        impl_->error = compiled->diagnostics.empty() ? "DXIL shader compilation failed"
+                                                     : compiled->diagnostics.front();
+      }
     }
 #endif
   }
@@ -1486,6 +1544,12 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
   auto result = impl_->performance;
   result.shader_cache_misses = impl_->compiled_shader_count;
   result.pipeline_cache_misses = impl_->pipeline_states.size();
+  return result;
+}
+
+GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
+  auto result = impl_->unsupported;
+  result.unsupported_sampler_behaviors += impl_->resources.unsupported_sampler_behaviors();
   return result;
 }
 bool Backend::ready() const noexcept { return impl_->ready; }

@@ -21,11 +21,18 @@ class TextureImage {
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // Part 7 of the AC6 Runtime Readiness pass: a structured signal alongside
+  // error(), set exactly when initialize() failed specifically because the
+  // guest texture format has no D3D12 mapping - distinct from every other
+  // initialize() failure reason, without the caller having to string-match
+  // error().
+  [[nodiscard]] bool unsupported_format() const noexcept { return unsupported_format_; }
 
  private:
   Microsoft::WRL::ComPtr<ID3D12Resource> resource_{};
   DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
   std::string error_{};
+  bool unsupported_format_{};
 };
 
 }  // namespace xenon::gpu::d3d12
