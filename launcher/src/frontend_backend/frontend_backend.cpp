@@ -18,6 +18,7 @@ FrontendBackend::FrontendBackend(QObject* parent)
       system_integration_(core_.settings(), core_.recovery().safeMode(), nullptr),
       recovery_(core_.recovery(), nullptr),
       runtime_(core_.runtime()),
+      network_(settings_, nullptr),
       input_(settings_, core_.paths(), kTestMode, nullptr),
       profiles_(core_.profiles(), core_.paths(), core_.library(), core_.modules(), settings_, runtime_, kTestMode, nullptr),
       modules_(core_.modules(), core_.library(), core_.packages(), core_.paths(), settings_, kTestMode,
@@ -65,6 +66,7 @@ ServiceResult FrontendBackend::initialize() {
   // initialization. Manual recovery actions remain available through the UI.
   if (!safe_mode) {
     static_cast<void>(input_.initialize());
+    network_.initialize();
     updates_.initialize();
   }
   return ServiceResult::success(safe_mode ? QStringLiteral("Launcher core ready in Safe Mode")
@@ -154,6 +156,12 @@ ServiceResult FrontendBackend::setSettingValue(const QString& key, const QVarian
     }
     return result;
   }
+  if (normalized.startsWith(QStringLiteral("network/"))) {
+    const auto result = settings_.setValidatedValue(normalized, value);
+    if (!result.ok) return result;
+    if (!recovery_.safeMode()) network_.reconfigure();
+    return result;
+  }
   if (normalized == QStringLiteral("runtime/graphicsBackend")) {
     const auto requested = value.toString();
     if (!runtime_.availableGraphicsBackends(kTestMode).contains(requested)) {
@@ -202,6 +210,9 @@ ServiceResult FrontendBackend::resetSetting(const QString& key) {
     return result;
   }
   settings_.reset(normalized);
+  if (normalized.startsWith(QStringLiteral("network/")) && !recovery_.safeMode()) {
+    network_.reconfigure();
+  }
   return ServiceResult::success();
 }
 
@@ -212,6 +223,12 @@ ServiceResult FrontendBackend::resetSettingsCategory(const QString& category_id)
     const auto result = settings_.resetCategory(normalized);
     if (!result.ok) return result;
     if (!recovery_.safeMode()) static_cast<void>(input_.reconfigure());
+    return result;
+  }
+  if (normalized == QStringLiteral("network")) {
+    const auto result = settings_.resetCategory(normalized);
+    if (!result.ok) return result;
+    if (!recovery_.safeMode()) network_.reconfigure();
     return result;
   }
   if (normalized == QStringLiteral("paths")) {

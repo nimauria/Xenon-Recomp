@@ -299,6 +299,8 @@ class LauncherBridge final : public QObject {
   // backend available, which the Network page must show honestly rather
   // than assuming either state.
   Q_INVOKABLE QString networkReachabilityStatus() const;
+  Q_INVOKABLE QVariantMap networkStatus() const;
+  Q_INVOKABLE void refreshNetworkStatus();
 
   // Deletes one file from inside the configured screenshots/captures
   // directory. Refuses (returns false, no-op) for any path that does not
@@ -345,6 +347,7 @@ class LauncherBridge final : public QObject {
   void notificationsChanged();
   void homeChanged();
   void inputChanged();
+  void networkChanged();
   void frontendAction(const QString& action);
   void navigationRequested(int page_index, const QString& target_id, const QString& section_id);
   void notificationRequested(const QString& title, const QString& message);

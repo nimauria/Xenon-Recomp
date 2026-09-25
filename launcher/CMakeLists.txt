@@ -257,6 +257,10 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/modules/updates/history/module_update_history_store.hpp
   src/frontend_backend/modules/package/module_package_installer.cpp
   src/frontend_backend/modules/package/module_package_installer.hpp
+  src/frontend_backend/network/network_feature.cpp
+  src/frontend_backend/network/network_feature.hpp
+  src/frontend_backend/network/qt_network_transport.cpp
+  src/frontend_backend/network/qt_network_transport.hpp
   src/frontend_backend/notifications/notification_center_feature.cpp
   src/frontend_backend/notifications/notification_center_feature.hpp
   src/frontend_backend/paths/paths_feature.cpp
@@ -296,6 +300,9 @@ if(TARGET xenon_filesystem)
 endif()
 if(TARGET xenon_input)
   target_link_libraries(xenon_launcher_core PRIVATE Xenon::Input)
+endif()
+if(TARGET xenon_network)
+  target_link_libraries(xenon_launcher_core PRIVATE Xenon::Network)
 endif()
 target_compile_features(xenon_launcher_core PUBLIC cxx_std_20)
 
@@ -655,4 +662,16 @@ if(XENON_BUILD_TESTS)
 
   add_test(NAME xenon_runtime_bridge_tests COMMAND xenon_runtime_bridge_tests)
   xenon_launcher_test_environment(xenon_runtime_bridge_tests)
+
+  if(TARGET xenon_network)
+    qt_add_executable(xenon_qt_network_transport_tests
+      tests/network/qt_network_transport_tests.cpp
+    )
+    target_link_libraries(xenon_qt_network_transport_tests PRIVATE
+      Xenon::LauncherCore Xenon::Network Qt6::Core Qt6::Network)
+    target_compile_features(xenon_qt_network_transport_tests PRIVATE cxx_std_20)
+    xenon_enable_test_asserts(xenon_qt_network_transport_tests)
+    add_test(NAME xenon_qt_network_transport_tests COMMAND xenon_qt_network_transport_tests)
+    xenon_launcher_test_environment(xenon_qt_network_transport_tests)
+  endif()
 endif()

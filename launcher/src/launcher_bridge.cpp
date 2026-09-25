@@ -57,6 +57,7 @@ LauncherBridge::LauncherBridge(QObject* parent)
   auto& notifications = backend_->notifications();
   auto& home = backend_->home();
   auto& input = backend_->input();
+  auto& network = backend_->network();
 
   auto& appearance = backend_->appearance();
   connect(&appearance, &xenon::launcher::frontend_backend::AppearanceFeature::themeChanged,
@@ -145,6 +146,8 @@ LauncherBridge::LauncherBridge(QObject* parent)
 
   connect(&input, &xenon::launcher::frontend_backend::InputFeature::changed,
           this, &LauncherBridge::inputChanged);
+  connect(&network, &xenon::launcher::frontend_backend::NetworkFeature::changed,
+          this, &LauncherBridge::networkChanged);
 
   frontendInputTimer_.setInterval(16);
   connect(&frontendInputTimer_, &QTimer::timeout, this, [this]() {
@@ -1053,6 +1056,8 @@ QString LauncherBridge::networkReachabilityStatus() const {
       return QStringLiteral("unknown");
   }
 }
+QVariantMap LauncherBridge::networkStatus() const { return backend_->network().snapshot(); }
+void LauncherBridge::refreshNetworkStatus() { backend_->network().refreshHealth(); }
 QString LauncherBridge::developerDiagnostics() const { return backend_->diagnostics().developerDiagnostics(); }
 QString LauncherBridge::userDiagnostics() const { return backend_->diagnostics().userDiagnostics(); }
 QString LauncherBridge::createSupportBundle() {

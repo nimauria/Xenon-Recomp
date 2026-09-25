@@ -1,0 +1,15 @@
+{
+  "protocolVersion": 1,
+  "minimumClientProtocol": 1,
+  "serviceVersion": "local-test",
+  "serverTime": "2026-09-25T12:00:00Z",
+  "capabilities": ["profile", "sessions", "future-optional-capability"],
+  "requiredCapabilities": ["sessions"],
+  "authenticationRequired": false,
+  "maintenance": false,
+  "endpoints": {
+    "realtime": "ws://127.0.0.1:38101/v1/events",
+    "relay": "http://127.0.0.1:38102"
+  },
+  "futureOptionalField": {"ignored": true}
+}

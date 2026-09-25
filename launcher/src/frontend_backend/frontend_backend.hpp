@@ -17,6 +17,7 @@
 #include "library/dlc/dlc_feature.hpp"
 #include "library/properties/game_properties_feature.hpp"
 #include "modules/modules_feature.hpp"
+#include "network/network_feature.hpp"
 #include "notifications/notification_center_feature.hpp"
 #include "paths/paths_feature.hpp"
 #include "profiles/profiles_feature.hpp"
@@ -67,6 +68,8 @@ class FrontendBackend final : public QObject {
   [[nodiscard]] const GamePropertiesFeature& gameProperties() const noexcept { return game_properties_; }
   [[nodiscard]] ModulesFeature& modules() noexcept { return modules_; }
   [[nodiscard]] const ModulesFeature& modules() const noexcept { return modules_; }
+  [[nodiscard]] NetworkFeature& network() noexcept { return network_; }
+  [[nodiscard]] const NetworkFeature& network() const noexcept { return network_; }
   [[nodiscard]] ImportExportFeature& importExport() noexcept { return import_export_; }
   [[nodiscard]] UpdateFeature& updates() noexcept { return updates_; }
   [[nodiscard]] RuntimeFeature& runtime() noexcept { return runtime_; }
@@ -102,6 +105,7 @@ class FrontendBackend final : public QObject {
   SystemIntegrationFeature system_integration_;
   RecoveryFeature recovery_;
   RuntimeFeature runtime_;
+  NetworkFeature network_;
   InputFeature input_;
   ProfilesFeature profiles_;
   ModulesFeature modules_;

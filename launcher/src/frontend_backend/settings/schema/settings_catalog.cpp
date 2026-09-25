@@ -93,6 +93,15 @@ const QList<Definition>& definitions() {
       {"runtime/afterLaunch", "runtime", "enum", QStringLiteral("Keep launcher open"),
        stringOptions({"Keep launcher open", "Minimize launcher", "Close launcher"})},
 
+      // Xenon Network is offline-first. Production intentionally has no
+      // default URL until a real service exists.
+      {"network/enabled", "network", "bool", false, {}},
+      {"network/environment", "network", "enum", QStringLiteral("Offline"),
+       stringOptions({"Offline", "Development", "Production"})},
+      {"network/baseUrl", "network", "string", QString{}, {}},
+      {"network/connectTimeoutMs", "network", "number", 5000.0, {}, 250.0, 30000.0, true},
+      {"network/requestTimeoutMs", "network", "number", 10000.0, {}, 500.0, 60000.0, true},
+
       {"graphics/shaderCache", "graphics", "bool", true, {}},
       {"graphics/shaderCacheMode", "graphics", "enum", QStringLiteral("Persistent"),
        stringOptions({"Persistent", "Session only"})},

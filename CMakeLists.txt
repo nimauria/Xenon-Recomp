@@ -40,7 +40,7 @@ option(XENON_ENABLE_INPUT "Enable input subsystem" ON)
 option(XENON_INPUT_ENABLE_SDL2 "Enable SDL2 controller backend when SDL2 is available" ON)
 option(XENON_INPUT_ENABLE_SDL3 "Enable SDL3 controller backend when SDL3 is available" ON)
 option(XENON_INPUT_ENABLE_XINPUT "Enable native Windows XInput backend" ON)
-option(XENON_ENABLE_NETWORK "Enable networking subsystem" OFF)
+option(XENON_ENABLE_NETWORK "Enable networking subsystem" ON)
 option(XENON_ENABLE_FILESYSTEM "Build the Xenon virtual filesystem subsystem" ON)
 option(XENON_ENABLE_KERNEL "Build the Xenon host-side kernel object/I/O layer" ${XENON_ENABLE_FILESYSTEM})
 
@@ -109,6 +109,26 @@ xenon_enable_warnings(xenon_core)
 # here would make every `if(TARGET ...)` check evaluate false and silently
 # leave xenon_core without any of its real dependencies.
 add_library(Xenon::Core ALIAS xenon_core)
+
+# -----------------------------------------------------------------------------
+# Xenon Network client/uplink. The protocol and service boundary are kept in a
+# Qt-free, platform-neutral target. Concrete HTTPS/realtime transports live at
+# the host edge (the launcher supplies the first Qt implementation) so Xbox/XAM
+# compatibility code never sees URLs, JSON, or a particular socket library.
+if(XENON_ENABLE_NETWORK)
+  add_library(xenon_network STATIC
+    src/network/types.cpp
+    src/network/routes.cpp
+    src/network/client.cpp
+    src/network/realtime.cpp
+    src/network/xbox_services.cpp
+  )
+  target_include_directories(xenon_network PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_compile_features(xenon_network PUBLIC cxx_std_20)
+  target_link_libraries(xenon_network PUBLIC Xenon::Core)
+  xenon_enable_warnings(xenon_network)
+  add_library(Xenon::Network ALIAS xenon_network)
+endif()
 
 # -----------------------------------------------------------------------------
 # Filesystem: host-independent Xbox-style VFS and content providers.
@@ -703,6 +723,15 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_run_fingerprint_tests PRIVATE xenon_core)
   xenon_enable_test_asserts(xenon_run_fingerprint_tests)
   add_test(NAME xenon_run_fingerprint_tests COMMAND xenon_run_fingerprint_tests)
+
+  if(TARGET xenon_network)
+    add_executable(xenon_network_tests tests/network/network_tests.cpp)
+    target_link_libraries(xenon_network_tests PRIVATE Xenon::Network)
+    target_compile_definitions(xenon_network_tests PRIVATE
+      XENON_NETWORK_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/network/fixtures")
+    xenon_enable_test_asserts(xenon_network_tests)
+    add_test(NAME xenon_network_tests COMMAND xenon_network_tests)
+  endif()
 
   add_executable(xenon_session_execution_tests
     tests/core/session_execution_tests.cpp)
