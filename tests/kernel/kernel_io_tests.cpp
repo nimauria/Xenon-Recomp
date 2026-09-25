@@ -14,6 +14,7 @@
 #include "xenon/filesystem/virtual_file_system.hpp"
 #include "xenon/kernel/io_manager.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/logger.hpp"
 
 namespace fs = xenon::filesystem;
 namespace kernel = xenon::kernel;
@@ -283,6 +284,62 @@ void test_async_ready_request_lifecycle() {
   assert(io.close(handle) == kernel::KernelIoCode::Success);
   const auto cancelled_result = cancelled->wait();
   assert(cancelled_result.code == kernel::KernelIoCode::Cancelled);
+}
+
+// Part 11 of the AC6 Runtime Readiness pass ("Filesystem / Content / Async
+// I/O"): async submit and completion must be individually observable
+// (request sequence number, operation, host thread), not just their net
+// effect on IoRequest's own state - so a real ordering issue (a request
+// completed out of the sequence it was submitted in, or completed on a
+// different host thread than expected) is diagnosable after the fact.
+void test_async_request_submit_and_completion_are_logged() {
+  using xenon::logging::Level;
+  using xenon::logging::Logger;
+
+  TempDirectory temp;
+  write_text(temp.path() / "diag.bin", "diagnostics");
+  kernel::KernelIoManager io(make_vfs(temp.path()));
+
+  kernel::KernelOpenOptions open{};
+  open.file = rw_open();
+  kernel::Handle handle{};
+  assert(io.open("game:\\diag.bin", open, handle).succeeded());
+
+  struct Captured {
+    Level level;
+    std::string category;
+    std::string message;
+  };
+  std::vector<Captured> captured;
+  auto& logger = Logger::instance();
+  const auto previous_level = logger.min_level();
+  logger.set_min_level(Level::Debug);
+  logger.set_sink([&](Level level, std::string_view category, std::string_view message) {
+    captured.push_back(Captured{level, std::string(category), std::string(message)});
+  });
+
+  std::shared_ptr<kernel::IoRequest> request;
+  assert(io.begin_request(handle, kernel::IoOperation::Read, 0xAAu, request).code ==
+         kernel::KernelIoCode::Pending);
+  kernel::IoStatus completion{};
+  assert(io.complete_request(handle, request->id(), completion) ==
+         kernel::KernelIoCode::Success);
+
+  logger.set_sink(nullptr);
+  logger.set_min_level(previous_level);
+
+  bool saw_submit = false, saw_completion = false;
+  const auto id_text = std::to_string(request->id());
+  for (const auto& entry : captured) {
+    if (entry.category != "io") continue;
+    if (entry.message.find("async submit: request=" + id_text) == 0) saw_submit = true;
+    if (entry.message.find("async completion: request=" + id_text) == 0)
+      saw_completion = true;
+  }
+  assert(saw_submit && "async submit must be logged with its request sequence number");
+  assert(saw_completion && "async completion must be logged with its request sequence number");
+
+  assert(io.close(handle) == kernel::KernelIoCode::Success);
 }
 
 void test_directory_create_and_kind_checks() {
@@ -661,6 +718,7 @@ int main() {
   test_delete_pending_waits_for_last_open_object();
   test_delete_on_close_and_handle_protection();
   test_async_ready_request_lifecycle();
+  test_async_request_submit_and_completion_are_logged();
   test_directory_create_and_kind_checks();
   test_rooted_relative_open_and_file_information();
   test_rename_information_with_root_directory();

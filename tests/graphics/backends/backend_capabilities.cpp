@@ -490,6 +490,28 @@ int main() {
         assert(std::memcmp(selected.data() + pixel * 4,
                            sample_colors[guest_sample].data(), 4) == 0);
     }
+    // Part 8 of the AC6 Runtime Readiness pass: when native 2x is
+    // unavailable, Xenos X2 falls back to a 4x attachment using host
+    // samples 0 and 3 (see validate_depth_sample_transfer_matrix's
+    // identical depth check) - host samples 1 and 2 are padding and must
+    // remain at the clear color (R8G8B8A8: {0,0,0,255} for this clear).
+    // Depth already asserted this; color previously did not.
+    if (!native_2x) {
+      assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
+      constexpr std::array<std::uint8_t, 4> kClearColor{0, 0, 0, 255};
+      std::vector<std::byte> native0, native3, padding1, padding2;
+      std::uint32_t pitch{};
+      assert(target.readback_native_sample(vulkan_queue, 0, 0, 0, 8, 8, native0, pitch));
+      assert(target.readback_native_sample(vulkan_queue, 3, 0, 0, 8, 8, native3, pitch));
+      assert(target.readback_native_sample(vulkan_queue, 1, 0, 0, 8, 8, padding1, pitch));
+      assert(target.readback_native_sample(vulkan_queue, 2, 0, 0, 8, 8, padding2, pitch));
+      for (std::size_t pixel = 0; pixel < 64; ++pixel) {
+        assert(std::memcmp(native0.data() + pixel * 4, sample_colors[0].data(), 4) == 0);
+        assert(std::memcmp(native3.data() + pixel * 4, sample_colors[1].data(), 4) == 0);
+        assert(std::memcmp(padding1.data() + pixel * 4, kClearColor.data(), 4) == 0);
+        assert(std::memcmp(padding2.data() + pixel * 4, kClearColor.data(), 4) == 0);
+      }
+    }
   }
   xenon::gpu::DxcShaderCompiler vulkan_compiler;
   assert(vulkan_compiler.available());
@@ -912,6 +934,25 @@ int main() {
         for (std::size_t pixel = 0; pixel < 64; ++pixel)
           assert(std::memcmp(selected.data() + pixel * 4,
                              d3d_sample_colors[guest_sample].data(), 4) == 0);
+      }
+      // Part 8 of the AC6 Runtime Readiness pass: see the identical Vulkan
+      // check above - host samples 1/2 are padding when X2 falls back to a
+      // native X4 attachment and must remain at the clear color.
+      if (!native_2x) {
+        assert(target.host_msaa() == xenon::gpu::MsaaSamples::X4);
+        constexpr std::array<std::uint8_t, 4> kClearColor{0, 0, 0, 255};
+        std::vector<std::byte> native0, native3, padding1, padding2;
+        std::uint32_t pitch{};
+        assert(target.readback_native_sample(queue, 0, 0, 0, 8, 8, native0, pitch));
+        assert(target.readback_native_sample(queue, 3, 0, 0, 8, 8, native3, pitch));
+        assert(target.readback_native_sample(queue, 1, 0, 0, 8, 8, padding1, pitch));
+        assert(target.readback_native_sample(queue, 2, 0, 0, 8, 8, padding2, pitch));
+        for (std::size_t pixel = 0; pixel < 64; ++pixel) {
+          assert(std::memcmp(native0.data() + pixel * 4, d3d_sample_colors[0].data(), 4) == 0);
+          assert(std::memcmp(native3.data() + pixel * 4, d3d_sample_colors[1].data(), 4) == 0);
+          assert(std::memcmp(padding1.data() + pixel * 4, kClearColor.data(), 4) == 0);
+          assert(std::memcmp(padding2.data() + pixel * 4, kClearColor.data(), 4) == 0);
+        }
       }
     }
     xenon::gpu::DxcShaderCompiler d3d_compiler;

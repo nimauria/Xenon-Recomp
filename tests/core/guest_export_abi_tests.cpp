@@ -631,6 +631,14 @@ int main() {
   if (!session.last_error().empty()) std::cout << "unexpected error: " << session.last_error() << "\n";
   assert(session.last_error().empty());
 
+  // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
+  // a real load_game()+start() round trip through this exact production
+  // pipeline must reach both platform-level milestones - proven here, not
+  // merely by unit-testing BootCheckpointTracker in isolation (see
+  // tests/core/boot_checkpoint_tests.cpp for that).
+  assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::XexLoaded));
+  assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::EntryStarted));
+
   // Step 3/15-16: verify the actual guest-visible ABI results, read back
   // through Memory V2 exactly as the guest program wrote them.
   auto* memory = session.memory();

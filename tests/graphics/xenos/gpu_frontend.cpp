@@ -951,6 +951,11 @@ void test_graphics_system_backend(AddressSpace& memory) {
   // looking-clean total either.
   const auto unsupported = backend.unsupported_counters();
   assert(unsupported.total() == 0u);
+  // Part 9: same honest-default requirement for shader coverage.
+  const auto coverage = backend.shader_coverage();
+  assert(coverage.shaders_discovered == 0u);
+  assert(coverage.translation_failures == 0u);
+  assert(coverage.cache_hits == 0u && coverage.cache_misses == 0u);
 }
 
 void test_frontend_capture_replay(AddressSpace& memory) {

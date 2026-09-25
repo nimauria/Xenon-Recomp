@@ -899,20 +899,35 @@ bool RenderTargetImage::readback_sample(
     std::vector<std::byte>& destination, std::uint32_t& row_pitch) {
   const auto mapping = map_guest_sample_to_host(
       surface_.msaa, guest_sample, host_msaa_ == MsaaSamples::X2);
-  if (!mapping || left >= right || top >= bottom || right > mip_width_ ||
-      bottom > mip_height_) {
+  if (!mapping) {
+    destination.clear();
+    row_pitch = 0;
     error_ = "invalid Vulkan selected-sample readback";
     return false;
   }
-  if (surface_.msaa == MsaaSamples::X1)
+  return readback_native_sample(queue, mapping->sample, left, top, right,
+                                bottom, destination, row_pitch);
+}
+
+bool RenderTargetImage::readback_native_sample(
+    CommandQueue& queue, std::uint32_t host_sample, std::uint32_t left,
+    std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+    std::vector<std::byte>& destination, std::uint32_t& row_pitch) {
+  const auto host_sample_count = 1u << static_cast<unsigned>(host_msaa_);
+  if (host_sample >= host_sample_count || left >= right || top >= bottom ||
+      right > mip_width_ || bottom > mip_height_) {
+    error_ = "invalid Vulkan native-sample readback";
+    return false;
+  }
+  if (surface_.msaa == MsaaSamples::X1 && host_sample == 0)
     return readback(queue,left,top,right,bottom,destination,row_pitch);
 #ifdef XENON_HAS_DXC
   return read_msaa_sample(physical_device_,device_,queue,image_,layout_,view_,
-                          format_,host_msaa_,mapping->sample,left,top,
+                          format_,host_msaa_,host_sample,left,top,
                           right-left,bottom-top,bytes_per_pixel_,destination,
                           row_pitch,error_);
 #else
-  error_ = "Vulkan selected-sample readback requires DXC";
+  error_ = "Vulkan native-sample readback requires DXC";
   return false;
 #endif
 }

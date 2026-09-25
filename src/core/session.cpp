@@ -26,6 +26,7 @@
 #include <sstream>
 
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
@@ -209,6 +210,14 @@ void XenonSession::record_dynamic_fallback_observation(
     write_observation(config_.adaptive_observation_mirror_path);
 }
 
+void XenonSession::reach_boot_checkpoint(BootCheckpoint checkpoint) {
+  if (!boot_checkpoints_.reach(checkpoint)) return;
+  logging::Logger::instance().log_if_enabled(
+      logging::Level::Info, "boot", [&] {
+        return std::string("checkpoint: ") + std::string(to_string(checkpoint));
+      });
+}
+
 XenonSession::XenonSession() = default;
 XenonSession::~XenonSession() {
   shutdown();
@@ -278,6 +287,7 @@ SessionResult XenonSession::initialize(const SessionConfig& config) {
     adaptive_observation_seen_.clear();
     dynamic_fallback_observation_seen_.clear();
   }
+  boot_checkpoints_.reset();
 
   if (!init_memory()) {
     return SessionResult::failure("Failed to initialize memory subsystem");
@@ -1212,6 +1222,7 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   }
 
   set_state(SessionState::Ready, "Game loaded successfully");
+  reach_boot_checkpoint(BootCheckpoint::XexLoaded);
   return SessionResult::ok("Game loaded", SessionState::Ready);
 }
 
@@ -1554,8 +1565,61 @@ JsonValue XenonSession::capability_report() const {
     gpu_section.set("draws", static_cast<std::int64_t>(performance.draws));
     gpu_section.set("shaderCacheMisses", static_cast<std::int64_t>(performance.shader_cache_misses));
     gpu_section.set("resolveOperations", static_cast<std::int64_t>(performance.resolve_operations));
+    gpu_section.set("textureCacheInvalidations",
+                    static_cast<std::int64_t>(performance.texture_cache_invalidations));
 
     report.set_section("gpu", std::move(gpu_section));
+
+    // Part 9 of the AC6 Runtime Readiness pass ("shader coverage report").
+    // Shaders are discovered dynamically as the title streams
+    // ir::ShaderLoad commands, so this is a live snapshot, not a
+    // static "every shader known before boot" requirement.
+    JsonValue shader_section = JsonValue::make_object();
+    const auto coverage = gpu_->shader_coverage();
+    shader_section.set("shadersDiscovered", static_cast<std::int64_t>(coverage.shaders_discovered));
+    shader_section.set("shadersTranslated", static_cast<std::int64_t>(coverage.shaders_translated));
+    shader_section.set("translationFailures",
+                       static_cast<std::int64_t>(coverage.translation_failures));
+    shader_section.set("cacheHits", static_cast<std::int64_t>(coverage.cache_hits));
+    shader_section.set("cacheMisses", static_cast<std::int64_t>(coverage.cache_misses));
+    report.set_section("shader", std::move(shader_section));
+  }
+
+  // Part 12 of the AC6 Runtime Readiness pass ("Title Update fidelity"):
+  // "Base SHA1, TU identity, Effective SHA1, Effective version" as its own
+  // section, distinct from runFingerprint's single effective_xex_sha1/
+  // tu_identity (which intentionally only describes what actually ran).
+  // Omitted (not zeroed) until a title is actually loaded.
+  if (effective_identity_) {
+    JsonValue title_update_section = JsonValue::make_object();
+    title_update_section.set(
+        "baseSha1", xbox::format_effective_image_hash(effective_identity_->base_image_hash));
+    title_update_section.set(
+        "effectiveSha1", xbox::format_effective_image_hash(effective_identity_->effective_image_hash));
+    title_update_section.set("titleUpdateApplied", effective_identity_->title_update_applied);
+    title_update_section.set(
+        "tuIdentity",
+        effective_identity_->title_update_applied
+            ? (format_xex_version(effective_identity_->base_version) + "+" +
+               format_xex_version(effective_identity_->effective_version))
+            : std::string("none"));
+    title_update_section.set("effectiveVersion",
+                            format_xex_version(effective_identity_->effective_version));
+    report.set_section("titleUpdate", std::move(title_update_section));
+  }
+
+  // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
+  // always published (unlike "gpu"/"shader", this needs no subsystem to
+  // exist) - the reached checkpoints in the order they actually happened,
+  // so a stalled run makes the last real progress point obvious.
+  {
+    JsonValue boot_section = JsonValue::make_object();
+    JsonValue checkpoints = JsonValue::make_array();
+    for (const auto checkpoint : boot_checkpoints_.reached_in_order()) {
+      checkpoints.append(JsonValue(std::string(to_string(checkpoint))));
+    }
+    boot_section.set("reached", std::move(checkpoints));
+    report.set_section("boot", std::move(boot_section));
   }
 
   return report.build();
@@ -2075,6 +2139,7 @@ std::uint32_t XenonSession::run_execution() {
   if (kernel_process_ && main_thread_) {
     kernel_process_->thread_manager().set_current_thread(main_thread_);
   }
+  reach_boot_checkpoint(BootCheckpoint::EntryStarted);
 
   execution_active_.store(true);
   const auto outcome =
@@ -2289,6 +2354,7 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
     context.memory.write32_be(thread_id_out, thread->thread_id());
   }
   context.cpu.gpr[3] = kernel::xbox::status::Success;
+  reach_boot_checkpoint(BootCheckpoint::FirstGuestThread);
   return true;
 }
 

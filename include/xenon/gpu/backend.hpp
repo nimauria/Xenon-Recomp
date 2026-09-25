@@ -22,6 +22,14 @@ struct GpuPerformanceCounters {
   std::uint64_t staging_transfers{};
   std::uint64_t queue_submissions{};
   std::uint64_t submission_time_ns{};
+  // Part 10 of the AC6 Runtime Readiness pass ("Memory / GPU coherency
+  // assertions"): a previously-cached guest texture was found dirty (a CPU
+  // write landed in its guest memory range since it was last uploaded, per
+  // memory::GuestMemoryCoherency's epoch) and was re-decoded/re-uploaded
+  // before this draw sampled it - the real CPU-write -> GPU-sample coherency
+  // path, not a first-time texture creation (which is not a re-validation
+  // and is not counted here).
+  std::uint64_t texture_cache_invalidations{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
@@ -55,6 +63,22 @@ struct GpuUnsupportedCounters {
            unexpected_ownership_transitions + failed_resource_barriers +
            fallback_shader_uses;
   }
+};
+
+// Part 9 of the AC6 Runtime Readiness pass ("shader coverage report").
+// Shaders are discovered dynamically as a title streams ir::ShaderLoad
+// commands - this is a live, cumulative report queryable at any point, not
+// a static "every shader known before boot" requirement. The target for a
+// fully-supported title is translationFailures == 0 and
+// unsupportedShaderInstructions/unsupportedFetchFormats (GpuUnsupportedCounters)
+// == 0; like those counters, these must reflect reality, never be tuned to
+// read as clean.
+struct GpuShaderCoverage {
+  std::uint64_t shaders_discovered{};    // Distinct ir::ShaderLoad programs seen.
+  std::uint64_t shaders_translated{};    // Successfully lowered to HLSL (may still fail to compile).
+  std::uint64_t translation_failures{};  // HlslShaderLowerer::lower() returned incomplete.
+  std::uint64_t cache_hits{};            // ShaderCache::get_or_compile() reused a prior compile.
+  std::uint64_t cache_misses{};          // ShaderCache::get_or_compile() actually invoked the compiler.
 };
 
 // Host graphics backends consume Xenon graphics IR, never PM4 directly. Vulkan
@@ -95,6 +119,10 @@ class Backend {
   // capability report can include a live, honest "GPU unsupported
   // operations: N" figure.
   [[nodiscard]] virtual GpuUnsupportedCounters unsupported_counters() const noexcept {
+    return {};
+  }
+  // See GpuShaderCoverage's doc comment.
+  [[nodiscard]] virtual GpuShaderCoverage shader_coverage() const noexcept {
     return {};
   }
 };

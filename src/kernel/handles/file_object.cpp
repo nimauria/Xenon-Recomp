@@ -1,9 +1,12 @@
 #include "xenon/kernel/file_object.hpp"
 
 #include "xenon/kernel/completion_port.hpp"
+#include "xenon/logging/logger.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <sstream>
+#include <thread>
 
 namespace xenon::kernel {
 namespace {
@@ -11,6 +14,32 @@ namespace {
 [[nodiscard]] bool can_access(filesystem::FileAccess granted,
                               filesystem::FileAccess required) noexcept {
   return filesystem::has_access(granted, required);
+}
+
+[[nodiscard]] std::string_view io_operation_name(IoOperation operation) noexcept {
+  switch (operation) {
+    case IoOperation::Read: return "Read";
+    case IoOperation::Write: return "Write";
+    case IoOperation::Flush: return "Flush";
+    case IoOperation::Resize: return "Resize";
+    case IoOperation::QueryDirectory: return "QueryDirectory";
+    case IoOperation::QueryInformation: return "QueryInformation";
+    case IoOperation::SetInformation: return "SetInformation";
+    case IoOperation::Other: return "Other";
+  }
+  return "Other";
+}
+
+// Part 11 of the AC6 Runtime Readiness pass ("Filesystem / Content / Async
+// I/O"): a stable string for whichever host thread submitted/completed a
+// request - not a guest thread id (this layer has no guest context), but
+// enough to spot a request submitted on one host thread and completed on a
+// different one, which is exactly the class of ordering issue this pass
+// asks to make observable without patching any specific title's own race.
+[[nodiscard]] std::string current_host_thread_tag() {
+  std::ostringstream out;
+  out << std::this_thread::get_id();
+  return out.str();
 }
 
 }  // namespace
@@ -97,6 +126,13 @@ std::shared_ptr<IoRequest> KernelFileObject::begin_request(
     return request;
   }
   requests_.emplace(id, request);
+  logging::Logger::instance().log_if_enabled(
+      logging::Level::Debug, "io", [&] {
+        return "async submit: request=" + std::to_string(id) +
+               " op=" + std::string(io_operation_name(operation)) +
+               " context=" + std::to_string(context) +
+               " thread=" + current_host_thread_tag();
+      });
   return request;
 }
 
@@ -110,8 +146,15 @@ KernelIoCode KernelFileObject::complete_request(std::uint64_t request_id,
     request = it->second;
     requests_.erase(it);
   }
-  return request->complete(result) ? KernelIoCode::Success
-                                   : KernelIoCode::InvalidParameter;
+  const auto completed = request->complete(result);
+  logging::Logger::instance().log_if_enabled(
+      logging::Level::Debug, "io", [&] {
+        return "async completion: request=" + std::to_string(request_id) +
+               " op=" + std::string(io_operation_name(request->operation())) +
+               " code=" + std::to_string(static_cast<int>(result.code)) +
+               " thread=" + current_host_thread_tag();
+      });
+  return completed ? KernelIoCode::Success : KernelIoCode::InvalidParameter;
 }
 
 KernelIoCode KernelFileObject::cancel_request(std::uint64_t request_id) {

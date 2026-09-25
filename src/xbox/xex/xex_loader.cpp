@@ -1905,6 +1905,8 @@ XexEffectiveIdentity compute_effective_identity(const XexImage& base_image, cons
   identity.base_version = base_image.execution_info.version;
   identity.effective_version = effective.execution_info.version;
   identity.effective_image_hash = compute_effective_image_hash(effective);
+  identity.base_image_hash = patched_image ? compute_effective_image_hash(base_image)
+                                           : identity.effective_image_hash;
   identity.title_update_applied = patched_image != nullptr;
   return identity;
 }

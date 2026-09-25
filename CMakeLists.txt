@@ -94,6 +94,7 @@ add_library(xenon_core STATIC
   src/core/run_fingerprint.cpp
   src/core/capability_report.cpp
   src/core/import_classification.cpp
+  src/core/boot_checkpoints.cpp
   src/xam/user_manager.cpp
   src/xam/locale_manager.cpp
   src/xam/content_manager.cpp
@@ -195,7 +196,7 @@ if(XENON_ENABLE_KERNEL)
     src/kernel/module/module.cpp
     src/kernel/exception/exception.cpp
   )
-  target_link_libraries(xenon_kernel PUBLIC xenon_filesystem)
+  target_link_libraries(xenon_kernel PUBLIC xenon_filesystem xenon_logging)
   target_include_directories(xenon_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_compile_features(xenon_kernel PUBLIC cxx_std_20)
   xenon_enable_warnings(xenon_kernel)
@@ -743,6 +744,11 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_run_fingerprint_tests PRIVATE xenon_core)
   xenon_enable_test_asserts(xenon_run_fingerprint_tests)
   add_test(NAME xenon_run_fingerprint_tests COMMAND xenon_run_fingerprint_tests)
+
+  add_executable(xenon_boot_checkpoint_tests tests/core/boot_checkpoint_tests.cpp)
+  target_link_libraries(xenon_boot_checkpoint_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_boot_checkpoint_tests)
+  add_test(NAME xenon_boot_checkpoint_tests COMMAND xenon_boot_checkpoint_tests)
 
   if(TARGET xenon_network)
     add_executable(xenon_network_tests tests/network/network_tests.cpp)

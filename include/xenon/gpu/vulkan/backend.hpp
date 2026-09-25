@@ -33,6 +33,7 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool presentation_ready() const noexcept override;
   [[nodiscard]] GpuPerformanceCounters performance_counters() const noexcept override;
   [[nodiscard]] GpuUnsupportedCounters unsupported_counters() const noexcept override;
+  [[nodiscard]] GpuShaderCoverage shader_coverage() const noexcept override;
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::size_t command_count() const noexcept;
   [[nodiscard]] std::size_t draw_count() const noexcept;

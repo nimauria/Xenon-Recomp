@@ -387,6 +387,14 @@ struct XexEffectiveIdentity {
   XexVersion base_version{};
   XexVersion effective_version{};
   std::array<std::byte, 20> effective_image_hash{};
+  // Part 12 of the AC6 Runtime Readiness pass ("Title Update fidelity"):
+  // the base image's own hash, independent of whether a title update was
+  // applied - equal to effective_image_hash exactly when
+  // title_update_applied is false. Lets a report show "Base SHA1" and
+  // "Effective SHA1" as two genuinely distinct values (per the pass's own
+  // required report format) instead of only ever exposing whichever image
+  // actually ran.
+  std::array<std::byte, 20> base_image_hash{};
   bool title_update_applied{false};
 };
 

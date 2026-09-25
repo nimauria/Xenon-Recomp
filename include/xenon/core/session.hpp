@@ -14,6 +14,7 @@
 #include <tuple>
 #include <vector>
 
+#include "xenon/core/boot_checkpoints.hpp"
 #include "xenon/core/capability_report.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/guest_thread_context.hpp"
@@ -289,6 +290,12 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] kernel::ExceptionDispatcher& exception_dispatcher() noexcept {
     return exception_dispatcher_;
   }
+  // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints").
+  // Read-only public access so a caller (or a future runtime-host UI) can
+  // inspect boot progress independently of capability_report().
+  [[nodiscard]] const BootCheckpointTracker& boot_checkpoints() const noexcept {
+    return boot_checkpoints_;
+  }
   // The canonical owner/context for the running title once load_game()
   // succeeds: null before that. Normal execution is
   // XenonSession -> KernelProcess -> KernelThread -> CPU V2, not a bare
@@ -513,6 +520,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // process/thread-scoped guest exception path instead of only a stringified
   // last_error(). See run_execution()'s catch clauses.
   kernel::ExceptionDispatcher exception_dispatcher_{};
+  BootCheckpointTracker boot_checkpoints_{};
+  // Logs (category "boot") and idempotently marks `checkpoint` reached.
+  void reach_boot_checkpoint(BootCheckpoint checkpoint);
 
   // Native extension (module) dynamic loading. See docs/runtime/RUNTIME_HOST.md for
   // the export contract a module's compiled-code library must provide.

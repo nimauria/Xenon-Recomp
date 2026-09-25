@@ -169,6 +169,16 @@ int main() {
     assert(hot_pcs != nullptr && hot_pcs->is_array() && hot_pcs->as_array()->empty());
     assert(sections->find("runFingerprint") != nullptr);
 
+    // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
+    // published unconditionally (no game loaded yet, so genuinely empty -
+    // not omitted the way "gpu"/"shader" are when no GPU backend exists,
+    // since a boot-progress report is meaningful even before a title is
+    // loaded: "reached nothing yet" is itself useful information).
+    const auto* boot = sections->find("boot");
+    assert(boot != nullptr && boot->is_object());
+    const auto* reached = boot->find("reached");
+    assert(reached != nullptr && reached->is_array() && reached->as_array()->empty());
+
     session.shutdown();
   }
 
@@ -262,6 +272,17 @@ int main() {
     assert(gpu_section->get_number("unknownPackets") == 0.0);
     assert(gpu_section->get_number("unsupportedTextureFormats") == 0.0);
     assert(gpu_section->get_number("fallbackShaderUses") == 0.0);
+    assert(gpu_section->get_number("textureCacheInvalidations") == 0.0);
+
+    // Part 9 of the AC6 Runtime Readiness pass ("shader coverage report"):
+    // a fresh Null-backend session has discovered nothing yet, so every
+    // field must read a real, honest zero.
+    const auto* shader_section = sections->find("shader");
+    assert(shader_section != nullptr && shader_section->is_object());
+    assert(shader_section->get_number("shadersDiscovered") == 0.0);
+    assert(shader_section->get_number("translationFailures") == 0.0);
+    assert(shader_section->get_number("cacheHits") == 0.0);
+    assert(shader_section->get_number("cacheMisses") == 0.0);
 
     session.shutdown();
   }
@@ -282,6 +303,8 @@ int main() {
     assert(sections != nullptr && sections->is_object());
     assert(sections->find("gpu") == nullptr &&
            "no gpu section should be published when no GPU backend exists");
+    assert(sections->find("shader") == nullptr &&
+           "no shader section should be published when no GPU backend exists");
 
     session.shutdown();
   }

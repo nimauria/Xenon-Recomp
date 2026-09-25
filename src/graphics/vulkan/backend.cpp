@@ -74,6 +74,9 @@ class Backend::Impl {
   // doc comment. Incremented at the point each category is actually
   // detected, never inferred after the fact from error strings.
   GpuUnsupportedCounters unsupported{};
+  // Part 9 - see GpuShaderCoverage's doc comment and the identical member
+  // in d3d12/backend.cpp.
+  std::uint64_t shader_translation_failures{};
   std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
@@ -870,9 +873,12 @@ void Backend::consume(const ir::Command& command) {
         const auto& descriptor = *state.textures[slot];
         const auto key = descriptor.hash();
         auto existing = impl_->textures.find(key);
-        const bool refresh = existing == impl_->textures.end() ||
-                             impl_->texture_dirty.consume_dirty(
-                                 key, impl_->memory->coherency(), dirty_epoch);
+        const bool already_cached = existing != impl_->textures.end();
+        const bool dirty = already_cached &&
+                          impl_->texture_dirty.consume_dirty(
+                              key, impl_->memory->coherency(), dirty_epoch);
+        const bool refresh = !already_cached || dirty;
+        if (dirty) ++impl_->performance.texture_cache_invalidations;
         if (refresh) {
           // Texture decoding is still CPU-side. Preserve GPU-resident
           // memexport normally, but if a later draw actually samples a
@@ -1415,6 +1421,7 @@ void Backend::consume(const ir::Command& command) {
     if (!lowered.complete) {
       // Do not even attempt to compile an incomplete lowering - see the
       // identical fix in d3d12/backend.cpp's consume().
+      ++impl_->shader_translation_failures;
       impl_->error = lowered.diagnostics.empty() ? "SPIR-V shader lowering failed"
                                                  : lowered.diagnostics.front();
       xenon::logging::Logger::instance().log_if_enabled(
@@ -1562,6 +1569,19 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
 
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
   return impl_->unsupported;
+}
+
+GpuShaderCoverage Backend::shader_coverage() const noexcept {
+  GpuShaderCoverage coverage{};
+  coverage.shaders_discovered = impl_->decoded_shaders.size();
+  coverage.translation_failures = impl_->shader_translation_failures;
+  coverage.shaders_translated =
+      coverage.shaders_discovered >= coverage.translation_failures
+          ? coverage.shaders_discovered - coverage.translation_failures
+          : 0u;
+  coverage.cache_hits = impl_->shader_cache.hits();
+  coverage.cache_misses = impl_->shader_cache.misses();
+  return coverage;
 }
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }

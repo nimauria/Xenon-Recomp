@@ -222,6 +222,18 @@ void test_base_only_launch() {
   session.memory()->read_bytes(kMarkerAddress, marker);
   assert(marker[0] == kBaseMarker && "mapped guest memory must contain the base image's own bytes");
 
+  // Part 12 of the AC6 Runtime Readiness pass ("Title Update fidelity"):
+  // capability_report()'s "titleUpdate" section - Base SHA1 must equal
+  // Effective SHA1 when no update was applied.
+  {
+    const auto report = session.capability_report();
+    const auto* title_update = report.find("sections")->find("titleUpdate");
+    assert(title_update != nullptr && title_update->is_object());
+    assert(title_update->get_bool("titleUpdateApplied") == false);
+    assert(title_update->get_string("baseSha1") == title_update->get_string("effectiveSha1"));
+    assert(title_update->get_string("tuIdentity") == "none");
+  }
+
   session.shutdown();
   std::cout << "  [ok] base-only launch: no title update required, effective identity == base identity\n";
 }
@@ -269,6 +281,23 @@ void test_valid_title_update_applied() {
   session.memory()->read_bytes(kMarkerAddress, marker);
   assert(marker[0] == kUpdateMarker &&
          "mapped guest memory must contain the TITLE UPDATE's bytes, not the base image's");
+
+  // Part 12 of the AC6 Runtime Readiness pass: Base SHA1 must be the BASE
+  // image's own hash (distinct from Effective SHA1) even though what
+  // actually ran is the patched image - no base/TU cross-contamination.
+  {
+    const auto report = session.capability_report();
+    const auto* title_update = report.find("sections")->find("titleUpdate");
+    assert(title_update != nullptr && title_update->is_object());
+    assert(title_update->get_bool("titleUpdateApplied") == true);
+    const auto base_sha1 = title_update->get_string("baseSha1");
+    const auto effective_sha1 = title_update->get_string("effectiveSha1");
+    assert(base_sha1 != effective_sha1);
+    assert(base_sha1 == xenon::xbox::format_effective_image_hash(base_identity.effective_image_hash));
+    assert(effective_sha1 == xenon::xbox::format_effective_image_hash(expected.effective_image_hash));
+    assert(title_update->get_string("tuIdentity") == "1.0.0.0+2.0.0.0");
+    assert(title_update->get_string("effectiveVersion") == "2.0.0.0");
+  }
 
   session.shutdown();
   std::cout << "  [ok] valid title update: apply_title_update() result is what gets mapped and run, "

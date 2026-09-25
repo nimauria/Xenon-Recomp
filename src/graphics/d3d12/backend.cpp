@@ -75,6 +75,12 @@ class Backend::Impl {
   // doc comment. Incremented at the point each category is actually
   // detected, never inferred after the fact from error strings.
   GpuUnsupportedCounters unsupported{};
+  // Part 9 - see GpuShaderCoverage's doc comment. Only the primary
+  // ir::ShaderLoad path counts as a "discovered" shader (decoded_shaders
+  // already keys on that); the float20-depth/writable-guest-memory variant
+  // lowerings are re-lowerings of an already-discovered shader, not new
+  // discoveries, so they are not double-counted here.
+  std::uint64_t shader_translation_failures{};
   std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
@@ -892,9 +898,12 @@ void Backend::consume(const ir::Command& command) {
         const auto& descriptor = *state.textures[slot];
         const auto key = descriptor.hash();
         auto existing = impl_->textures.find(key);
-        const bool refresh = existing == impl_->textures.end() ||
-                             impl_->texture_dirty.consume_dirty(
-                                 key, impl_->memory->coherency(), dirty_epoch);
+        const bool already_cached = existing != impl_->textures.end();
+        const bool dirty = already_cached &&
+                          impl_->texture_dirty.consume_dirty(
+                              key, impl_->memory->coherency(), dirty_epoch);
+        const bool refresh = !already_cached || dirty;
+        if (dirty) ++impl_->performance.texture_cache_invalidations;
         if (refresh) {
           // Texture decoding is still CPU-side. Preserve GPU-resident
           // memexport normally, but if a later draw actually samples a
@@ -1401,6 +1410,7 @@ void Backend::consume(const ir::Command& command) {
       // Do not even attempt to compile an incomplete lowering - it would
       // only fail again with a generic "compilation failed" that discards
       // the specific, already-known reason lower() recorded.
+      ++impl_->shader_translation_failures;
       impl_->error = lowered.diagnostics.empty() ? "DXIL shader lowering failed"
                                                  : lowered.diagnostics.front();
       xenon::logging::Logger::instance().log_if_enabled(
@@ -1551,6 +1561,19 @@ GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
   auto result = impl_->unsupported;
   result.unsupported_sampler_behaviors += impl_->resources.unsupported_sampler_behaviors();
   return result;
+}
+
+GpuShaderCoverage Backend::shader_coverage() const noexcept {
+  GpuShaderCoverage coverage{};
+  coverage.shaders_discovered = impl_->decoded_shaders.size();
+  coverage.translation_failures = impl_->shader_translation_failures;
+  coverage.shaders_translated =
+      coverage.shaders_discovered >= coverage.translation_failures
+          ? coverage.shaders_discovered - coverage.translation_failures
+          : 0u;
+  coverage.cache_hits = impl_->shader_cache.hits();
+  coverage.cache_misses = impl_->shader_cache.misses();
+  return coverage;
 }
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }

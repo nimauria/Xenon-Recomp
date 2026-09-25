@@ -387,16 +387,31 @@ bool RenderTargetImage::readback_sample(
     CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
     std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
     std::vector<std::byte>& destination, std::uint32_t& row_pitch) {
-  destination.clear();
-  row_pitch = 0;
   const auto mapping = map_guest_sample_to_host(
       surface_.msaa, guest_sample, host_msaa_ == MsaaSamples::X2);
-  if (!mapping || !resource_ || !bytes_per_pixel_ || left >= right ||
-      top >= bottom || right > width_ || bottom > height_) {
+  if (!mapping) {
+    destination.clear();
+    row_pitch = 0;
     error_ = "invalid D3D12 selected-sample readback";
     return false;
   }
-  if (surface_.msaa == MsaaSamples::X1)
+  return readback_native_sample(queue, mapping->sample, left, top, right,
+                                bottom, destination, row_pitch);
+}
+
+bool RenderTargetImage::readback_native_sample(
+    CommandQueue& queue, std::uint32_t host_sample, std::uint32_t left,
+    std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+    std::vector<std::byte>& destination, std::uint32_t& row_pitch) {
+  destination.clear();
+  row_pitch = 0;
+  const auto host_sample_count = 1u << static_cast<unsigned>(host_msaa_);
+  if (host_sample >= host_sample_count || !resource_ || !bytes_per_pixel_ ||
+      left >= right || top >= bottom || right > width_ || bottom > height_) {
+    error_ = "invalid D3D12 native-sample readback";
+    return false;
+  }
+  if (surface_.msaa == MsaaSamples::X1 && host_sample == 0)
     return readback(queue, left, top, right, bottom, destination, row_pitch);
 #ifndef XENON_HAS_DXC
   error_ = "D3D12 selected-sample readback requires DXC";
@@ -463,7 +478,7 @@ bool RenderTargetImage::readback_sample(
   }
   std::span<std::byte> mapped;
   if (!constants.map(mapped)) { error_ = constants.error(); return false; }
-  const TransferConstants values{{left, top}, mapping->sample, 0};
+  const TransferConstants values{{left, top}, host_sample, 0};
   std::memcpy(mapped.data(), &values, sizeof(values)); constants.unmap();
   Buffer readback_buffer;
   if (!readback_buffer.initialize(device.Get(),

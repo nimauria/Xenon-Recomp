@@ -42,6 +42,15 @@ class RenderTargetImage {
       CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::vector<std::byte>& destination, std::uint32_t& row_pitch);
+  // Host-sample readback is intended for backend validation and diagnostics
+  // - see DepthTargetImage's identical method. Guest-visible ownership and
+  // resolve code must use readback_sample so the Xenos-to-host sample
+  // mapping remains centralized.
+  [[nodiscard]] bool readback_native_sample(
+      CommandQueue& queue, std::uint32_t host_sample, std::uint32_t left,
+      std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
+      std::vector<std::byte>& destination, std::uint32_t& row_pitch);
+  [[nodiscard]] MsaaSamples host_msaa() const noexcept { return host_msaa_; }
   [[nodiscard]] bool upload_sample(
       CommandQueue& queue, std::uint32_t guest_sample, std::uint32_t left,
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
