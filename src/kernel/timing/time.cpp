@@ -19,15 +19,21 @@ std::uint64_t TimeServices::system_time() {
 }
 
 std::uint64_t TimeServices::performance_counter() {
-  auto now = std::chrono::high_resolution_clock::now();
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             now.time_since_epoch())
-      .count();
+  // steady_clock, not high_resolution_clock: the real PPC time-base
+  // register can never go backward, and high_resolution_clock carries no
+  // such guarantee (it may alias system_clock on some implementations).
+  // Scaled from host nanoseconds down to real 50 MHz Xbox 360 ticks (one
+  // tick per 20ns) - see kGuestTimeBaseFrequencyHz's doc comment.
+  const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now().time_since_epoch())
+                       .count();
+  constexpr std::uint64_t kNanosecondsPerGuestTick =
+      1000000000ULL / kGuestTimeBaseFrequencyHz;
+  return static_cast<std::uint64_t>(ns) / kNanosecondsPerGuestTick;
 }
 
 std::uint64_t TimeServices::performance_frequency() {
-  // Return frequency in ticks per second (nanoseconds = 1 billion per second)
-  return 1000000000ULL;
+  return kGuestTimeBaseFrequencyHz;
 }
 
 std::uint64_t TimeServices::milliseconds_to_xbox_time(std::uint64_t milliseconds) {

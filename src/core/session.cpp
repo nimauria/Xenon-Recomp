@@ -25,6 +25,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "xenon/kernel/time.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
@@ -1498,6 +1499,12 @@ JsonValue XenonSession::capability_report() const {
                  static_cast<std::int64_t>(unsupported_instructions));
     fallback.set("fallbackSourceInvalidations",
                  static_cast<std::int64_t>(source_invalidations));
+    fallback.set("unsupportedSprReads",
+                 static_cast<std::int64_t>(
+                     unsupported_spr_reads_.load(std::memory_order_relaxed)));
+    fallback.set("unsupportedSprWrites",
+                 static_cast<std::int64_t>(
+                     unsupported_spr_writes_.load(std::memory_order_relaxed)));
 
     std::size_t new_indirect_targets_discovered = 0u;
     {
@@ -1669,6 +1676,18 @@ JsonValue XenonSession::capability_report() const {
         fallback_reasons.push_back(
             std::to_string(dynamic_fallback_->unsupported_instructions()) +
             " unsupported PPC instruction(s) encountered");
+      }
+    }
+    {
+      const auto spr_reads = unsupported_spr_reads_.load(std::memory_order_relaxed);
+      const auto spr_writes = unsupported_spr_writes_.load(std::memory_order_relaxed);
+      if (spr_reads > 0u) {
+        fallback_reasons.push_back(std::to_string(spr_reads) +
+                                    " unsupported SPR read(s) encountered");
+      }
+      if (spr_writes > 0u) {
+        fallback_reasons.push_back(std::to_string(spr_writes) +
+                                    " unsupported SPR write(s) encountered");
       }
     }
     if (gpu_) {
@@ -2639,21 +2658,45 @@ cpu::ExecutionResult XenonSession::trap(std::uint32_t trap_code,
 
 std::uint64_t XenonSession::read_spr(std::uint32_t spr,
                                     const cpu::CpuState& state) {
-  // Handle SPR reads
-  // For now, just return 0
+  // Reached only for SPRs outside mfspr/mftb's own xer/lr/ctr/vrsave/pvr/
+  // time-base fast paths (dynamic_fallback.cpp) - i.e. a real, if rare, PPC
+  // SPR this runtime does not model per-register semantics for. 0 is the
+  // safest neutral default (matching many real-hardware unimplemented/
+  // reserved SPRs' own behavior), but the access itself must not be
+  // silent: counted here and surfaced in capability_report()'s "fallback"
+  // section, so a title that actually depends on one shows up as a real,
+  // diagnosable gap rather than a silently-wrong constant zero.
+  unsupported_spr_reads_.fetch_add(1u, std::memory_order_relaxed);
+  logging::Logger::instance().log_if_enabled(
+      logging::Level::Debug, "cpu", [spr] {
+        return "unsupported SPR read: spr=" + std::to_string(spr);
+      });
   return 0;
 }
 
 void XenonSession::write_spr(std::uint32_t spr, std::uint64_t value,
                             cpu::CpuState& state) {
-  // Handle SPR writes
-  // For now, do nothing
+  // See read_spr() above - same "not silent" reasoning. The write itself
+  // still has nowhere real to go (no per-SPR storage/semantics modeled),
+  // but it is now an accounted, logged gap instead of a silent no-op.
+  unsupported_spr_writes_.fetch_add(1u, std::memory_order_relaxed);
+  logging::Logger::instance().log_if_enabled(
+      logging::Level::Debug, "cpu", [spr, value] {
+        return "unsupported SPR write: spr=" + std::to_string(spr) +
+               " value=" + std::to_string(value);
+      });
 }
 
 std::uint64_t XenonSession::read_time_base(const cpu::CpuState& state) {
-  // Simple incrementing counter for now
-  // In a real implementation, this would be based on host time
-  return time_base_counter_++;
+  // The real Xbox 360 PPC time-base register runs at a fixed 50 MHz,
+  // independent of CPU clock scaling - see TimeServices::
+  // kGuestTimeBaseFrequencyHz's doc comment for how this was verified
+  // against xenia-project/xenia rather than guessed. mftb/mftbu-reading
+  // guest code (frame pacing, physics timestep, animation timing) needs
+  // this to track real elapsed time at that exact rate, matching what
+  // KeQueryPerformanceFrequency() (TimeServices::performance_frequency())
+  // already reports - the two must stay in the same unit.
+  return kernel::TimeServices::performance_counter();
 }
 
 bool XenonSession::external_call(std::string_view module,

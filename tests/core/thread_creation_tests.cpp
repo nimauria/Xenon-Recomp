@@ -11,6 +11,9 @@
 
 #include "xenon/core/session.hpp"
 
+#include "xenon/kernel/time.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -141,6 +144,33 @@ ExecutionResult tls_isolation_probe_entry(ExecutionContext& context) {
   (is_a ? g_tls_probe_final_a : g_tls_probe_final_b).store(observed);
 
   context.state.gpr[3] = tag;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// Regression coverage for the real read_time_base()/read_spr()/write_spr()
+// fixes (previously: read_time_base() returned an arbitrary per-call
+// increment unrelated to real elapsed time; read_spr()/write_spr() silently
+// no-opped every SPR). Dispatched through the exact real production
+// RuntimeServices interface a real AOT-compiled Op::ReadTimeBase/ReadSPR/
+// WriteSPR would use (see src/cpu/codegen/backend_cpp_aot.cpp), not called
+// directly on XenonSession.
+std::atomic<std::uint64_t> g_timebase_probe_first{0};
+std::atomic<std::uint64_t> g_timebase_probe_second{0};
+
+ExecutionResult runtime_services_probe_entry(ExecutionContext& context) {
+  g_timebase_probe_first.store(context.runtime.read_time_base(context.state));
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  g_timebase_probe_second.store(context.runtime.read_time_base(context.state));
+
+  // 999 is not one of read_spr()/write_spr()'s hard-coded fast-path SPRs
+  // (xer=1, lr=8, ctr=9, vrsave=256, pvr=287, tb=268/269 - see
+  // dynamic_fallback.cpp's mfspr/mtspr handling), so both calls land in the
+  // real unsupported-SPR accounting path.
+  static_cast<void>(context.runtime.read_spr(999u, context.state));
+  context.runtime.write_spr(999u, 0xDEADBEEFu, context.state);
+
+  context.state.gpr[3] = 0u;
   context.state.lr = 0u;
   return {FlowReason::Return, 0u, 0u};
 }
@@ -443,6 +473,84 @@ void test_two_concurrent_created_threads_have_independent_tls() {
          "thread B must read back its own tag, not thread A's - proves no KPCR aliasing");
 }
 
+void test_read_time_base_tracks_real_elapsed_time_and_spr_access_is_accounted() {
+  g_timebase_probe_first.store(0);
+  g_timebase_probe_second.store(0);
+
+  ThreadCreationHarness harness(&runtime_services_probe_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  assert(cpu.gpr[3] == 0u);
+
+  const auto handle = harness.session.memory()->read32_be(handle_out);
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000) && "runtime services probe thread must complete");
+
+  const auto first = g_timebase_probe_first.load();
+  const auto second = g_timebase_probe_second.load();
+  assert(first != 0u && second != 0u);
+  assert(second > first &&
+         "read_time_base() must advance - a regression to a call-count-based "
+         "value would still pass this, but a frozen/host-time-independent "
+         "value would not");
+
+  // real_time_base_frequency comes from the actual xboxkrnl export path
+  // (KeQueryPerformanceFrequency), matching the same real 50MHz rate
+  // read_time_base()'s value must be denominated in.
+  const auto elapsed_ticks = second - first;
+  const auto elapsed_ms =
+      (elapsed_ticks * 1000ull) / xenon::kernel::TimeServices::performance_frequency();
+  assert(elapsed_ms >= 30ull && elapsed_ms <= 2000ull &&
+         "read_time_base()'s delta across a real 50ms sleep must reflect "
+         "real elapsed time at the real 50MHz rate, not an arbitrary counter");
+
+  const auto report = harness.session.capability_report();
+  const auto* sections = report.find("sections");
+  assert(sections != nullptr && sections->is_object());
+  const auto* fallback = sections->find("fallback");
+  assert(fallback != nullptr && fallback->is_object());
+  assert(fallback->get_number("unsupportedSprReads") >= 1.0 &&
+         "an unhandled SPR read must be accounted, not silently ignored");
+  assert(fallback->get_number("unsupportedSprWrites") >= 1.0 &&
+         "an unhandled SPR write must be accounted, not silently ignored");
+
+  // Not asserting the top-level "state" here: this harness (like every
+  // other test in this file) never calls the real load_native_extension()
+  // path, so Part 17's verdict correctly reports FAIL for that unrelated
+  // reason regardless of these SPR counters - session_tests.cpp already
+  // covers PASS/PASS_WITH_FALLBACK/FAIL in isolation. What this test needs
+  // to prove is that the real SPR counters actually surface as concrete
+  // fallbackReasons entries, which they do independently of the overall
+  // state.
+  const auto* verdict = sections->find("verdict");
+  assert(verdict != nullptr && verdict->is_object());
+  const auto* verdict_fallback_reasons = verdict->find("fallbackReasons");
+  assert(verdict_fallback_reasons != nullptr && verdict_fallback_reasons->is_array());
+  const auto& verdict_reasons = *verdict_fallback_reasons->as_array();
+  assert(std::any_of(verdict_reasons.begin(), verdict_reasons.end(),
+                     [](const xenon::core::JsonValue& reason) {
+                       return reason.is_string() &&
+                              reason.as_string().find("unsupported SPR read") !=
+                                  std::string::npos;
+                     }));
+  assert(std::any_of(verdict_reasons.begin(), verdict_reasons.end(),
+                     [](const xenon::core::JsonValue& reason) {
+                       return reason.is_string() &&
+                              reason.as_string().find("unsupported SPR write") !=
+                                  std::string::npos;
+                     }));
+}
+
 void test_ex_create_thread_rejects_null_start_address() {
   ThreadCreationHarness harness(&echo_increment_entry);
   xenon::memory::GuestAddress handle_out{};
@@ -497,6 +605,7 @@ int main() {
   test_preemptive_safepoint_terminates_a_running_created_thread();
   test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread();
   test_two_concurrent_created_threads_have_independent_tls();
+  test_read_time_base_tracks_real_elapsed_time_and_spr_access_is_accounted();
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();
   test_ex_create_thread_rejects_null_start_address();
   test_external_call_resolves_real_calling_thread_identity();

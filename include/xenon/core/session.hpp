@@ -496,7 +496,15 @@ class XenonSession final : public cpu::RuntimeServices {
   std::unique_ptr<xam::ContentGraph> content_graph_{};
   std::string game_id_{};
   std::unique_ptr<cpu::CpuState> main_cpu_state_{};
-  std::uint64_t time_base_counter_{0};
+  // read_spr()/write_spr() are reachable concurrently from every guest
+  // thread (they are RuntimeServices overrides shared by the whole
+  // session), so these are atomics, not the plain counters GPU telemetry
+  // uses on its own single render thread. Counts any SPR access outside
+  // the small set of SPRs read_spr()/write_spr() (or mfspr/mtspr's own
+  // xer/lr/ctr/vrsave/pvr/time-base fast paths in dynamic_fallback.cpp)
+  // actually model - see capability_report()'s "fallback" section.
+  std::atomic<std::uint64_t> unsupported_spr_reads_{0};
+  std::atomic<std::uint64_t> unsupported_spr_writes_{0};
 
   // Real guest process/thread model: XenonSession -> KernelProcess ->
   // KernelThread -> CPU V2, replacing the previous bare

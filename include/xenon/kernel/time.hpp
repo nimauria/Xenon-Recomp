@@ -34,6 +34,20 @@ class TimeServices {
   static constexpr std::uint64_t kEpochDifference = 11644473600ULL;
   // 100-nanosecond intervals per second
   static constexpr std::uint64_t kIntervalsPerSecond = 10000000ULL;
+
+ public:
+  // The real Xbox 360 CPU's PPC time-base register runs at a fixed 50 MHz,
+  // independent of CPU clock scaling. Verified against xenia-project/xenia
+  // (this project's primary Xbox 360 semantic reference) rather than
+  // guessed: src/xenia/emulator.cc calls
+  // Clock::set_guest_tick_frequency(50000000) with the comment "360 uses a
+  // 50MHz clock". performance_frequency() (what KeQueryPerformanceFrequency
+  // reports to guest code) and performance_counter() (what
+  // XenonSession::read_time_base() derives the real mftb/mftbu value from)
+  // must both use this same rate - real guest code computes elapsed time
+  // as (tb_delta) / KeQueryPerformanceFrequency(), so the two are one
+  // coherent clock domain, not two independently-chosen numbers.
+  static constexpr std::uint64_t kGuestTimeBaseFrequencyHz = 50000000ULL;
 };
 
 }  // namespace xenon::kernel

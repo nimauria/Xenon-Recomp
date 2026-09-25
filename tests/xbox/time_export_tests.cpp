@@ -48,7 +48,37 @@ void test_ke_query_performance_frequency() {
   const auto result = registry.invoke("xboxkrnl", 0x083u, call);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == kernel::TimeServices::performance_frequency());
-  assert(cpu.gpr[3] != 0);
+  // The real, fixed hardware value (verified against xenia-project/xenia,
+  // not guessed - see kGuestTimeBaseFrequencyHz's doc comment), not just a
+  // tautological self-comparison: a regression back to an arbitrary value
+  // (e.g. a nanosecond-scale 1000000000) must fail this test.
+  assert(cpu.gpr[3] == 50000000u &&
+         "KeQueryPerformanceFrequency must report the real Xbox 360 50MHz "
+         "time-base rate");
+}
+
+// Regression: performance_counter() previously had no relationship to real
+// elapsed time (XenonSession::read_time_base() used its own unrelated
+// increment-by-one-per-call counter instead). It must now be monotonic and
+// advance at the real, documented 50MHz rate within a generous scheduling
+// tolerance - not merely "some number that changes".
+void test_performance_counter_is_monotonic_and_tracks_real_time() {
+  const auto before = kernel::TimeServices::performance_counter();
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto after = kernel::TimeServices::performance_counter();
+
+  assert(after > before && "performance_counter() must never go backward");
+
+  const auto delta_ticks = after - before;
+  const auto delta_ms =
+      (delta_ticks * 1000u) / kernel::TimeServices::performance_frequency();
+  // Sleeping 50ms should read back as roughly 50 guest-ticks-derived ms;
+  // generous bounds absorb real scheduler jitter without masking a real
+  // unit/scaling bug (which would be off by orders of magnitude, not a few
+  // ms).
+  assert(delta_ms >= 30u && delta_ms <= 500u &&
+         "performance_counter() delta must track real elapsed wall-clock "
+         "time at the real 50MHz rate");
 }
 
 void test_ke_query_system_time_writes_guest_memory() {
@@ -127,6 +157,7 @@ int main() {
 
   test_ordinals_are_registered();
   test_ke_query_performance_frequency();
+  test_performance_counter_is_monotonic_and_tracks_real_time();
   test_ke_query_system_time_writes_guest_memory();
   test_ke_delay_execution_thread_relative_blocks_calling_thread();
   test_ke_stall_execution_processor_blocks_for_microseconds();
