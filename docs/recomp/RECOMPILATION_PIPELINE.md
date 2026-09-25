@@ -72,7 +72,10 @@ module-inspector <game.xex>
 ```
 
 All tools provide `--help`. `ir-dump` shows discovered CPU V2 blocks,
-`import-scanner` prints imported module symbols and thunks, and
+`import-scanner` classifies every imported symbol against the real
+production export registry as IMPLEMENTED/SAFE_STUB/PARTIAL/MISSING (a
+per-library and overall PASS/FAIL summary; `--json` for machine-readable
+output - see `docs/kernel/KERNEL_V1_SUMMARY.md`), and
 `module-inspector` prints XEX identity and section counts. `recomp-driver`
 is the only tool that writes generated build input. The generated
 `CMakeLists.txt` builds the shards, registry, imports, and metadata as a

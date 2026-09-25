@@ -327,12 +327,78 @@ class XenonSession final : public cpu::RuntimeServices {
   void release_partial_guest_process() noexcept;
   void set_state(SessionState new_state, std::string message = {});
   void set_error(std::string error);
+
+  // Outcome of dispatch_guest_thread() - enough information for a caller to
+  // decide what THREAD-SPECIFIC session bookkeeping to apply (SessionState
+  // transitions, execution_active_, last_error()) without dispatch_guest_thread()
+  // itself needing to know which guest thread (main vs. a created one) is
+  // running it.
+  struct GuestDispatchOutcome {
+    bool crashed{false};
+    std::string crash_message{};
+    std::uint32_t crash_exit_code{0xC0000005u};  // NTSTATUS-style default (access violation).
+    cpu::ExecutionResult final_result{};
+    bool stop_requested{false};
+    // True when the loop exited because thread->is_terminated() was
+    // observed at a safepoint (terminate() was called - possibly while this
+    // thread was mid-dispatch, not just parked/blocked). Distinct from
+    // stop_requested (session-wide): this is a per-thread terminate(). When
+    // set, the caller should use thread->exit_code() (terminate()'s own
+    // committed value), not any in-flight CpuState register, as the
+    // authoritative exit code.
+    bool thread_terminated{false};
+  };
+  // Shared AOT/fallback guest-code dispatch core: runs `entry` on `state`
+  // (a CPU V2 ExecutionContext built around it) until the guest returns,
+  // faults, traps, halts, stop_requested_ (session-wide) is set, or `thread`
+  // (if non-null) is suspended/terminated. Used by BOTH run_execution() (the
+  // main thread) and run_created_guest_thread() (ExCreateThread-spawned
+  // threads) so the dispatch loop, fault handling, exception-dispatch logic,
+  // and preemptive safepoint exist exactly once rather than being duplicated
+  // per thread kind. Deliberately does NOT touch any caller/thread-specific
+  // session state (execution_active_, SessionState transitions,
+  // last_error()) - see GuestDispatchOutcome above.
+  //
+  // Preemptive safepoint (Phase 2 of the AC6 Runtime Readiness pass): at
+  // every compiled-block boundary (Branch/Fallthrough dispatch), calls
+  // thread->wait_while_suspended() (parks if suspended, cheap no-op
+  // otherwise) and checks thread->is_terminated() (lock-free), so
+  // suspend()/terminate() from another host thread are honored within
+  // roughly one block's latency for any guest thread actually executing
+  // code - not only one blocked in a wait/sleep of its own. `thread` may be
+  // null (no safepoint checks performed) for callers that do not have a
+  // KernelThread yet.
+  [[nodiscard]] GuestDispatchOutcome dispatch_guest_thread(
+      cpu::CpuState& state, cpu::GuestAddress entry,
+      const std::shared_ptr<kernel::KernelThread>& thread);
   // Guest execution thread body: builds a CPU V2 ExecutionContext, binds the
   // native extension's compiled registry into it, looks up the entry point,
-  // and invokes it. Runs entirely on main_thread_'s own host thread (it is
-  // the kernel::KernelThread's ThreadEntry - see create_guest_process()).
-  // Returns the guest exit code.
+  // and invokes it via dispatch_guest_thread(), then applies main-thread-only
+  // session bookkeeping to the outcome. Runs entirely on main_thread_'s own
+  // host thread (it is the kernel::KernelThread's ThreadEntry - see
+  // create_guest_process()). Returns the guest exit code.
   [[nodiscard]] std::uint32_t run_execution();
+  // ExCreateThread's ThreadEntry body (Phase 1/2 of the AC6 Runtime
+  // Readiness pass): registers `thread` as the current guest thread
+  // identity, dispatches start_address(start_context) on a fresh
+  // CpuState/stack/KPCR-TLS via dispatch_guest_thread(), and releases that
+  // stack/TLS once the thread exits (naturally or via crash) - see
+  // docs/kernel/THREADING_V2.md. The exit code is the PPC ABI return value
+  // (gpr[3]) on a natural return, matching real ExCreateThread/
+  // ExTerminateThread semantics (returning from the thread function is an
+  // implicit ExTerminateThread(returnValue)).
+  [[nodiscard]] std::uint32_t run_created_guest_thread(
+      std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
+      std::uint64_t start_context, memory::GuestAddress stack_base,
+      std::uint32_t stack_size, GuestThreadTlsContext tls);
+  // ExCreateThread export handler: allocates a guest stack and KPCR/TLS
+  // block, creates the KernelThread via kernel_process_->thread_manager()
+  // (honoring ThreadCreationParams::create_suspended from the guest's
+  // CREATE_SUSPENDED flag), publishes its Handle through
+  // kernel_process_->handle_table() (the same shared dispatcher-object table
+  // NtWaitForSingleObjectEx et al. already use, so a thread handle is
+  // waitable like any other kernel object), and starts it.
+  [[nodiscard]] bool export_ex_create_thread(ExportCallContext& context);
   static void record_compiled_lookup_miss(void* observer,
                                           cpu::ExecutionContext& context,
                                           cpu::GuestAddress target,

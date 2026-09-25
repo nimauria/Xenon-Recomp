@@ -47,6 +47,11 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     desc.name = "XamContentCreateEnumerator";
     desc.ordinal = ordinal::XamContentCreateEnumerator;
     desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "returns a fixed fake handle (0xDEADBEEF) instead of a real "
+        "enumerator over installed content - a subsequent enumerate/close "
+        "call against that handle does not walk any real content list";
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
       const auto out_handle_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[6]);
 

@@ -29,25 +29,34 @@ bool ExceptionDispatcher::dispatch_exception(const ExceptionRecord& record) {
 
 ExceptionRecord ExceptionDispatcher::fault_to_exception(
     const memory::MemoryFaultInfo& fault) {
+  // Every memory::FaultReason (Unmapped, Uncommitted, Protection,
+  // OutOfRange, MmioWidth) maps to the same STATUS_ACCESS_VIOLATION here -
+  // that reflects real Xbox 360/NT semantics correctly: none of those
+  // reasons has a distinct, separately-documented NTSTATUS code a guest
+  // __except filter could observe. FaultReason is Xenon's own internal
+  // Memory V2 diagnostic taxonomy (useful for host-side debugging via the
+  // diagnostic string built in XenonSession::dispatch_guest_thread()'s
+  // MemoryFault catch clause), not a guest-visible ABI surface.
+  //
+  // What WAS a real bug: ExceptionInformation[0] (record.parameters[0])
+  // only ever encoded read (0) or write (1), collapsing an Execute-kind
+  // fault (the guest tried to run code from a non-executable page) into the
+  // "read" bucket. Real NT's EXCEPTION_RECORD.ExceptionInformation[0] uses
+  // 0 = read, 1 = write, 8 = execute/DEP violation - a stable, documented
+  // Win32/NT ABI value, not an Xbox-specific unknown - so a guest __except
+  // filter that branches on this value now sees the correct one.
   ExceptionRecord record;
-  
-  switch (fault.reason) {
-    case memory::FaultReason::Unmapped:
-    case memory::FaultReason::Uncommitted:
-    case memory::FaultReason::Protection:
-      record.code = ExceptionCode::AccessViolation;
-      record.address = static_cast<std::uint32_t>(fault.fault_address);
-      record.parameters.push_back(fault.is_write() ? 1 : 0);  // Write/Read
-      record.parameters.push_back(static_cast<std::uint32_t>(fault.fault_address));
-      break;
+  record.code = ExceptionCode::AccessViolation;
+  record.address = static_cast<std::uint32_t>(fault.fault_address);
 
-    default:
-      record.code = ExceptionCode::AccessViolation;
-      record.address = static_cast<std::uint32_t>(fault.fault_address);
-      record.parameters.push_back(fault.is_write() ? 1 : 0);
-      record.parameters.push_back(static_cast<std::uint32_t>(fault.fault_address));
-      break;
+  std::uint32_t access_flag = 0;  // read
+  if (fault.is_write()) {
+    access_flag = 1;
+  } else if (fault.is_execute()) {
+    access_flag = 8;
   }
+  record.parameters.push_back(access_flag);
+  record.parameters.push_back(static_cast<std::uint32_t>(fault.fault_address));
 
   return record;
 }

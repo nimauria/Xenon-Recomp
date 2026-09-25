@@ -64,6 +64,7 @@ add_library(xenon_core STATIC
   src/core/call_bridge.cpp
   src/core/run_fingerprint.cpp
   src/core/capability_report.cpp
+  src/core/import_classification.cpp
   src/logging/logger.cpp
   src/xam/user_manager.cpp
   src/xam/locale_manager.cpp
@@ -135,6 +136,7 @@ if(XENON_ENABLE_KERNEL)
     src/kernel/synchronization/semaphore.cpp
     src/kernel/synchronization/mutant.cpp
     src/kernel/synchronization/timer.cpp
+    src/kernel/synchronization/timer_manager.cpp
     src/kernel/synchronization/wait.cpp
     src/kernel/threading/thread.cpp
     src/kernel/timing/time.cpp
@@ -694,6 +696,21 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_session_execution_tests)
   add_test(NAME xenon_session_execution_tests COMMAND xenon_session_execution_tests)
 
+  # Phase 1/2 (AC6 Runtime Readiness pass): ExCreateThread, the shared
+  # dispatch_guest_thread()/run_created_guest_thread() primitive, and the
+  # external_call() real-calling-thread-id regression.
+  add_executable(xenon_thread_creation_tests tests/core/thread_creation_tests.cpp)
+  target_link_libraries(xenon_thread_creation_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_thread_creation_tests)
+  add_test(NAME xenon_thread_creation_tests COMMAND xenon_thread_creation_tests)
+
+  # Phase 6 (AC6 Runtime Readiness pass): whole-XEX import capability audit
+  # four-state classification (IMPLEMENTED/SAFE_STUB/PARTIAL/MISSING).
+  add_executable(xenon_import_capability_report_tests tests/core/import_capability_report_tests.cpp)
+  target_link_libraries(xenon_import_capability_report_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_import_capability_report_tests)
+  add_test(NAME xenon_import_capability_report_tests COMMAND xenon_import_capability_report_tests)
+
   if(TARGET xenon_audio)
     add_executable(xenon_audio_mixer_tests tests/audio/mixer_tests.cpp)
     target_link_libraries(xenon_audio_mixer_tests PRIVATE xenon_audio)
@@ -749,6 +766,29 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_kernel_synchronization_tests PRIVATE xenon_kernel)
     xenon_enable_test_asserts(xenon_kernel_synchronization_tests)
     add_test(NAME xenon_kernel_synchronization_tests COMMAND xenon_kernel_synchronization_tests)
+
+    # Phase 3 (AC6 Runtime Readiness pass): real timer-dispatch thread -
+    # a timer with due_time > 0 now actually fires, periodic re-arm works,
+    # cancel prevents firing, and teardown does not hang.
+    add_executable(xenon_kernel_timer_dispatch_tests tests/kernel/timer_dispatch_tests.cpp)
+    target_link_libraries(xenon_kernel_timer_dispatch_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_timer_dispatch_tests)
+    add_test(NAME xenon_kernel_timer_dispatch_tests COMMAND xenon_kernel_timer_dispatch_tests)
+
+    # Phase 5 (AC6 Runtime Readiness pass): ExceptionDispatcher::fault_to_exception()
+    # Execute-fault/ExceptionInformation[0] regression.
+    add_executable(xenon_kernel_exception_tests tests/kernel/exception_tests.cpp)
+    target_link_libraries(xenon_kernel_exception_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_exception_tests)
+    add_test(NAME xenon_kernel_exception_tests COMMAND xenon_kernel_exception_tests)
+
+    # Phase 2 (AC6 Runtime Readiness pass): join(timeout) real-timeout,
+    # terminate()-vs-natural-return exit-code race, and CREATE_SUSPENDED
+    # regressions.
+    add_executable(xenon_kernel_thread_lifecycle_tests tests/kernel/thread_lifecycle_tests.cpp)
+    target_link_libraries(xenon_kernel_thread_lifecycle_tests PRIVATE xenon_kernel)
+    xenon_enable_test_asserts(xenon_kernel_thread_lifecycle_tests)
+    add_test(NAME xenon_kernel_thread_lifecycle_tests COMMAND xenon_kernel_thread_lifecycle_tests)
   endif()
 
   if(TARGET xenon_xbox_kernel_io)

@@ -13,6 +13,7 @@
 #include "xenon/kernel/module.hpp"
 #include "xenon/kernel/object.hpp"
 #include "xenon/kernel/thread.hpp"
+#include "xenon/kernel/timer_manager.hpp"
 
 namespace xenon::kernel {
 
@@ -45,6 +46,12 @@ class KernelProcess final : public KernelObject {
   [[nodiscard]] HandleTable& handle_table() noexcept { return handle_table_; }
   [[nodiscard]] const HandleTable& handle_table() const noexcept { return handle_table_; }
 
+  // Real timer-dispatch thread backing KernelTimer objects with a nonzero
+  // due time - see timer_manager.hpp. Owned per-process (like
+  // thread_manager()/handle_table()) so it is torn down with the process
+  // rather than needing separate lifecycle management.
+  [[nodiscard]] TimerManager& timer_manager() noexcept { return timer_manager_; }
+
   [[nodiscard]] std::shared_ptr<KernelThread> main_thread() const;
   void set_main_thread(std::shared_ptr<KernelThread> thread);
 
@@ -67,6 +74,7 @@ class KernelProcess final : public KernelObject {
   ModuleManager module_manager_;
   std::shared_ptr<KernelThread> main_thread_;
   HandleTable handle_table_{};
+  TimerManager timer_manager_{};
 
   mutable std::mutex env_mutex_;
   std::unordered_map<std::string, std::string> environment_;

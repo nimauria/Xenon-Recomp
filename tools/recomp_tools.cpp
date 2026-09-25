@@ -14,6 +14,8 @@
 
 #if defined(XENON_TOOL_HAS_CORE)
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/import_classification.hpp"
+#include "xenon/core/json.hpp"
 #include "xenon/core/session.hpp"
 #endif
 
@@ -39,11 +41,18 @@ int main(int argc, char** argv) {
     else if (tool == "ppc-disasm") std::cout << "usage: ppc-disasm <game.xex> [--json]\n";
     else if (tool == "ir-dump") std::cout << "usage: ir-dump <game.xex> [--json]\n";
     else if (tool == "import-scanner") std::cout << "usage: import-scanner <game.xex> [--json]\n"
-                                                     "  Prints, for every guest import: module!symbol, ordinal, the\n"
-                                                     "  resolved Xenon export name (if any), and whether it is registered\n"
-                                                     "  in the production core::ExportRegistry (same registry\n"
-                                                     "  XenonSession uses) - not a second, hand-maintained ordinal list.\n"
-                                                     "  Used by Project Gracemeria to audit a title's XAM imports.\n";
+                                                     "  Whole-XEX import capability audit (Phase 6 of the AC6 Runtime\n"
+                                                     "  Readiness pass). Classifies every guest import against the real\n"
+                                                     "  production core::ExportRegistry (the same registry XenonSession\n"
+                                                     "  uses, not a second hand-maintained ordinal list) as one of:\n"
+                                                     "    IMPLEMENTED - registered, real behavior.\n"
+                                                     "    SAFE_STUB   - registered, a deliberate safe no-op.\n"
+                                                     "    PARTIAL     - registered but has a real, documented behavior gap.\n"
+                                                     "    MISSING     - not registered at all.\n"
+                                                     "  Prints a per-library and overall PASS/FAIL summary; exits nonzero\n"
+                                                     "  if any import is MISSING. --json emits the same data as JSON.\n"
+                                                     "  Used by Project Gracemeria to audit a title's imports before the\n"
+                                                     "  expensive native module build.\n";
     else std::cout << "usage: module-inspector <game.xex> [--json]\n";
     return argc < 2 ? 1 : 0;
   }
@@ -198,6 +207,28 @@ int main(int argc, char** argv) {
                    "listing\n";
     }
 
+    // Phase 6 of the AC6 Runtime Readiness pass: four-state classification
+    // (not the previous binary resolved/unresolved) via
+    // xenon::core::classify_import() - a small, independently-tested
+    // function (tests/core/import_capability_report_tests.cpp), not logic
+    // embedded only here:
+    //   IMPLEMENTED - registered, not a stub, not flagged partial.
+    //   SAFE_STUB   - registered as ExportRequirement::Stubbed and not
+    //                 flagged partial (a deliberate, safe no-op).
+    //   PARTIAL     - registered but ExportDescriptor::partial is set (a
+    //                 real, non-obvious behavior gap - see partial_note).
+    //   MISSING     - not registered at all (including when the registry
+    //                 itself could not be initialized - never silently
+    //                 accepted as anything better than MISSING).
+    using xenon::core::ImportClassification;
+
+    struct ClassifiedImport {
+      const xenon::xbox::XexImport* item;
+      ImportClassification status;
+      std::string resolved_name;
+      std::string partial_note;
+    };
+
     // Part 6.1 of the Gracemeria readiness pass: group output by library so
     // a commercial-title import list (potentially hundreds of entries) is
     // actually reviewable. Audio exports are registered under the literal
@@ -205,42 +236,116 @@ int main(int argc, char** argv) {
     // distinct import module, so they are broken out as an "xboxkrnl
     // (audio)" sub-group by resolved name prefix instead of by (nonexistent)
     // separate module string.
-    std::map<std::string, std::vector<const xenon::xbox::XexImport*>> groups;
+    std::map<std::string, std::vector<ClassifiedImport>> groups;
     for (const auto& item : report.image.imports) {
+      const auto* descriptor =
+          session_ready ? session.exports()->resolve(item.module, item.ordinal) : nullptr;
+
       std::string group = item.module;
-      if (session_ready && item.module == "xboxkrnl") {
-        if (const auto* descriptor = session.exports()->resolve(item.module, item.ordinal);
-            descriptor != nullptr && descriptor->name.rfind("XAudio", 0) == 0) {
-          group = "xboxkrnl (audio)";
+      if (descriptor != nullptr && item.module == "xboxkrnl" &&
+          descriptor->name.rfind("XAudio", 0) == 0) {
+        group = "xboxkrnl (audio)";
+      }
+      const auto status = xenon::core::classify_import(descriptor);
+      const std::string resolved_name = descriptor != nullptr ? descriptor->name : "<none>";
+      const std::string partial_note = descriptor != nullptr ? descriptor->partial_note : "";
+      groups[group].push_back(ClassifiedImport{&item, status, resolved_name, partial_note});
+    }
+
+    std::size_t total_implemented = 0, total_safe_stub = 0, total_partial = 0, total_missing = 0;
+    for (const auto& [group, items] : groups) {
+      for (const auto& classified : items) {
+        switch (classified.status) {
+          case ImportClassification::Implemented: ++total_implemented; break;
+          case ImportClassification::SafeStub: ++total_safe_stub; break;
+          case ImportClassification::Partial: ++total_partial; break;
+          case ImportClassification::Missing: ++total_missing; break;
         }
       }
-      groups[group].push_back(&item);
     }
-    for (auto& [group, items] : groups) {
-      std::cout << "== " << group << " (" << items.size() << ") ==\n";
-      for (const auto* item_ptr : items) {
-        const auto& item = *item_ptr;
-        std::cout << "  " << item.module << "!" << item.symbol << " ordinal=" << item.ordinal
-                  << " thunk=0x" << std::hex << item.guest_thunk << std::dec;
-        if (session_ready) {
-          const auto* descriptor = session.exports()->resolve(item.module, item.ordinal);
-          if (descriptor != nullptr) {
-            const char* status = "Optional";
-            switch (descriptor->requirement) {
-              case xenon::core::ExportRequirement::Required: status = "Required"; break;
-              case xenon::core::ExportRequirement::Stubbed: status = "Stubbed"; break;
-              case xenon::core::ExportRequirement::Optional: status = "Optional"; break;
-              case xenon::core::ExportRequirement::DiagnosticOnly: status = "DiagnosticOnly"; break;
-            }
-            std::cout << " resolved=" << descriptor->name << " status=" << status;
-          } else {
-            std::cout << " resolved=<none> status=NOT_REGISTERED";
+    const bool overall_pass = total_missing == 0;
+
+    if (json) {
+      xenon::core::JsonValue root = xenon::core::JsonValue::make_object();
+      xenon::core::JsonValue libraries = xenon::core::JsonValue::make_object();
+      for (const auto& [group, items] : groups) {
+        std::size_t implemented = 0, safe_stub = 0, partial = 0, missing = 0;
+        xenon::core::JsonValue import_list = xenon::core::JsonValue::make_array();
+        for (const auto& classified : items) {
+          switch (classified.status) {
+            case ImportClassification::Implemented: ++implemented; break;
+            case ImportClassification::SafeStub: ++safe_stub; break;
+            case ImportClassification::Partial: ++partial; break;
+            case ImportClassification::Missing: ++missing; break;
           }
+          xenon::core::JsonValue entry = xenon::core::JsonValue::make_object();
+          entry.set("module", classified.item->module);
+          entry.set("symbol", classified.item->symbol);
+          entry.set("ordinal", classified.item->ordinal);
+          entry.set("resolvedName", classified.resolved_name);
+          entry.set("status", std::string(xenon::core::to_string(classified.status)));
+          if (!classified.partial_note.empty()) {
+            entry.set("partialNote", classified.partial_note);
+          }
+          import_list.append(std::move(entry));
+        }
+        xenon::core::JsonValue library_entry = xenon::core::JsonValue::make_object();
+        library_entry.set("implemented", static_cast<std::int64_t>(implemented));
+        library_entry.set("safeStub", static_cast<std::int64_t>(safe_stub));
+        library_entry.set("partial", static_cast<std::int64_t>(partial));
+        library_entry.set("missing", static_cast<std::int64_t>(missing));
+        library_entry.set("imports", std::move(import_list));
+        libraries.set(group, std::move(library_entry));
+      }
+      root.set("libraries", std::move(libraries));
+      xenon::core::JsonValue overall = xenon::core::JsonValue::make_object();
+      overall.set("implemented", static_cast<std::int64_t>(total_implemented));
+      overall.set("safeStub", static_cast<std::int64_t>(total_safe_stub));
+      overall.set("partial", static_cast<std::int64_t>(total_partial));
+      overall.set("missing", static_cast<std::int64_t>(total_missing));
+      overall.set("result", std::string(overall_pass ? "PASS" : "FAIL"));
+      root.set("overall", std::move(overall));
+      std::cout << root.dump(2) << "\n";
+    } else {
+      std::cout << "XEX import capability report\n\n";
+      for (const auto& [group, items] : groups) {
+        std::size_t implemented = 0, safe_stub = 0, partial = 0, missing = 0;
+        for (const auto& classified : items) {
+          switch (classified.status) {
+            case ImportClassification::Implemented: ++implemented; break;
+            case ImportClassification::SafeStub: ++safe_stub; break;
+            case ImportClassification::Partial: ++partial; break;
+            case ImportClassification::Missing: ++missing; break;
+          }
+        }
+        std::cout << group << ":\n"
+                  << "  implemented: " << implemented << "\n"
+                  << "  safe_stub: " << safe_stub << "\n"
+                  << "  partial: " << partial << "\n"
+                  << "  missing: " << missing << "\n";
+        for (const auto& classified : items) {
+          const auto& item = *classified.item;
+          std::cout << "  " << item.module << "!" << item.symbol << " ordinal=" << item.ordinal
+                    << " thunk=0x" << std::hex << item.guest_thunk << std::dec
+                    << " resolved=" << classified.resolved_name
+                    << " status=" << xenon::core::to_string(classified.status);
+          if (!classified.partial_note.empty()) {
+            std::cout << " note=\"" << classified.partial_note << "\"";
+          }
+          std::cout << "\n";
         }
         std::cout << "\n";
       }
+      std::cout << "overall:\n"
+                << "  implemented: " << total_implemented << "\n"
+                << "  safe_stub: " << total_safe_stub << "\n"
+                << "  partial: " << total_partial << "\n"
+                << "  missing: " << total_missing << "\n"
+                << "  result: " << (overall_pass ? "PASS" : "FAIL") << "\n";
     }
+
     if (session_ready) session.shutdown();
+    if (!overall_pass) return 4;
 #else
     for (const auto& item : report.image.imports)
       std::cout << item.module << "!" << item.symbol << " ordinal=" << item.ordinal << " thunk=0x" << std::hex << item.guest_thunk << "\n";

@@ -109,6 +109,11 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     desc.name = "XamUserCheckPrivilege";
     desc.ordinal = ordinal::XamUserCheckPrivilege;
     desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "always grants every privilege for offline play instead of checking "
+        "the real per-title/per-user privilege set - a title that gates "
+        "content on a specific denied privilege will not observe the denial";
     desc.handler = [&user_manager](core::ExportCallContext& ctx) -> bool {
       const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
       const auto out_result_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);

@@ -74,6 +74,12 @@ void test_ordinals_are_registered() {
   assert(f.registry.contains("xboxkrnl", "NtWaitForSingleObjectEx"));
   assert(f.registry.contains("xboxkrnl", 0x0FEu));
   assert(f.registry.contains("xboxkrnl", "NtWaitForMultipleObjectsEx"));
+  assert(f.registry.contains("xboxkrnl", 0x0D7u));
+  assert(f.registry.contains("xboxkrnl", "NtCreateTimer"));
+  assert(f.registry.contains("xboxkrnl", 0x0CDu));
+  assert(f.registry.contains("xboxkrnl", "NtCancelTimer"));
+  assert(f.registry.contains("xboxkrnl", 0x0FAu));
+  assert(f.registry.contains("xboxkrnl", "NtSetTimerEx"));
 }
 
 void test_nt_create_event_and_wait_single() {
@@ -251,6 +257,57 @@ void test_nt_wait_for_multiple_objects_any_and_all() {
   assert(cpu.gpr[3] == 0x00000102u);  // STATUS_TIMEOUT
 }
 
+void test_nt_create_timer_set_and_cancel() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[4] = 0;  // object attributes
+  cpu.gpr[5] = 1;  // SynchronizationTimer (auto-reset)
+  auto result = f.invoke(0x0D7u, cpu);
+  assert(result.handled && result.success && cpu.gpr[3] == 0u);
+  const auto handle = f.address_space->read32_be(handle_out);
+  assert(handle != 0u);
+
+  // NtSetTimerEx with a real future due time (relative, negative 100ns
+  // units) must actually fire it via the process's TimerManager, not just
+  // record it inertly - this is the real, end-to-end regression for the
+  // "timer with due_time > 0 never fired" bug.
+  const auto due_time_ptr = f.alloc64();
+  constexpr std::int64_t kDelayMs = 80;
+  f.address_space->write64_be(due_time_ptr, static_cast<std::uint64_t>(-(kDelayMs * 10'000)));
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.gpr[4] = due_time_ptr;
+  cpu.gpr[5] = 0;  // no guest callback routine
+  cpu.gpr[9] = 0;  // one-shot (no period)
+  result = f.invoke(0x0FAu, cpu);
+  assert(result.handled && result.success && cpu.gpr[3] == 0u);
+
+  // Wait on the timer handle through the real NtWaitForSingleObjectEx
+  // export - proves the timer becomes a genuinely signaled, waitable kernel
+  // object once TimerManager fires it, not merely that fire() was called in
+  // isolation.
+  const auto wait_timeout_ptr = f.alloc64();
+  f.address_space->write64_be(wait_timeout_ptr, static_cast<std::uint64_t>(-(2000 * 10'000)));
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.gpr[6] = wait_timeout_ptr;
+  result = f.invoke(0x0FDu, cpu);
+  assert(result.handled && result.success);
+  assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0: actually fired within the 2s bound
+
+  // NtCancelTimer must succeed and leave the timer no longer pending.
+  const auto current_state_ptr = f.alloc32();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.gpr[4] = current_state_ptr;
+  result = f.invoke(0x0CDu, cpu);
+  assert(result.handled && result.success && cpu.gpr[3] == 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -261,6 +318,7 @@ int main() {
   test_nt_create_semaphore_release_and_limit();
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
   test_nt_wait_for_multiple_objects_any_and_all();
+  test_nt_create_timer_set_and_cancel();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";
   return 0;

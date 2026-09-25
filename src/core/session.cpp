@@ -25,6 +25,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "xenon/kernel/xbox_io.hpp"
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
@@ -784,10 +785,11 @@ bool XenonSession::init_exports() {
     return false;
   }
 
-  // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1 of
-  // the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
+  // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1/3
+  // of the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
   // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
-  // NtWaitForSingleObjectEx, NtWaitForMultipleObjectsEx. kernel_process_
+  // NtWaitForSingleObjectEx, NtWaitForMultipleObjectsEx, NtCreateTimer,
+  // NtCancelTimer, NtSetTimerEx. kernel_process_
   // does not exist yet at this point in a fresh session (it is created later
   // by create_guest_process(), once a title is loaded) - like io_bridge_
   // above, these lambdas capture `this` and dereference kernel_process_ at
@@ -808,6 +810,9 @@ bool XenonSession::init_exports() {
         {0x0F2u, "NtReleaseMutant", &xbox::nt_release_mutant_export},
         {0x0FDu, "NtWaitForSingleObjectEx", &xbox::nt_wait_for_single_object_ex_export},
         {0x0FEu, "NtWaitForMultipleObjectsEx", &xbox::nt_wait_for_multiple_objects_ex_export},
+        {0x0D7u, "NtCreateTimer", &xbox::nt_create_timer_export},
+        {0x0CDu, "NtCancelTimer", &xbox::nt_cancel_timer_export},
+        {0x0FAu, "NtSetTimerEx", &xbox::nt_set_timer_ex_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -823,6 +828,27 @@ bool XenonSession::init_exports() {
         set_error(std::string("Failed to register xboxkrnl sync export: ") + binding.name);
         return false;
       }
+    }
+  }
+
+  // Register ExCreateThread (Phase 1/2 of the AC6 Runtime Readiness pass).
+  // Ordinal 0x0D verified against the xenia-project/xenia xboxkrnl export
+  // table (xboxkrnl_table.inc). A private XenonSession method rather than a
+  // free function like the sync exports above: spawning a real
+  // guest-executing thread needs compiled_registry_binder_/dynamic_fallback_/
+  // memory_/the XEX's TLS template, not just kernel_process_.
+  {
+    core::ExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl.exe";
+    descriptor.name = "ExCreateThread";
+    descriptor.ordinal = 0x0Du;
+    descriptor.requirement = ExportRequirement::Required;
+    descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      return export_ex_create_thread(ctx);
+    };
+    if (!export_registry_.register_export(std::move(descriptor))) {
+      set_error("Failed to register xboxkrnl ExCreateThread export");
+      return false;
     }
   }
 
@@ -1649,19 +1675,12 @@ void XenonSession::unload_native_extension() noexcept {
   }
 }
 
-std::uint32_t XenonSession::run_execution() {
-  // Establishes this host thread as the active guest thread for anything
-  // that resolves "current thread" via kernel::ThreadManager (thread_local),
-  // so kernel/exception context below - and any future kernel export that
-  // asks "who am I" - is scoped to the real KernelThread, not inferred.
-  if (kernel_process_ && main_thread_) {
-    kernel_process_->thread_manager().set_current_thread(main_thread_);
-  }
+XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
+    cpu::CpuState& state, cpu::GuestAddress entry,
+    const std::shared_ptr<kernel::KernelThread>& thread) {
+  GuestDispatchOutcome outcome{};
 
-  execution_active_.store(true);
-  const auto entry = loaded_xex_->image.entry_point;
-
-  cpu::ExecutionContext context(*main_cpu_state_, *memory_, *this);
+  cpu::ExecutionContext context(state, *memory_, *this);
   if (dynamic_fallback_) dynamic_fallback_->bind(context);
   if (!config_.adaptive_observation_path.empty() ||
       !config_.adaptive_observation_mirror_path.empty()) {
@@ -1673,9 +1692,10 @@ std::uint32_t XenonSession::run_execution() {
   }
 
   if (!context.compiled_lookup && !context.dynamic_fallback) {
-    execution_active_.store(false);
-    set_error("No compiled game code or dynamic fallback is available to execute");
-    return 0xFFFFFFFFu;
+    outcome.crashed = true;
+    outcome.crash_message = "No compiled game code or dynamic fallback is available to execute";
+    outcome.crash_exit_code = 0xFFFFFFFFu;
+    return outcome;
   }
 
   auto* entry_fn = context.lookup_compiled(entry, cpu::CompiledLookupKind::Call);
@@ -1684,6 +1704,7 @@ std::uint32_t XenonSession::run_execution() {
   bool crashed = false;
   std::string crash_message;
   std::uint32_t crash_exit_code = 0xC0000005u;  // NTSTATUS-style default (access violation).
+  bool thread_terminated_mid_dispatch = false;
   const auto fail_execution = [&](std::string message, std::uint32_t exit_code) {
     crashed = true;
     crash_message = std::move(message);
@@ -1711,18 +1732,30 @@ std::uint32_t XenonSession::run_execution() {
                 << cpu::flow_reason_name(result.reason)
                 << " next=0x" << std::hex << std::uppercase << result.next_address
                 << " detail=0x" << result.detail
-                << " cia=0x" << main_cpu_state_->cia
-                << " nia=0x" << main_cpu_state_->nia
-                << " lr=0x" << main_cpu_state_->lr
-                << " ctr=0x" << main_cpu_state_->ctr
-                << " r1=0x" << main_cpu_state_->gpr[1]
-                << " r3=0x" << main_cpu_state_->gpr[3] << std::dec << std::endl;
+                << " cia=0x" << state.cia
+                << " nia=0x" << state.nia
+                << " lr=0x" << state.lr
+                << " ctr=0x" << state.ctr
+                << " r1=0x" << state.gpr[1]
+                << " r3=0x" << state.gpr[3] << std::dec << std::endl;
     }
 
     constexpr std::uint32_t kMaxTopLevelDispatches = 1'000'000u;
     for (std::uint32_t dispatch_count = 0u;
          !crashed && !stop_requested_.load() &&
+         !(thread && thread->is_terminated()) &&
          dispatch_count < kMaxTopLevelDispatches;) {
+      // Preemptive safepoint: parks if `thread` was suspend()ed by another
+      // host thread (cheap no-op otherwise), then re-checks termination in
+      // case terminate() raced with the suspend/resume - a thread must not
+      // dispatch one more block after being terminated while parked here.
+      if (thread) {
+        thread->wait_while_suspended();
+        if (thread->is_terminated()) {
+          thread_terminated_mid_dispatch = true;
+          break;
+        }
+      }
       switch (result.reason) {
         case cpu::FlowReason::Branch:
         case cpu::FlowReason::Fallthrough: {
@@ -1759,22 +1792,22 @@ std::uint32_t XenonSession::run_execution() {
                       << cpu::flow_reason_name(result.reason)
                       << " next=0x" << std::hex << std::uppercase
                       << result.next_address << " detail=0x" << result.detail
-                      << " cia=0x" << main_cpu_state_->cia
-                      << " nia=0x" << main_cpu_state_->nia
-                      << " lr=0x" << main_cpu_state_->lr
-                      << " ctr=0x" << main_cpu_state_->ctr
-                      << " r1=0x" << main_cpu_state_->gpr[1]
-                      << " r3=0x" << main_cpu_state_->gpr[3] << std::dec
+                      << " cia=0x" << state.cia
+                      << " nia=0x" << state.nia
+                      << " lr=0x" << state.lr
+                      << " ctr=0x" << state.ctr
+                      << " r1=0x" << state.gpr[1]
+                      << " r3=0x" << state.gpr[3] << std::dec
                       << std::endl;
           }
           continue;
         }
         case cpu::FlowReason::Return:
-          if (result.next_address != 0u || main_cpu_state_->lr != 0u) {
+          if (result.next_address != 0u || state.lr != 0u) {
             std::ostringstream diagnostic;
             diagnostic << "Guest entry returned from a non-terminal compiled "
                        << "boundary (next=0x" << std::hex << std::uppercase
-                       << result.next_address << ", lr=0x" << main_cpu_state_->lr
+                       << result.next_address << ", lr=0x" << state.lr
                        << ')';
             fail_execution(diagnostic.str(), 0xC000001Du);
           }
@@ -1800,18 +1833,23 @@ std::uint32_t XenonSession::run_execution() {
       }
       break;
     }
-    if (!crashed && !stop_requested_.load() &&
+    if (!crashed && !stop_requested_.load() && !(thread && thread->is_terminated()) &&
         result.reason == cpu::FlowReason::Branch) {
       fail_execution("Guest execution exceeded the top-level dispatch limit",
                      0xC000001Du);
     }
+    if (!crashed && thread && thread->is_terminated()) {
+      thread_terminated_mid_dispatch = true;
+    }
   } catch (const memory::MemoryFault& fault) {
     // Real connection to the guest exception path (not a new subsystem):
     // Memory V2 already throws this on a genuine guest memory fault; route
-    // it through kernel::ExceptionDispatcher, scoped to the thread that just
-    // registered itself above. Also retain the guest CPU/memory state that
-    // caused the first fault - "fault at 0" alone cannot distinguish a null
-    // data dereference from an indirect call, bad ABI state, or bad mapping.
+    // it through kernel::ExceptionDispatcher, scoped to whichever thread
+    // called dispatch_guest_thread() (the caller already registered itself
+    // as current_thread() before invoking this). Also retain the guest
+    // CPU/memory state that caused the first fault - "fault at 0" alone
+    // cannot distinguish a null data dereference from an indirect call, bad
+    // ABI state, or bad mapping.
     crashed = true;
     const auto& info = fault.info();
     const auto record = kernel::ExceptionDispatcher::fault_to_exception(info);
@@ -1836,8 +1874,8 @@ std::uint32_t XenonSession::run_execution() {
       }
       return "unknown";
     };
-    const auto page_state_name = [](memory::PageState state) {
-      switch (state) {
+    const auto page_state_name = [](memory::PageState page_state) {
+      switch (page_state) {
         case memory::PageState::Free: return "free";
         case memory::PageState::Reserved: return "reserved";
         case memory::PageState::Committed: return "committed";
@@ -1845,21 +1883,21 @@ std::uint32_t XenonSession::run_execution() {
       return "unknown";
     };
     const auto protect_string = [](memory::Protect protect) {
-      std::string result;
-      result += memory::has(protect, memory::Protect::Read) ? 'R' : '-';
-      result += memory::has(protect, memory::Protect::Write) ? 'W' : '-';
-      result += memory::has(protect, memory::Protect::Execute) ? 'X' : '-';
-      if (memory::has(protect, memory::Protect::NoCache)) result += "|NC";
-      if (memory::has(protect, memory::Protect::WriteCombine)) result += "|WC";
-      return result;
+      std::string protect_str;
+      protect_str += memory::has(protect, memory::Protect::Read) ? 'R' : '-';
+      protect_str += memory::has(protect, memory::Protect::Write) ? 'W' : '-';
+      protect_str += memory::has(protect, memory::Protect::Execute) ? 'X' : '-';
+      if (memory::has(protect, memory::Protect::NoCache)) protect_str += "|NC";
+      if (memory::has(protect, memory::Protect::WriteCombine)) protect_str += "|WC";
+      return protect_str;
     };
 
     std::ostringstream diagnostic;
     diagnostic << "Guest memory fault: " << fault.what()
-               << " [cia=0x" << std::hex << std::uppercase << main_cpu_state_->cia
-               << " nia=0x" << main_cpu_state_->nia
-               << " lr=0x" << main_cpu_state_->lr
-               << " ctr=0x" << main_cpu_state_->ctr
+               << " [cia=0x" << std::hex << std::uppercase << state.cia
+               << " nia=0x" << state.nia
+               << " lr=0x" << state.lr
+               << " ctr=0x" << state.ctr
                << " request=0x" << info.request_address
                << " fault=0x" << info.fault_address
                << std::dec << " width=" << info.width
@@ -1871,17 +1909,17 @@ std::uint32_t XenonSession::run_execution() {
                << " current_protect=" << protect_string(info.current_protect)
                << " allocation_protect=" << protect_string(info.allocation_protect)
                << " page_size=0x" << std::hex << info.page_size
-               << " r1=0x" << main_cpu_state_->gpr[1]
-               << " r2=0x" << main_cpu_state_->gpr[2]
-               << " r3=0x" << main_cpu_state_->gpr[3]
-               << " r4=0x" << main_cpu_state_->gpr[4]
-               << " r5=0x" << main_cpu_state_->gpr[5]
-               << " r6=0x" << main_cpu_state_->gpr[6]
-               << " r7=0x" << main_cpu_state_->gpr[7]
-               << " r8=0x" << main_cpu_state_->gpr[8]
-               << " r9=0x" << main_cpu_state_->gpr[9]
-               << " r10=0x" << main_cpu_state_->gpr[10]
-               << " r13=0x" << main_cpu_state_->gpr[13] << ']';
+               << " r1=0x" << state.gpr[1]
+               << " r2=0x" << state.gpr[2]
+               << " r3=0x" << state.gpr[3]
+               << " r4=0x" << state.gpr[4]
+               << " r5=0x" << state.gpr[5]
+               << " r6=0x" << state.gpr[6]
+               << " r7=0x" << state.gpr[7]
+               << " r8=0x" << state.gpr[8]
+               << " r9=0x" << state.gpr[9]
+               << " r10=0x" << state.gpr[10]
+               << " r13=0x" << state.gpr[13] << ']';
     crash_message = diagnostic.str();
   } catch (const std::exception& ex) {
     crashed = true;
@@ -1891,25 +1929,242 @@ std::uint32_t XenonSession::run_execution() {
     crash_message = "Unhandled unknown exception during guest execution";
   }
 
+  outcome.crashed = crashed;
+  outcome.crash_message = std::move(crash_message);
+  outcome.crash_exit_code = crash_exit_code;
+  outcome.final_result = result;
+  outcome.stop_requested = stop_requested_.load();
+  outcome.thread_terminated = thread_terminated_mid_dispatch;
+
+  // Exception dispatch for a genuine guest Trap is generic fault
+  // interpretation (like the MemoryFault catch above), not session-lifecycle
+  // bookkeeping, so it happens here rather than in each caller - every
+  // guest thread that traps gets this, not just the main thread.
+  if (!crashed && result.reason == cpu::FlowReason::Trap) {
+    static_cast<void>(exception_dispatcher_.dispatch_exception(
+        kernel::ExceptionRecord{kernel::ExceptionCode::IllegalInstruction, 0,
+                                static_cast<std::uint32_t>(state.cia), {}}));
+  }
+
+  return outcome;
+}
+
+std::uint32_t XenonSession::run_execution() {
+  // Establishes this host thread as the active guest thread for anything
+  // that resolves "current thread" via kernel::ThreadManager (thread_local),
+  // so kernel/exception context below - and any future kernel export that
+  // asks "who am I" - is scoped to the real KernelThread, not inferred.
+  if (kernel_process_ && main_thread_) {
+    kernel_process_->thread_manager().set_current_thread(main_thread_);
+  }
+
+  execution_active_.store(true);
+  const auto outcome =
+      dispatch_guest_thread(*main_cpu_state_, loaded_xex_->image.entry_point, main_thread_);
   execution_active_.store(false);
 
-  if (crashed) {
-    set_error(crash_message);
-    return crash_exit_code;
+  if (outcome.crashed) {
+    set_error(outcome.crash_message);
+    return outcome.crash_exit_code;
   }
-  if (stop_requested_.load()) {
+  if (outcome.thread_terminated) {
+    // terminate() was called on main_thread_ (possibly mid-dispatch, via the
+    // preemptive safepoint) - its own committed exit code is authoritative,
+    // not any in-flight register state.
+    set_state(SessionState::Stopped, "Game execution ended (thread terminated)");
+    return main_thread_ ? main_thread_->exit_code() : 0;
+  }
+  if (outcome.stop_requested) {
     set_state(SessionState::Stopped, "Game execution ended (stop requested)");
     return 0;
   }
-  if (result.reason == cpu::FlowReason::Trap) {
-    set_error("Game execution trapped (code " + std::to_string(result.detail) + ")");
-    static_cast<void>(exception_dispatcher_.dispatch_exception(
-        kernel::ExceptionRecord{kernel::ExceptionCode::IllegalInstruction, 0,
-                                static_cast<std::uint32_t>(main_cpu_state_->cia), {}}));
-    return result.detail;
+  if (outcome.final_result.reason == cpu::FlowReason::Trap) {
+    set_error("Game execution trapped (code " + std::to_string(outcome.final_result.detail) + ")");
+    return outcome.final_result.detail;
   }
   set_state(SessionState::Stopped, "Game execution completed");
   return 0;
+}
+
+std::uint32_t XenonSession::run_created_guest_thread(
+    std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
+    std::uint64_t start_context, memory::GuestAddress stack_base,
+    std::uint32_t stack_size, GuestThreadTlsContext tls) {
+  if (kernel_process_ && thread) {
+    kernel_process_->thread_manager().set_current_thread(thread);
+  }
+
+  cpu::CpuState state{};
+  state.cia = start_address;
+  // PowerPC stacks grow downward; r1 starts at the top of the allocation,
+  // less a small back-chain reserve, matching create_guest_process()'s main
+  // thread stack setup and start_audio_guest_thread()'s callback stack.
+  state.gpr[1] = static_cast<std::uint64_t>(stack_base) + stack_size - 64u;
+  state.gpr[3] = start_context;
+  state.gpr[13] = tls.kpcr_address;
+
+  const auto outcome = dispatch_guest_thread(state, start_address, thread);
+
+  std::uint32_t exit_code = 0;
+  if (outcome.crashed) {
+    exit_code = outcome.crash_exit_code;
+    if (config_.enable_logging) {
+      std::cout << "[XenonSession] Created guest thread "
+                << (thread ? thread->thread_id() : 0u)
+                << " crashed: " << outcome.crash_message << std::endl;
+    }
+  } else if (outcome.thread_terminated) {
+    // terminate() was called on this thread (possibly mid-dispatch, via the
+    // preemptive safepoint) - its own committed exit code is authoritative,
+    // not any in-flight register state.
+    exit_code = thread ? thread->exit_code() : 0;
+    if (config_.enable_logging) {
+      std::cout << "[XenonSession] Created guest thread "
+                << (thread ? thread->thread_id() : 0u)
+                << " terminated mid-dispatch, exit_code=" << exit_code << std::endl;
+    }
+  } else if (outcome.stop_requested) {
+    // Session-wide stop was requested mid-dispatch; exit_code stays 0,
+    // matching run_execution()'s own "stop requested" -> clean 0 convention.
+  } else if (outcome.final_result.reason == cpu::FlowReason::Trap) {
+    // A Trap is a distinct, non-"crashed" outcome in GuestDispatchOutcome
+    // (see dispatch_guest_thread()) - it still must not be reported as a
+    // successful exit code, exactly matching how run_execution() treats a
+    // main-thread Trap (returns final_result.detail, not gpr[3]).
+    exit_code = outcome.final_result.detail;
+    if (config_.enable_logging) {
+      std::cout << "[XenonSession] Created guest thread "
+                << (thread ? thread->thread_id() : 0u)
+                << " trapped (code " << exit_code << ')' << std::endl;
+    }
+  } else {
+    // Natural return: PPC ABI convention - r3 holds the function's return
+    // value, matching real ExCreateThread/ExTerminateThread semantics (a
+    // thread function returning is an implicit ExTerminateThread(returnValue)).
+    exit_code = static_cast<std::uint32_t>(state.gpr[3]);
+  }
+
+  // Release this thread's own guest stack/TLS now that nothing will execute
+  // on them again. Safe to do from within the thread's own host-side
+  // ThreadEntry body: this code runs on host_thread_'s native OS stack,
+  // entirely separate from the guest-memory stack/TLS being freed here.
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, tls);
+    static_cast<void>(memory_->release(stack_base));
+  }
+
+  return exit_code;
+}
+
+// ExCreateThread (ordinal 0x0D)
+// Guest ABI: r3 = PHANDLE out, r4 = stack size (0 = default), r5 = LPDWORD
+// thread-id out (optional, nullable), r6 = XApiThreadStartup (ignored -
+// Xenon calls start_address directly; it has no XAPI bootstrap trampoline to
+// reproduce), r7 = start address, r8 = start context (the single argument
+// passed to the thread function, matching PPC ABI gpr[3]), r9 = creation
+// flags (bit 0x4 = CREATE_SUSPENDED) -> r3 = NTSTATUS.
+bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
+  if (!kernel_process_ || !memory_ || !loaded_xex_) {
+    // No title loaded - this export cannot possibly succeed; report a
+    // real failure rather than silently doing nothing (ExportHandler
+    // returning false surfaces as "unhandled export" to the caller).
+    return false;
+  }
+
+  const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  auto stack_size = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  const auto thread_id_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto start_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
+  const auto start_context = context.cpu.gpr[8];
+  const auto creation_flags = static_cast<std::uint32_t>(context.cpu.gpr[9]);
+
+  if (handle_out == 0u || start_address == 0u) {
+    context.cpu.gpr[3] = kernel::xbox::status::InvalidParameter;
+    return true;
+  }
+
+  // 0 means "inherit the default stack size" on real Xbox 360, matching the
+  // same default create_guest_process() uses for the main thread.
+  constexpr std::uint32_t kDefaultStackSize = 1u * 1024u * 1024u;
+  if (stack_size == 0u) stack_size = kDefaultStackSize;
+  constexpr std::uint32_t kMinimumStackSize = 4096u;
+  if (stack_size < kMinimumStackSize) stack_size = kMinimumStackSize;
+
+  memory::GuestAddress stack_base{};
+  if (!memory_->allocate(stack_size, 16, memory::kReadWrite, /*top_down=*/true, stack_base)) {
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  GuestThreadTlsContext tls{};
+  std::string tls_error;
+  if (!setup_guest_thread_tls_context(*memory_, loaded_xex_->image.tls, stack_base,
+                                      stack_size, tls, &tls_error)) {
+    static_cast<void>(memory_->release(stack_base));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  kernel::ThreadCreationParams params{};
+  params.stack_size = stack_size;
+  params.name = "GuestThread";
+  // CREATE_SUSPENDED = 0x4, the real Win32/Xbox 360 creation-flag bit.
+  params.create_suspended = (creation_flags & 0x4u) != 0u;
+
+  // The ThreadEntry closure needs to know its own KernelThread's id (to
+  // resolve the shared_ptr again via ThreadManager::get_thread() and
+  // register current-thread identity in run_created_guest_thread()), but
+  // ThreadManager::create_thread() has not returned that shared_ptr yet at
+  // the point this closure is constructed - a real chicken-and-egg problem,
+  // not an oversight. Solved with a small shared slot filled in immediately
+  // below, strictly before start() is called (so thread_main() can never
+  // observe it unset: the host OS thread that would read it is not created
+  // until start()).
+  auto thread_id_slot = std::make_shared<std::atomic<std::uint32_t>>(0u);
+  auto thread = kernel_process_->thread_manager().create_thread(
+      [this, start_address, start_context, stack_base, stack_size, tls,
+       thread_id_slot]() -> std::uint32_t {
+        auto self = kernel_process_->thread_manager().get_thread(
+            thread_id_slot->load(std::memory_order_acquire));
+        return run_created_guest_thread(std::move(self), start_address, start_context,
+                                        stack_base, stack_size, tls);
+      },
+      params);
+  if (!thread) {
+    release_guest_thread_tls_context(*memory_, tls);
+    static_cast<void>(memory_->release(stack_base));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+  thread_id_slot->store(thread->thread_id(), std::memory_order_release);
+
+  kernel::Handle handle{};
+  const auto insert_code = kernel_process_->handle_table().insert(
+      thread, /*granted_access=*/0xFFFFFFFFu, kernel::HandleFlags::None, handle);
+  if (insert_code != kernel::KernelIoCode::Success) {
+    // The thread object was already created (and, per real semantics,
+    // observably exists) but could not be published as a guest handle -
+    // terminate it immediately rather than leaking a runnable, unreachable
+    // thread. terminate() before start() means thread_main() will observe
+    // Terminated at its very first safepoint and exit without ever running
+    // start_address (see thread_main()'s parked-terminate path).
+    static_cast<void>(thread->terminate(0));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  if (!thread->start()) {
+    static_cast<void>(thread->terminate(0));
+    context.cpu.gpr[3] = kernel::xbox::status::Unsuccessful;
+    return true;
+  }
+
+  context.memory.write32_be(handle_out, handle);
+  if (thread_id_out != 0u) {
+    context.memory.write32_be(thread_id_out, thread->thread_id());
+  }
+  context.cpu.gpr[3] = kernel::xbox::status::Success;
+  return true;
 }
 
 #if defined(XENON_HAS_AUDIO)
@@ -2136,8 +2391,28 @@ bool XenonSession::external_call(std::string_view module,
                                  std::uint32_t ordinal,
                                  cpu::CpuState& state,
                                  cpu::MemoryPort& memory) {
+  // Resolves to the real calling guest thread's id via
+  // kernel::ThreadManager's thread_local current-thread slot, which every
+  // guest-executing host thread registers itself into once at the start of
+  // its run (run_execution() for the main thread, run_audio_callback_thread()
+  // for the audio callback thread, run_created_guest_thread() for
+  // ExCreateThread-spawned threads) - external_call() runs synchronously on
+  // whichever host thread is currently executing the guest code that issued
+  // this call, so this is always the correct thread, not an approximation.
+  // Previously hardcoded to 0 regardless of caller, which made
+  // ExportCallContext::thread_id meaningless in production for every export
+  // that uses it (e.g. NtCreateMutant/NtWaitForSingleObjectEx's real thread
+  // identity/ownership semantics) even though it worked correctly in
+  // isolated tests that construct ExportCallContext directly.
+  std::uint32_t calling_thread_id = 0;
+  if (kernel_process_) {
+    if (auto current = kernel_process_->thread_manager().current_thread()) {
+      calling_thread_id = current->thread_id();
+    }
+  }
+
   // Try the export registry first
-  ExportCallContext context{state, memory, state.cia, 0};
+  ExportCallContext context{state, memory, state.cia, calling_thread_id};
   auto result = export_registry_.invoke(module, ordinal, context);
   
   if (result.handled) {

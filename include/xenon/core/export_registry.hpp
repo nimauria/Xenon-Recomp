@@ -48,6 +48,15 @@ struct ExportDescriptor {
   std::uint32_t ordinal{};
   ExportHandler handler{};
   ExportRequirement requirement{ExportRequirement::Required};
+  // True when this export is registered and callable but does not fully
+  // implement real Xbox 360 semantics (e.g. it returns success without
+  // performing the real side effect a caller would observe) - distinct from
+  // ExportRequirement::Stubbed, which already covers exports that are
+  // deliberately safe no-ops. `partial` flags a real, non-obvious behavior
+  // gap so audit tooling (see tools/recomp_tools.cpp's import-scanner) can
+  // classify it as PARTIAL rather than silently reporting IMPLEMENTED.
+  bool partial{false};
+  std::string partial_note{};
 };
 
 // Guest-backed variable exported by an Xbox system module. XEX native-import

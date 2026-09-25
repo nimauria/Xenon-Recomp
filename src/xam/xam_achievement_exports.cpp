@@ -37,6 +37,12 @@ bool register_achievement_exports(core::ExportRegistry& registry,
     desc.name = "XamUserCreateAchievementEnumerator";
     desc.ordinal = ordinal::XamUserCreateAchievementEnumerator;
     desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "returns a fixed fake handle (0xACE00001) instead of a real "
+        "enumerator over the user's achievements - only the output handle "
+        "parameter is marshalled, title_id/user_index/flags/count are not "
+        "used to populate a real result set";
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
       const auto out_handle_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
 
@@ -64,6 +70,12 @@ bool register_achievement_exports(core::ExportRegistry& registry,
     desc.name = "XamUserCreateStatsEnumerator";
     desc.ordinal = ordinal::XamUserCreateStatsEnumerator;
     desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "returns a fixed fake handle (0xACE00002) instead of a real "
+        "enumerator backing a walk-the-results XamEnumerate path - see "
+        "AchievementManager::enumerate_stats() for the internal-only real "
+        "data this does not yet expose through the handle";
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
       const auto out_handle_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
 

@@ -31,13 +31,27 @@ namespace xenon::xbox {
     xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_wait_for_multiple_objects_ex_export(
     xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_create_timer_export(xenon::kernel::KernelProcess& process,
+                                          xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_cancel_timer_export(xenon::kernel::KernelProcess& process,
+                                          xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_set_timer_ex_export(xenon::kernel::KernelProcess& process,
+                                          xenon::core::ExportCallContext& context);
 
 // Registers the xboxkrnl handle-based (Nt*) synchronization exports this
 // pass adds: NtCreateEvent, NtCreateSemaphore, NtReleaseSemaphore,
 // NtCreateMutant, NtReleaseMutant, NtWaitForSingleObjectEx,
-// NtWaitForMultipleObjectsEx. Ordinals were verified against the
-// xenia-project/xenia xboxkrnl export table (xboxkrnl_table.inc), not
-// guessed - see docs/kernel/THREADING_V2.md.
+// NtWaitForMultipleObjectsEx, NtCreateTimer, NtCancelTimer, NtSetTimerEx.
+// Ordinals were verified against the xenia-project/xenia xboxkrnl export
+// table (xboxkrnl_table.inc), not guessed - see docs/kernel/THREADING_V2.md.
+//
+// NtSetTimerEx's guest callback ROUTINE parameter is accepted but not
+// invoked: real Xbox 360 timer callbacks run in a DPC/APC context Xenon does
+// not model, and inventing one without a verified reference risks silently
+// wrong guest-visible behavior. The timer object itself still fires and
+// signals correctly for NtWaitForSingleObjectEx-style waiters; a nonzero
+// routine pointer is logged as a diagnostic, not silently dropped. See
+// docs/kernel/THREADING_V2.md.
 //
 // Deliberately does NOT register the Ke* variants (KeSetEvent, KeResetEvent,
 // KeWaitForSingleObject, KeWaitForMultipleObjects): those operate on a raw

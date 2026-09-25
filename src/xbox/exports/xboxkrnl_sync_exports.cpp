@@ -11,8 +11,11 @@
 #include "xenon/kernel/mutant.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/kernel/timer.hpp"
+#include "xenon/kernel/timer_manager.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 
 namespace xenon::xbox {
@@ -298,6 +301,127 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
   return true;
 }
 
+// NtCreateTimer (ordinal 0xD7)
+// Guest ABI: r3 = PHANDLE out, r4 = POBJECT_ATTRIBUTES (unnamed-only, see
+// NtCreateEvent), r5 = timer type (0 = NotificationTimer/manual-reset, 1 =
+// SynchronizationTimer/auto-reset - same convention as EVENT_TYPE) ->
+// r3 = NTSTATUS.
+bool nt_create_timer_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto timer_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  if (handle_out == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+
+  const auto type = (timer_type == 0u) ? kernel::TimerType::NotificationTimer
+                                       : kernel::TimerType::SynchronizationTimer;
+  auto timer = std::make_shared<kernel::KernelTimer>(type);
+
+  Handle handle{};
+  const auto code =
+      process.handle_table().insert(std::move(timer), /*granted_access=*/0xFFFFFFFFu,
+                                    HandleFlags::None, handle);
+  if (code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(code);
+    return true;
+  }
+
+  context.memory.write32_be(handle_out, handle);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// NtCancelTimer (ordinal 0xCD)
+// Guest ABI: r3 = handle, r4 = PLONG current-state out (optional, nullable;
+// real xboxkrnl always writes 0 here per the reference implementation, not
+// a meaningful previous-state value) -> r3 = NTSTATUS.
+bool nt_cancel_timer_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto current_state_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Timer) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  auto timer = std::static_pointer_cast<kernel::KernelTimer>(view.object);
+  static_cast<void>(timer->cancel());
+  process.timer_manager().unschedule(timer);
+
+  if (current_state_ptr != 0u) {
+    context.memory.write32_be(current_state_ptr, 0u);
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// NtSetTimerEx (ordinal 0xFA)
+// Guest ABI: r3 = handle, r4 = PLARGE_INTEGER due time (100ns units, same
+// convention as wait timeouts - negative = relative, positive = absolute,
+// mandatory), r5 = guest callback routine pointer (accepted but not
+// invoked - see xboxkrnl_sync_exports.hpp), r6 = unk (ignored), r7 =
+// routine argument (ignored - the routine is never invoked), r8 = resume
+// (ignored - no APC/suspend semantics modeled), r9 = period in
+// milliseconds (0 = one-shot), r10 = unk (ignored) -> r3 = NTSTATUS.
+bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto due_time_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto routine_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto period_ms = static_cast<std::uint32_t>(context.cpu.gpr[9]);
+
+  if (due_time_ptr == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Timer) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  if (routine_ptr != 0u) {
+    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "timer", [&] {
+      return std::string(
+          "NtSetTimerEx: guest callback routine requested but not invoked "
+          "(DPC/APC timer callbacks are not modeled) - the timer object itself "
+          "still fires for NtWaitForSingleObjectEx-style waiters");
+    });
+  }
+
+  const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));
+  const auto relative_due = xbox_timeout_to_relative_ms(raw);
+  const std::optional<std::chrono::milliseconds> period =
+      period_ms == 0u ? std::nullopt
+                      : std::optional<std::chrono::milliseconds>(period_ms);
+
+  auto timer = std::static_pointer_cast<kernel::KernelTimer>(view.object);
+  if (!timer->set(relative_due, period, nullptr)) {
+    context.cpu.gpr[3] = status::Unsuccessful;
+    return true;
+  }
+  if (relative_due.count() > 0) {
+    // due_time == 0 already fired synchronously inside set(); only a
+    // genuinely future due time needs the dispatch thread.
+    process.timer_manager().schedule(timer);
+  }
+
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 namespace {
 
 struct SyncExportSpec {
@@ -315,6 +439,9 @@ constexpr SyncExportSpec kSyncExports[] = {
     {0x0F2u, "NtReleaseMutant"},
     {0x0FDu, "NtWaitForSingleObjectEx"},
     {0x0FEu, "NtWaitForMultipleObjectsEx"},
+    {0x0D7u, "NtCreateTimer"},
+    {0x0CDu, "NtCancelTimer"},
+    {0x0FAu, "NtSetTimerEx"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -348,6 +475,15 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
     return [&process](ExportCallContext& ctx) {
       return nt_wait_for_multiple_objects_ex_export(process, ctx);
     };
+  }
+  if (name == "NtCreateTimer") {
+    return [&process](ExportCallContext& ctx) { return nt_create_timer_export(process, ctx); };
+  }
+  if (name == "NtCancelTimer") {
+    return [&process](ExportCallContext& ctx) { return nt_cancel_timer_export(process, ctx); };
+  }
+  if (name == "NtSetTimerEx") {
+    return [&process](ExportCallContext& ctx) { return nt_set_timer_ex_export(process, ctx); };
   }
   return {};
 }
