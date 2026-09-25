@@ -35,7 +35,7 @@ Item {
         var r = root.runtimeRevision
         if (launcherBridge.runtimeCapability(service)) return Theme.success
         if (launcherBridge.runtimeCapability(service + "Compiled"))
-            return launcherBridge.backendConnected ? Theme.success : Theme.warning
+            return launcherBridge.backendConnected ? Theme.accent : Theme.warning
         return Theme.textMuted
     }
 
@@ -67,7 +67,7 @@ Item {
                 : "The launcher UI is running, but the runtime host executable is missing from this build/output folder."
             StatusPill {
                 label: launcherBridge.backendConnected ? "Runtime host ready" : "Launcher only"
-                tone: launcherBridge.backendConnected ? Theme.success : Theme.warning
+                tone: launcherBridge.backendConnected ? Theme.accent : Theme.warning
             }
             XButton { text: "Copy system summary"; onClicked: { launcherBridge.copyText(launcherBridge.userDiagnostics()); launcherBridge.notify("Summary copied", "A system summary was copied to the clipboard.") } }
         }
@@ -82,7 +82,7 @@ Item {
             StatusPill {
                 label: launcherBridge.inputAvailable() ? "Ready"
                     : (launcherBridge.runtimeCapability("inputCompiled") ? "Built • unavailable" : "Not built")
-                tone: launcherBridge.inputAvailable() ? Theme.success
+                tone: launcherBridge.inputAvailable() ? Theme.accent
                     : (launcherBridge.runtimeCapability("inputCompiled") ? Theme.warning : Theme.textMuted)
             }
             XButton {
@@ -98,9 +98,21 @@ Item {
             ColumnLayout {
                 Layout.fillWidth: true
                 spacing: Theme.spaceXs
-                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Graphics"; color: Theme.text }; StatusPill { label: root.serviceLabel("graphics"); tone: root.serviceTone("graphics") } }
-                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Audio"; color: Theme.text }; StatusPill { label: root.serviceLabel("audio"); tone: root.serviceTone("audio") } }
-                RowLayout { Layout.fillWidth: true; Text { Layout.fillWidth: true; text: "Network"; color: Theme.text }; StatusPill { label: root.serviceLabel("network"); tone: root.serviceTone("network") } }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { Layout.fillWidth: true; text: "Graphics"; color: Theme.text }
+                    StatusPill { label: root.serviceLabel("graphics"); tone: root.serviceTone("graphics") }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { Layout.fillWidth: true; text: "Audio"; color: Theme.text }
+                    StatusPill { label: root.serviceLabel("audio"); tone: root.serviceTone("audio") }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text { Layout.fillWidth: true; text: "Network"; color: Theme.text }
+                    StatusPill { label: root.serviceLabel("network"); tone: root.serviceTone("network") }
+                }
             }
         }
 

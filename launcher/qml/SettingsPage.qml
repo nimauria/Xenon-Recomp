@@ -259,7 +259,8 @@ Item {
 
     function updateStatusTone() {
         var status = String(root.launcherUpdateState.status || "idle")
-        if (status === "up-to-date" || status === "ready-to-install") return Theme.success
+        if (status === "up-to-date") return Theme.success
+        if (status === "ready-to-install") return Theme.accent
         if (status === "update-available" || status === "checking" || status === "downloading" || status === "installing") return Theme.warning
         if (status === "error" || status === "asset-unavailable") return Theme.danger
         return Theme.textMuted
@@ -292,7 +293,7 @@ Item {
         var r = root.runtimeRevision
         if (launcherBridge.runtimeCapability(service)) return Theme.success
         if (launcherBridge.runtimeCapability(service + "Compiled"))
-            return launcherBridge.backendConnected ? Theme.success : Theme.warning
+            return launcherBridge.backendConnected ? Theme.accent : Theme.warning
         return Theme.textMuted
     }
 
@@ -316,7 +317,7 @@ Item {
 
     function inputServiceTone() {
         var r = root.inputRevision
-        if (launcherBridge.inputAvailable()) return Theme.success
+        if (launcherBridge.inputAvailable()) return Theme.accent
         return launcherBridge.runtimeCapability("inputCompiled") ? Theme.warning : Theme.textMuted
     }
 
@@ -784,7 +785,7 @@ Item {
                         description: launcherBridge.backendConnected
                             ? "xenon_runtime_host is installed beside the launcher and ready to start game sessions."
                             : "The launcher UI is running, but xenon_runtime_host was not found beside it. Rebuild/install the full launcher target."
-                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Runtime host missing"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Runtime host missing"; tone: launcherBridge.backendConnected ? Theme.accent : Theme.warning }
                     }
                     XSettingsCard {
                         title: "Reset runtime preferences"
@@ -1377,7 +1378,7 @@ Item {
                         description: launcherBridge.backendConnected
                             ? "The runtime host executable is available and ready to start sessions."
                             : "The runtime host executable is missing from the launcher folder."
-                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Missing"; tone: launcherBridge.backendConnected ? Theme.success : Theme.warning }
+                        StatusPill { label: launcherBridge.backendConnected ? "Ready" : "Missing"; tone: launcherBridge.backendConnected ? Theme.accent : Theme.warning }
                     }
                     XSettingsCard {
                         id: developerRuntimeSessionCard

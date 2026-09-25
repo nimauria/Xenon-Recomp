@@ -4,8 +4,9 @@ import QtQuick.Layouts
 
 // Non-destructive profile picture crop editor. The source image is never
 // rewritten: focal point + zoom are persisted and shared with ProfileAvatar.
-// Zoom may go below the normal cover scale so logos/badges can be fitted in
-// full instead of being forced into an over-cropped portrait treatment.
+// Zoom starts at the normal cover scale. Keeping the lower bound at cover
+// prevents empty pixels from entering the circular crop while still allowing
+// immediate panning on the source image's overflowing axis.
 Popup {
     id: root
 
@@ -13,7 +14,7 @@ Popup {
     property real initialFocalX: 0.5
     property real initialFocalY: 0.5
     property real initialZoom: 1.0
-    readonly property real minZoom: 0.55
+    readonly property real minZoom: 1.0
     readonly property real maxZoom: 3.0
     readonly property real nudgeStep: 0.02
 
@@ -51,7 +52,7 @@ Popup {
     function fitImage() {
         focalX = 0.5
         focalY = 0.5
-        zoom = minZoom
+        zoom = 1.0
     }
 
     function nudge(dx, dy) {
@@ -117,7 +118,7 @@ Popup {
             Layout.fillWidth: true
             Layout.leftMargin: Theme.spaceXl
             Layout.rightMargin: Theme.spaceXl
-            text: "Drag the image to reposition it. Zoom out to keep more of the source, or zoom in for a tighter crop. Everything inside the circle becomes your profile picture."
+            text: "Drag the image to reposition it, or zoom in for a tighter crop. Xenon keeps the crop filled so the saved avatar matches this circular preview."
             color: Theme.textMuted
             font.pixelSize: Theme.typeCaption
             wrapMode: Text.WordWrap
@@ -280,7 +281,7 @@ Popup {
 
             XButton {
                 Layout.fillWidth: true
-                text: "Fit image"
+                text: "Fit crop"
                 onClicked: root.fitImage()
             }
             XButton {

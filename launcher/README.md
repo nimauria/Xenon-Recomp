@@ -32,6 +32,21 @@ The completed QML front end now sits on a generic **Launcher Core**. Navigation 
 
 Current front-end behaviour includes:
 
+- Library search, filter, sort, and backend refreshes reconcile the existing
+  `ListModel` in place. Stable rows are moved or updated instead of clearing
+  every delegate, which preserves decoded artwork, selection, and browse
+  position in the virtualized carousel/grid views.
+- Captures uses a virtualized thumbnail grid over the real configured
+  screenshots folder. Folder scans expose honest loading/empty/ready states;
+  thumbnails decode asynchronously at a bounded size, refreshes are
+  coalesced, and permanent deletion requires confirmation.
+- The profile avatar editor stores a non-destructive focal point and zoom over
+  the original imported image. Its minimum zoom is the filled cover scale, so
+  drag, wheel, slider, keyboard, and controller adjustments cannot expose
+  empty pixels inside the saved crop.
+- Runtime status colours distinguish active/healthy services from services
+  that are merely compiled and ready. Ready uses the accent tone, while green
+  remains reserved for a genuinely active or healthy state.
 - A responsive Library detail layout that keeps title, description, Play/Manage actions, DLC, game metadata, and compatibility information visible at normal desktop sizes.
 - An isolated DLC scroll region: mouse-wheel input over the DLC catalogue is consumed by that list and never scrolls the outer game-detail page at the same time.
 - Theme-specific decorative backdrops with user-selectable intensity; these are Xenon-owned visuals and remain separate from optional module-provided game artwork.

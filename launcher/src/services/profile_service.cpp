@@ -18,9 +18,10 @@ namespace xenon::launcher {
 namespace {
 constexpr int kProfileNameLimit = 48;
 constexpr int kDescriptionLimit = 180;
-// The crop editor's own upper bound on how far a user may zoom in past the
-// minimum cover scale; kept in sync with AvatarCropEditor.qml's slider range.
-constexpr double kMinAvatarZoom = 0.55;
+// Crop transforms are persisted as a multiplier over the minimum cover scale.
+// Values below 1.0 can expose empty backing pixels and therefore cannot match
+// the filled avatar preview. Keep these bounds in sync with AvatarCropEditor.
+constexpr double kMinAvatarZoom = 1.0;
 constexpr double kMaxAvatarZoom = 3.0;
 
 QString limited(QString value, int limit) {

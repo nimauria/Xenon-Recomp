@@ -274,16 +274,79 @@ Item {
         return bl.localeCompare(al) || at.localeCompare(bt)
     }
 
+    function currentBrowsePosition() {
+        if (root.libraryView === "Carousel")
+            return ({ view: "Carousel", offset: carouselView.contentX })
+        if (root.libraryView === "Grid")
+            return ({ view: "Grid", offset: gridView.contentY })
+        return ({ view: root.libraryView, offset: 0 })
+    }
+
+    function restoreBrowsePosition(position) {
+        if (!position || position.view !== root.libraryView) return
+        if (position.view === "Carousel") {
+            var maxX = Math.max(0, carouselView.contentWidth - carouselView.width)
+            carouselView.contentX = Math.max(0, Math.min(maxX, Number(position.offset || 0)))
+        } else if (position.view === "Grid") {
+            var maxY = Math.max(0, gridView.contentHeight - gridView.height)
+            gridView.contentY = Math.max(0, Math.min(maxY, Number(position.offset || 0)))
+        }
+    }
+
+    function modelIndexForGameId(gameId, firstIndex) {
+        var target = String(gameId || "")
+        if (target.length === 0) return -1
+        for (var i = Math.max(0, Number(firstIndex || 0)); i < gamesModel.count; ++i) {
+            if (String(gamesModel.get(i).gameId || "") === target) return i
+        }
+        return -1
+    }
+
+    // Reconcile the visible model in place. Filtering, sorting and backend
+    // refreshes used to clear and append the complete model, which destroyed
+    // every delegate (and its decoded artwork) even when a single role had
+    // changed. Moves/removals/inserts keep virtualized delegates, selection
+    // and scroll state stable for large libraries.
+    function syncVisibleGames(visible) {
+        var wanted = ({})
+        for (var i = 0; i < visible.length; ++i)
+            wanted[String(visible[i].gameId || "")] = true
+
+        for (var oldIndex = gamesModel.count - 1; oldIndex >= 0; --oldIndex) {
+            if (!wanted[String(gamesModel.get(oldIndex).gameId || "")])
+                gamesModel.remove(oldIndex)
+        }
+
+        for (var targetIndex = 0; targetIndex < visible.length; ++targetIndex) {
+            var desired = visible[targetIndex]
+            var desiredId = String(desired.gameId || "")
+            var existingIndex = root.modelIndexForGameId(desiredId, targetIndex)
+            if (existingIndex < 0) {
+                gamesModel.insert(targetIndex, desired)
+            } else {
+                if (existingIndex !== targetIndex)
+                    gamesModel.move(existingIndex, targetIndex, 1)
+                // set() changes roles on the existing row instead of
+                // replacing the delegate object.
+                gamesModel.set(targetIndex, desired)
+            }
+        }
+
+        while (gamesModel.count > visible.length)
+            gamesModel.remove(gamesModel.count - 1)
+    }
+
     function rebuildLibrary(preserveGameId) {
         var keep = String(preserveGameId || (root.selectedGame().gameId || ""))
+        var position = root.currentBrowsePosition()
+        var previousSelectedId = root.selectedGame().gameId || ""
         var visible = []
         for (var i = 0; i < root.sourceGames.length; ++i) {
             var game = root.sourceGames[i]
             if (root.matchesSearch(game) && root.matchesFilter(game)) visible.push(game)
         }
         visible.sort(root.compareGames)
-        gamesModel.clear()
-        for (var j = 0; j < visible.length; ++j) gamesModel.append(visible[j])
+        root.syncVisibleGames(visible)
         root.modelRevision += 1
 
         root.selectedGameIndex = gamesModel.count > 0 ? 0 : -1
@@ -292,7 +355,9 @@ Item {
             ? launcherBridge.stringSetting("library/lastSelectedGameId", "") : ""
         var target = keep.length > 0 ? keep : remembered
         if (target.length > 0) root.selectGameById(target, false)
-        root.populateDlcForSelection()
+        if ((root.selectedGame().gameId || "") !== previousSelectedId)
+            root.populateDlcForSelection()
+        Qt.callLater(function() { root.restoreBrowsePosition(position) })
     }
 
     function setLibraryFilter(value) {
