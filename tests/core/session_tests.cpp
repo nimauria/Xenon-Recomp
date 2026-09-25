@@ -6,11 +6,29 @@
 #include "xenon/cpu/flat_memory.hpp"
 #include "xenon/memory/address_space.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+
+// Same pattern as tests/core/thread_creation_tests.cpp's own independently
+// defined SessionExecutionTestAccess (each test executable is a separate
+// translation unit, so there is no ODR conflict) - this file only needs
+// direct access to unresolved_imports_, to unit-test capability_report()'s
+// Part 17 verdict aggregation against a real (if directly-injected)
+// unresolved-import signal without needing to load a full XEX with a
+// genuinely broken import.
+namespace xenon::core {
+struct SessionExecutionTestAccess {
+  static void push_unresolved_import(XenonSession& session, std::string module,
+                                     std::string symbol, std::uint32_t ordinal) {
+    session.unresolved_imports_.push_back(
+        UnresolvedImport{std::move(module), std::move(symbol), ordinal});
+  }
+};
+}  // namespace xenon::core
 
 int main() {
   std::cout << "Testing Xenon Session...\n";
@@ -179,6 +197,53 @@ int main() {
     const auto* reached = boot->find("reached");
     assert(reached != nullptr && reached->is_array() && reached->as_array()->empty());
 
+    // Part 17 of the AC6 Runtime Readiness pass ("AC6 capability report"):
+    // a freshly initialized session with nothing degraded must verdict
+    // PASS with no reasons of either kind - not merely "not FAIL".
+    const auto* verdict = sections->find("verdict");
+    assert(verdict != nullptr && verdict->is_object());
+    assert(verdict->get_string("state") == "PASS");
+    const auto* fail_reasons = verdict->find("failReasons");
+    const auto* fallback_reasons = verdict->find("fallbackReasons");
+    assert(fail_reasons != nullptr && fail_reasons->is_array() && fail_reasons->as_array()->empty());
+    assert(fallback_reasons != nullptr && fallback_reasons->is_array() &&
+           fallback_reasons->as_array()->empty());
+
+    session.shutdown();
+  }
+
+  // Part 17 of the AC6 Runtime Readiness pass: a real (if directly-injected,
+  // to isolate the aggregation logic from needing a full broken-XEX load)
+  // unresolved import must verdict PASS_WITH_FALLBACK, with a reason that
+  // actually names the degradation - not silently folded into PASS just
+  // because nothing crashed.
+  {
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    assert(session.initialize(config).success);
+
+    xenon::core::SessionExecutionTestAccess::push_unresolved_import(
+        session, "xboxkrnl.exe", "SomeMissingExport", 123u);
+
+    const auto report = session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    const auto* verdict = sections->find("verdict");
+    assert(verdict != nullptr && verdict->is_object());
+    assert(verdict->get_string("state") == "PASS_WITH_FALLBACK");
+    const auto* fail_reasons = verdict->find("failReasons");
+    assert(fail_reasons != nullptr && fail_reasons->is_array() && fail_reasons->as_array()->empty());
+    const auto* fallback_reasons = verdict->find("fallbackReasons");
+    assert(fallback_reasons != nullptr && fallback_reasons->is_array());
+    const auto& reasons = *fallback_reasons->as_array();
+    assert(!reasons.empty());
+    assert(std::any_of(reasons.begin(), reasons.end(), [](const xenon::core::JsonValue& reason) {
+      return reason.is_string() && reason.as_string().find("unresolved import") != std::string::npos;
+    }));
+
     session.shutdown();
   }
 
@@ -322,6 +387,21 @@ int main() {
     auto result = session.initialize(config);
     assert(!result.success && "Unknown graphics backend must fail, not fall back to Null");
     assert(session.state() == xenon::core::SessionState::Failed);
+
+    // Part 17 of the AC6 Runtime Readiness pass: a real recorded session
+    // failure must verdict FAIL, with the actual failure message carried
+    // into failReasons - not merged into "PASS_WITH_FALLBACK" just because
+    // the report itself can still be built.
+    const auto report = session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    const auto* verdict = sections->find("verdict");
+    assert(verdict != nullptr && verdict->is_object());
+    assert(verdict->get_string("state") == "FAIL");
+    const auto* fail_reasons = verdict->find("failReasons");
+    assert(fail_reasons != nullptr && fail_reasons->is_array());
+    assert(!fail_reasons->as_array()->empty() &&
+           "a FAIL verdict must always carry at least one concrete reason");
   }
 
   // Test: "Automatic" graphics backend selection either produces a real

@@ -1622,6 +1622,84 @@ JsonValue XenonSession::capability_report() const {
     report.set_section("boot", std::move(boot_section));
   }
 
+  // Part 17 of the AC6 Runtime Readiness pass ("AC6 capability report"),
+  // plus the reviewer's PASS/PASS_WITH_FALLBACK/FAIL addition: a single
+  // top-level verdict synthesized from every section already published
+  // above, rather than a separate subsystem of its own. This never invents
+  // new telemetry - it only reads counters/state each subsystem already
+  // maintains for its own diagnostic purposes, so the verdict can never
+  // read cleaner than the sections it is built from.
+  //
+  // FAIL is reserved for signals that mean part of the run could not
+  // execute at all (a recorded session failure, or a loaded title whose
+  // native compiled code never got bound). Everything else that indicates
+  // a *degraded but completed* run - unresolved imports that were never
+  // actually called, guest code that ran through the Gen 7 dynamic
+  // fallback instead of AOT-compiled code, unsupported GPU operations, or
+  // shader translation failures - is PASS_WITH_FALLBACK, since the title
+  // still produced output rather than crashing outright.
+  {
+    JsonValue verdict_section = JsonValue::make_object();
+    std::vector<std::string> fail_reasons;
+    std::vector<std::string> fallback_reasons;
+
+    if (state() == SessionState::Failed) {
+      const auto error = last_error();
+      fail_reasons.push_back(error.empty() ? "session reported a failure with no message"
+                                            : "session failed: " + error);
+    }
+    if (loaded_xex_ && !native_extension_bound_) {
+      fail_reasons.push_back(
+          native_extension_error_.empty()
+              ? "native extension (compiled guest code) never bound"
+              : "native extension not bound: " + native_extension_error_);
+    }
+
+    if (!unresolved_imports_.empty()) {
+      fallback_reasons.push_back(std::to_string(unresolved_imports_.size()) +
+                                  " unresolved import(s)");
+    }
+    if (dynamic_fallback_) {
+      if (dynamic_fallback_->executed_blocks() > 0u) {
+        fallback_reasons.push_back(
+            std::to_string(dynamic_fallback_->executed_blocks()) +
+            " guest code block(s) executed via the Gen 7 dynamic fallback instead of AOT");
+      }
+      if (dynamic_fallback_->unsupported_instructions() > 0u) {
+        fallback_reasons.push_back(
+            std::to_string(dynamic_fallback_->unsupported_instructions()) +
+            " unsupported PPC instruction(s) encountered");
+      }
+    }
+    if (gpu_) {
+      const auto unsupported = gpu_->unsupported_counters();
+      if (unsupported.total() > 0u) {
+        fallback_reasons.push_back(std::to_string(unsupported.total()) +
+                                    " unsupported GPU operation(s)");
+      }
+      const auto coverage = gpu_->shader_coverage();
+      if (coverage.translation_failures > 0u) {
+        fallback_reasons.push_back(std::to_string(coverage.translation_failures) +
+                                    " shader translation failure(s)");
+      }
+    }
+
+    const char* verdict_state = !fail_reasons.empty()
+                                     ? "FAIL"
+                                     : (!fallback_reasons.empty() ? "PASS_WITH_FALLBACK" : "PASS");
+    verdict_section.set("state", std::string(verdict_state));
+
+    JsonValue fail_array = JsonValue::make_array();
+    for (auto& reason : fail_reasons) fail_array.append(JsonValue(std::move(reason)));
+    verdict_section.set("failReasons", std::move(fail_array));
+
+    JsonValue fallback_array = JsonValue::make_array();
+    for (auto& reason : fallback_reasons) fallback_array.append(JsonValue(std::move(reason)));
+    verdict_section.set("fallbackReasons", std::move(fallback_array));
+
+    report.set_section("verdict", std::move(verdict_section));
+  }
+
   return report.build();
 }
 
