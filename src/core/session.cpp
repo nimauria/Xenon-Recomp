@@ -25,6 +25,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "xenon/core/import_classification.hpp"
 #include "xenon/kernel/time.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
@@ -1615,6 +1616,72 @@ JsonValue XenonSession::capability_report() const {
     report.set_section("titleUpdate", std::move(title_update_section));
   }
 
+  // Part 17 of the AC6 Runtime Readiness pass: the whole-XEX import
+  // capability audit (Part 3/4's classify_import()/
+  // compute_import_capability_verdict(), already real and tested via
+  // tools/recomp_tools.cpp's standalone import-scanner and
+  // tests/core/import_capability_report_tests.cpp) surfaced directly in
+  // the live session report, so a caller does not need to separately run
+  // the offline tool against the XEX file to get the same classification.
+  // Omitted until a title is loaded, matching "titleUpdate"/"gpu"'s own
+  // convention.
+  if (loaded_xex_) {
+    std::size_t implemented = 0u, safe_stub = 0u, partial = 0u, missing = 0u;
+    JsonValue partial_notes = JsonValue::make_array();
+    for (const auto& import : loaded_xex_->image.imports) {
+      if (import.is_function_address()) continue;  // Not separately resolved - see resolve_xex_imports().
+
+      const auto* descriptor = !import.symbol.empty()
+                                    ? export_registry_.resolve(import.module, import.symbol)
+                                    : export_registry_.resolve(import.module, import.ordinal);
+      switch (classify_import(descriptor)) {
+        case ImportClassification::Implemented: ++implemented; break;
+        case ImportClassification::SafeStub: ++safe_stub; break;
+        case ImportClassification::Partial: ++partial; break;
+        case ImportClassification::Missing: ++missing; break;
+      }
+      if (descriptor != nullptr && !descriptor->partial_note.empty()) {
+        JsonValue entry = JsonValue::make_object();
+        entry.set("library", import.module);
+        entry.set("name", descriptor->name);
+        entry.set("note", descriptor->partial_note);
+        partial_notes.append(std::move(entry));
+      }
+    }
+
+    JsonValue imports_section = JsonValue::make_object();
+    imports_section.set("implemented", static_cast<std::int64_t>(implemented));
+    imports_section.set("safeStub", static_cast<std::int64_t>(safe_stub));
+    imports_section.set("partial", static_cast<std::int64_t>(partial));
+    imports_section.set("missing", static_cast<std::int64_t>(missing));
+    imports_section.set(
+        "verdict",
+        std::string(to_string(
+            compute_import_capability_verdict(implemented, safe_stub, partial, missing))));
+    imports_section.set("partialNotes", std::move(partial_notes));
+    report.set_section("imports", std::move(imports_section));
+  }
+
+  // Reviewer feedback addition 3 on the AC6 Runtime Readiness pass
+  // ("RunFingerprint + kernel-object liveness accounting"): RunFingerprint
+  // itself has existed since Phase 0 (see set_run_fingerprint() above); this
+  // is the liveness half. Surfaces real, live counts from
+  // kernel::ThreadManager/kernel::HandleTable - not a running total, a
+  // point-in-time snapshot, so a leak (a session whose live count keeps
+  // growing across many created-and-finished guest threads/objects instead
+  // of returning to baseline) is actually observable. Omitted until a
+  // kernel process exists, matching "gpu"/"shader"'s own convention.
+  if (kernel_process_) {
+    JsonValue kernel_objects_section = JsonValue::make_object();
+    kernel_objects_section.set(
+        "liveThreads",
+        static_cast<std::int64_t>(kernel_process_->thread_manager().thread_count()));
+    kernel_objects_section.set(
+        "liveHandles",
+        static_cast<std::int64_t>(kernel_process_->handle_table().size()));
+    report.set_section("kernelObjects", std::move(kernel_objects_section));
+  }
+
   // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
   // always published (unlike "gpu"/"shader", this needs no subsystem to
   // exist) - the reached checkpoints in the order they actually happened,
@@ -1688,6 +1755,18 @@ JsonValue XenonSession::capability_report() const {
       if (spr_writes > 0u) {
         fallback_reasons.push_back(std::to_string(spr_writes) +
                                     " unsupported SPR write(s) encountered");
+      }
+    }
+    if (const auto* imports_section = report.find_section("imports")) {
+      const auto safe_stub = imports_section->get_number("safeStub");
+      const auto partial = imports_section->get_number("partial");
+      if (safe_stub > 0.0) {
+        fallback_reasons.push_back(std::to_string(static_cast<std::int64_t>(safe_stub)) +
+                                    " import(s) resolve to a safe stub");
+      }
+      if (partial > 0.0) {
+        fallback_reasons.push_back(std::to_string(static_cast<std::int64_t>(partial)) +
+                                    " import(s) resolve to a documented partial implementation");
       }
     }
     if (gpu_) {
@@ -2243,6 +2322,14 @@ std::uint32_t XenonSession::run_execution() {
       dispatch_guest_thread(*main_cpu_state_, loaded_xex_->image.entry_point, main_thread_);
   execution_active_.store(false);
 
+  // See run_created_guest_thread()'s matching cleanup: main_thread_ is
+  // tracked by ThreadManager the same way a created thread is, and must
+  // stop being counted as live once its dispatch has genuinely ended,
+  // regardless of which outcome branch below is taken.
+  if (kernel_process_ && main_thread_) {
+    kernel_process_->thread_manager().remove_thread(main_thread_->thread_id());
+  }
+
   if (outcome.crashed) {
     set_error(outcome.crash_message);
     return outcome.crash_exit_code;
@@ -2339,6 +2426,21 @@ std::uint32_t XenonSession::run_created_guest_thread(
   // registered for it must not linger forever in exception_dispatcher_,
   // and must never be silently inherited by a different, later thread.
   exception_dispatcher_.clear_thread_handlers(thread ? thread->thread_id() : 0u);
+
+  // Real, found-while-auditing bug: nothing ever called
+  // ThreadManager::remove_thread() anywhere in production, so
+  // ThreadManager::thread_count() silently counted "threads ever created
+  // this session" rather than threads still live - a session that created
+  // and finished many short-lived guest threads would report an
+  // ever-growing count forever. Safe to remove here even though this code
+  // runs inside the thread's own ThreadEntry closure: the guest handle
+  // (HandleTable) and this function's own `thread` shared_ptr keep the
+  // KernelThread object itself alive: this only stops the scheduler from
+  // tracking a thread that will never run guest code again, matching the
+  // exception-handler cleanup just above.
+  if (kernel_process_ && thread) {
+    kernel_process_->thread_manager().remove_thread(thread->thread_id());
+  }
 
   return exit_code;
 }
@@ -2699,6 +2801,61 @@ std::uint64_t XenonSession::read_time_base(const cpu::CpuState& state) {
   return kernel::TimeServices::performance_counter();
 }
 
+// Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
+// closes the gap between the 3 checkpoints wired at their own direct call
+// sites (XexLoaded, EntryStarted, FirstGuestThread - none of which are
+// export calls) and the remaining ones, which are all first-observed
+// through a specific real guest export call. Ordinals are the same real,
+// already-verified ones their own export registration files use (see the
+// comment at each case) - never guessed.
+void XenonSession::observe_boot_checkpoint_from_export_call(
+    std::string_view module, std::uint32_t ordinal, const cpu::CpuState& state) {
+  // Real XEX import tables spell library names "xboxkrnl.exe"/"xam.xex" -
+  // ExportRegistry::normalize_library() does the same lowercase+strip
+  // internally but is private, so this matches its exact behavior locally
+  // rather than comparing against the wrong (suffixed/cased) string.
+  std::string normalized_module(module);
+  std::transform(normalized_module.begin(), normalized_module.end(),
+                 normalized_module.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (normalized_module.ends_with(".exe") || normalized_module.ends_with(".xex")) {
+    normalized_module.resize(normalized_module.size() - 4);
+  }
+  if (normalized_module == "xboxkrnl") {
+    switch (ordinal) {
+      case 0x00D2u:  // NtCreateFile - src/xbox/exports/xboxkrnl_io_exports.cpp
+      case 0x00DFu:  // NtOpenFile - src/xbox/exports/xboxkrnl_io_exports.cpp
+        reach_boot_checkpoint(BootCheckpoint::FirstFileOpen);
+        return;
+      case 0x1F3u:  // XAudioRegisterRenderDriverClient - src/audio/exports.cpp
+        reach_boot_checkpoint(BootCheckpoint::FirstAudioClient);
+        return;
+      default:
+        return;
+    }
+  }
+  if (normalized_module == "xam") {
+    switch (ordinal) {
+      case 0x0191u:  // XamInputGetState - include/xenon/xam/xam_exports.hpp
+        reach_boot_checkpoint(BootCheckpoint::FirstInputPoll);
+        return;
+      case 0x0210u:  // XamUserGetSigninState - include/xenon/xam/xam_exports.hpp
+        // gpr[3] carries the real xam::SigninState the handler wrote
+        // (NotSignedIn=0) - "ready" means an actual signed-in profile, not
+        // merely that the guest asked whether one exists.
+        if (state.gpr[3] != 0u) {
+          reach_boot_checkpoint(BootCheckpoint::ProfileReady);
+        }
+        return;
+      case 0x025Cu:  // XamContentCreateEnumerator - include/xenon/xam/xam_exports.hpp
+        reach_boot_checkpoint(BootCheckpoint::SaveEnumeration);
+        return;
+      default:
+        return;
+    }
+  }
+}
+
 bool XenonSession::external_call(std::string_view module,
                                  std::uint32_t ordinal,
                                  cpu::CpuState& state,
@@ -2726,8 +2883,9 @@ bool XenonSession::external_call(std::string_view module,
   // Try the export registry first
   ExportCallContext context{state, memory, state.cia, calling_thread_id};
   auto result = export_registry_.invoke(module, ordinal, context);
-  
+
   if (result.handled) {
+    observe_boot_checkpoint_from_export_call(module, ordinal, state);
     return true;
   }
 

@@ -19,6 +19,7 @@
 // compiled function) is proven separately in guest_export_abi_tests.cpp;
 // this file complements it rather than duplicating it.
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -368,6 +369,93 @@ void test_unresolved_import_diagnostics() {
                "are all explicit, terminal failures - never silent\n";
 }
 
+// Part 17 of the AC6 Runtime Readiness pass: capability_report()'s new
+// "imports" section (the whole-XEX import capability audit - Part 3/4's
+// already-tested classify_import()/compute_import_capability_verdict() -
+// now surfaced live in the session report, not just via the offline
+// import-scanner tool) must classify a real mix of Missing/SafeStub/
+// Partial/Implemented imports correctly, and the overall session
+// "verdict" must pick up SafeStub/Partial as real PASS_WITH_FALLBACK
+// reasons.
+void test_capability_report_imports_section_classifies_real_mix() {
+  const auto bytes = make_minimal_xex({
+      {"totally_bogus_lib", 1u},  // nothing registers this -> Missing
+      {"test_stub_lib", 10u},     // registered below as Stubbed, not partial -> SafeStub
+      {"test_partial_lib", 20u},  // registered below with partial=true -> Partial
+      {"xboxkrnl", 0x083u},       // KeQueryPerformanceFrequency, real and complete -> Implemented
+  });
+
+  xenon::core::XenonSession session;
+  xenon::core::SessionConfig config{};
+  config.enable_logging = false;
+  config.enable_input = true;
+  config.input_drivers = {"null"};
+  config.enable_audio = false;
+  assert(session.initialize(config).success);
+
+  {
+    xenon::core::ExportDescriptor stub{};
+    stub.library = "test_stub_lib";
+    stub.ordinal = 10u;
+    stub.name = "SyntheticStub";
+    stub.requirement = xenon::core::ExportRequirement::Stubbed;
+    stub.handler = [](xenon::core::ExportCallContext&) { return true; };
+    assert(session.exports()->register_export(std::move(stub)));
+
+    xenon::core::ExportDescriptor partial{};
+    partial.library = "test_partial_lib";
+    partial.ordinal = 20u;
+    partial.name = "SyntheticPartial";
+    partial.requirement = xenon::core::ExportRequirement::Required;
+    partial.partial = true;
+    partial.partial_note = "synthetic test partial gap";
+    partial.handler = [](xenon::core::ExportCallContext&) { return true; };
+    assert(session.exports()->register_export(std::move(partial)));
+  }
+
+  const auto load_result = session.load_game(bytes, "imports_section_test");
+  assert(load_result.success);
+
+  const auto report = session.capability_report();
+  const auto* sections = report.find("sections");
+  assert(sections != nullptr && sections->is_object());
+  const auto* imports = sections->find("imports");
+  assert(imports != nullptr && imports->is_object());
+
+  assert(imports->get_number("missing") == 1.0);
+  assert(imports->get_number("safeStub") == 1.0);
+  assert(imports->get_number("partial") == 1.0);
+  assert(imports->get_number("implemented") >= 1.0);
+  assert(imports->get_string("verdict") == "FAIL" &&
+         "any Missing import must make the imports-section verdict FAIL, "
+         "matching compute_import_capability_verdict()");
+
+  const auto* partial_notes = imports->find("partialNotes");
+  assert(partial_notes != nullptr && partial_notes->is_array());
+  const auto& notes = *partial_notes->as_array();
+  assert(std::any_of(notes.begin(), notes.end(), [](const xenon::core::JsonValue& entry) {
+    return entry.get_string("note") == "synthetic test partial gap";
+  }));
+
+  const auto* verdict = sections->find("verdict");
+  assert(verdict != nullptr && verdict->is_object());
+  const auto* fallback_reasons = verdict->find("fallbackReasons");
+  assert(fallback_reasons != nullptr && fallback_reasons->is_array());
+  const auto& reasons = *fallback_reasons->as_array();
+  assert(std::any_of(reasons.begin(), reasons.end(), [](const xenon::core::JsonValue& reason) {
+    return reason.is_string() && reason.as_string().find("safe stub") != std::string::npos;
+  }));
+  assert(std::any_of(reasons.begin(), reasons.end(), [](const xenon::core::JsonValue& reason) {
+    return reason.is_string() &&
+           reason.as_string().find("documented partial implementation") != std::string::npos;
+  }));
+
+  session.shutdown();
+  std::cout << "  [ok] capability_report()'s \"imports\" section classifies a real "
+               "Missing/SafeStub/Partial/Implemented mix, and the overall verdict "
+               "picks up SafeStub/Partial as fallback reasons\n";
+}
+
 // --- Item 3(e): missing/incompatible native game module -------------------
 void test_missing_native_module_fails_explicitly() {
   const auto bytes = make_minimal_xex({});
@@ -447,6 +535,7 @@ int main() {
   test_export_registry_variable_resolution();
   test_malformed_import_entry_is_skipped();
   test_unresolved_import_diagnostics();
+  test_capability_report_imports_section_classifies_real_mix();
   test_missing_native_module_fails_explicitly();
   test_guest_process_creation_rollback();
   std::cout << "All tests passed!\n";

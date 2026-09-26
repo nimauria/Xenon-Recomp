@@ -531,6 +531,15 @@ class XenonSession final : public cpu::RuntimeServices {
   BootCheckpointTracker boot_checkpoints_{};
   // Logs (category "boot") and idempotently marks `checkpoint` reached.
   void reach_boot_checkpoint(BootCheckpoint checkpoint);
+  // Maps a handled export dispatch to the boot checkpoint (if any) it
+  // represents - see the .cpp for the real ordinal table this is built
+  // from. Called from external_call() right after a successful dispatch;
+  // `state` is post-dispatch (the export's own return value, e.g. gpr[3],
+  // has already been written), since some checkpoints (ProfileReady) need
+  // the actual result, not just "the call happened".
+  void observe_boot_checkpoint_from_export_call(std::string_view module,
+                                                std::uint32_t ordinal,
+                                                const cpu::CpuState& state);
 
   // Native extension (module) dynamic loading. See docs/runtime/RUNTIME_HOST.md for
   // the export contract a module's compiled-code library must provide.

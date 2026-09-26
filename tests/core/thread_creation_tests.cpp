@@ -595,6 +595,208 @@ void test_external_call_resolves_real_calling_thread_identity() {
          "external_call() must resolve the real calling thread's id, not hardcode 0");
 }
 
+// Reviewer feedback addition 3 ("kernel-object liveness accounting") led to
+// auditing what ThreadManager::thread_count() actually measures - and
+// finding that nothing in production ever called
+// ThreadManager::remove_thread(), so it silently counted "threads ever
+// created this session" rather than threads still live. A session that
+// created and finished many short-lived guest threads would report an
+// ever-growing count forever, which would make "kernel-object liveness"
+// telemetry actively misleading rather than merely absent. Fixed in
+// XenonSession::run_created_guest_thread()/run_execution(); this proves it
+// through the real ExCreateThread production path, not by calling
+// ThreadManager directly.
+void test_thread_count_returns_to_baseline_after_threads_finish() {
+  ThreadCreationHarness harness(&echo_increment_entry);
+  auto& thread_manager = harness.session.kernel_process()->thread_manager();
+  const auto baseline = thread_manager.thread_count();
+
+  auto create_and_join_one = [&] {
+    xenon::memory::GuestAddress handle_out{};
+    assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+    xenon::cpu::CpuState cpu{};
+    cpu.gpr[3] = handle_out;
+    cpu.gpr[7] = 0x3000u;
+    cpu.gpr[8] = 0u;
+    auto call = make_call(cpu, *harness.session.memory());
+    assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+    assert(cpu.gpr[3] == 0u);
+    const auto handle = harness.session.memory()->read32_be(handle_out);
+    kernel::HandleView view{};
+    assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+           kernel::KernelIoCode::Success);
+    auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+    assert(thread.join(2000));
+  };
+
+  create_and_join_one();
+  assert(thread_manager.thread_count() == baseline &&
+         "a finished guest thread must stop being counted as live, not linger forever");
+
+  // Three more, sequentially - proves the map does not accumulate across
+  // repeated create/finish cycles (the actual shape of the bug: it would
+  // have read baseline+1, baseline+2, baseline+3 here before the fix).
+  create_and_join_one();
+  create_and_join_one();
+  create_and_join_one();
+  assert(thread_manager.thread_count() == baseline &&
+         "thread_count() must return to baseline after every created thread finishes, "
+         "not grow with each one");
+}
+
+// capability_report()'s new "kernelObjects" section (same reviewer addition
+// as above) must reflect the real, live ThreadManager/HandleTable counts -
+// including going back down after a created thread's handle is closed, not
+// just after it finishes running.
+void test_capability_report_kernel_objects_section_reflects_real_liveness() {
+  ThreadCreationHarness harness(&echo_increment_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  const auto handle = harness.session.memory()->read32_be(handle_out);
+
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000));
+
+  {
+    const auto report = harness.session.capability_report();
+    const auto* sections = report.find("sections");
+    assert(sections != nullptr && sections->is_object());
+    const auto* kernel_objects = sections->find("kernelObjects");
+    assert(kernel_objects != nullptr && kernel_objects->is_object());
+    // The thread finished (and was removed from ThreadManager above) but its
+    // handle is still open - the object is still live from the handle
+    // table's perspective, matching real Xbox 360 semantics (a finished
+    // thread's handle is still valid until explicitly closed).
+    assert(kernel_objects->get_number("liveThreads") == 0.0);
+    assert(kernel_objects->get_number("liveHandles") >= 1.0);
+  }
+
+  assert(harness.session.kernel_process()->handle_table().close(handle) ==
+         kernel::KernelIoCode::Success);
+
+  {
+    const auto report = harness.session.capability_report();
+    const auto* kernel_objects = report.find("sections")->find("kernelObjects");
+    assert(kernel_objects != nullptr);
+    assert(kernel_objects->get_number("liveHandles") == 0.0 &&
+           "closing the thread's handle must bring liveHandles back down");
+  }
+}
+
+// Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
+// the 9 checkpoints that are each first observed through a specific real
+// guest export call (as opposed to XexLoaded/EntryStarted/FirstGuestThread,
+// each wired at their own direct, non-export call site) are dispatched
+// through XenonSession::observe_boot_checkpoint_from_export_call(), called
+// from external_call() right after a real, successful export dispatch.
+// This drives each one through the exact real ordinal a real guest thunk
+// would use (not calling the handler C++ function directly), on a fully
+// initialized session (not the ExCreateThread-only harness above, which
+// bypasses init_exports() entirely and would have none of these exports
+// registered).
+void test_boot_checkpoints_reached_via_real_export_calls() {
+  xenon::core::XenonSession session;
+  xenon::core::SessionConfig config{};
+  config.enable_logging = false;
+  config.enable_input = true;
+  config.input_drivers = {"null"};
+  config.enable_audio = true;
+  assert(session.initialize(config).success);
+
+  auto* memory = session.memory();
+  assert(memory != nullptr);
+
+  // FirstInputPoll: XamInputGetState (0x0191) - real ABI is
+  // (user_index, flags, LPXINPUT_STATE out).
+  {
+    xenon::memory::GuestAddress state_out{};
+    assert(memory->allocate(32, 4, xenon::memory::kReadWrite, false, state_out));
+    xenon::cpu::CpuState cpu{};
+    cpu.gpr[3] = 0u;
+    cpu.gpr[4] = 0u;
+    cpu.gpr[5] = state_out;
+    assert(xenon::core::SessionExecutionTestAccess::external_call(session, "xam", 0x0191u, cpu,
+                                                                   *memory));
+    assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::FirstInputPoll));
+  }
+
+  // FirstAudioClient: XAudioRegisterRenderDriverClient (0x1F3, "xboxkrnl") -
+  // real ABI is (LPDWORD callback_pair [callback,arg], LPDWORD driver_out).
+  // Deliberately called with a null callback_pair/driver_out (InvalidArgument,
+  // not a crash - see src/audio/exports.cpp's own null checks): reaching the
+  // checkpoint only needs the export to be found and dispatched, matching
+  // "FirstGuestThread" not implying the thread ran bug-free either.
+  {
+    xenon::cpu::CpuState cpu{};
+    cpu.gpr[3] = 0u;
+    cpu.gpr[4] = 0u;
+    assert(xenon::core::SessionExecutionTestAccess::external_call(session, "xboxkrnl", 0x1F3u,
+                                                                   cpu, *memory));
+    assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::FirstAudioClient));
+  }
+
+  // FirstFileOpen: NtOpenFile (0x00DF, "xboxkrnl") - all-zero args are safe
+  // (GuestIoBridge::nt_create_file() checks for null handle_out/
+  // object_attributes before touching guest memory and returns
+  // InvalidParameter) and still a real, successful dispatch.
+  {
+    xenon::cpu::CpuState cpu{};  // gpr[3..7] all zero
+    assert(xenon::core::SessionExecutionTestAccess::external_call(session, "xboxkrnl.exe", 0x00DFu,
+                                                                   cpu, *memory));
+    assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::FirstFileOpen));
+  }
+
+  // ProfileReady: XamUserGetSigninState (0x0210, "xam.xex"). This is the one
+  // checkpoint gated on the export's actual return value, not just dispatch
+  // success - UserManager provisions a default user who is
+  // SignedInLocally from construction (src/xam/user_manager.cpp), so user
+  // index 0 genuinely is signed in here; a not-signed-in user (any index
+  // >= UserManager's provisioned count) must NOT reach it.
+  {
+    xenon::cpu::CpuState cpu{};
+    cpu.gpr[3] = 0u;  // user_index 0 - the always-provisioned default user
+    assert(xenon::core::SessionExecutionTestAccess::external_call(session, "xam.xex", 0x0210u,
+                                                                   cpu, *memory));
+    assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::ProfileReady) &&
+           "the provisioned default user is genuinely signed in - ProfileReady must be reached");
+  }
+  {
+    xenon::core::XenonSession not_signed_in_session;
+    xenon::core::SessionConfig not_signed_in_config{};
+    not_signed_in_config.enable_logging = false;
+    not_signed_in_config.enable_input = false;
+    not_signed_in_config.enable_audio = false;
+    assert(not_signed_in_session.initialize(not_signed_in_config).success);
+    xenon::cpu::CpuState cpu{};
+    cpu.gpr[3] = 0xFFu;  // an out-of-range user index - never provisioned
+    assert(xenon::core::SessionExecutionTestAccess::external_call(
+        not_signed_in_session, "xam.xex", 0x0210u, cpu, *not_signed_in_session.memory()));
+    assert(!not_signed_in_session.boot_checkpoints().reached(
+               xenon::core::BootCheckpoint::ProfileReady) &&
+           "an out-of-range/never-signed-in user must not report ProfileReady");
+    not_signed_in_session.shutdown();
+  }
+
+  // SaveEnumeration: XamContentCreateEnumerator (0x025C, "xam").
+  {
+    xenon::cpu::CpuState cpu{};  // gpr[6] (out handle ptr) zero - safe, see the stub above
+    assert(xenon::core::SessionExecutionTestAccess::external_call(session, "xam", 0x025Cu, cpu,
+                                                                   *memory));
+    assert(session.boot_checkpoints().reached(xenon::core::BootCheckpoint::SaveEnumeration));
+  }
+
+  session.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -609,6 +811,9 @@ int main() {
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();
   test_ex_create_thread_rejects_null_start_address();
   test_external_call_resolves_real_calling_thread_identity();
+  test_thread_count_returns_to_baseline_after_threads_finish();
+  test_capability_report_kernel_objects_section_reflects_real_liveness();
+  test_boot_checkpoints_reached_via_real_export_calls();
 
   std::cout << "All ExCreateThread tests passed!\n";
   return 0;

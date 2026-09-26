@@ -77,13 +77,52 @@ section still gets a real, specific answer, not just a traffic light.
 - Full solution rebuild + full test suite: see the pass's finish report
   for the exact run.
 
+## Follow-up: the "imports" piece of "CPU/imports/GPU/runtime"
+
+Part 17's own wording named imports as one of the four things to tie
+together, but the first pass of this work only tied together
+CPU/GPU/runtime signals - the whole-XEX import capability audit (Part
+3/4's `classify_import()`/`compute_import_capability_verdict()`, already
+real and tested via `tools/recomp_tools.cpp`'s standalone import-scanner
+and `tests/core/import_capability_report_tests.cpp`) still required a
+separate offline tool run against the XEX file; it had no live
+`capability_report()` presence.
+
+Closed in a follow-up: `capability_report()` now publishes an `"imports"`
+section (omitted until a title is loaded) with `implemented`/`safeStub`/
+`partial`/`missing` counts, its own `verdict` (`PASS`/`PASS_WITH_FALLBACK`/
+`FAIL`, from the same already-tested `compute_import_capability_verdict()`
+the offline tool uses), and a `partialNotes` array naming every import
+with a documented behavior gap. The overall session `"verdict"` above was
+extended to add `PASS_WITH_FALLBACK` reasons when `safeStub`/`partial` are
+non-zero (previously only "unresolved/Missing" imports were represented
+there, via `unresolved_imports_`).
+
+Deliberately *not* folded in: the imports-section's own `Fail`-on-any-
+Missing rule is not promoted into the overall session verdict's
+`failReasons` - that would contradict `resolve_xex_imports()`'s existing,
+deliberate "an unresolved-but-never-called import must not block launch"
+design. The two verdicts answer different questions on purpose: the
+imports-section verdict is "is this XEX's import table fully,
+gap-free covered" (a static, XEX-wide question - matching the offline
+tool's own purpose), while the overall session verdict is "did this
+actual run work" (a live, this-session question).
+
+This follow-up's test, in `tests/core/guest_import_negative_tests.cpp`:
+`test_capability_report_imports_section_classifies_real_mix()` builds a
+real XEX import table with one genuinely Missing, one genuinely SafeStub
+(a synthetic `ExportRequirement::Stubbed` export), one genuinely Partial
+(a synthetic export with `partial=true` and a real note), and one
+genuinely Implemented (`xboxkrnl`'s real `KeQueryPerformanceFrequency`)
+import, then asserts `capability_report()`'s `"imports"` section counts
+and verdict are exactly right, `partialNotes` carries the real note
+through, and the overall session verdict's `fallbackReasons` picks up both
+the SafeStub and Partial signals. `xenon_guest_import_negative_tests`
+passes in full, including this new test.
+
 ## Remaining gaps
 
-None for Part 17's own scope. Two adjacent, pre-existing gaps were noticed
-while reading `session.cpp` during this audit but are out of scope for
-Part 17 and are called out separately rather than silently left alone:
-`XenonSession::write_spr()` is a real no-op ("For now, do nothing") and
-`read_time_base()` returns a simple incrementing counter rather than a
-host-time-derived value ("In a real implementation, this would be based on
-host time") - both predate this pass and belong to Part 6 ("Guest
-timebase/vblank/timers"), not Part 17.
+None for Part 17's scope as now completed (CPU/imports/GPU/runtime all
+tied together). The guest timebase/SPR bug noticed during this audit was
+a separate, real Part 6 gap - fixed separately and documented in
+`docs/cpu/GUEST_TIMEBASE_SPR_AUDIT.md`, not left as a footnote here.
