@@ -98,12 +98,40 @@ class FakeSdlHost final : public input::SdlHost {
                                    : input::Result::DeviceNotConnected;
   }
 
+  input::Result get_motion_state(input::NativeDeviceId device,
+                                  input::MotionState& out) override {
+    ++motion_calls;
+    const auto it = motion.find(device);
+    if (it == motion.end()) return input::Result::Unsupported;
+    out = it->second;
+    return input::Result::Success;
+  }
+
+  input::Result get_touchpad_state(input::NativeDeviceId device,
+                                    input::TouchpadState& out) override {
+    ++touch_calls;
+    const auto it = touch.find(device);
+    if (it == touch.end()) return input::Result::Unsupported;
+    out = it->second;
+    return input::Result::Success;
+  }
+
+  input::Result set_light_color(input::NativeDeviceId device,
+                                 const input::LightColor& color) override {
+    ++light_calls;
+    if (!states.contains(device)) return input::Result::DeviceNotConnected;
+    last_light = color;
+    return input::Result::Success;
+  }
+
   std::uint64_t now_millis() const noexcept override { return now; }
 
   input::Result setup_result{input::Result::Success};
   std::vector<input::SdlHostDevice> devices{};
   std::unordered_map<input::NativeDeviceId, input::GamepadState> states{};
   std::unordered_map<input::NativeDeviceId, input::PowerInfo> power{};
+  std::unordered_map<input::NativeDeviceId, input::MotionState> motion{};
+  std::unordered_map<input::NativeDeviceId, input::TouchpadState> touch{};
   std::uint64_t now{};
   int mapping_result{3};
   int setup_calls{};
@@ -114,6 +142,9 @@ class FakeSdlHost final : public input::SdlHost {
   int rumble_calls{};
   int power_calls{};
   int player_index_calls{};
+  int motion_calls{};
+  int touch_calls{};
+  int light_calls{};
   bool setup_active{};
   std::string last_mapping_path{};
   input::NativeDeviceId last_rumble_device{};
@@ -121,6 +152,7 @@ class FakeSdlHost final : public input::SdlHost {
   std::uint32_t last_rumble_duration{};
   input::NativeDeviceId last_player_device{};
   std::uint8_t last_player_index{input::kNoPlayerIndicator};
+  input::LightColor last_light{};
 };
 
 input::SdlHostDevice pad(input::NativeDeviceId native_id,
@@ -345,6 +377,59 @@ void test_power_player_indicator_and_metadata() {
   assert(fake->last_player_index == 2);
 }
 
+void test_dualsense_family_motion_touchpad_and_light() {
+  input::InputSystem system;
+  auto host = std::make_unique<FakeSdlHost>();
+  auto* fake = host.get();
+  auto dualsense = pad(55, "dualsense-serial", "DualSense Wireless Controller");
+  dualsense.family = input::ControllerFamily::PlayStation;
+  dualsense.vendor_id = 0x054C;
+  dualsense.product_id = 0x0CE6;
+  dualsense.supports_motion = true;
+  dualsense.supports_touchpad = true;
+  dualsense.supports_light_color = true;
+  fake->devices = {dualsense};
+  fake->states[55] = {};
+  input::MotionState motion{};
+  motion.acceleration = {1.0f, 2.0f, 3.0f};
+  motion.angular_velocity = {4.0f, 5.0f, 6.0f};
+  motion.has_accelerometer = true;
+  motion.has_gyroscope = true;
+  fake->motion[55] = motion;
+  input::TouchpadState touch{};
+  touch.point_count = 1;
+  touch.points[0] = {0, 0.25f, 0.75f, 0.5f, true};
+  fake->touch[55] = touch;
+
+  input::SdlInputOptions options{};
+  options.load_mappings_if_present = false;
+  assert(system.add_driver(
+      std::make_unique<input::SdlInputDriver>(std::move(host), options)));
+  assert(system.setup() == input::Result::Success);
+
+  const auto devices = system.devices();
+  assert(devices.size() == 1);
+  assert(devices[0].family == input::ControllerFamily::PlayStation);
+  assert(devices[0].supports_motion);
+  assert(devices[0].supports_touchpad);
+  assert(devices[0].supports_light_color);
+
+  input::MotionState actual_motion{};
+  assert(system.get_motion_state(0, actual_motion) == input::Result::Success);
+  assert(actual_motion.has_accelerometer && actual_motion.has_gyroscope);
+  assert(actual_motion.acceleration[2] == 3.0f);
+
+  input::TouchpadState actual_touch{};
+  assert(system.get_touchpad_state(0, actual_touch) == input::Result::Success);
+  assert(actual_touch.point_count == 1);
+  assert(actual_touch.points[0].down);
+  assert(actual_touch.points[0].x == 0.25f);
+
+  const input::LightColor purple{80, 20, 120};
+  assert(system.set_light_color(0, purple) == input::Result::Success);
+  assert(fake->last_light == purple);
+}
+
 void test_missing_real_sdl_backend_fails_truthfully_when_unavailable() {
 #if !defined(XENON_INPUT_HAS_SDL2)
   input::SdlInputOptions options{};
@@ -364,6 +449,7 @@ int main() {
   test_button_analog_and_repeat_keystrokes();
   test_hotplug_reconnect_preserves_core_identity();
   test_power_player_indicator_and_metadata();
+  test_dualsense_family_motion_touchpad_and_light();
   test_missing_real_sdl_backend_fails_truthfully_when_unavailable();
   return 0;
 }

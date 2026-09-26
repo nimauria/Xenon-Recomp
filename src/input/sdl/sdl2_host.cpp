@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <iomanip>
 #include <limits>
 #include <mutex>
@@ -15,6 +16,56 @@
 
 namespace xenon::input {
 namespace {
+
+bool contains_case_insensitive(std::string_view value,
+                               std::string_view needle) {
+  if (needle.empty()) return true;
+  return std::search(value.begin(), value.end(), needle.begin(), needle.end(),
+                     [](char lhs, char rhs) {
+                       return std::tolower(static_cast<unsigned char>(lhs)) ==
+                              std::tolower(static_cast<unsigned char>(rhs));
+                     }) != value.end();
+}
+
+ControllerFamily controller_family(SDL_GameController* controller) noexcept {
+#if SDL_VERSION_ATLEAST(2, 0, 6)
+  if (SDL_GameControllerGetVendor(controller) == 0x28DEu) {
+    return ControllerFamily::Steam;
+  }
+#endif
+  const char* name = SDL_GameControllerName(controller);
+  if (name && (contains_case_insensitive(name, "steam") ||
+               contains_case_insensitive(name, "valve"))) {
+    return ControllerFamily::Steam;
+  }
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+  switch (SDL_GameControllerGetType(controller)) {
+    case SDL_CONTROLLER_TYPE_XBOX360:
+    case SDL_CONTROLLER_TYPE_XBOXONE:
+      return ControllerFamily::Xbox;
+    case SDL_CONTROLLER_TYPE_PS3:
+    case SDL_CONTROLLER_TYPE_PS4:
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLER_TYPE_PS5:
+#endif
+      return ControllerFamily::PlayStation;
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+#endif
+      return ControllerFamily::Nintendo;
+    case SDL_CONTROLLER_TYPE_VIRTUAL:
+      return ControllerFamily::Virtual;
+    default:
+      break;
+  }
+#endif
+  // SDL2 predates a distinct Steam family, handled above using Valve's vendor
+  // ID and the reported product name.
+  return ControllerFamily::Generic;
+}
 
 class Sdl2Host final : public SdlHost {
  public:
@@ -28,6 +79,24 @@ class Sdl2Host final : public SdlHost {
         (version.major == 2 && version.minor == 0 && version.patch < 9)) {
       return Result::Unsupported;
     }
+    // Enable SDL's native HID paths before initializing the controller
+    // subsystem. Environment/application hints still take precedence over
+    // these normal-priority defaults.
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_STEAM
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAMDECK, "1");
+#endif
     if (SDL_InitSubSystem(SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) {
       return Result::Failed;
     }
@@ -125,6 +194,7 @@ class Sdl2Host final : public SdlHost {
       }
       const char* name = SDL_GameControllerName(item.controller);
       device.name = name ? name : "SDL Game Controller";
+      device.family = controller_family(item.controller);
       device.subtype = DeviceSubtype::Gamepad;
       device.connection = connection_type(item.controller);
 #if SDL_VERSION_ATLEAST(2, 0, 6)
@@ -138,6 +208,29 @@ class Sdl2Host final : public SdlHost {
       if (const char* serial = SDL_GameControllerGetSerial(item.controller);
           serial && *serial) {
         device.serial = serial;
+      }
+      device.supports_touchpad =
+          SDL_GameControllerGetNumTouchpads(item.controller) > 0;
+      const bool has_accelerometer = SDL_GameControllerHasSensor(
+          item.controller, SDL_SENSOR_ACCEL) == SDL_TRUE;
+      const bool has_gyroscope = SDL_GameControllerHasSensor(
+          item.controller, SDL_SENSOR_GYRO) == SDL_TRUE;
+      device.supports_motion = has_accelerometer || has_gyroscope;
+      if (has_accelerometer) {
+        SDL_GameControllerSetSensorEnabled(item.controller, SDL_SENSOR_ACCEL,
+                                           SDL_TRUE);
+      }
+      if (has_gyroscope) {
+        SDL_GameControllerSetSensorEnabled(item.controller, SDL_SENSOR_GYRO,
+                                           SDL_TRUE);
+      }
+      device.supports_light_color =
+          SDL_GameControllerHasLED(item.controller) == SDL_TRUE;
+#endif
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+      if (const char* path = SDL_GameControllerPath(item.controller);
+          path && *path) {
+        device.path = path;
       }
 #endif
       device.supports_power_info = true;
@@ -256,6 +349,94 @@ class Sdl2Host final : public SdlHost {
 #endif
   }
 
+  Result get_motion_state(NativeDeviceId device,
+                          MotionState& out_motion) override {
+    out_motion = {};
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (!setup_) return Result::Failed;
+    std::scoped_lock lock(mutex_);
+    auto* controller = find_controller(device);
+    if (!controller) return Result::DeviceNotConnected;
+    SDL_GameControllerUpdate();
+    if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_ACCEL) == SDL_TRUE) {
+      if (SDL_GameControllerGetSensorData(controller, SDL_SENSOR_ACCEL,
+                                          out_motion.acceleration.data(), 3) == 0) {
+        out_motion.has_accelerometer = true;
+      }
+    }
+    if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO) == SDL_TRUE) {
+      if (SDL_GameControllerGetSensorData(
+              controller, SDL_SENSOR_GYRO,
+              out_motion.angular_velocity.data(), 3) == 0) {
+        out_motion.has_gyroscope = true;
+      }
+    }
+    return out_motion.has_accelerometer || out_motion.has_gyroscope
+               ? Result::Success
+               : Result::Unsupported;
+#else
+    static_cast<void>(device);
+    return Result::Unsupported;
+#endif
+  }
+
+  Result get_touchpad_state(NativeDeviceId device,
+                            TouchpadState& out_touch) override {
+    out_touch = {};
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (!setup_) return Result::Failed;
+    std::scoped_lock lock(mutex_);
+    auto* controller = find_controller(device);
+    if (!controller) return Result::DeviceNotConnected;
+    SDL_GameControllerUpdate();
+    if (SDL_GameControllerGetNumTouchpads(controller) <= 0) {
+      return Result::Unsupported;
+    }
+    const auto count = std::min<std::size_t>(
+        kMaxTouchPoints,
+        static_cast<std::size_t>(std::max(
+            0, SDL_GameControllerGetNumTouchpadFingers(controller, 0))));
+    for (std::size_t i = 0; i < count; ++i) {
+      Uint8 down = 0;
+      TouchPoint point{};
+      if (SDL_GameControllerGetTouchpadFinger(
+              controller, 0, static_cast<int>(i), &down, &point.x, &point.y,
+              &point.pressure) != 0) {
+        continue;
+      }
+      point.finger = static_cast<std::int32_t>(i);
+      point.down = down != 0;
+      out_touch.points[out_touch.point_count] = point;
+      ++out_touch.point_count;
+    }
+    return Result::Success;
+#else
+    static_cast<void>(device);
+    return Result::Unsupported;
+#endif
+  }
+
+  Result set_light_color(NativeDeviceId device,
+                         const LightColor& color) override {
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (!setup_) return Result::Failed;
+    std::scoped_lock lock(mutex_);
+    auto* controller = find_controller(device);
+    if (!controller) return Result::DeviceNotConnected;
+    if (SDL_GameControllerHasLED(controller) != SDL_TRUE) {
+      return Result::Unsupported;
+    }
+    return SDL_GameControllerSetLED(controller, color.red, color.green,
+                                    color.blue) == 0
+               ? Result::Success
+               : Result::Failed;
+#else
+    static_cast<void>(device);
+    static_cast<void>(color);
+    return Result::Unsupported;
+#endif
+  }
+
   std::uint64_t now_millis() const noexcept override {
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     return SDL_GetTicks64();
@@ -322,6 +503,12 @@ class Sdl2Host final : public SdlHost {
     } else
 #endif
     {
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+      if (const char* path = SDL_GameControllerPath(controller); path && *path) {
+        key << ":path=" << path;
+        return key.str();
+      }
+#endif
       if (const char* name = SDL_GameControllerName(controller); name && *name) {
         key << ":name=" << name;
       }

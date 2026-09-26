@@ -48,6 +48,7 @@ class InputFeature final : public QObject {
   [[nodiscard]] ServiceResult reconfigure();
   [[nodiscard]] ServiceResult applySettings();
   [[nodiscard]] ServiceResult assignUser(int user_index, const QString& identity_key);
+  [[nodiscard]] ServiceResult setUserAutomatic(int user_index);
   [[nodiscard]] ServiceResult clearUser(int user_index);
   [[nodiscard]] ServiceResult addUserSource(int user_index, const QString& identity_key);
   [[nodiscard]] ServiceResult removeUserSource(int user_index, const QString& identity_key);

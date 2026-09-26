@@ -80,12 +80,13 @@ This README reflects the source tree in the repository snapshot dated **26 Septe
 | Filesystem | Advanced | Host paths, VFS, GDFX/STFS content sources, Xbox path semantics, kernel I/O integration, Memory V2 guest marshalling, and recompiled-title import dispatch are present. |
 | Kernel V1 | Implemented foundation | Handles, objects, file I/O, threads, synchronization, timers, waits, time services, memory integration, modules, process state, and exception foundations are present. |
 | XAM | Active | Offline user/profile, locale, content, notifications, achievements, storage/content services, and export infrastructure are present. Save/data and title-specific validation still need further integration. |
-| Input V1 | Feature-complete architecture | SDL2/SDL3, Windows XInput, keyboard/mouse, multi-source routing, profiles, flight/HOTAS mapping, XAM guest ABI marshalling, diagnostics, and a native module API are present. |
+| Input V2 | Expanded controller architecture | SDL2/SDL3 with Xbox, DualSense/PS5, Steam, Nintendo and generic-controller families; Windows XInput fallback; sticky hotplug routing; motion/touchpad/light extensions; keyboard/mouse; profiles; HOTAS; XAM marshalling; diagnostics; and a stable native module API are present. |
 | Content services | Implemented foundation | Content graph, title-update, DLC, save-manager, validation and mounting infrastructure are present and being connected through the runtime/launcher path. |
 | Launcher | Advanced frontend/backend | Qt 6 Quick/QML multi-game launcher with library, modules, profiles, settings, diagnostics, update infrastructure, module catalogue/install/update services, input configuration, and runtime-session supervision. |
 | Audio V1 | Implemented common path | Xbox render-driver/XMA context semantics, XMAFRAMES decode, bounded voice mixing/resampling, Memory V2 DMA/coherency, SDL2 host output, xboxkrnl audio exports, and regression tests are integrated. Windows x64 includes the vetted FFmpeg/XMA dependency; real-title playback qualification remains ongoing. |
 | Xenon Network | Client foundation implemented / offline by default | Versioned bootstrap, health and service-route contracts, asynchronous HTTPS transport, explicit connection/auth/realtime states, bounded retries and resources, launcher diagnostics, and an Xbox-services boundary are present. No hosted service, production endpoint, gameplay relay, persistent login, or completed XAM/XNet mapping is claimed. |
 | ARM64 | Planned | The architecture is kept host-neutral where practical, but current development and validation focus remains x86-64. |
+| macOS / Apple Silicon | Planned | Host platform/architecture detection already recognises `macos` and `arm64` (`cmake/Platforms.cmake`, `cmake/Architectures.cmake`), and dependency staging has origin-relative RPATH handling for macOS targets. There is no Metal graphics backend, no macOS CI/build validation, and no Apple Silicon qualification yet — this is tracked groundwork, not a supported host today. |
 
 There is currently no claim of general Xbox 360 compatibility or a completed playable-title release. The present goal is to close the shared runtime boundary, then use real games to expose correctness gaps without introducing title-specific hacks into Xenon itself.
 
@@ -403,16 +404,17 @@ See [`docs/network/XENON_NETWORK_V1.md`](docs/network/XENON_NETWORK_V1.md).
 
 ---
 
-## Input V1
+## Input V2
 
 Input is designed around a host-neutral four-user Xbox controller model with optional platform backends.
 
 Current features include:
 
-- SDL2 and SDL3 controller support.
-- Native Windows XInput support.
+- SDL2 and SDL3 support for Xbox, DualSense/PS5, Steam, Nintendo and generic controllers.
+- Native Windows XInput support as an explicit backend and automatic fallback.
 - Keyboard/mouse virtual-controller mapping.
-- Stable device identities and hotplug routing.
+- Stable device identities and sticky explicit routes across hotplug/reconnect.
+- Controller-family metadata plus optional motion, touchpad and light controls.
 - Per-user primary and additional input sources.
 - State merging for multi-device configurations.
 - Deadzone/calibration/response profiles.
@@ -426,7 +428,7 @@ Current features include:
 
 Input intentionally contains no Ace Combat 6-specific actions; title-specific interpretation remains in the game module.
 
-See [`docs/input/INPUT_V1.md`](docs/input/INPUT_V1.md) and [`docs/modules/INPUT_API_V1.md`](docs/modules/INPUT_API_V1.md).
+See [`docs/input/INPUT_V2.md`](docs/input/INPUT_V2.md), the historical [`docs/input/INPUT_V1.md`](docs/input/INPUT_V1.md), and [`docs/modules/INPUT_API_V1.md`](docs/modules/INPUT_API_V1.md).
 
 ---
 
@@ -590,12 +592,15 @@ While Xenon remains under active development, tag-triggered publication is gated
 
 ### Major build options
 
-The authoritative list is in the root [`CMakeLists.txt`](CMakeLists.txt). Current major options include:
+The authoritative list is in the root [`CMakeLists.txt`](CMakeLists.txt) and
+[`cmake/Dependencies.cmake`](cmake/Dependencies.cmake) (dependency-bootstrap
+options). Current major options include:
 
 ```text
 XENON_BUILD_TESTS
 XENON_BUILD_BENCHMARKS
 XENON_BUILD_LAUNCHER
+XENON_BUILD_RUNTIME_HOST
 XENON_BUILD_INSTALLER
 XENON_ENABLE_MEMORY
 XENON_MEMORY_DEFAULT_DIRECT_APERTURE
@@ -694,7 +699,7 @@ Useful starting points:
 - [`docs/kernel/KERNEL_V1.md`](docs/kernel/KERNEL_V1.md) — kernel execution environment
 - [`docs/xam/XAM_V1.md`](docs/xam/XAM_V1.md) — XAM services
 - [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md) — title update, DLC and save/content architecture
-- [`docs/input/INPUT_V1.md`](docs/input/INPUT_V1.md) — input architecture
+- [`docs/input/INPUT_V2.md`](docs/input/INPUT_V2.md) — current input architecture
 - [`docs/network/XENON_NETWORK_V1.md`](docs/network/XENON_NETWORK_V1.md) — Xenon Network client/uplink architecture and security boundary
 - [`launcher/README.md`](launcher/README.md) — launcher frontend/backend state
 - [`docs/development/RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md) — research references and provenance
@@ -780,7 +785,7 @@ Near-term priorities are focused on making the first real title exercise the com
 9. Add additional game modules to prove the runtime is reusable.
 10. Qualify Audio V1 against retail titles, connect the Xenon Network client to a compliant development service, and implement audited XAM/XNet mappings without merging the control plane with guest gameplay sockets.
 11. Add secure platform credential storage and a concrete secure realtime channel before any production Xenon Network authentication is enabled.
-12. Continue ARM64, Linux packaging, and later platform support as the shared execution path stabilizes.
+12. Continue ARM64, Linux packaging, and later platform support (including macOS/Apple Silicon, once a Metal graphics backend and host validation exist) as the shared execution path stabilizes.
 
 ---
 

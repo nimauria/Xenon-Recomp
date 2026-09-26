@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -16,6 +17,42 @@ DeviceSubtype gamepad_subtype(SDL_GamepadType /*type*/) noexcept {
   // SDL's vendor-specific gamepad types all map to the standard Xbox gamepad
   // contract. Specialized Xbox subtypes are provided by dedicated backends.
   return DeviceSubtype::Gamepad;
+}
+
+bool contains_case_insensitive(std::string_view value,
+                               std::string_view needle) {
+  if (needle.empty()) return true;
+  return std::search(value.begin(), value.end(), needle.begin(), needle.end(),
+                     [](char lhs, char rhs) {
+                       return std::tolower(static_cast<unsigned char>(lhs)) ==
+                              std::tolower(static_cast<unsigned char>(rhs));
+                     }) != value.end();
+}
+
+ControllerFamily gamepad_family(SDL_GamepadType type, std::uint16_t vendor,
+                                std::string_view name) noexcept {
+  if (vendor == 0x28DEu || contains_case_insensitive(name, "steam") ||
+      contains_case_insensitive(name, "valve")) {
+    return ControllerFamily::Steam;
+  }
+  switch (type) {
+    case SDL_GAMEPAD_TYPE_XBOX360:
+    case SDL_GAMEPAD_TYPE_XBOXONE:
+      return ControllerFamily::Xbox;
+    case SDL_GAMEPAD_TYPE_PS3:
+    case SDL_GAMEPAD_TYPE_PS4:
+    case SDL_GAMEPAD_TYPE_PS5:
+      return ControllerFamily::PlayStation;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+      return ControllerFamily::Nintendo;
+    case SDL_GAMEPAD_TYPE_STANDARD:
+      return ControllerFamily::Generic;
+    default:
+      return ControllerFamily::Unknown;
+  }
 }
 
 std::int16_t invert_axis(std::int16_t value) noexcept {
@@ -42,6 +79,18 @@ class Sdl3Host final : public SdlHost {
 
   Result setup() override {
     if (setup_) return Result::Success;
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_ENHANCED_REPORTS
+    SDL_SetHint(SDL_HINT_JOYSTICK_ENHANCED_REPORTS, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1");
+#endif
+#ifdef SDL_HINT_JOYSTICK_HIDAPI_STEAM
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+#endif
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) return Result::Failed;
     setup_ = true;
     return Result::Success;
@@ -87,6 +136,7 @@ class Sdl3Host final : public SdlHost {
 
     for (auto it = gamepads_.begin(); it != gamepads_.end();) {
       const bool connected =
+          count > 0 &&
           std::find(ids, ids + count, it->first) != ids + count;
       if (connected) {
         ++it;
@@ -105,7 +155,7 @@ class Sdl3Host final : public SdlHost {
     auto* gamepad = find(id);
     if (!gamepad) return Result::DeviceNotConnected;
 
-    static constexpr std::array<std::pair<SDL_GamepadButton, std::uint16_t>, 14>
+    static constexpr std::array<std::pair<SDL_GamepadButton, std::uint16_t>, 15>
         kButtons{{
             {SDL_GAMEPAD_BUTTON_DPAD_UP, DpadUp},
             {SDL_GAMEPAD_BUTTON_DPAD_DOWN, DpadDown},
@@ -117,6 +167,7 @@ class Sdl3Host final : public SdlHost {
             {SDL_GAMEPAD_BUTTON_RIGHT_STICK, RightThumb},
             {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, LeftShoulder},
             {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, RightShoulder},
+            {SDL_GAMEPAD_BUTTON_GUIDE, Guide},
             {SDL_GAMEPAD_BUTTON_SOUTH, A},
             {SDL_GAMEPAD_BUTTON_EAST, B},
             {SDL_GAMEPAD_BUTTON_WEST, X},
@@ -183,6 +234,77 @@ class Sdl3Host final : public SdlHost {
                                                        : Result::Failed;
   }
 
+  Result get_motion_state(NativeDeviceId id,
+                          MotionState& out_motion) override {
+    out_motion = {};
+    std::scoped_lock lock(mutex_);
+    auto* gamepad = find(id);
+    if (!gamepad) return Result::DeviceNotConnected;
+    SDL_UpdateGamepads();
+    if (SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL)) {
+      if (!SDL_GamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL)) {
+        SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL, true);
+      }
+      out_motion.has_accelerometer = SDL_GetGamepadSensorData(
+          gamepad, SDL_SENSOR_ACCEL, out_motion.acceleration.data(), 3);
+    }
+    if (SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO)) {
+      if (!SDL_GamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO)) {
+        SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_GYRO, true);
+      }
+      out_motion.has_gyroscope = SDL_GetGamepadSensorData(
+          gamepad, SDL_SENSOR_GYRO, out_motion.angular_velocity.data(), 3);
+    }
+    return out_motion.has_accelerometer || out_motion.has_gyroscope
+               ? Result::Success
+               : Result::Unsupported;
+  }
+
+  Result get_touchpad_state(NativeDeviceId id,
+                            TouchpadState& out_touch) override {
+    out_touch = {};
+    std::scoped_lock lock(mutex_);
+    auto* gamepad = find(id);
+    if (!gamepad) return Result::DeviceNotConnected;
+    SDL_UpdateGamepads();
+    if (SDL_GetNumGamepadTouchpads(gamepad) <= 0) return Result::Unsupported;
+    const auto count = std::min<std::size_t>(
+        kMaxTouchPoints,
+        static_cast<std::size_t>(std::max(
+            0, SDL_GetNumGamepadTouchpadFingers(gamepad, 0))));
+    for (std::size_t i = 0; i < count; ++i) {
+      bool down = false;
+      TouchPoint point{};
+      if (!SDL_GetGamepadTouchpadFinger(
+              gamepad, 0, static_cast<int>(i), &down, &point.x, &point.y,
+              &point.pressure)) {
+        continue;
+      }
+      point.finger = static_cast<std::int32_t>(i);
+      point.down = down;
+      out_touch.points[out_touch.point_count] = point;
+      ++out_touch.point_count;
+    }
+    return Result::Success;
+  }
+
+  Result set_light_color(NativeDeviceId id,
+                         const LightColor& color) override {
+    std::scoped_lock lock(mutex_);
+    auto* gamepad = find(id);
+    if (!gamepad) return Result::DeviceNotConnected;
+    const auto properties = SDL_GetGamepadProperties(gamepad);
+    if (!SDL_GetBooleanProperty(
+            properties, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false) &&
+        !SDL_GetBooleanProperty(
+            properties, SDL_PROP_GAMEPAD_CAP_MONO_LED_BOOLEAN, false)) {
+      return Result::Unsupported;
+    }
+    return SDL_SetGamepadLED(gamepad, color.red, color.green, color.blue)
+               ? Result::Success
+               : Result::Failed;
+  }
+
   std::uint64_t now_millis() const noexcept override { return SDL_GetTicks(); }
 
  private:
@@ -195,6 +317,8 @@ class Sdl3Host final : public SdlHost {
     device.vendor_id = SDL_GetGamepadVendor(gamepad);
     device.product_id = SDL_GetGamepadProduct(gamepad);
     device.product_version = SDL_GetGamepadProductVersion(gamepad);
+    device.family = gamepad_family(SDL_GetGamepadType(gamepad),
+                                   device.vendor_id, device.name);
     if (const char* serial = SDL_GetGamepadSerial(gamepad)) device.serial = serial;
     if (const char* path = SDL_GetGamepadPath(gamepad)) device.path = path;
 
@@ -224,9 +348,21 @@ class Sdl3Host final : public SdlHost {
                power == SDL_POWERSTATE_ON_BATTERY) {
       device.connection = ConnectionType::Wireless;
     }
-    device.supports_vibration = true;
+    const auto properties = SDL_GetGamepadProperties(gamepad);
+    device.supports_vibration = SDL_GetBooleanProperty(
+        properties, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     device.supports_power_info = true;
-    device.supports_player_indicator = true;
+    device.supports_player_indicator = SDL_GetBooleanProperty(
+        properties, SDL_PROP_GAMEPAD_CAP_PLAYER_LED_BOOLEAN, false);
+    device.supports_light_color =
+        SDL_GetBooleanProperty(properties,
+                               SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false) ||
+        SDL_GetBooleanProperty(properties,
+                               SDL_PROP_GAMEPAD_CAP_MONO_LED_BOOLEAN, false);
+    device.supports_touchpad = SDL_GetNumGamepadTouchpads(gamepad) > 0;
+    device.supports_motion =
+        SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL) ||
+        SDL_GamepadHasSensor(gamepad, SDL_SENSOR_GYRO);
     return device;
   }
 

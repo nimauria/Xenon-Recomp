@@ -27,6 +27,7 @@ void XInputDriver::enumerate_devices(std::vector<DriverDeviceInfo>& out) {
     info.native_id = device.native_id;
     info.persistent_key = device.persistent_key;
     info.name = device.name;
+    info.family = ControllerFamily::Xbox;
     info.type = DeviceType::Gamepad;
     info.subtype = device.subtype;
     info.connection = ConnectionType::Unknown;

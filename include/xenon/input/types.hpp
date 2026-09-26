@@ -60,6 +60,34 @@ enum class ConnectionType : std::uint8_t {
   Virtual,
 };
 
+// Physical controller family. This is deliberately separate from the Xbox
+// device subtype: a DualSense and a Steam Controller are both exposed to an
+// Xbox 360 title as a standard gamepad, but frontends and native modules still
+// need to describe the actual hardware accurately.
+enum class ControllerFamily : std::uint8_t {
+  Unknown = 0,
+  Xbox,
+  PlayStation,
+  Nintendo,
+  Steam,
+  Generic,
+  Virtual,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(
+    ControllerFamily family) noexcept {
+  switch (family) {
+    case ControllerFamily::Unknown: return "unknown";
+    case ControllerFamily::Xbox: return "xbox";
+    case ControllerFamily::PlayStation: return "playstation";
+    case ControllerFamily::Nintendo: return "nintendo";
+    case ControllerFamily::Steam: return "steam";
+    case ControllerFamily::Generic: return "generic";
+    case ControllerFamily::Virtual: return "virtual";
+  }
+  return "unknown";
+}
+
 // Power data is intentionally host-neutral. Percentage 0xFF means the host
 // backend cannot provide a trustworthy numeric value.
 enum class PowerSource : std::uint8_t {
@@ -134,6 +162,38 @@ struct Vibration {
   [[nodiscard]] bool operator==(const Vibration&) const noexcept = default;
 };
 
+struct MotionState {
+  // SDL and the host adapters use SI units: acceleration is m/s^2 and angular
+  // velocity is radians/second.
+  std::array<float, 3> acceleration{};
+  std::array<float, 3> angular_velocity{};
+  bool has_accelerometer{};
+  bool has_gyroscope{};
+};
+
+struct TouchPoint {
+  std::int32_t finger{};
+  float x{};
+  float y{};
+  float pressure{};
+  bool down{};
+};
+
+constexpr std::size_t kMaxTouchPoints = 4;
+
+struct TouchpadState {
+  std::array<TouchPoint, kMaxTouchPoints> points{};
+  std::uint8_t point_count{};
+};
+
+struct LightColor {
+  std::uint8_t red{};
+  std::uint8_t green{};
+  std::uint8_t blue{};
+
+  [[nodiscard]] bool operator==(const LightColor&) const noexcept = default;
+};
+
 enum CapabilityFlag : std::uint16_t {
   CapabilityNone = 0,
   CapabilityVoiceSupported = 1u << 0u,
@@ -170,6 +230,7 @@ struct DriverDeviceInfo {
   NativeDeviceId native_id{};
   std::string persistent_key{};
   std::string name{};
+  ControllerFamily family{ControllerFamily::Unknown};
   DeviceType type{DeviceType::Gamepad};
   DeviceSubtype subtype{DeviceSubtype::Gamepad};
   ConnectionType connection{ConnectionType::Unknown};
@@ -182,6 +243,9 @@ struct DriverDeviceInfo {
   bool supports_keystrokes{};
   bool supports_power_info{};
   bool supports_player_indicator{};
+  bool supports_motion{};
+  bool supports_touchpad{};
+  bool supports_light_color{};
 };
 
 struct DeviceInfo {
@@ -191,6 +255,7 @@ struct DeviceInfo {
   std::string persistent_key{};
   std::string identity_key{};
   std::string name{};
+  ControllerFamily family{ControllerFamily::Unknown};
   DeviceType type{DeviceType::Gamepad};
   DeviceSubtype subtype{DeviceSubtype::Gamepad};
   ConnectionType connection{ConnectionType::Unknown};
@@ -203,6 +268,9 @@ struct DeviceInfo {
   bool supports_keystrokes{};
   bool supports_power_info{};
   bool supports_player_indicator{};
+  bool supports_motion{};
+  bool supports_touchpad{};
+  bool supports_light_color{};
   PowerInfo power{};
   bool power_valid{};
   std::uint8_t player_indicator{kNoPlayerIndicator};

@@ -179,6 +179,7 @@ class LauncherBridge final : public QObject {
   Q_INVOKABLE void refreshInputDevices();
   Q_INVOKABLE void reconfigureInput();
   Q_INVOKABLE void assignInputDevice(int user_index, const QString& identity_key);
+  Q_INVOKABLE void setInputDeviceAutomatic(int user_index);
   Q_INVOKABLE void clearInputDevice(int user_index);
   Q_INVOKABLE void addInputSource(int user_index, const QString& identity_key);
   Q_INVOKABLE void removeInputSource(int user_index, const QString& identity_key);

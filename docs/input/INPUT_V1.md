@@ -1,5 +1,9 @@
 # Xenon Input v1
 
+> Historical design document. Input V2 supersedes the host-controller and
+> hotplug portions while preserving this Xbox/XAM contract. See
+> [`INPUT_V2.md`](INPUT_V2.md).
+
 Xenon Input is the host-neutral controller/input layer shared by recompiled Xbox
 360 game modules. It is intentionally separate from XAM ABI marshalling and from
 platform APIs such as SDL or Windows XInput.

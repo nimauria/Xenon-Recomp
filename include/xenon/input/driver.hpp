@@ -43,6 +43,24 @@ class InputDriver {
     static_cast<void>(player_index);
     return Result::Unsupported;
   }
+  [[nodiscard]] virtual Result get_motion_state(NativeDeviceId device,
+                                                 MotionState& out_motion) {
+    static_cast<void>(device);
+    out_motion = {};
+    return Result::Unsupported;
+  }
+  [[nodiscard]] virtual Result get_touchpad_state(NativeDeviceId device,
+                                                   TouchpadState& out_touch) {
+    static_cast<void>(device);
+    out_touch = {};
+    return Result::Unsupported;
+  }
+  [[nodiscard]] virtual Result set_light_color(NativeDeviceId device,
+                                                const LightColor& color) {
+    static_cast<void>(device);
+    static_cast<void>(color);
+    return Result::Unsupported;
+  }
 };
 
 }  // namespace xenon::input

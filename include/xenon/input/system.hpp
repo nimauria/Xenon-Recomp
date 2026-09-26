@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,18 @@ class InputSystem {
 
   [[nodiscard]] Result assign_user(std::uint32_t user_index, DeviceId device_id);
   [[nodiscard]] Result clear_user(std::uint32_t user_index);
+  // Replaces a user's complete route atomically. Explicit routes are sticky:
+  // their stable identities remain configured while devices are disconnected
+  // and are restored automatically on reconnect. An empty route intentionally
+  // leaves the user unassigned.
+  [[nodiscard]] Result set_user_sources(std::uint32_t user_index,
+                                        std::span<const DeviceId> device_ids);
+  [[nodiscard]] Result set_user_source_identities(
+      std::uint32_t user_index, std::vector<std::string> identity_keys);
+  [[nodiscard]] std::vector<std::string> desired_sources_for_user(
+      std::uint32_t user_index) const;
+  void set_auto_assignment(std::uint32_t user_index, bool enabled);
+  [[nodiscard]] bool auto_assignment(std::uint32_t user_index) const;
   // Additional sources are merged into the primary device for this guest user.
   // This enables controller + keyboard/mouse + HOTAS/accessibility devices.
   [[nodiscard]] Result add_user_source(std::uint32_t user_index, DeviceId device_id);
@@ -72,6 +85,12 @@ class InputSystem {
                                      PowerInfo& out_power);
   [[nodiscard]] Result set_player_indicator(std::uint32_t user_index,
                                             std::uint8_t player_index);
+  [[nodiscard]] Result get_motion_state(std::uint32_t user_index,
+                                        MotionState& out_motion);
+  [[nodiscard]] Result get_touchpad_state(std::uint32_t user_index,
+                                          TouchpadState& out_touch);
+  [[nodiscard]] Result set_light_color(std::uint32_t user_index,
+                                       const LightColor& color);
   [[nodiscard]] InputDiagnostics diagnostics() const;
 
   // Shared frontend action routing lives beside the device core so all host
@@ -117,7 +136,7 @@ class InputSystem {
     DeviceId id{kInvalidDeviceId};
     std::size_t driver_index{};
     NativeDeviceId native_id{};
-    std::string_view identity_key{};
+    std::string identity_key{};
   };
 
   [[nodiscard]] std::optional<RoutedDevice> route_user_locked(
@@ -130,18 +149,28 @@ class InputSystem {
                                  const GamepadState& merged,
                                  State& out_state);
   void auto_assign_locked();
+  void reconcile_user_routes_locked();
+  [[nodiscard]] std::optional<DeviceId> connected_id_for_identity_locked(
+      std::string_view identity) const;
   [[nodiscard]] static std::string make_identity_key(
       std::string_view driver_name, std::string_view persistent_key);
   [[nodiscard]] bool effective_active_locked() const noexcept;
   void stop_vibration_for_inactive_transition(bool was_active, bool now_active);
   void sync_player_indicators();
 
+  // Serializes driver lifecycle, hotplug enumeration, and I/O. The routing
+  // mutex below protects Xenon's records; host drivers are not required to
+  // tolerate refresh and polling concurrently.
+  mutable std::mutex driver_mutex_{};
   mutable std::mutex mutex_{};
   std::vector<DriverSlot> drivers_{};
   std::unordered_map<DeviceId, DeviceRecord> records_{};
   std::unordered_map<std::string, DeviceId> identity_to_id_{};
   std::array<DeviceId, kMaxUsers> users_{};
   std::array<std::vector<DeviceId>, kMaxUsers> extra_sources_{};
+  std::array<std::vector<std::string>, kMaxUsers>
+      desired_source_identities_{};
+  std::array<bool, kMaxUsers> auto_assignment_{{true, true, true, true}};
   std::array<GamepadState, kMaxUsers> merged_last_state_{};
   std::array<std::uint32_t, kMaxUsers> merged_packet_number_{};
   std::array<bool, kMaxUsers> merged_has_state_{};

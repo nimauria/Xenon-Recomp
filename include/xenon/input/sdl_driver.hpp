@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,7 @@ struct SdlHostDevice {
   NativeDeviceId native_id{};
   std::string persistent_key{};
   std::string name{};
+  ControllerFamily family{ControllerFamily::Unknown};
   DeviceSubtype subtype{DeviceSubtype::Gamepad};
   ConnectionType connection{ConnectionType::Unknown};
   std::uint16_t vendor_id{};
@@ -27,6 +29,9 @@ struct SdlHostDevice {
   bool supports_vibration{};
   bool supports_power_info{};
   bool supports_player_indicator{};
+  bool supports_motion{};
+  bool supports_touchpad{};
+  bool supports_light_color{};
 };
 
 class SdlHost {
@@ -47,6 +52,24 @@ class SdlHost {
                                               PowerInfo& out_power) = 0;
   [[nodiscard]] virtual Result set_player_index(NativeDeviceId device,
                                                 std::uint8_t player_index) = 0;
+  [[nodiscard]] virtual Result get_motion_state(NativeDeviceId device,
+                                                 MotionState& out_motion) {
+    static_cast<void>(device);
+    out_motion = {};
+    return Result::Unsupported;
+  }
+  [[nodiscard]] virtual Result get_touchpad_state(NativeDeviceId device,
+                                                   TouchpadState& out_touch) {
+    static_cast<void>(device);
+    out_touch = {};
+    return Result::Unsupported;
+  }
+  [[nodiscard]] virtual Result set_light_color(NativeDeviceId device,
+                                                const LightColor& color) {
+    static_cast<void>(device);
+    static_cast<void>(color);
+    return Result::Unsupported;
+  }
   [[nodiscard]] virtual std::uint64_t now_millis() const noexcept = 0;
 };
 
@@ -83,9 +106,16 @@ class SdlInputDriver final : public InputDriver {
                                       PowerInfo& out_power) override;
   [[nodiscard]] Result set_player_indicator(
       NativeDeviceId device, std::uint8_t player_index) override;
+  [[nodiscard]] Result get_motion_state(NativeDeviceId device,
+                                         MotionState& out_motion) override;
+  [[nodiscard]] Result get_touchpad_state(NativeDeviceId device,
+                                           TouchpadState& out_touch) override;
+  [[nodiscard]] Result set_light_color(NativeDeviceId device,
+                                        const LightColor& color) override;
 
   [[nodiscard]] bool available() const noexcept { return host_ != nullptr; }
-  [[nodiscard]] int loaded_mapping_count() const noexcept {
+  [[nodiscard]] int loaded_mapping_count() const {
+    std::scoped_lock lock(mutex_);
     return loaded_mapping_count_;
   }
 
@@ -101,7 +131,7 @@ class SdlInputDriver final : public InputDriver {
 
   [[nodiscard]] std::uint64_t analog_to_keyfield(
       const GamepadState& state) const noexcept;
-  [[nodiscard]] Result refresh_cache();
+  [[nodiscard]] Result refresh_cache_locked();
 
   std::unique_ptr<SdlHost> host_{};
   SdlInputOptions options_{};
@@ -109,6 +139,7 @@ class SdlInputDriver final : public InputDriver {
   std::vector<std::pair<NativeDeviceId, KeystrokeState>> keystrokes_{};
   int loaded_mapping_count_{};
   bool setup_{};
+  mutable std::mutex mutex_{};
 };
 
 // Returns an SDL2-backed host when Xenon was built with SDL2, otherwise null.

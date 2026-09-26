@@ -634,6 +634,9 @@ void LauncherBridge::reconfigureInput() { notifyResult(backend_->input().reconfi
 void LauncherBridge::assignInputDevice(int user_index, const QString& identity_key) {
   notifyResult(backend_->input().assignUser(user_index, identity_key), false);
 }
+void LauncherBridge::setInputDeviceAutomatic(int user_index) {
+  notifyResult(backend_->input().setUserAutomatic(user_index), false);
+}
 void LauncherBridge::clearInputDevice(int user_index) {
   notifyResult(backend_->input().clearUser(user_index), false);
 }

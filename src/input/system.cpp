@@ -2,6 +2,7 @@
 #include "xenon/input/state_merge.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <utility>
 
 namespace xenon::input {
@@ -20,27 +21,24 @@ bool InputSystem::add_driver(std::unique_ptr<InputDriver> driver) {
 Result InputSystem::setup() {
   std::vector<std::size_t> ready;
   {
+    std::scoped_lock driver_lock(driver_mutex_);
     std::scoped_lock lock(mutex_);
     if (setup_) return Result::Success;
-  }
-
-  for (std::size_t i = 0; i < drivers_.size(); ++i) {
-    const auto result = drivers_[i].driver->setup();
-    if (result == Result::Success) {
-      drivers_[i].setup = true;
-      ready.push_back(i);
-    }
-  }
-
-  {
-    std::scoped_lock lock(mutex_);
     setup_ = true;
+    for (std::size_t i = 0; i < drivers_.size(); ++i) {
+      const auto result = drivers_[i].driver->setup();
+      if (result == Result::Success) {
+        drivers_[i].setup = true;
+        ready.push_back(i);
+      }
+    }
   }
   refresh_devices();
   return ready.empty() && !drivers_.empty() ? Result::Failed : Result::Success;
 }
 
 void InputSystem::shutdown() noexcept {
+  std::scoped_lock driver_lock(driver_mutex_);
   std::vector<InputDriver*> drivers;
   std::vector<std::pair<InputDriver*, NativeDeviceId>> stop_vibration;
   {
@@ -64,12 +62,16 @@ void InputSystem::shutdown() noexcept {
       slot.setup = false;
     }
     users_.fill(kInvalidDeviceId);
-    setup_ = false;
+    for (auto& sources : extra_sources_) sources.clear();
   }
   for (const auto& [driver, native] : stop_vibration) {
     if (driver) static_cast<void>(driver->set_vibration(native, {}));
   }
   for (auto* driver : drivers) driver->shutdown();
+  {
+    std::scoped_lock lock(mutex_);
+    setup_ = false;
+  }
 }
 
 std::string InputSystem::make_identity_key(std::string_view driver_name,
@@ -83,6 +85,7 @@ std::string InputSystem::make_identity_key(std::string_view driver_name,
 }
 
 void InputSystem::refresh_devices() {
+  std::unique_lock driver_lock(driver_mutex_);
   struct Enumerated {
     std::size_t driver_index{};
     DriverDeviceInfo info{};
@@ -140,6 +143,7 @@ void InputSystem::refresh_devices() {
       record.native_id = item.info.native_id;
       record.refresh_generation = refresh_generation_;
       record.info.name = std::move(item.info.name);
+      record.info.family = item.info.family;
       record.info.type = item.info.type;
       record.info.subtype = item.info.subtype;
       record.info.connection = item.info.connection;
@@ -153,6 +157,9 @@ void InputSystem::refresh_devices() {
       record.info.supports_power_info = item.info.supports_power_info;
       record.info.supports_player_indicator =
           item.info.supports_player_indicator;
+      record.info.supports_motion = item.info.supports_motion;
+      record.info.supports_touchpad = item.info.supports_touchpad;
+      record.info.supports_light_color = item.info.supports_light_color;
       record.info.connected = true;
     }
 
@@ -165,31 +172,17 @@ void InputSystem::refresh_devices() {
       record.has_state = false;
     }
 
-    for (std::size_t user_index = 0; user_index < users_.size(); ++user_index) {
-      auto& user = users_[user_index];
-      if (user != kInvalidDeviceId) {
-        const auto it = records_.find(user);
-        if (it == records_.end() || !it->second.info.connected) {
-          user = kInvalidDeviceId;
-          merged_has_state_[user_index] = false;
-        }
-      }
-
-      auto& extras = extra_sources_[user_index];
-      extras.erase(
-          std::remove_if(extras.begin(), extras.end(), [&](DeviceId id) {
-            const auto it = records_.find(id);
-            return it == records_.end() || !it->second.info.connected;
-          }),
-          extras.end());
-    }
+    reconcile_user_routes_locked();
     auto_assign_locked();
   }
+  driver_lock.unlock();
   sync_player_indicators();
 }
 
 void InputSystem::auto_assign_locked() {
-  for (auto& user : users_) {
+  for (std::size_t user_index = 0; user_index < users_.size(); ++user_index) {
+    if (!auto_assignment_[user_index]) continue;
+    auto& user = users_[user_index];
     if (user != kInvalidDeviceId) continue;
 
     const DeviceRecord* best = nullptr;
@@ -199,13 +192,102 @@ void InputSystem::auto_assign_locked() {
           std::find(users_.begin(), users_.end(), record.info.id) != users_.end()) {
         continue;
       }
+      bool used_as_extra = false;
+      for (const auto& extras : extra_sources_) {
+        if (std::find(extras.begin(), extras.end(), record.info.id) !=
+            extras.end()) {
+          used_as_extra = true;
+          break;
+        }
+      }
+      if (used_as_extra) continue;
       if (!best || record.info.ordinal < best->info.ordinal) best = &record;
     }
     if (best) user = best->info.id;
   }
 }
 
+std::optional<DeviceId> InputSystem::connected_id_for_identity_locked(
+    std::string_view identity) const {
+  const auto known = identity_to_id_.find(std::string(identity));
+  if (known == identity_to_id_.end()) return std::nullopt;
+  const auto record = records_.find(known->second);
+  if (record == records_.end() || !record->second.info.connected) {
+    return std::nullopt;
+  }
+  return known->second;
+}
+
+void InputSystem::reconcile_user_routes_locked() {
+  std::unordered_set<DeviceId> claimed_primaries;
+
+  // Restore explicit routes first. A secondary source may also be another
+  // user's primary while the preferred source is connected, but if it is
+  // promoted after a disconnect it must become the sole primary owner.
+  for (std::size_t user_index = 0; user_index < users_.size(); ++user_index) {
+    if (auto_assignment_[user_index]) continue;
+    auto& primary = users_[user_index];
+    auto& extras = extra_sources_[user_index];
+
+    std::vector<DeviceId> restored;
+    restored.reserve(desired_source_identities_[user_index].size());
+    for (const auto& identity : desired_source_identities_[user_index]) {
+      const auto id = connected_id_for_identity_locked(identity);
+      if (!id || std::find(restored.begin(), restored.end(), *id) !=
+                     restored.end()) {
+        continue;
+      }
+      restored.push_back(*id);
+    }
+    const auto primary_it = std::find_if(
+        restored.begin(), restored.end(), [&](DeviceId id) {
+          return !claimed_primaries.contains(id);
+        });
+    const auto next_primary = primary_it == restored.end()
+                                  ? kInvalidDeviceId
+                                  : *primary_it;
+    std::vector<DeviceId> next_extras;
+    if (next_primary != kInvalidDeviceId) {
+      claimed_primaries.emplace(next_primary);
+      next_extras.reserve(restored.size() - 1);
+      for (const auto id : restored) {
+        if (id != next_primary) next_extras.push_back(id);
+      }
+    }
+    if (primary != next_primary || extras != next_extras) {
+      merged_has_state_[user_index] = false;
+    }
+    primary = next_primary;
+    extras = std::move(next_extras);
+  }
+
+  // Automatic users retain a still-connected controller unless an explicit
+  // route claimed it above. auto_assign_locked() fills any slots cleared here.
+  for (std::size_t user_index = 0; user_index < users_.size(); ++user_index) {
+    if (!auto_assignment_[user_index]) continue;
+    auto& primary = users_[user_index];
+    auto& extras = extra_sources_[user_index];
+    if (primary != kInvalidDeviceId) {
+      const auto it = records_.find(primary);
+      if (it == records_.end() || !it->second.info.connected ||
+          claimed_primaries.contains(primary)) {
+        primary = kInvalidDeviceId;
+        merged_has_state_[user_index] = false;
+      } else {
+        claimed_primaries.emplace(primary);
+      }
+    }
+    extras.erase(
+        std::remove_if(extras.begin(), extras.end(), [&](DeviceId id) {
+          const auto it = records_.find(id);
+          return it == records_.end() || !it->second.info.connected;
+        }),
+        extras.end());
+  }
+}
+
 void InputSystem::sync_player_indicators() {
+  std::scoped_lock driver_lock(driver_mutex_);
   struct Update {
     DeviceId id{};
     InputDriver* driver{};
@@ -281,18 +363,70 @@ Result InputSystem::assign_user(std::uint32_t user_index, DeviceId device_id) {
   if (user_index >= kMaxUsers || device_id == kInvalidDeviceId) {
     return Result::BadArguments;
   }
+  const std::array<DeviceId, 1> route{device_id};
+  return set_user_sources(user_index, route);
+}
+
+Result InputSystem::set_user_sources(
+    std::uint32_t user_index, std::span<const DeviceId> device_ids) {
+  if (user_index >= kMaxUsers) return Result::BadArguments;
+  std::vector<std::string> identities;
   {
     std::scoped_lock lock(mutex_);
-    const auto it = records_.find(device_id);
-    if (it == records_.end() || !it->second.info.connected) {
-      return Result::DeviceNotConnected;
+    identities.reserve(device_ids.size());
+    for (const auto id : device_ids) {
+      if (id == kInvalidDeviceId) return Result::BadArguments;
+      const auto it = records_.find(id);
+      if (it == records_.end() || !it->second.info.connected) {
+        return Result::DeviceNotConnected;
+      }
+      if (std::find(identities.begin(), identities.end(),
+                    it->second.info.identity_key) != identities.end()) {
+        return Result::BadArguments;
+      }
+      identities.push_back(it->second.info.identity_key);
     }
-    const auto existing = std::find(users_.begin(), users_.end(), device_id);
-    if (existing != users_.end()) *existing = kInvalidDeviceId;
-    users_[user_index] = device_id;
-    extra_sources_[user_index].clear();
-    merged_has_state_[user_index] = false;
+  }
+  return set_user_source_identities(user_index, std::move(identities));
+}
+
+Result InputSystem::set_user_source_identities(
+    std::uint32_t user_index, std::vector<std::string> identity_keys) {
+  if (user_index >= kMaxUsers) return Result::BadArguments;
+  std::unordered_set<std::string> unique;
+  for (const auto& identity : identity_keys) {
+    if (identity.empty()) return Result::BadArguments;
+    if (!unique.emplace(identity).second) return Result::BadArguments;
+  }
+  {
+    std::scoped_lock lock(mutex_);
+    if (!identity_keys.empty()) {
+      const auto& requested_primary = identity_keys.front();
+      for (std::size_t other = 0; other < users_.size(); ++other) {
+        if (other == user_index) continue;
+        bool displaced_primary = false;
+        if (users_[other] != kInvalidDeviceId) {
+          const auto existing = records_.find(users_[other]);
+          if (existing != records_.end() &&
+              existing->second.info.identity_key == requested_primary) {
+            users_[other] = kInvalidDeviceId;
+            merged_has_state_[other] = false;
+            displaced_primary = true;
+          }
+        }
+        if (displaced_primary && !auto_assignment_[other]) {
+          auto& desired = desired_source_identities_[other];
+          desired.erase(std::remove(desired.begin(), desired.end(),
+                                    requested_primary),
+                        desired.end());
+        }
+      }
+    }
+    auto_assignment_[user_index] = false;
+    desired_source_identities_[user_index] = std::move(identity_keys);
+    reconcile_user_routes_locked();
     auto_assign_locked();
+    merged_has_state_[user_index] = false;
   }
   sync_player_indicators();
   return Result::Success;
@@ -300,45 +434,92 @@ Result InputSystem::assign_user(std::uint32_t user_index, DeviceId device_id) {
 
 Result InputSystem::clear_user(std::uint32_t user_index) {
   if (user_index >= kMaxUsers) return Result::BadArguments;
-  {
-    std::scoped_lock lock(mutex_);
-    users_[user_index] = kInvalidDeviceId;
-    extra_sources_[user_index].clear();
-    merged_has_state_[user_index] = false;
-  }
-  sync_player_indicators();
-  return Result::Success;
+  return set_user_source_identities(user_index, {});
 }
 
 Result InputSystem::add_user_source(std::uint32_t user_index, DeviceId device_id) {
   if (user_index >= kMaxUsers || device_id == kInvalidDeviceId) return Result::BadArguments;
+  std::vector<DeviceId> route;
   {
     std::scoped_lock lock(mutex_);
     const auto it = records_.find(device_id);
     if (it == records_.end() || !it->second.info.connected) return Result::DeviceNotConnected;
-    if (users_[user_index] == device_id ||
-        std::find(extra_sources_[user_index].begin(), extra_sources_[user_index].end(), device_id) != extra_sources_[user_index].end()) {
+    if (users_[user_index] == device_id || std::find(
+            extra_sources_[user_index].begin(),
+            extra_sources_[user_index].end(), device_id) !=
+            extra_sources_[user_index].end()) {
       return Result::Success;
     }
-    extra_sources_[user_index].push_back(device_id);
-    std::sort(extra_sources_[user_index].begin(), extra_sources_[user_index].end(),
-              [&](DeviceId a, DeviceId b) { return records_.at(a).info.ordinal < records_.at(b).info.ordinal; });
-    merged_has_state_[user_index] = false;
+    if (users_[user_index] != kInvalidDeviceId) {
+      route.push_back(users_[user_index]);
+    }
+    route.insert(route.end(), extra_sources_[user_index].begin(),
+                 extra_sources_[user_index].end());
+    route.push_back(device_id);
   }
-  return Result::Success;
+  return set_user_sources(user_index, route);
 }
 
 Result InputSystem::remove_user_source(std::uint32_t user_index, DeviceId device_id) {
   if (user_index >= kMaxUsers || device_id == kInvalidDeviceId) return Result::BadArguments;
+  std::vector<DeviceId> route;
   {
     std::scoped_lock lock(mutex_);
-    auto& list = extra_sources_[user_index];
-    const auto it = std::find(list.begin(), list.end(), device_id);
-    if (it == list.end()) return Result::DeviceNotConnected;
-    list.erase(it);
+    if (users_[user_index] == device_id) return Result::BadArguments;
+    const auto& list = extra_sources_[user_index];
+    if (std::find(list.begin(), list.end(), device_id) == list.end()) {
+      return Result::DeviceNotConnected;
+    }
+    if (users_[user_index] != kInvalidDeviceId) {
+      route.push_back(users_[user_index]);
+    }
+    for (const auto id : list) {
+      if (id != device_id) route.push_back(id);
+    }
+  }
+  return set_user_sources(user_index, route);
+}
+
+std::vector<std::string> InputSystem::desired_sources_for_user(
+    std::uint32_t user_index) const {
+  if (user_index >= kMaxUsers) return {};
+  std::scoped_lock lock(mutex_);
+  return desired_source_identities_[user_index];
+}
+
+void InputSystem::set_auto_assignment(std::uint32_t user_index, bool enabled) {
+  if (user_index >= kMaxUsers) return;
+  {
+    std::scoped_lock lock(mutex_);
+    if (auto_assignment_[user_index] == enabled) return;
+    auto_assignment_[user_index] = enabled;
+    desired_source_identities_[user_index].clear();
+    if (!enabled) {
+      if (users_[user_index] != kInvalidDeviceId) {
+        desired_source_identities_[user_index].push_back(
+            records_.at(users_[user_index]).info.identity_key);
+      }
+      for (const auto id : extra_sources_[user_index]) {
+        const auto it = records_.find(id);
+        if (it != records_.end()) {
+          desired_source_identities_[user_index].push_back(
+              it->second.info.identity_key);
+        }
+      }
+    } else {
+      extra_sources_[user_index].clear();
+      reconcile_user_routes_locked();
+      auto_assign_locked();
+    }
     merged_has_state_[user_index] = false;
   }
-  return Result::Success;
+  sync_player_indicators();
+}
+
+bool InputSystem::auto_assignment(std::uint32_t user_index) const {
+  if (user_index >= kMaxUsers) return false;
+  std::scoped_lock lock(mutex_);
+  return auto_assignment_[user_index];
 }
 
 std::vector<DeviceId> InputSystem::sources_for_user(std::uint32_t user_index) const {
@@ -361,6 +542,7 @@ bool InputSystem::effective_active_locked() const noexcept {
 void InputSystem::stop_vibration_for_inactive_transition(bool was_active,
                                                          bool now_active) {
   if (!was_active || now_active) return;
+  std::scoped_lock driver_lock(driver_mutex_);
   std::vector<std::pair<InputDriver*, NativeDeviceId>> stop_vibration;
   {
     std::scoped_lock lock(mutex_);
@@ -435,6 +617,7 @@ BackgroundInputPolicy InputSystem::background_input_policy() const noexcept {
 }
 
 void InputSystem::set_vibration_enabled(bool enabled) {
+  std::scoped_lock driver_lock(driver_mutex_);
   std::vector<std::pair<InputDriver*, NativeDeviceId>> stop_vibration;
   {
     std::scoped_lock lock(mutex_);
@@ -491,7 +674,9 @@ Result InputSystem::poll_state_source(std::uint32_t user_index,
   {
     std::scoped_lock lock(mutex_);
     const auto it = records_.find(route.id);
-    if (it != records_.end()) {
+    if (it != records_.end() && it->second.info.connected &&
+        it->second.driver_index == route.driver_index &&
+        it->second.native_id == route.native_id) {
       it->second.last_result = result;
       if (result != Result::Success) ++it->second.state_failures;
     }
@@ -518,6 +703,7 @@ void InputSystem::write_merged_state_locked(std::uint32_t user_index,
 Result InputSystem::get_state(std::uint32_t user_index, State& out_state) {
   out_state = {};
   if (user_index >= kMaxUsers) return Result::BadArguments;
+  std::scoped_lock driver_lock(driver_mutex_);
 
   struct Source {
     RoutedDevice route;
@@ -590,6 +776,7 @@ Result InputSystem::get_capabilities(std::uint32_t user_index,
                                      std::uint32_t flags,
                                      Capabilities& out_caps) {
   out_caps = {};
+  std::scoped_lock driver_lock(driver_mutex_);
   RoutedDevice route{};
   InputDriver* driver = nullptr;
   {
@@ -605,7 +792,9 @@ Result InputSystem::get_capabilities(std::uint32_t user_index,
   const auto result = driver->get_capabilities(route.native_id, out_caps);
   std::scoped_lock lock(mutex_);
   const auto it = records_.find(route.id);
-  if (it != records_.end()) {
+  if (it != records_.end() && it->second.info.connected &&
+      it->second.driver_index == route.driver_index &&
+      it->second.native_id == route.native_id) {
     if (result != Result::Success) ++it->second.capability_failures;
     it->second.last_result = result;
   }
@@ -614,6 +803,7 @@ Result InputSystem::get_capabilities(std::uint32_t user_index,
 
 Result InputSystem::set_vibration(std::uint32_t user_index,
                                   const Vibration& vibration) {
+  std::scoped_lock driver_lock(driver_mutex_);
   RoutedDevice route{};
   InputDriver* driver = nullptr;
   {
@@ -638,7 +828,9 @@ Result InputSystem::set_vibration(std::uint32_t user_index,
   const auto result = driver->set_vibration(route.native_id, vibration);
   std::scoped_lock lock(mutex_);
   const auto it = records_.find(route.id);
-  if (it != records_.end()) {
+  if (it != records_.end() && it->second.info.connected &&
+      it->second.driver_index == route.driver_index &&
+      it->second.native_id == route.native_id) {
     if (result == Result::Success) {
       it->second.last_vibration = vibration;
     } else {
@@ -651,7 +843,7 @@ Result InputSystem::set_vibration(std::uint32_t user_index,
 
 Result InputSystem::get_keystroke(std::uint32_t user_index,
                                   std::uint32_t flags,
-                                  Keystroke& out_keystroke) {
+  Keystroke& out_keystroke) {
   out_keystroke = {};
   static_cast<void>(flags);
   if (user_index == kAnyUser) {
@@ -665,6 +857,7 @@ Result InputSystem::get_keystroke(std::uint32_t user_index,
     return any_connected ? Result::Empty : Result::DeviceNotConnected;
   }
   if (user_index >= kMaxUsers) return Result::BadArguments;
+  std::scoped_lock driver_lock(driver_mutex_);
 
   struct Source { RoutedDevice route; InputDriver* driver{}; };
   std::vector<Source> sources;
@@ -692,7 +885,9 @@ Result InputSystem::get_keystroke(std::uint32_t user_index,
     {
       std::scoped_lock lock(mutex_);
       const auto it = records_.find(source.route.id);
-      if (it != records_.end()) {
+      if (it != records_.end() && it->second.info.connected &&
+          it->second.driver_index == source.route.driver_index &&
+          it->second.native_id == source.route.native_id) {
         if (result != Result::Success && result != Result::Empty &&
             result != Result::DeviceNotConnected) {
           ++it->second.keystroke_failures;
@@ -716,6 +911,7 @@ Result InputSystem::get_keystroke(std::uint32_t user_index,
 Result InputSystem::get_power_info(std::uint32_t user_index,
                                    PowerInfo& out_power) {
   out_power = {};
+  std::scoped_lock driver_lock(driver_mutex_);
   RoutedDevice route{};
   InputDriver* driver = nullptr;
   {
@@ -736,7 +932,9 @@ Result InputSystem::get_power_info(std::uint32_t user_index,
   const auto result = driver->get_power_info(route.native_id, out_power);
   std::scoped_lock lock(mutex_);
   const auto it = records_.find(route.id);
-  if (it != records_.end()) {
+  if (it != records_.end() && it->second.info.connected &&
+      it->second.driver_index == route.driver_index &&
+      it->second.native_id == route.native_id) {
     if (result == Result::Success) {
       it->second.info.power = out_power;
       it->second.info.power_valid = true;
@@ -756,6 +954,7 @@ Result InputSystem::get_power_info(std::uint32_t user_index,
 
 Result InputSystem::set_player_indicator(std::uint32_t user_index,
                                          std::uint8_t player_index) {
+  std::scoped_lock driver_lock(driver_mutex_);
   if (player_index != kNoPlayerIndicator && player_index >= kMaxUsers) {
     return Result::BadArguments;
   }
@@ -776,9 +975,69 @@ Result InputSystem::set_player_indicator(std::uint32_t user_index,
   if (result == Result::Success) {
     std::scoped_lock lock(mutex_);
     const auto it = records_.find(route.id);
-    if (it != records_.end()) it->second.info.player_indicator = player_index;
+    if (it != records_.end() && it->second.info.connected &&
+        it->second.driver_index == route.driver_index &&
+        it->second.native_id == route.native_id) {
+      it->second.info.player_indicator = player_index;
+    }
   }
   return result;
+}
+
+Result InputSystem::get_motion_state(std::uint32_t user_index,
+                                     MotionState& out_motion) {
+  out_motion = {};
+  std::scoped_lock driver_lock(driver_mutex_);
+  RoutedDevice route{};
+  InputDriver* driver = nullptr;
+  {
+    std::scoped_lock lock(mutex_);
+    const auto routed = route_user_locked(user_index);
+    if (!routed) return user_index >= kMaxUsers ? Result::BadArguments
+                                               : Result::DeviceNotConnected;
+    route = *routed;
+    const auto& record = records_.at(route.id);
+    if (!record.info.supports_motion) return Result::Unsupported;
+    driver = drivers_[route.driver_index].driver.get();
+  }
+  return driver->get_motion_state(route.native_id, out_motion);
+}
+
+Result InputSystem::get_touchpad_state(std::uint32_t user_index,
+                                       TouchpadState& out_touch) {
+  out_touch = {};
+  std::scoped_lock driver_lock(driver_mutex_);
+  RoutedDevice route{};
+  InputDriver* driver = nullptr;
+  {
+    std::scoped_lock lock(mutex_);
+    const auto routed = route_user_locked(user_index);
+    if (!routed) return user_index >= kMaxUsers ? Result::BadArguments
+                                               : Result::DeviceNotConnected;
+    route = *routed;
+    const auto& record = records_.at(route.id);
+    if (!record.info.supports_touchpad) return Result::Unsupported;
+    driver = drivers_[route.driver_index].driver.get();
+  }
+  return driver->get_touchpad_state(route.native_id, out_touch);
+}
+
+Result InputSystem::set_light_color(std::uint32_t user_index,
+                                    const LightColor& color) {
+  std::scoped_lock driver_lock(driver_mutex_);
+  RoutedDevice route{};
+  InputDriver* driver = nullptr;
+  {
+    std::scoped_lock lock(mutex_);
+    const auto routed = route_user_locked(user_index);
+    if (!routed) return user_index >= kMaxUsers ? Result::BadArguments
+                                               : Result::DeviceNotConnected;
+    route = *routed;
+    const auto& record = records_.at(route.id);
+    if (!record.info.supports_light_color) return Result::Unsupported;
+    driver = drivers_[route.driver_index].driver.get();
+  }
+  return driver->set_light_color(route.native_id, color);
 }
 
 InputDiagnostics InputSystem::diagnostics() const {

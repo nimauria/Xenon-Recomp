@@ -117,6 +117,7 @@ void KeyboardMouseInputDriver::enumerate_devices(
   info.native_id = kDeviceId;
   info.persistent_key = options_.persistent_key;
   info.name = options_.name;
+  info.family = ControllerFamily::Virtual;
   info.type = DeviceType::Gamepad;
   info.subtype = DeviceSubtype::Gamepad;
   info.connection = ConnectionType::Virtual;

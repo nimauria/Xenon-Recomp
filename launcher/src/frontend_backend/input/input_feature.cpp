@@ -57,6 +57,22 @@ QString subtypeName(int value) {
   return QStringLiteral("Unknown");
 }
 
+QString familyName(int value) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  using xenon::input::ControllerFamily;
+  switch (static_cast<ControllerFamily>(value)) {
+    case ControllerFamily::Xbox: return QStringLiteral("Xbox");
+    case ControllerFamily::PlayStation: return QStringLiteral("PlayStation");
+    case ControllerFamily::Nintendo: return QStringLiteral("Nintendo");
+    case ControllerFamily::Steam: return QStringLiteral("Steam");
+    case ControllerFamily::Generic: return QStringLiteral("Generic");
+    case ControllerFamily::Virtual: return QStringLiteral("Virtual");
+    case ControllerFamily::Unknown: break;
+  }
+#endif
+  return QStringLiteral("Unknown");
+}
+
 }  // namespace
 
 class InputFeature::Impl {
@@ -73,6 +89,7 @@ class InputFeature::Impl {
 #if XENON_LAUNCHER_RUNTIME_INPUT
   std::unique_ptr<xenon::input::InputSystem> system{};
   std::unique_ptr<xenon::input::module_api::Provider> module_api{};
+  QTimer hotplug_timer{};
   std::array<xenon::input::GamepadState, xenon::input::kMaxUsers> frontend_previous_states{};
   std::array<bool, xenon::input::kMaxUsers> frontend_has_previous{};
 
@@ -114,13 +131,13 @@ class InputFeature::Impl {
   void persistAssignments() {
     if (!system) return;
     for (std::uint32_t user = 0; user < xenon::input::kMaxUsers; ++user) {
-      const auto sources = system->sources_for_user(user);
       QStringList identities;
-      for (const auto id : sources) {
-        const auto info = system->device(id);
-        if (info) identities.push_back(QString::fromStdString(info->identity_key));
+      for (const auto& identity : system->desired_sources_for_user(user)) {
+        identities.push_back(QString::fromStdString(identity));
       }
       settings.setValue(QStringLiteral("input/user%1/sources").arg(user), identities);
+      settings.setValue(QStringLiteral("input/user%1/automatic").arg(user),
+                        system->auto_assignment(user));
     }
   }
 
@@ -129,18 +146,30 @@ class InputFeature::Impl {
     for (std::uint32_t user = 0; user < xenon::input::kMaxUsers; ++user) {
       const auto key = QStringLiteral("input/user%1/sources").arg(user);
       const auto identities = settings.value(key).toStringList();
-      if (identities.isEmpty()) continue;
-      bool primary = true;
-      for (const auto& identity : identities) {
-        const auto id = idForIdentity(identity);
-        if (!id) continue;
-        if (primary) {
-          static_cast<void>(system->assign_user(user, *id));
-          primary = false;
-        } else {
-          static_cast<void>(system->add_user_source(user, *id));
-        }
+      const auto automatic_key =
+          QStringLiteral("input/user%1/automatic").arg(user);
+      const auto saved_automatic = settings.value(automatic_key);
+      const bool any_identity_is_live = std::any_of(
+          identities.begin(), identities.end(),
+          [&](const QString& identity) { return idForIdentity(identity).has_value(); });
+      // V1 did not persist an assignment mode. If its backend-specific
+      // identity cannot exist under V2's SDL-first Automatic backend, migrate
+      // the slot back to automatic instead of leaving it permanently dead.
+      const bool automatic =
+          saved_automatic.isValid()
+              ? saved_automatic.toBool()
+              : (identities.isEmpty() || !any_identity_is_live);
+      if (automatic) {
+        system->set_auto_assignment(user, true);
+        continue;
       }
+      std::vector<std::string> desired;
+      desired.reserve(static_cast<std::size_t>(identities.size()));
+      for (const auto& identity : identities) {
+        desired.push_back(identity.toStdString());
+      }
+      static_cast<void>(system->set_user_source_identities(user,
+                                                           std::move(desired)));
     }
   }
 
@@ -170,18 +199,12 @@ class InputFeature::Impl {
     };
 
 #if defined(Q_OS_WIN)
-    if (backend == QStringLiteral("Native XInput")) add_xinput();
-    else if (backend == QStringLiteral("SDL")) add_sdl();
-    else {
+    if (backend == QStringLiteral("Native XInput")) {
       add_xinput();
-      const auto result = system->setup();
-      if (result == xenon::input::Result::Success) {
-        module_api = std::make_unique<xenon::input::module_api::Provider>(*system);
-        return true;
-      }
-      system.reset();
-      module_api.reset();
-      system = std::make_unique<xenon::input::InputSystem>();
+    } else {
+      // SDL handles Xbox pads as well as DualSense, Steam, Nintendo and
+      // generic controllers. Prefer it for Automatic to avoid both excluding
+      // non-XInput hardware and double-enumerating one physical controller.
       add_sdl();
     }
 #else
@@ -189,7 +212,17 @@ class InputFeature::Impl {
     add_sdl();
 #endif
 
-    const auto result = system->setup();
+    auto result = system->setup();
+#if defined(Q_OS_WIN)
+    if (result != xenon::input::Result::Success &&
+        backend == QStringLiteral("Automatic")) {
+      system.reset();
+      module_api.reset();
+      system = std::make_unique<xenon::input::InputSystem>();
+      add_xinput();
+      result = system->setup();
+    }
+#endif
     if (result != xenon::input::Result::Success) {
       system.reset();
       module_api.reset();
@@ -227,6 +260,19 @@ class InputFeature::Impl {
     frontend_left_trigger_held.fill(false);
     frontend_right_trigger_held.fill(false);
   }
+
+  using TopologyEntry = std::pair<xenon::input::DeviceId, bool>;
+
+  std::vector<TopologyEntry> topology() const {
+    std::vector<TopologyEntry> result;
+    if (!system) return result;
+    const auto devices = system->devices();
+    result.reserve(devices.size());
+    for (const auto& device : devices) {
+      result.emplace_back(device.id, device.connected);
+    }
+    return result;
+  }
 #endif
 };
 
@@ -257,7 +303,21 @@ ServiceResult InputFeature::initialize() {
   }
 
   impl_->restoreAssignments();
-  impl_->last_status = QStringLiteral("Input v1 connected");
+  impl_->hotplug_timer.setInterval(1500);
+  impl_->hotplug_timer.setTimerType(Qt::CoarseTimer);
+  QObject::disconnect(&impl_->hotplug_timer, nullptr, this, nullptr);
+  connect(&impl_->hotplug_timer, &QTimer::timeout, this, [this]() {
+    if (!impl_->system) return;
+    const auto before = impl_->topology();
+    impl_->system->refresh_devices();
+    if (before != impl_->topology()) {
+      impl_->frontend_previous_states.fill({});
+      impl_->frontend_has_previous.fill(false);
+      emit changed();
+    }
+  });
+  impl_->hotplug_timer.start();
+  impl_->last_status = QStringLiteral("Input v2 connected");
   emit changed();
   return ServiceResult::success(QStringLiteral("Input ready"),
                                 QStringLiteral("Live Xenon Input devices and module API v1 are connected to the launcher."));
@@ -392,6 +452,7 @@ QVariantList InputFeature::frontendActions() {
 
 void InputFeature::shutdown() noexcept {
 #if XENON_LAUNCHER_RUNTIME_INPUT
+  impl_->hotplug_timer.stop();
   impl_->frontend_previous_states.fill({});
   impl_->frontend_has_previous.fill(false);
   if (impl_->system) {
@@ -427,6 +488,7 @@ QVariantList InputFeature::devices() const {
     item.insert(QStringLiteral("identityKey"), QString::fromStdString(device.identity_key));
     item.insert(QStringLiteral("driver"), QString::fromStdString(device.driver_name));
     item.insert(QStringLiteral("name"), QString::fromStdString(device.name));
+    item.insert(QStringLiteral("family"), familyName(static_cast<int>(device.family)));
     item.insert(QStringLiteral("subtype"), subtypeName(static_cast<int>(device.subtype)));
     item.insert(QStringLiteral("connection"), connectionName(static_cast<int>(device.connection)));
     item.insert(QStringLiteral("vendorId"), QStringLiteral("%1").arg(device.vendor_id, 4, 16, QLatin1Char('0')).toUpper());
@@ -435,6 +497,9 @@ QVariantList InputFeature::devices() const {
     item.insert(QStringLiteral("supportsVibration"), device.supports_vibration);
     item.insert(QStringLiteral("supportsPower"), device.supports_power_info);
     item.insert(QStringLiteral("supportsPlayerIndicator"), device.supports_player_indicator);
+    item.insert(QStringLiteral("supportsMotion"), device.supports_motion);
+    item.insert(QStringLiteral("supportsTouchpad"), device.supports_touchpad);
+    item.insert(QStringLiteral("supportsLightColor"), device.supports_light_color);
     if (device.power_valid) {
       item.insert(QStringLiteral("batteryPercent"), device.power.percentage == 0xFFu ? -1 : device.power.percentage);
     } else {
@@ -473,6 +538,8 @@ QVariantList InputFeature::users() const {
       }
       const auto profile_id = Impl::profileIdForUser(*impl_->system, user);
       row.insert(QStringLiteral("profileId"), profile_id);
+      row.insert(QStringLiteral("automatic"),
+                 impl_->system->auto_assignment(user));
     }
     row.insert(QStringLiteral("sources"), sources);
     result.append(row);
@@ -608,6 +675,27 @@ ServiceResult InputFeature::clearUser(int user_index) {
 #else
   static_cast<void>(user_index);
   return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::setUserAutomatic(int user_index) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 ||
+      user_index >= static_cast<int>(xenon::input::kMaxUsers)) {
+    return ServiceResult::failure(QStringLiteral("Input assignment"),
+                                  QStringLiteral("Invalid input user."));
+  }
+  impl_->system->set_auto_assignment(static_cast<std::uint32_t>(user_index),
+                                     true);
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(
+      QStringLiteral("Automatic controller assignment enabled"));
+#else
+  static_cast<void>(user_index);
+  return ServiceResult::failure(
+      QStringLiteral("Input unavailable"),
+      QStringLiteral("Input support is not available in this build or session."));
 #endif
 }
 

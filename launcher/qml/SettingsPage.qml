@@ -211,15 +211,29 @@ Item {
             if (devices[i].connected) result.push(String(devices[i].identityKey))
         return result
     }
+    function primaryInputDeviceLabels() {
+        var labels = root.inputDeviceLabels()
+        labels[0] = "Automatic"
+        labels.splice(1, 0, "Unassigned")
+        return labels
+    }
+    function primaryInputDeviceIdentities() {
+        var identities = root.inputDeviceIdentities()
+        identities.splice(1, 0, "")
+        return identities
+    }
     function inputUser(index) {
         var users = root.inputUsers()
         return index >= 0 && index < users.length ? users[index] : ({ userIndex: index, sources: [] })
     }
     function inputUserDeviceIndex(index) {
-        var identity = String(root.inputUser(index).identityKey || "")
-        var values = root.inputDeviceIdentities()
+        var user = root.inputUser(index)
+        if (Boolean(user.automatic)) return 0
+        var identity = String(user.identityKey || "")
+        if (identity.length === 0) return 1
+        var values = root.primaryInputDeviceIdentities()
         for (var i = 0; i < values.length; ++i) if (values[i] === identity) return i
-        return 0
+        return 1
     }
     function inputProfileLabels() {
         var entries = root.inputProfiles()
@@ -857,7 +871,7 @@ Item {
                     }
                     XSettingsCard {
                         title: "Host input backend"
-                        description: "Automatic prefers native XInput on Windows and falls back to SDL. SDL remains the portable path for PlayStation, Nintendo, generic controllers and Linux."
+                        description: "Automatic uses SDL for Xbox, PlayStation, Steam, Nintendo and generic controllers, with native XInput as a Windows fallback. Choose Native XInput only when you specifically need that backend."
                         XComboBox {
                             Layout.fillWidth: true
                             model: root.optionLabels("input/backend")
@@ -881,7 +895,7 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: 1
                                         Text { Layout.fillWidth: true; text: String(modelData.name); color: Theme.text; font.pixelSize: Theme.typeBody; elide: Text.ElideRight }
-                                        Text { Layout.fillWidth: true; text: String(modelData.subtype) + " • " + String(modelData.connection) + " • " + String(modelData.driver); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
+                                        Text { Layout.fillWidth: true; text: String(modelData.family) + " • " + String(modelData.subtype) + " • " + String(modelData.connection) + " • " + String(modelData.driver); color: Theme.textMuted; font.pixelSize: Theme.typeCaption; elide: Text.ElideRight }
                                     }
                                     Text { visible: Number(modelData.batteryPercent) >= 0; text: String(modelData.batteryPercent) + "%"; color: Theme.textMuted; font.pixelSize: Theme.typeCaption }
                                 }
@@ -910,11 +924,12 @@ Item {
                                         Layout.fillWidth: true
                                         XComboBox {
                                             Layout.fillWidth: true
-                                            model: root.inputDeviceLabels()
+                                            model: root.primaryInputDeviceLabels()
                                             currentIndex: root.inputUserDeviceIndex(index)
                                             onActivated: function(deviceIndex) {
-                                                var ids = root.inputDeviceIdentities()
-                                                if (deviceIndex <= 0) launcherBridge.clearInputDevice(index)
+                                                var ids = root.primaryInputDeviceIdentities()
+                                                if (deviceIndex === 0) launcherBridge.setInputDeviceAutomatic(index)
+                                                else if (deviceIndex === 1) launcherBridge.clearInputDevice(index)
                                                 else launcherBridge.assignInputDevice(index, ids[deviceIndex])
                                             }
                                         }

@@ -82,10 +82,14 @@ cpu::ExecutionResult save_gpr_lr_v2(cpu::ExecutionContext& context) {
         effective_address(r1, kGprLrBaseOffset + static_cast<std::int32_t>((reg - 14u) * 8u)),
         state.gpr[reg]);
   }
-  // r0 holds the value the calling function's own `mflr r0` placed there
-  // immediately before its `bl` into this entry point - a real ABI
-  // precondition of this shared helper, exactly like the real guest
-  // routine relies on.
+  // r12 holds the value the calling function's own `mfspr r12,LR` (mflr r12)
+  // placed there immediately before its `bl` into this entry point - a real
+  // ABI precondition of this shared helper. Confirmed against the real AC6
+  // binary's own save sequence at guest 0x82382A28 (`stw r12,-8(r1)`, not
+  // r0) - every compiled caller of this helper family sets gpr[12], never
+  // gpr[0], before the call, so reading gpr[0] here would save whatever
+  // unrelated/stale value happens to be there instead of the real return
+  // address, corrupting every later restore through this same slot.
   //
   // The LR slot is a plain 32-bit word, not a 64-bit field: confirmed
   // against the real AC6 binary's own paired save/restore sequence
@@ -96,7 +100,7 @@ cpu::ExecutionResult save_gpr_lr_v2(cpu::ExecutionContext& context) {
   // restore trailer via raw guest bytes (rather than through this same
   // native helper) would read back 0 instead of the real return address.
   context.memory.write32_be(effective_address(r1, kGprLrLrOffset),
-                            static_cast<std::uint32_t>(state.gpr[0]));
+                            static_cast<std::uint32_t>(state.gpr[12]));
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
 }
 

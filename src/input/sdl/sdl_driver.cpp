@@ -68,6 +68,7 @@ SdlInputDriver::SdlInputDriver(std::unique_ptr<SdlHost> host,
 SdlInputDriver::~SdlInputDriver() { shutdown(); }
 
 Result SdlInputDriver::setup() {
+  std::scoped_lock lock(mutex_);
   if (setup_) return Result::Success;
   if (!host_) return Result::Unsupported;
   const auto result = host_->setup();
@@ -82,10 +83,11 @@ Result SdlInputDriver::setup() {
       if (mappings >= 0) loaded_mapping_count_ = mappings;
     }
   }
-  return refresh_cache();
+  return refresh_cache_locked();
 }
 
 void SdlInputDriver::shutdown() noexcept {
+  std::scoped_lock lock(mutex_);
   if (!setup_) return;
   if (host_) host_->shutdown();
   devices_.clear();
@@ -94,7 +96,7 @@ void SdlInputDriver::shutdown() noexcept {
   loaded_mapping_count_ = 0;
 }
 
-Result SdlInputDriver::refresh_cache() {
+Result SdlInputDriver::refresh_cache_locked() {
   if (!setup_ || !host_) return Result::Failed;
   std::vector<SdlHostDevice> refreshed;
   const auto result = host_->enumerate(refreshed);
@@ -123,14 +125,16 @@ Result SdlInputDriver::refresh_cache() {
 
 void SdlInputDriver::enumerate_devices(
     std::vector<DriverDeviceInfo>& out_devices) {
+  std::scoped_lock lock(mutex_);
   out_devices.clear();
-  if (!setup_ || refresh_cache() != Result::Success) return;
+  if (!setup_ || refresh_cache_locked() != Result::Success) return;
   out_devices.reserve(devices_.size());
   for (const auto& device : devices_) {
     DriverDeviceInfo info{};
     info.native_id = device.native_id;
     info.persistent_key = device.persistent_key;
     info.name = device.name;
+    info.family = device.family;
     info.type = DeviceType::Gamepad;
     info.subtype = device.subtype;
     info.connection = device.connection;
@@ -143,12 +147,16 @@ void SdlInputDriver::enumerate_devices(
     info.supports_keystrokes = true;
     info.supports_power_info = device.supports_power_info;
     info.supports_player_indicator = device.supports_player_indicator;
+    info.supports_motion = device.supports_motion;
+    info.supports_touchpad = device.supports_touchpad;
+    info.supports_light_color = device.supports_light_color;
     out_devices.push_back(std::move(info));
   }
 }
 
 Result SdlInputDriver::get_state(NativeDeviceId device,
                                  GamepadState& out_state) {
+  std::scoped_lock lock(mutex_);
   out_state = {};
   if (!setup_ || !host_) return Result::Failed;
   return host_->get_state(device, out_state);
@@ -156,6 +164,7 @@ Result SdlInputDriver::get_state(NativeDeviceId device,
 
 Result SdlInputDriver::get_capabilities(NativeDeviceId device,
                                         Capabilities& out_caps) {
+  std::scoped_lock lock(mutex_);
   out_caps = {};
   if (!setup_ || !host_) return Result::Failed;
   auto find_device = [&]() {
@@ -166,7 +175,7 @@ Result SdlInputDriver::get_capabilities(NativeDeviceId device,
   };
   auto it = find_device();
   if (it == devices_.end()) {
-    if (refresh_cache() != Result::Success) return Result::Failed;
+    if (refresh_cache_locked() != Result::Success) return Result::Failed;
     it = find_device();
     if (it == devices_.end()) return Result::DeviceNotConnected;
   }
@@ -190,6 +199,7 @@ Result SdlInputDriver::get_capabilities(NativeDeviceId device,
 
 Result SdlInputDriver::set_vibration(NativeDeviceId device,
                                      const Vibration& vibration) {
+  std::scoped_lock lock(mutex_);
   if (!setup_ || !host_) return Result::Failed;
   const auto it = std::find_if(devices_.begin(), devices_.end(),
                                [&](const auto& item) {
@@ -204,6 +214,7 @@ Result SdlInputDriver::set_vibration(NativeDeviceId device,
 
 Result SdlInputDriver::get_power_info(NativeDeviceId device,
                                           PowerInfo& out_power) {
+  std::scoped_lock lock(mutex_);
   out_power = {};
   if (!setup_ || !host_) return Result::Failed;
   const auto it = std::find_if(devices_.begin(), devices_.end(),
@@ -217,6 +228,7 @@ Result SdlInputDriver::get_power_info(NativeDeviceId device,
 
 Result SdlInputDriver::set_player_indicator(NativeDeviceId device,
                                             std::uint8_t player_index) {
+  std::scoped_lock lock(mutex_);
   if (!setup_ || !host_) return Result::Failed;
   const auto it = std::find_if(devices_.begin(), devices_.end(),
                                [&](const auto& item) {
@@ -225,6 +237,47 @@ Result SdlInputDriver::set_player_indicator(NativeDeviceId device,
   if (it == devices_.end()) return Result::DeviceNotConnected;
   if (!it->supports_player_indicator) return Result::Unsupported;
   return host_->set_player_index(device, player_index);
+}
+
+Result SdlInputDriver::get_motion_state(NativeDeviceId device,
+                                        MotionState& out_motion) {
+  std::scoped_lock lock(mutex_);
+  out_motion = {};
+  if (!setup_ || !host_) return Result::Failed;
+  const auto it = std::find_if(devices_.begin(), devices_.end(),
+                               [&](const auto& item) {
+                                 return item.native_id == device;
+                               });
+  if (it == devices_.end()) return Result::DeviceNotConnected;
+  if (!it->supports_motion) return Result::Unsupported;
+  return host_->get_motion_state(device, out_motion);
+}
+
+Result SdlInputDriver::get_touchpad_state(NativeDeviceId device,
+                                          TouchpadState& out_touch) {
+  std::scoped_lock lock(mutex_);
+  out_touch = {};
+  if (!setup_ || !host_) return Result::Failed;
+  const auto it = std::find_if(devices_.begin(), devices_.end(),
+                               [&](const auto& item) {
+                                 return item.native_id == device;
+                               });
+  if (it == devices_.end()) return Result::DeviceNotConnected;
+  if (!it->supports_touchpad) return Result::Unsupported;
+  return host_->get_touchpad_state(device, out_touch);
+}
+
+Result SdlInputDriver::set_light_color(NativeDeviceId device,
+                                       const LightColor& color) {
+  std::scoped_lock lock(mutex_);
+  if (!setup_ || !host_) return Result::Failed;
+  const auto it = std::find_if(devices_.begin(), devices_.end(),
+                               [&](const auto& item) {
+                                 return item.native_id == device;
+                               });
+  if (it == devices_.end()) return Result::DeviceNotConnected;
+  if (!it->supports_light_color) return Result::Unsupported;
+  return host_->set_light_color(device, color);
 }
 
 std::uint64_t SdlInputDriver::analog_to_keyfield(
@@ -272,9 +325,11 @@ std::uint64_t SdlInputDriver::analog_to_keyfield(
 
 Result SdlInputDriver::get_keystroke(NativeDeviceId device,
                                      Keystroke& out_keystroke) {
+  std::scoped_lock lock(mutex_);
   out_keystroke = {};
   GamepadState state{};
-  const auto state_result = get_state(device, state);
+  if (!setup_ || !host_) return Result::Failed;
+  const auto state_result = host_->get_state(device, state);
   if (state_result != Result::Success) return state_result;
 
   auto tracker = std::find_if(keystrokes_.begin(), keystrokes_.end(),

@@ -77,6 +77,7 @@ void FlightInputDriver::enumerate_devices(
     info.native_id = id;
     info.persistent_key = device.key;
     info.name = device.name;
+    info.family = ControllerFamily::Generic;
     info.type = DeviceType::Gamepad;
     info.subtype = DeviceSubtype::FlightStick;
     info.connection = ConnectionType::Unknown;
