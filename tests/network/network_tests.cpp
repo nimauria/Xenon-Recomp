@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,9 +80,10 @@ class HoldingTransport final : public net::NetworkTransport {
 class ScriptedRealtimeChannel final : public net::NetworkRealtimeChannel {
  public:
   void connect(std::string, std::string, net::CancellationToken cancellation,
-               StateCallback state_callback, EventCallback) override {
+               StateCallback state_callback, EventCallback event_callback) override {
     ++connect_count;
     if (cancellation.cancelled()) return;
+    event_callback_ = std::move(event_callback);
     assert(next_state < states.size());
     const auto state = states[next_state++];
     state_callback(state, state == net::NetworkRealtimeState::Error
@@ -90,11 +92,15 @@ class ScriptedRealtimeChannel final : public net::NetworkRealtimeChannel {
                               : net::NetworkError{});
   }
   void disconnect() override { disconnected = true; }
+  void emit(net::NetworkRealtimeEvent event) {
+    if (event_callback_) event_callback_(std::move(event));
+  }
 
   std::vector<net::NetworkRealtimeState> states{};
   std::size_t next_state{0};
   int connect_count{0};
   bool disconnected{false};
+  EventCallback event_callback_{};
 };
 
 net::NetworkConfig development_config() {
@@ -105,6 +111,13 @@ net::NetworkConfig development_config() {
   config.retry.initial_backoff = std::chrono::milliseconds(0);
   config.retry.maximum_backoff = std::chrono::milliseconds(0);
   config.retry.jitter_ratio = 0.0;
+  return config;
+}
+
+net::NetworkConfig development_config_with_service_origins() {
+  auto config = development_config();
+  config.endpoints.realtime_url = "ws://127.0.0.1:38101/v1/events";
+  config.endpoints.relay_url = "http://127.0.0.1:38102";
   return config;
 }
 
@@ -156,6 +169,35 @@ void test_security_policy_and_endpoint_generation() {
          net::NetworkErrorCode::EndpointNotConfigured);
   config.endpoints.base_url = "https://network.example.test";
   assert(!net::XenonNetworkClient::validate_config(config));
+  config.endpoints.base_url = "https://";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config = development_config();
+  config.endpoints.base_url = "http://[::1]:38100";
+  assert(!net::XenonNetworkClient::validate_config(config));
+  config.endpoints.base_url = "http://[::::]:38100";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config.endpoints.base_url = "https://network.example.test:0";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config.endpoints.base_url = "https://user%40name:password@network.example.test";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config.endpoints.base_url = "https://network.example.test/%2e%2e/private";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config.endpoints.base_url = "https://network.example.test\\@evil.example";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config = development_config();
+  config.retry.jitter_ratio = std::numeric_limits<double>::quiet_NaN();
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
+  config = development_config();
+  config.endpoints.realtime_url = "ws://example.test/v1/events";
+  assert(net::XenonNetworkClient::validate_config(config).code ==
+         net::NetworkErrorCode::InvalidConfiguration);
 
   assert(net::route_path(net::NetworkRoute::SessionJoin, "session / one") ==
          "/v1/sessions/session%20%2F%20one/join");
@@ -181,6 +223,13 @@ void test_bootstrap_parser_fixtures() {
       response(200, fixture("bootstrap-missing-required.json")), parsed, error));
   assert(error.code == net::NetworkErrorCode::MalformedResponse);
 
+  auto wrong_content_type = response(200, fixture("bootstrap-valid.json"));
+  wrong_content_type.headers.emplace("Content-Type", "text/html");
+  parsed = {};
+  error = {};
+  assert(!net::XenonNetworkClient::parse_bootstrap(wrong_content_type, parsed, error));
+  assert(error.code == net::NetworkErrorCode::MalformedResponse);
+
   parsed = {};
   error = {};
   assert(!net::XenonNetworkClient::parse_bootstrap(
@@ -193,12 +242,51 @@ void test_bootstrap_parser_fixtures() {
   error = {};
   assert(!net::XenonNetworkClient::parse_bootstrap(required_unknown, parsed, error));
   assert(error.code == net::NetworkErrorCode::UnsupportedCapability);
+
+  auto fractional = response(
+      200, R"({"protocolVersion":1.5,"minimumClientProtocol":1,"capabilities":[]})");
+  parsed = {};
+  error = {};
+  assert(!net::XenonNetworkClient::parse_bootstrap(fractional, parsed, error));
+  assert(error.code == net::NetworkErrorCode::MalformedResponse);
+
+  auto invalid_utf8 = response(
+      200, std::string("{\"protocolVersion\":1,\"minimumClientProtocol\":1,\"serviceVersion\":\"") +
+               static_cast<char>(0xFF) + "\"}");
+  parsed = {};
+  error = {};
+  assert(!net::XenonNetworkClient::parse_bootstrap(invalid_utf8, parsed, error));
+  assert(error.code == net::NetworkErrorCode::MalformedResponse);
+
+  for (const auto& malformed : {
+           R"({"protocolVersion":1,"protocolVersion":1,"minimumClientProtocol":1})",
+           R"({"protocolVersion":01,"minimumClientProtocol":1})",
+           R"({"protocolVersion":1,"minimumClientProtocol":1,"maintenance":"false"})",
+           R"({"protocolVersion":1,"minimumClientProtocol":1,"serviceVersion":"\q"})",
+           R"({"protocolVersion":1,"minimumClientProtocol":1,"serviceVersion":"\uD800"})",
+           R"({"protocolVersion":1,"minimumClientProtocol":1,"endpoints":{"realtime":7}})",
+       }) {
+    parsed = {};
+    error = {};
+    assert(!net::XenonNetworkClient::parse_bootstrap(response(200, malformed), parsed, error));
+    assert(error.code == net::NetworkErrorCode::MalformedResponse);
+  }
+
+  std::string deeply_nested = R"({"protocolVersion":1,"minimumClientProtocol":1,"unknown":)";
+  deeply_nested.append(65u, '[');
+  deeply_nested += '0';
+  deeply_nested.append(65u, ']');
+  deeply_nested += '}';
+  parsed = {};
+  error = {};
+  assert(!net::XenonNetworkClient::parse_bootstrap(response(200, deeply_nested), parsed, error));
+  assert(error.code == net::NetworkErrorCode::MalformedResponse);
 }
 
 void test_bootstrap_success_and_protocol_rejection() {
   auto transport = std::make_shared<ScriptedTransport>();
   transport->results.push_back({response(200, fixture("bootstrap-valid.json")), {}});
-  auto network = client(transport);
+  auto network = client(transport, development_config_with_service_origins());
   std::vector<net::NetworkConnectionState> states;
   network->set_state_callback(
       [&](const net::NetworkStatus& status) { states.push_back(status.connection); });
@@ -217,6 +305,21 @@ void test_bootstrap_success_and_protocol_rejection() {
          transport->requests.front().headers.at("X-Request-ID"));
   assert(states.front() == net::NetworkConnectionState::Resolving);
 
+  auto untrusted_transport = std::make_shared<ScriptedTransport>();
+  untrusted_transport->results.push_back(
+      {response(200,
+                R"({"protocolVersion":1,"minimumClientProtocol":1,"endpoints":{"realtime":"wss://attacker.example/v1/events"}})"),
+       {}});
+  auto production = development_config();
+  production.environment = net::NetworkEnvironment::Production;
+  production.endpoints.base_url = "https://network.example.test";
+  auto untrusted_client = client(untrusted_transport, production);
+  net::NetworkErrorCode untrusted_error = net::NetworkErrorCode::None;
+  untrusted_client->start(
+      [&](net::NetworkResult result) { untrusted_error = result.error.code; });
+  assert(untrusted_error == net::NetworkErrorCode::TlsFailure);
+  assert(untrusted_client->status().connection == net::NetworkConnectionState::Unavailable);
+
   auto future_transport = std::make_shared<ScriptedTransport>();
   future_transport->results.push_back({response(200, fixture("bootstrap-future.json")), {}});
   auto future_client = client(future_transport);
@@ -232,7 +335,7 @@ void test_retry_success_and_exhaustion() {
   transport->results.push_back(
       {{}, {net::NetworkErrorCode::ConnectionFailure, "refused"}});
   transport->results.push_back({response(200, fixture("bootstrap-valid.json")), {}});
-  auto network = client(transport);
+  auto network = client(transport, development_config_with_service_origins());
   bool succeeded = false;
   network->start([&](net::NetworkResult result) { succeeded = result.ok(); });
   assert(succeeded);
@@ -264,7 +367,16 @@ void test_authentication_idempotency_and_handshake() {
                    });
   assert(auth_failed && transport->requests.empty());
 
-  network->set_auth_session({"top-secret-access", "top-secret-refresh", "later"});
+  auth_failed = false;
+  network->perform({net::NetworkRoute::ProfileMe}, [&](net::NetworkResult result) {
+    auth_failed = result.error.code == net::NetworkErrorCode::AuthenticationRequired;
+  });
+  assert(auth_failed && transport->requests.empty());
+
+  assert(!network->set_auth_session({"bad\r\ntoken", {}, {}}));
+  assert(network->status().authentication == net::NetworkAuthState::Error);
+
+  assert(network->set_auth_session({"top-secret-access", "top-secret-refresh", "later"}));
   transport->results.push_back({response(200, "{}"), {}});
   network->perform({net::NetworkRoute::ClientHandshake, {}, {}, "handshake-key", true},
                    [](net::NetworkResult result) { assert(result.ok()); });
@@ -277,6 +389,42 @@ void test_authentication_idempotency_and_handshake() {
   assert(net::sanitize_for_log(request.headers.at("Authorization")) == "[redacted]");
   assert(net::sanitize_for_log("access_token=top-secret-access").find("top-secret") ==
          std::string::npos);
+  assert(net::sanitize_for_log("safe\r\nforged-line") == "safe??forged-line");
+
+  transport->results.push_back({response(401, "{}"), {}});
+  network->perform({net::NetworkRoute::ProfileMe}, [](net::NetworkResult result) {
+    assert(result.error.code == net::NetworkErrorCode::AuthenticationRequired);
+  });
+  assert(network->status().authentication == net::NetworkAuthState::Expired);
+  bool expired_token_rejected = false;
+  network->perform({net::NetworkRoute::ProfileMe}, [&](net::NetworkResult result) {
+    expired_token_rejected =
+        result.error.code == net::NetworkErrorCode::AuthenticationRequired;
+  });
+  assert(expired_token_rejected);
+
+  bool invalid_operation_rejected = false;
+  network->perform({static_cast<net::NetworkRoute>(255)}, [&](net::NetworkResult result) {
+    invalid_operation_rejected =
+        result.error.code == net::NetworkErrorCode::InvalidConfiguration;
+  });
+  assert(invalid_operation_rejected);
+
+  auto config = development_config();
+  config.maximum_request_bytes = 8;
+  auto limited = client(std::make_shared<ScriptedTransport>(), config);
+  limited->perform({net::NetworkRoute::AuthSessionCreate, {}, "0123456789"},
+                   [&](net::NetworkResult result) {
+                     assert(result.error.code == net::NetworkErrorCode::RequestTooLarge);
+                   });
+
+  network->perform({net::NetworkRoute::Health, {}, "body"}, [](net::NetworkResult result) {
+    assert(result.error.code == net::NetworkErrorCode::InvalidConfiguration);
+  });
+  network->perform({net::NetworkRoute::ClientHandshake, {}, {}, "bad key"},
+                   [](net::NetworkResult result) {
+                     assert(result.error.code == net::NetworkErrorCode::InvalidConfiguration);
+                   });
 }
 
 void test_timeout_size_limit_cancellation_and_shutdown() {
@@ -308,6 +456,18 @@ void test_timeout_size_limit_cancellation_and_shutdown() {
   assert(holding_transport->shutdown_called);
   holding_transport->completion_({response(200, "{}"), {}});
   assert(cancelled);
+
+  auto queue_transport = std::make_shared<HoldingTransport>();
+  config = development_config();
+  config.maximum_pending_requests = 1;
+  auto queue_client = client(queue_transport, config);
+  queue_client->check_health([](net::NetworkResult) {});
+  bool queue_rejected = false;
+  queue_client->check_health([&](net::NetworkResult result) {
+    queue_rejected = result.error.code == net::NetworkErrorCode::ServiceUnavailable;
+  });
+  assert(queue_rejected);
+  queue_client->shutdown();
 }
 
 void test_capability_report_shape() {
@@ -343,9 +503,46 @@ void test_realtime_reconnect_and_clean_stop() {
   assert(channel->connect_count == 2);
   assert(realtime->state() == net::NetworkRealtimeState::Connected);
   assert(realtime->reconnect_count() == 1);
+  int delivered = 0;
+  channel->emit({"event-1", "session.joined", "{}"});
+  // The callback supplied above intentionally does nothing; delivery itself
+  // is covered by the bounded controller below.
   realtime->stop();
   assert(channel->disconnected);
   assert(realtime->state() == net::NetworkRealtimeState::Disconnected);
+  channel->emit({"late-event", "session.joined", "{}"});
+
+  auto bounded_channel = std::make_shared<ScriptedRealtimeChannel>();
+  bounded_channel->states = {net::NetworkRealtimeState::Connected};
+  auto bounded = std::make_shared<net::NetworkRealtimeController>(
+      scheduler, bounded_channel, net::RetryPolicy{}, 8u);
+  bounded->start("wss://network.example.test/v1/events", "short-lived-secret",
+                 [](net::NetworkRealtimeState, net::NetworkError) {},
+                 [&](net::NetworkRealtimeEvent) { ++delivered; });
+  bounded_channel->emit({"event-1", "presence.changed", "{}"});
+  assert(delivered == 1);
+  bounded_channel->emit({"event-2", "presence.changed", "012345678"});
+  assert(delivered == 1);
+  assert(bounded->state() == net::NetworkRealtimeState::Unavailable);
+  assert(bounded_channel->disconnected);
+
+  auto restart_channel = std::make_shared<ScriptedRealtimeChannel>();
+  restart_channel->states = {net::NetworkRealtimeState::Connected,
+                             net::NetworkRealtimeState::Connected};
+  auto restarted = std::make_shared<net::NetworkRealtimeController>(
+      scheduler, restart_channel, net::RetryPolicy{});
+  int restart_delivered = 0;
+  restarted->start("wss://network.example.test/v1/events", "first-secret",
+                   [](net::NetworkRealtimeState, net::NetworkError) {},
+                   [&](net::NetworkRealtimeEvent) { ++restart_delivered; });
+  const auto stale_event_callback = restart_channel->event_callback_;
+  restarted->start("wss://network.example.test/v1/events", "second-secret",
+                   [](net::NetworkRealtimeState, net::NetworkError) {},
+                   [&](net::NetworkRealtimeEvent) { ++restart_delivered; });
+  stale_event_callback({"stale-event", "presence.changed", "{}"});
+  assert(restart_delivered == 0);
+  restart_channel->emit({"current-event", "presence.changed", "{}"});
+  assert(restart_delivered == 1);
 }
 
 void test_xbox_services_boundary_returns_truthful_offline_error() {

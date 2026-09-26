@@ -43,7 +43,7 @@ class XenonNetworkClient final : public std::enable_shared_from_this<XenonNetwor
   [[nodiscard]] std::optional<NetworkBootstrap> bootstrap() const;
   [[nodiscard]] NetworkConfig config() const;
 
-  void set_auth_session(AuthSession session);
+  [[nodiscard]] bool set_auth_session(AuthSession session);
   void clear_auth_session(NetworkAuthState state = NetworkAuthState::Unauthenticated);
 
   [[nodiscard]] static NetworkError validate_config(const NetworkConfig& config);
@@ -71,6 +71,7 @@ class XenonNetworkClient final : public std::enable_shared_from_this<XenonNetwor
   std::optional<NetworkBootstrap> bootstrap_{};
   StateCallback state_callback_{};
   CancellationSource cancellation_{};
+  std::size_t pending_operations_{0};
   bool shutdown_{false};
 };
 

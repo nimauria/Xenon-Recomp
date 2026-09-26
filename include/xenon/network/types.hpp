@@ -19,8 +19,11 @@ namespace xenon::network {
 inline constexpr std::uint32_t kClientProtocolVersion = 1;
 inline constexpr std::uint32_t kMinimumClientProtocolVersion = 1;
 inline constexpr std::size_t kDefaultMaximumResponseBytes = 1024u * 1024u;
+inline constexpr std::size_t kDefaultMaximumRequestBytes = 1024u * 1024u;
+inline constexpr std::size_t kDefaultMaximumRealtimeEventBytes = 256u * 1024u;
 inline constexpr std::size_t kMaximumIdentifierBytes = 256u;
 inline constexpr std::size_t kMaximumCapabilities = 128u;
+inline constexpr std::size_t kMaximumCredentialBytes = 8192u;
 
 enum class NetworkEnvironment : std::uint8_t { Offline, Development, Production };
 enum class NetworkConnectionState : std::uint8_t {
@@ -74,6 +77,7 @@ enum class NetworkErrorCode : std::uint8_t {
   ProtocolMismatch,
   UnsupportedCapability,
   MalformedResponse,
+  RequestTooLarge,
   ResponseTooLarge,
   ServerError,
   NotImplemented,
@@ -106,6 +110,7 @@ struct NetworkConfig {
   std::chrono::milliseconds connect_timeout{5000};
   std::chrono::milliseconds request_timeout{10000};
   std::chrono::milliseconds realtime_heartbeat_timeout{30000};
+  std::size_t maximum_request_bytes{kDefaultMaximumRequestBytes};
   std::size_t maximum_response_bytes{kDefaultMaximumResponseBytes};
   std::size_t maximum_queued_events{256};
   std::size_t maximum_pending_requests{64};
@@ -277,6 +282,7 @@ class CredentialStore {
 // implementations can replace this without changing the client or protocol.
 class MemoryCredentialStore final : public CredentialStore {
  public:
+  ~MemoryCredentialStore() override;
   [[nodiscard]] std::optional<AuthSession> load() override;
   bool store(const AuthSession& session) override;
   void clear() override;
@@ -291,6 +297,10 @@ class MemoryCredentialStore final : public CredentialStore {
 [[nodiscard]] std::string_view to_string(NetworkAuthState state) noexcept;
 [[nodiscard]] std::string_view to_string(NetworkRealtimeState state) noexcept;
 [[nodiscard]] std::string_view to_string(NetworkErrorCode code) noexcept;
+[[nodiscard]] bool valid_utf8(std::string_view value) noexcept;
+[[nodiscard]] bool valid_http_header_value(std::string_view value,
+                                           std::size_t maximum_bytes) noexcept;
+void secure_erase(std::string& value) noexcept;
 [[nodiscard]] std::string sanitize_for_log(std::string_view value);
 [[nodiscard]] core::JsonValue network_status_json(const NetworkStatus& status,
                                                   const NetworkMetrics& metrics);

@@ -256,6 +256,7 @@ ServiceResult FrontendBackend::resetAllSettings() {
   if (!recovery_.safeMode()) {
     const auto input = input_.reconfigure();
     if (!input.ok) return input;
+    network_.reconfigure();
   }
   return ServiceResult::success(QStringLiteral("Settings reset"),
                                 QStringLiteral("All launcher settings and paths were restored to their defaults."));

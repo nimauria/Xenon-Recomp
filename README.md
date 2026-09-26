@@ -66,7 +66,7 @@ Title-specific symbols, patches, hooks, workarounds, artwork, manifests, compati
 
 ## Current state
 
-This README reflects the source tree in the repository snapshot dated **22 September 2026**.
+This README reflects the source tree in the repository snapshot dated **26 September 2026**.
 
 | Area | Status | Current state |
 | --- | --- | --- |
@@ -84,7 +84,7 @@ This README reflects the source tree in the repository snapshot dated **22 Septe
 | Content services | Implemented foundation | Content graph, title-update, DLC, save-manager, validation and mounting infrastructure are present and being connected through the runtime/launcher path. |
 | Launcher | Advanced frontend/backend | Qt 6 Quick/QML multi-game launcher with library, modules, profiles, settings, diagnostics, update infrastructure, module catalogue/install/update services, input configuration, and runtime-session supervision. |
 | Audio V1 | Implemented common path | Xbox render-driver/XMA context semantics, XMAFRAMES decode, bounded voice mixing/resampling, Memory V2 DMA/coherency, SDL2 host output, xboxkrnl audio exports, and regression tests are integrated. Windows x64 includes the vetted FFmpeg/XMA dependency; real-title playback qualification remains ongoing. |
-| Networking | Planned | Build option exists, but the production subsystem is not yet implemented. |
+| Xenon Network | Client foundation implemented / offline by default | Versioned bootstrap, health and service-route contracts, asynchronous HTTPS transport, explicit connection/auth/realtime states, bounded retries and resources, launcher diagnostics, and an Xbox-services boundary are present. No hosted service, production endpoint, gameplay relay, persistent login, or completed XAM/XNet mapping is claimed. |
 | ARM64 | Planned | The architecture is kept host-neutral where practical, but current development and validation focus remains x86-64. |
 
 There is currently no claim of general Xbox 360 compatibility or a completed playable-title release. The present goal is to close the shared runtime boundary, then use real games to expose correctness gaps without introducing title-specific hacks into Xenon itself.
@@ -341,6 +341,65 @@ The XAM layer currently provides foundations for:
 The design favours useful offline/native behaviour and explicit unsupported states rather than silently pretending unimplemented dashboard or network functionality succeeded.
 
 See [`docs/kernel/KERNEL_V1.md`](docs/kernel/KERNEL_V1.md), [`docs/xam/XAM_V1.md`](docs/xam/XAM_V1.md), and [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md).
+
+---
+
+## Xenon Network client / uplink V1
+
+Xenon Network is a future independent service for replacement online
+functionality. It is **not Xbox Live**, does not contact Microsoft/Xbox Live
+infrastructure, and is not bundled into individual game modules.
+
+```text
+Xbox 360 title
+    |
+future XAM/XNet compatibility mapping
+    |
+XboxServicesNetworkAdapter
+    |
+XenonNetworkClient
+    +--> versioned HTTPS control plane
+    +--> independent future realtime channel
+    +--> future direct/relay gameplay data plane
+```
+
+The V1 client currently provides:
+
+- offline, development/custom, and production configuration, with offline as
+  the default and no invented production URL;
+- explicit transport, protocol, authentication, readiness and realtime states;
+- `/v1/bootstrap`, `/v1/health`, handshake, authentication, profile, presence,
+  friends, matchmaking, session, connectivity and event route contracts;
+- protocol/capability negotiation, correlation IDs, idempotency-aware retries,
+  bounded timeouts, cancellation and clean shutdown;
+- generic title, session and Direct/Relay/Unavailable connectivity models;
+- truthful launcher status and an Xbox-services adapter that returns typed
+  offline/unavailable results instead of fabricated success.
+
+The transport is fail-closed: non-local communication requires HTTPS with
+normal certificate and hostname verification and TLS 1.2 or later; redirects
+are not followed; cookies and response caching are disabled; request, response,
+header, queue, identifier and realtime-event sizes are bounded; endpoint and
+header inputs are canonicalized or rejected; and untrusted JSON is strict,
+UTF-8-checked and depth-limited. Bearer credentials are memory-only, never
+written to ordinary settings, and redacted from diagnostics. Plain HTTP is
+accepted only for explicitly configured loopback development endpoints. A
+bootstrap response cannot move realtime or relay traffic outside the base
+service origin unless that alternate origin was explicitly configured first.
+
+These controls reduce attack surface but are not a claim that any software is
+“completely secure”. Production deployment still requires independent security
+review, a real identity design, secure platform credential storage, a concrete
+secure realtime transport, server-side abuse controls, and operational testing.
+
+Xenia and ReXGlue were cross-checked for the separate guest `NetDll_*`/XSocket
+compatibility surface. Their guest socket layer is useful behavioural research,
+but it is not the Xenon Network service protocol and is intentionally kept
+outside this client. UnleashedRecomp and other title recompilations similarly
+reinforce that title-local stubs or updater HTTP clients must not become a
+second shared online-services stack.
+
+See [`docs/network/XENON_NETWORK_V1.md`](docs/network/XENON_NETWORK_V1.md).
 
 ---
 
@@ -636,6 +695,7 @@ Useful starting points:
 - [`docs/xam/XAM_V1.md`](docs/xam/XAM_V1.md) — XAM services
 - [`docs/modules/CONTENT_SERVICES.md`](docs/modules/CONTENT_SERVICES.md) — title update, DLC and save/content architecture
 - [`docs/input/INPUT_V1.md`](docs/input/INPUT_V1.md) — input architecture
+- [`docs/network/XENON_NETWORK_V1.md`](docs/network/XENON_NETWORK_V1.md) — Xenon Network client/uplink architecture and security boundary
 - [`launcher/README.md`](launcher/README.md) — launcher frontend/backend state
 - [`docs/development/RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md) — research references and provenance
 
@@ -658,6 +718,8 @@ The repository contains dedicated coverage for areas including:
 - Vulkan/D3D12 backend capability and ownership integration;
 - cross-backend canonical EDRAM behaviour;
 - runtime-session integration.
+- Xenon Network offline behavior, endpoint policy, strict protocol parsing,
+  retries/cancellation, realtime limits, and loopback HTTP transport.
 
 Native backend tests are conditional on the corresponding host SDK/runtime being available.
 
@@ -716,7 +778,9 @@ Near-term priorities are focused on making the first real title exercise the com
 7. Bring Project Gracemeria through first execution, first frame, sustained rendering, input, saves/content, and then playable validation.
 8. Generalize every genuine Xbox 360 behaviour discovered during that process instead of placing AC6-specific logic in Xenon.
 9. Add additional game modules to prove the runtime is reusable.
-10. Qualify Audio V1 against retail titles, then expand networking, ARM64, Linux packaging, and later platform support as the shared execution path stabilizes.
+10. Qualify Audio V1 against retail titles, connect the Xenon Network client to a compliant development service, and implement audited XAM/XNet mappings without merging the control plane with guest gameplay sockets.
+11. Add secure platform credential storage and a concrete secure realtime channel before any production Xenon Network authentication is enabled.
+12. Continue ARM64, Linux packaging, and later platform support as the shared execution path stabilizes.
 
 ---
 

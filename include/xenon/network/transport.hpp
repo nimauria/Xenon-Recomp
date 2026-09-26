@@ -17,6 +17,8 @@ class NetworkTransport {
   [[nodiscard]] virtual bool available() const noexcept = 0;
   virtual void send(NetworkRequest request, CancellationToken cancellation,
                     Completion completion) = 0;
+  // A scheduled task is dispatched exactly once even if cancellation wins;
+  // the owner uses the token to settle its callback without issuing I/O.
   virtual void schedule(std::chrono::milliseconds delay, CancellationToken cancellation,
                         Task task) = 0;
   virtual void shutdown() = 0;

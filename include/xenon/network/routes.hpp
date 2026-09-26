@@ -31,6 +31,7 @@ enum class NetworkRoute : std::uint8_t {
   ConnectivityAllocationCreate,
   ConnectivityAllocationDelete,
   RealtimeEvents,
+  Count,
 };
 
 struct RouteDefinition {
@@ -38,6 +39,7 @@ struct RouteDefinition {
   std::string_view name;
   NetworkHttpMethod method;
   std::string_view path_template;
+  bool authentication_required;
   bool identifier_required;
   bool supports_idempotency;
 };
@@ -46,5 +48,6 @@ struct RouteDefinition {
 [[nodiscard]] std::string route_path(NetworkRoute route, std::string_view identifier = {});
 [[nodiscard]] std::string join_endpoint(std::string_view base_url, std::string_view path);
 [[nodiscard]] bool valid_route_identifier(std::string_view identifier) noexcept;
+[[nodiscard]] bool valid_network_route(NetworkRoute route) noexcept;
 
 }  // namespace xenon::network

@@ -8,46 +8,50 @@ namespace xenon::network {
 namespace {
 
 constexpr std::array<RouteDefinition, 23> kRoutes{{
-    {NetworkRoute::Bootstrap, "bootstrap", NetworkHttpMethod::Get, "/v1/bootstrap", false, false},
-    {NetworkRoute::Health, "health", NetworkHttpMethod::Get, "/v1/health", false, false},
-    {NetworkRoute::ClientHandshake, "client.handshake", NetworkHttpMethod::Post,
-     "/v1/client/handshake", false, true},
-    {NetworkRoute::AuthSessionCreate, "auth.session.create", NetworkHttpMethod::Post,
-     "/v1/auth/session", false, true},
-    {NetworkRoute::AuthSessionDelete, "auth.session.delete", NetworkHttpMethod::Delete,
-     "/v1/auth/session", false, true},
-    {NetworkRoute::AuthRefresh, "auth.refresh", NetworkHttpMethod::Post, "/v1/auth/refresh", false,
-     true},
-    {NetworkRoute::ProfileMe, "profile.me", NetworkHttpMethod::Get, "/v1/profile/me", false, false},
-    {NetworkRoute::PresenceMeGet, "presence.me.get", NetworkHttpMethod::Get, "/v1/presence/me", false,
+    {NetworkRoute::Bootstrap, "bootstrap", NetworkHttpMethod::Get, "/v1/bootstrap", false, false,
      false},
-    {NetworkRoute::PresenceMePut, "presence.me.put", NetworkHttpMethod::Put, "/v1/presence/me", false,
-     true},
-    {NetworkRoute::FriendsList, "friends.list", NetworkHttpMethod::Get, "/v1/friends", false, false},
+    {NetworkRoute::Health, "health", NetworkHttpMethod::Get, "/v1/health", false, false, false},
+    {NetworkRoute::ClientHandshake, "client.handshake", NetworkHttpMethod::Post,
+     "/v1/client/handshake", false, false, true},
+    {NetworkRoute::AuthSessionCreate, "auth.session.create", NetworkHttpMethod::Post,
+     "/v1/auth/session", false, false, true},
+    {NetworkRoute::AuthSessionDelete, "auth.session.delete", NetworkHttpMethod::Delete,
+     "/v1/auth/session", true, false, true},
+    {NetworkRoute::AuthRefresh, "auth.refresh", NetworkHttpMethod::Post, "/v1/auth/refresh", false,
+     false, true},
+    {NetworkRoute::ProfileMe, "profile.me", NetworkHttpMethod::Get, "/v1/profile/me", true, false,
+     false},
+    {NetworkRoute::PresenceMeGet, "presence.me.get", NetworkHttpMethod::Get, "/v1/presence/me", true,
+     false, false},
+    {NetworkRoute::PresenceMePut, "presence.me.put", NetworkHttpMethod::Put, "/v1/presence/me", true,
+     false, true},
+    {NetworkRoute::FriendsList, "friends.list", NetworkHttpMethod::Get, "/v1/friends", true, false,
+     false},
     {NetworkRoute::MatchmakingTicketCreate, "matchmaking.ticket.create", NetworkHttpMethod::Post,
-     "/v1/matchmaking/tickets", false, true},
+     "/v1/matchmaking/tickets", true, false, true},
     {NetworkRoute::MatchmakingTicketGet, "matchmaking.ticket.get", NetworkHttpMethod::Get,
-     "/v1/matchmaking/tickets/{id}", true, false},
+     "/v1/matchmaking/tickets/{id}", true, true, false},
     {NetworkRoute::MatchmakingTicketDelete, "matchmaking.ticket.delete", NetworkHttpMethod::Delete,
-     "/v1/matchmaking/tickets/{id}", true, true},
-    {NetworkRoute::SessionCreate, "session.create", NetworkHttpMethod::Post, "/v1/sessions", false,
-     true},
-    {NetworkRoute::SessionGet, "session.get", NetworkHttpMethod::Get, "/v1/sessions/{id}", true,
+     "/v1/matchmaking/tickets/{id}", true, true, true},
+    {NetworkRoute::SessionCreate, "session.create", NetworkHttpMethod::Post, "/v1/sessions", true,
+     false, true},
+    {NetworkRoute::SessionGet, "session.get", NetworkHttpMethod::Get, "/v1/sessions/{id}", true, true,
      false},
     {NetworkRoute::SessionPatch, "session.patch", NetworkHttpMethod::Patch, "/v1/sessions/{id}", true,
-     true},
-    {NetworkRoute::SessionDelete, "session.delete", NetworkHttpMethod::Delete, "/v1/sessions/{id}",
      true, true},
+    {NetworkRoute::SessionDelete, "session.delete", NetworkHttpMethod::Delete, "/v1/sessions/{id}",
+     true, true, true},
     {NetworkRoute::SessionJoin, "session.join", NetworkHttpMethod::Post, "/v1/sessions/{id}/join", true,
-     true},
+     true, true},
     {NetworkRoute::SessionLeave, "session.leave", NetworkHttpMethod::Post,
-     "/v1/sessions/{id}/leave", true, true},
+     "/v1/sessions/{id}/leave", true, true, true},
     {NetworkRoute::ConnectivityAllocationCreate, "connectivity.allocation.create",
-     NetworkHttpMethod::Post, "/v1/connectivity/allocations", false, true},
+     NetworkHttpMethod::Post, "/v1/connectivity/allocations", true, false, true},
     {NetworkRoute::ConnectivityAllocationDelete, "connectivity.allocation.delete",
-     NetworkHttpMethod::Delete, "/v1/connectivity/allocations/{id}", true, true},
-    {NetworkRoute::RealtimeEvents, "events", NetworkHttpMethod::Get, "/v1/events", false, false},
-    {NetworkRoute::Bootstrap, "invalid", NetworkHttpMethod::Get, "", false, false},
+     NetworkHttpMethod::Delete, "/v1/connectivity/allocations/{id}", true, true, true},
+    {NetworkRoute::RealtimeEvents, "events", NetworkHttpMethod::Get, "/v1/events", true, false,
+     false},
+    {NetworkRoute::Bootstrap, "invalid", NetworkHttpMethod::Get, "", false, false, false},
 }};
 
 std::string encode_identifier(std::string_view value) {
@@ -69,8 +73,12 @@ std::string encode_identifier(std::string_view value) {
 
 const RouteDefinition& route_definition(NetworkRoute route) {
   const auto index = static_cast<std::size_t>(route);
-  if (index >= kRoutes.size() - 1u) throw std::out_of_range("Unknown Xenon Network route");
+  if (!valid_network_route(route)) throw std::out_of_range("Unknown Xenon Network route");
   return kRoutes[index];
+}
+
+bool valid_network_route(NetworkRoute route) noexcept {
+  return static_cast<std::size_t>(route) < static_cast<std::size_t>(NetworkRoute::Count);
 }
 
 bool valid_route_identifier(std::string_view identifier) noexcept {

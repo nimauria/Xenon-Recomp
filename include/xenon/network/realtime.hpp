@@ -20,7 +20,9 @@ class NetworkRealtimeController final
 
   NetworkRealtimeController(std::shared_ptr<NetworkTransport> scheduler,
                             std::shared_ptr<NetworkRealtimeChannel> channel,
-                            RetryPolicy retry_policy = {});
+                            RetryPolicy retry_policy = {},
+                            std::size_t maximum_event_bytes =
+                                kDefaultMaximumRealtimeEventBytes);
   ~NetworkRealtimeController();
 
   void start(std::string endpoint, std::string access_token,
@@ -30,12 +32,15 @@ class NetworkRealtimeController final
   [[nodiscard]] std::uint64_t reconnect_count() const;
 
  private:
-  void connect_once(bool reconnecting);
-  void handle_state(NetworkRealtimeState state, NetworkError error);
+  void connect_once(bool reconnecting, std::uint64_t generation);
+  void handle_state(std::uint64_t generation, NetworkRealtimeState state,
+                    NetworkError error);
+  void handle_event(std::uint64_t generation, NetworkRealtimeEvent event);
 
   std::shared_ptr<NetworkTransport> scheduler_;
   std::shared_ptr<NetworkRealtimeChannel> channel_;
   RetryPolicy retry_policy_;
+  std::size_t maximum_event_bytes_;
   mutable std::mutex mutex_;
   CancellationSource cancellation_{};
   std::string endpoint_{};
@@ -45,6 +50,7 @@ class NetworkRealtimeController final
   NetworkRealtimeState state_{NetworkRealtimeState::Disconnected};
   std::uint32_t retry_count_{0};
   std::uint64_t reconnect_count_{0};
+  std::uint64_t generation_{0};
   bool stopped_{true};
 };
 

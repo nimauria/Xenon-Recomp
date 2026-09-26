@@ -5,8 +5,11 @@
 // intentionally stays outside Qt so xenon_core and the runtime host never
 // depend on the launcher's toolkit; see docs/architecture/PROJECT_STRUCTURE.md.
 // It supports the JSON subset this project needs: objects, arrays, strings,
-// numbers, booleans and null. It is not a general-purpose validator.
+// numbers, booleans and null. Parsing is deliberately strict because this is
+// also used at process and network trust boundaries.
 
+#include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -133,7 +136,7 @@ class JsonValue {
     }
     Parser parser{text};
     parser.skip_ws();
-    if (!parser.parse_value(out)) {
+    if (!parser.parse_value(out, 0)) {
       if (error) *error = parser.error.empty() ? "Invalid JSON" : parser.error;
       return false;
     }
@@ -222,6 +225,8 @@ class JsonValue {
   }
 
   struct Parser {
+    static constexpr std::size_t kMaximumDepth = 64;
+
     std::string_view text;
     std::size_t pos{0};
     std::string error{};
@@ -248,12 +253,12 @@ class JsonValue {
       return false;
     }
 
-    bool parse_value(JsonValue& out) {
+    bool parse_value(JsonValue& out, std::size_t depth) {
       skip_ws();
       if (at_end()) { error = "Unexpected end of input"; return false; }
       const char c = text[pos];
-      if (c == '{') return parse_object(out);
-      if (c == '[') return parse_array(out);
+      if (c == '{') return parse_object(out, depth);
+      if (c == '[') return parse_array(out, depth);
       if (c == '"') { std::string s; if (!parse_string(s)) return false; out = JsonValue(std::move(s)); return true; }
       if (literal("true")) { out = JsonValue(true); return true; }
       if (literal("false")) { out = JsonValue(false); return true; }
@@ -266,19 +271,41 @@ class JsonValue {
     bool parse_number(JsonValue& out) {
       const std::size_t start = pos;
       if (pos < text.size() && text[pos] == '-') ++pos;
-      while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
+      if (pos >= text.size()) { error = "Invalid number"; return false; }
+      if (text[pos] == '0') {
+        ++pos;
+        if (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+          error = "Leading zero in number";
+          return false;
+        }
+      } else if (text[pos] >= '1' && text[pos] <= '9') {
+        while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
+      } else {
+        error = "Invalid number";
+        return false;
+      }
       if (pos < text.size() && text[pos] == '.') {
         ++pos;
+        const auto fraction_start = pos;
         while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
+        if (pos == fraction_start) { error = "Invalid number fraction"; return false; }
       }
       if (pos < text.size() && (text[pos] == 'e' || text[pos] == 'E')) {
         ++pos;
         if (pos < text.size() && (text[pos] == '+' || text[pos] == '-')) ++pos;
+        const auto exponent_start = pos;
         while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') ++pos;
+        if (pos == exponent_start) { error = "Invalid number exponent"; return false; }
       }
-      if (pos == start) { error = "Invalid number"; return false; }
       try {
-        out = JsonValue(std::stod(std::string(text.substr(start, pos - start))));
+        const auto token = std::string(text.substr(start, pos - start));
+        std::size_t consumed = 0;
+        const double value = std::stod(token, &consumed);
+        if (consumed != token.size() || !std::isfinite(value)) {
+          error = "Invalid number";
+          return false;
+        }
+        out = JsonValue(value);
       } catch (...) {
         error = "Invalid number";
         return false;
@@ -291,7 +318,12 @@ class JsonValue {
       out.clear();
       while (pos < text.size() && text[pos] != '"') {
         char c = text[pos++];
-        if (c == '\\' && pos < text.size()) {
+        if (static_cast<unsigned char>(c) < 0x20u) {
+          error = "Unescaped control character in string";
+          return false;
+        }
+        if (c == '\\') {
+          if (pos >= text.size()) { error = "Unterminated escape sequence"; return false; }
           const char escape = text[pos++];
           switch (escape) {
             case '"': out += '"'; break;
@@ -303,31 +335,29 @@ class JsonValue {
             case 'b': out += '\b'; break;
             case 'f': out += '\f'; break;
             case 'u': {
-              if (pos + 4 > text.size()) { error = "Invalid unicode escape"; return false; }
-              unsigned int code = 0;
-              for (int i = 0; i < 4; ++i) {
-                code <<= 4;
-                const char hex = text[pos++];
-                if (hex >= '0' && hex <= '9') code |= static_cast<unsigned int>(hex - '0');
-                else if (hex >= 'a' && hex <= 'f') code |= static_cast<unsigned int>(hex - 'a' + 10);
-                else if (hex >= 'A' && hex <= 'F') code |= static_cast<unsigned int>(hex - 'A' + 10);
-                else { error = "Invalid unicode escape"; return false; }
+              std::uint32_t code = 0;
+              if (!parse_hex_quad(code)) return false;
+              if (code >= 0xD800u && code <= 0xDBFFu) {
+                if (pos + 2u > text.size() || text[pos] != '\\' || text[pos + 1u] != 'u') {
+                  error = "Unpaired high surrogate";
+                  return false;
+                }
+                pos += 2u;
+                std::uint32_t low = 0;
+                if (!parse_hex_quad(low)) return false;
+                if (low < 0xDC00u || low > 0xDFFFu) {
+                  error = "Invalid low surrogate";
+                  return false;
+                }
+                code = 0x10000u + ((code - 0xD800u) << 10u) + (low - 0xDC00u);
+              } else if (code >= 0xDC00u && code <= 0xDFFFu) {
+                error = "Unpaired low surrogate";
+                return false;
               }
-              // Basic BMP-only conversion to UTF-8 (sufficient for paths/text
-              // used in this project's launch/status contracts).
-              if (code < 0x80) {
-                out += static_cast<char>(code);
-              } else if (code < 0x800) {
-                out += static_cast<char>(0xC0 | (code >> 6));
-                out += static_cast<char>(0x80 | (code & 0x3F));
-              } else {
-                out += static_cast<char>(0xE0 | (code >> 12));
-                out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-                out += static_cast<char>(0x80 | (code & 0x3F));
-              }
+              append_utf8(out, code);
               break;
             }
-            default: out += escape;
+            default: error = "Invalid escape sequence"; return false;
           }
         } else {
           out += c;
@@ -337,14 +367,15 @@ class JsonValue {
       return true;
     }
 
-    bool parse_array(JsonValue& out) {
+    bool parse_array(JsonValue& out, std::size_t depth) {
+      if (depth >= kMaximumDepth) { error = "JSON nesting limit exceeded"; return false; }
       if (!consume('[')) return false;
       JsonValue::Array array;
       skip_ws();
       if (consume(']')) { out = JsonValue(std::move(array)); return true; }
       while (true) {
         JsonValue element;
-        if (!parse_value(element)) return false;
+        if (!parse_value(element, depth + 1u)) return false;
         array.push_back(std::move(element));
         skip_ws();
         if (consume(',')) { skip_ws(); continue; }
@@ -356,7 +387,8 @@ class JsonValue {
       return true;
     }
 
-    bool parse_object(JsonValue& out) {
+    bool parse_object(JsonValue& out, std::size_t depth) {
+      if (depth >= kMaximumDepth) { error = "JSON nesting limit exceeded"; return false; }
       if (!consume('{')) return false;
       JsonValue::Object object;
       skip_ws();
@@ -368,8 +400,11 @@ class JsonValue {
         skip_ws();
         if (!consume(':')) { error = "Expected ':' in object"; return false; }
         JsonValue value;
-        if (!parse_value(value)) return false;
-        object[std::move(key)] = std::move(value);
+        if (!parse_value(value, depth + 1u)) return false;
+        if (!object.emplace(std::move(key), std::move(value)).second) {
+          error = "Duplicate object key";
+          return false;
+        }
         skip_ws();
         if (consume(',')) continue;
         if (consume('}')) break;
@@ -378,6 +413,38 @@ class JsonValue {
       }
       out = JsonValue(std::move(object));
       return true;
+    }
+
+    bool parse_hex_quad(std::uint32_t& code) {
+      if (pos + 4u > text.size()) { error = "Invalid unicode escape"; return false; }
+      code = 0;
+      for (int i = 0; i < 4; ++i) {
+        code <<= 4u;
+        const char hex = text[pos++];
+        if (hex >= '0' && hex <= '9') code |= static_cast<std::uint32_t>(hex - '0');
+        else if (hex >= 'a' && hex <= 'f') code |= static_cast<std::uint32_t>(hex - 'a' + 10);
+        else if (hex >= 'A' && hex <= 'F') code |= static_cast<std::uint32_t>(hex - 'A' + 10);
+        else { error = "Invalid unicode escape"; return false; }
+      }
+      return true;
+    }
+
+    static void append_utf8(std::string& out, std::uint32_t code) {
+      if (code < 0x80u) {
+        out += static_cast<char>(code);
+      } else if (code < 0x800u) {
+        out += static_cast<char>(0xC0u | (code >> 6u));
+        out += static_cast<char>(0x80u | (code & 0x3Fu));
+      } else if (code < 0x10000u) {
+        out += static_cast<char>(0xE0u | (code >> 12u));
+        out += static_cast<char>(0x80u | ((code >> 6u) & 0x3Fu));
+        out += static_cast<char>(0x80u | (code & 0x3Fu));
+      } else {
+        out += static_cast<char>(0xF0u | (code >> 18u));
+        out += static_cast<char>(0x80u | ((code >> 12u) & 0x3Fu));
+        out += static_cast<char>(0x80u | ((code >> 6u) & 0x3Fu));
+        out += static_cast<char>(0x80u | (code & 0x3Fu));
+      }
     }
   };
 };
