@@ -316,6 +316,7 @@ class XenonSession final : public cpu::RuntimeServices {
   kernel::KernelProcess* current_process() noexcept override { return kernel_process_.get(); }
   bool external_call(std::string_view module, std::uint32_t ordinal,
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
+  bool is_recognized_import_thunk(cpu::GuestAddress target) override;
 
  private:
   friend struct SessionExecutionTestAccess;

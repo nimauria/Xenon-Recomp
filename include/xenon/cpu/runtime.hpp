@@ -88,6 +88,25 @@ class RuntimeServices {
     static_cast<void>(module); static_cast<void>(ordinal);
     static_cast<void>(state); static_cast<void>(memory); return false;
   }
+
+  // True iff `target` is a callable XEX-native import thunk address this
+  // runtime already resolves via call() (matching an import's guest_thunk).
+  // A recognized import thunk's bytes are loader-owned placeholder metadata
+  // (ordinal/attributes/record-type), never real guest PPC - a caller that
+  // might otherwise try to decode/interpret bytes at an arbitrary executable
+  // address (e.g. the Gen 7 dynamic-fallback interpreter) must check this
+  // FIRST and route straight to call() instead, the same way the Recomp
+  // Driver's static analysis already excludes import-thunk addresses from
+  // decode (see driver.cpp's find_callable_import_thunk()). Deliberately
+  // kept out of the hot compiled-call path (call() itself does not consult
+  // this - it already checks imports directly, in the right order for that
+  // path's own performance characteristics); this exists only for callers
+  // that would otherwise attempt to interpret raw guest bytes. Default false
+  // for minimal/test runtimes with no XEX import table at all.
+  virtual bool is_recognized_import_thunk(GuestAddress target) {
+    static_cast<void>(target);
+    return false;
+  }
 };
 
 // CPU V2 native-entry ABI. A caller creates one context for a guest execution

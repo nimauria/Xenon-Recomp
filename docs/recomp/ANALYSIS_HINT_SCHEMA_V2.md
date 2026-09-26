@@ -209,7 +209,11 @@ resolved Xenon symbol and implementation status (`Required`/`Stubbed`/
 `recomp-driver`'s analysis report (`format_report`/`format_report_json`) now
 includes the full `AnalysisDiagnostics` block described above, giving a
 commercial-title-scale view of what static analysis actually resolved versus
-what still needs attention.
+what still needs attention. `import_thunks_recognized` counts
+`DiscoveredFunction` entries whose start address is a callable XEX-native
+import record (`XexImport::guest_thunk`); these are deliberately excluded
+from codegen (see RECOMP_ANALYSIS_V3.md) and must never be confused with
+`analysis_errors`.
 
 ## Tests
 

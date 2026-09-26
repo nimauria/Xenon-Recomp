@@ -33,6 +33,9 @@
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
+#include "xenon/xbox/xboxkrnl_memory_exports.hpp"
+#include "xenon/xbox/xboxkrnl_process_exports.hpp"
+#include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
 
 #if defined(_WIN32)
@@ -798,6 +801,12 @@ bool XenonSession::init_exports() {
     return false;
   }
 
+  // Register xboxkrnl guest memory-management exports: KeFlushUserModeTb.
+  if (!xbox::register_xboxkrnl_memory_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl memory exports");
+    return false;
+  }
+
   // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1/3
   // of the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
   // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
@@ -837,6 +846,15 @@ bool XenonSession::init_exports() {
         {0x09Du, "KeSetEvent", &xbox::ke_set_event_export},
         {0x0AFu, "KeWaitForMultipleObjects", &xbox::ke_wait_for_multiple_objects_export},
         {0x0B0u, "KeWaitForSingleObject", &xbox::ke_wait_for_single_object_export},
+        {0x0CCu, "NtAllocateVirtualMemory", &xbox::nt_allocate_virtual_memory_export},
+        {0x066u, "KeGetCurrentProcessType", &xbox::ke_get_current_process_type_export},
+        {0x09Au, "KeSetCurrentProcessType", &xbox::ke_set_current_process_type_export},
+        {0x125u, "RtlEnterCriticalSection", &xbox::rtl_enter_critical_section_export},
+        {0x12Eu, "RtlInitializeCriticalSection", &xbox::rtl_initialize_critical_section_export},
+        {0x12Fu, "RtlInitializeCriticalSectionAndSpinCount",
+         &xbox::rtl_initialize_critical_section_and_spin_count_export},
+        {0x130u, "RtlLeaveCriticalSection", &xbox::rtl_leave_critical_section_export},
+        {0x141u, "RtlTryEnterCriticalSection", &xbox::rtl_try_enter_critical_section_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -2739,6 +2757,14 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
           static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
 }
 
+bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
+  if (!loaded_xex_) return false;
+  for (const auto& import : loaded_xex_->image.imports) {
+    if (import.callable() && import.guest_thunk == target) return true;
+  }
+  return false;
+}
+
 cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,
                                           cpu::CpuState& state,
                                           cpu::MemoryPort& memory) {
@@ -2882,9 +2908,28 @@ bool XenonSession::external_call(std::string_view module,
 
   // Try the export registry first
   ExportCallContext context{state, memory, state.cia, calling_thread_id};
+  const std::uint32_t r3_before = static_cast<std::uint32_t>(state.gpr[3]);
+  const std::uint32_t r4_before = static_cast<std::uint32_t>(state.gpr[4]);
+  const std::uint32_t r5_before = static_cast<std::uint32_t>(state.gpr[5]);
+  const std::uint32_t r6_before = static_cast<std::uint32_t>(state.gpr[6]);
   auto result = export_registry_.invoke(module, ordinal, context);
 
   if (result.handled) {
+    // TEMPORARY (AC6 boot-path investigation): full resolved-call trace,
+    // every successful export call, not just unresolved ones - see the
+    // "unresolved import" trace a few lines below, which only ever fires
+    // for a MISSING export and therefore cannot show what a game's own
+    // startup logic actually did with an ALREADY-implemented export's
+    // return value.
+    if (config_.enable_export_diagnostics) {
+      const auto* desc = export_registry_.resolve(module, ordinal);
+      std::cout << "[XenonSession] call " << module << "!"
+                << (desc ? desc->name : std::to_string(ordinal)) << "(ordinal=" << ordinal
+                << ") at 0x" << std::hex << state.cia << " args(r3-r6)=0x" << r3_before << ",0x"
+                << r4_before << ",0x" << r5_before << ",0x" << r6_before
+                << " -> success=" << std::dec << result.success << " r3=0x" << std::hex
+                << static_cast<std::uint32_t>(state.gpr[3]) << std::dec << std::endl;
+    }
     observe_boot_checkpoint_from_export_call(module, ordinal, state);
     return true;
   }

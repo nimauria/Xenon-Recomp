@@ -505,6 +505,9 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/kernel/xboxkrnl/xbox_io_guest.cpp
     src/xbox/imports/import_registry.cpp
     src/xbox/exports/xboxkrnl_io_exports.cpp
+    src/xbox/exports/xboxkrnl_memory_exports.cpp
+    src/xbox/exports/xboxkrnl_process_exports.cpp
+    src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
@@ -906,6 +909,41 @@ if(XENON_BUILD_TESTS)
     add_test(NAME xenon_xboxkrnl_time_export_tests COMMAND xenon_xboxkrnl_time_export_tests)
   endif()
 
+  # xboxkrnl guest memory-management exports (KeFlushUserModeTb,
+  # NtAllocateVirtualMemory) - the first real kernel exports Ace Combat 6's
+  # actual boot path calls that had no ExportRegistry registration at all.
+  # See xenon_xboxkrnl_time_export_tests above for why this links xenon_core
+  # rather than xenon_xbox_kernel_io alone.
+  if(TARGET xenon_core)
+    add_executable(xenon_xboxkrnl_memory_export_tests tests/xbox/memory_export_tests.cpp)
+    target_link_libraries(xenon_xboxkrnl_memory_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xboxkrnl_memory_export_tests)
+    add_test(NAME xenon_xboxkrnl_memory_export_tests COMMAND xenon_xboxkrnl_memory_export_tests)
+  endif()
+
+  # xboxkrnl process-type exports (KeGetCurrentProcessType,
+  # KeSetCurrentProcessType) - the next real export Ace Combat 6's boot path
+  # calls once the memory-management exports above were fixed.
+  if(TARGET xenon_core)
+    add_executable(xenon_xboxkrnl_process_export_tests tests/xbox/process_export_tests.cpp)
+    target_link_libraries(xenon_xboxkrnl_process_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xboxkrnl_process_export_tests)
+    add_test(NAME xenon_xboxkrnl_process_export_tests COMMAND xenon_xboxkrnl_process_export_tests)
+  endif()
+
+  # xboxkrnl Rtl*CriticalSection exports - the next real export Ace Combat
+  # 6's boot path calls once the process-type exports above were fixed.
+  # Includes a real multi-host-thread mutual-exclusion test, not just
+  # single-threaded field bookkeeping.
+  if(TARGET xenon_core)
+    add_executable(xenon_rtl_critical_section_export_tests
+      tests/xbox/rtl_critical_section_export_tests.cpp)
+    target_link_libraries(xenon_rtl_critical_section_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_rtl_critical_section_export_tests)
+    add_test(NAME xenon_rtl_critical_section_export_tests
+             COMMAND xenon_rtl_critical_section_export_tests)
+  endif()
+
   # Phase 1/3 (AC6 Runtime Readiness pass): xboxkrnl handle-based (Nt*) sync
   # exports - NtCreateEvent/Semaphore/Mutant, release, and the Ex wait
   # variants - driven through the real core::ExportRegistry against a real
@@ -1070,6 +1108,29 @@ if(XENON_BUILD_TESTS)
     XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
   xenon_enable_test_asserts(xenon_registry_numeric_format_tests)
   add_test(NAME xenon_registry_numeric_format_tests COMMAND xenon_registry_numeric_format_tests)
+
+  # Import-thunk static-analysis misclassification fix: an XEX-native
+  # import record's callable guest_thunk address must never be decoded as
+  # PPC or shadow the runtime's existing import dispatch in the generated
+  # lookup_compiled() table - see analyze_function_candidate()'s
+  # find_callable_import_thunk() short-circuit and the real Ace Combat 6
+  # 0x823D014C repro in the test file's own header comment.
+  add_executable(xenon_import_thunk_analysis_tests tests/recomp/import_thunk_analysis_tests.cpp)
+  target_link_libraries(xenon_import_thunk_analysis_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_import_thunk_analysis_tests)
+  add_test(NAME xenon_import_thunk_analysis_tests COMMAND xenon_import_thunk_analysis_tests)
+
+  # Tail-call-only shared-block discovery fix: a terminal, non-linked branch
+  # to a genuine, valid PPC block with no `bl` caller anywhere and no
+  # recognized function prologue must still be discovered/compiled, not left
+  # as an entry-integrity-breaking hole - see
+  # analyze_function_candidate()'s decodes_to_valid_terminated_block() and
+  # the real Ace Combat 6 0x8224c9a0 -> 0x8224c458 repro in the test file's
+  # own header comment.
+  add_executable(xenon_tail_call_gap_discovery_tests tests/recomp/tail_call_gap_discovery_tests.cpp)
+  target_link_libraries(xenon_tail_call_gap_discovery_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_tail_call_gap_discovery_tests)
+  add_test(NAME xenon_tail_call_gap_discovery_tests COMMAND xenon_tail_call_gap_discovery_tests)
 
   # ModuleHintProvider production integration (Part 2/7): a synthetic
   # two-revision module package, correct/incorrect revision selection, and

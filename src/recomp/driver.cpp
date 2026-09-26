@@ -649,6 +649,22 @@ GuestAddress canonicalize_candidate(GuestAddress start, const analysis::Analysis
   return start;
 }
 
+// Xbox 360 import binding (Part 1/1.11 extension): an XEX-native import
+// record's callable guest_thunk address is loader-owned placeholder data
+// (ordinal/attributes/record-type - see xex_loader.cpp's
+// parse_native_import_libraries()), not guest PPC bytes. Only
+// XexImportKind::FunctionThunk/PeFunction records are actual callable
+// dispatch targets (XexImport::callable()); a type-0/FunctionAddress slot is
+// metadata bound to a variable, never a branch target. Shared by
+// analyze_function_candidate()'s decode short-circuit below and
+// load_and_analyze()'s adaptive-observation/knowledge-seed filtering.
+const xbox::XexImport* find_callable_import_thunk(const xbox::XexImage& image, GuestAddress address) {
+  for (const auto& import : image.imports) {
+    if (import.callable() && import.guest_thunk == address) return &import;
+  }
+  return nullptr;
+}
+
 // Worker-local output of analyzing exactly one candidate address (Part 2's
 // FunctionAnalysisResult). Contains no reference to shared state - a wave's
 // results are merged into AnalysisReport by the single calling thread only,
@@ -738,6 +754,37 @@ FunctionAnalysisResult analyze_function_candidate(GuestAddress start, const Anal
           "guest bytes normally instead");
       // Falls through to normal discovery/compilation below.
     }
+  }
+
+  // Import-thunk short-circuit: a candidate landing exactly on an XEX-native
+  // import record's callable guest_thunk address is loader-owned placeholder
+  // data (see find_callable_import_thunk()'s comment above), never guest PPC
+  // bytes - decoding it is a static-analysis false positive
+  // ("unsupported"/"invalid PPC encoding" for what is really an unresolved
+  // import metadata word), and in the worst case a coincidentally-valid
+  // decode could register a bogus compiled function that shadows the
+  // correct runtime import dispatch. Xenon's runtime (XenonSession::call(),
+  // src/core/session.cpp) already matches call targets against
+  // XexImage::imports[].guest_thunk before falling back to compiled code, so
+  // this candidate deliberately stays uncompiled (`compiled = false`): no
+  // lookup_compiled() case gets emitted for it, and the existing
+  // lookup_compiled-miss -> try_dynamic_fallback-miss -> runtime.call()
+  // chain reaches that correct dispatch unshadowed.
+  if (const auto* import = find_callable_import_thunk(ctx.image, start)) {
+    DiscoveredFunction function{};
+    function.guest_start = start;
+    function.guest_end = start;
+    function.name = sanitize_cpp_name(
+        !import->symbol.empty() ? import->symbol : (import->module + "_" + std::to_string(import->ordinal)), start);
+    add_source(function, DiscoverySource::ModuleHint);
+    function.import_thunk = DiscoveredFunction::ImportThunkBinding{import->module, import->symbol, import->ordinal};
+    function.compiled = false;
+    function.confidence = 100;
+    function.authority = FunctionAuthority::ModuleHint;
+    function.ranges = {start, start};
+    result.function = std::move(function);
+    result.outcome = FunctionAnalysisResult::Outcome::Accepted;
+    return result;
   }
 
   const auto* section = executable_section(ctx.range_index, start);
@@ -1248,6 +1295,19 @@ FunctionAnalysisResult analyze_function_candidate(GuestAddress start, const Anal
   const auto has_independent_discovery_evidence = [&](GuestAddress target) {
     if (independently_proven_function_start(target)) return true;
     if (direct_call_targets.contains(target)) return true;
+    // A callable XEX-native import thunk is independently, structurally
+    // confirmed by the XEX's own import metadata (ctx.image.imports) - never
+    // a guess. Without this, a thunk reached ONLY by a non-linked branch/
+    // tail-call (no `bl` anywhere providing DirectCall evidence) would never
+    // get promoted to its own candidate by promote_terminal_target() below,
+    // and worse, queue_local_target()/the inferred-local-range materializer
+    // above could try to inline its placeholder bytes as local code inside
+    // the BRANCHING function's own body - the same "decode loader metadata
+    // as PPC" bug analyze_function_candidate()'s import-thunk short-circuit
+    // already prevents for direct candidates, reached here through a
+    // different path. Real AC6 repro: xboxkrnl.exe ordinal 197's thunk at
+    // 0x823d00cc is reached only by a lone non-linked branch at 0x821f4120.
+    if (find_callable_import_thunk(ctx.image, target)) return true;
     const auto evidence = ctx.discovered_evidence.find(target);
     if (evidence == ctx.discovered_evidence.end()) return false;
     return std::any_of(evidence->second.begin(), evidence->second.end(), [](DiscoverySource source) {
@@ -1480,9 +1540,45 @@ FunctionAnalysisResult analyze_function_candidate(GuestAddress start, const Anal
   const bool self_confirmed =
       std::any_of(function.sources.begin(), function.sources.end(),
                   [](DiscoverySource source) { return source != DiscoverySource::DirectBranch; });
+  // A genuine compiler-emitted tail call commonly targets a shared/outlined
+  // block that reuses the CALLER's stack frame and so never has a classic
+  // prologue of its own (has_prologue_evidence() rejects it) - and nothing
+  // else may ever `bl` it directly either (has_independent_discovery_
+  // evidence() rejects it too). The terminal branch instruction itself is
+  // still real, structural evidence from actually-compiled code (branches
+  // are not placed at arbitrary addresses by accident); this confirms that
+  // evidence by requiring the target to decode into a fully valid,
+  // terminator-reaching instruction stream - the same structural check
+  // load_and_analyze()'s gap-recovery pass already trusts elsewhere, just
+  // applied to one specific, already-evidenced control-flow edge instead of
+  // a blind per-byte scan of every unclaimed executable range, so it is
+  // strictly narrower (and no more permissive) than a check this codebase
+  // already relies on. Real AC6 repro: 0x8224c9a0 tail-calls 0x8224c458 (a
+  // `cmplwi`-first shared block, not a prologue, with zero other callers
+  // anywhere in the title) - entry-integrity validation failed outright
+  // ("... leaves owner 0x8224c9a0 without a dispatchable guest entry")
+  // because this address was never analyzed at all.
+  const auto decodes_to_valid_terminated_block = [&](GuestAddress target) {
+    const auto* target_section = executable_section(ctx.range_index, target);
+    if (!target_section || target < target_section->virtual_address) return false;
+    auto probe_offset = static_cast<std::size_t>(target - target_section->virtual_address);
+    constexpr std::size_t kMaxProbeWords = 1024u;
+    for (std::size_t probe = 0; probe < kMaxProbeWords; ++probe, probe_offset += 4u) {
+      if (probe_offset + 4u > target_section->bytes.size()) return false;
+      const auto probe_address = static_cast<GuestAddress>(target + probe * 4u);
+      const auto probe_word = be32(target_section->bytes, probe_offset);
+      if (probe_word == 0u) return false;
+      const auto probe_instruction = decoder.decode(probe_address, probe_word);
+      if (!probe_instruction.valid()) return false;
+      if (is_terminal(probe_instruction)) return true;
+    }
+    return false;
+  };
   const auto promote_terminal_target = [&](GuestAddress target) {
     if (inside_own_extent(target) || !self_confirmed) return;
-    if (!has_independent_discovery_evidence(target) && !has_prologue_evidence(target)) return;
+    if (!has_independent_discovery_evidence(target) && !has_prologue_evidence(target) &&
+        !decodes_to_valid_terminated_block(target))
+      return;
     result.discovered.push_back({target, DiscoverySource::DirectBranch});
   };
   for (const auto& [target, terminal] : pending_direct_branch_targets)
@@ -1711,7 +1807,7 @@ bool validate_region_entry_integrity(const AnalysisReport& report,
       error = "entry-integrity: duplicate guest entry 0x" + hex_string(entry.address);
       return false;
     }
-    if (entry.kind == GuestEntryKind::RuntimeHelper) continue;
+    if (entry.kind == GuestEntryKind::RuntimeHelper || entry.kind == GuestEntryKind::ImportThunk) continue;
 
     const auto owner_it = functions_by_start.find(entry.owner_function);
     if (owner_it == functions_by_start.end()) {
@@ -1951,6 +2047,7 @@ const char* guest_entry_kind_name(GuestEntryKind kind) noexcept {
     case GuestEntryKind::AlternateBlock: return "alternate-block";
     case GuestEntryKind::RuntimeHelper: return "runtime-helper";
     case GuestEntryKind::NativeReplacement: return "native-replacement";
+    case GuestEntryKind::ImportThunk: return "import-thunk";
   }
   return "unknown";
 }
@@ -2164,10 +2261,7 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
                        });
   };
   const auto is_import_thunk = [&](GuestAddress address) {
-    return std::any_of(report.image.imports.begin(), report.image.imports.end(),
-                       [address](const auto& import) {
-                         return import.guest_thunk == address;
-                       });
+    return find_callable_import_thunk(report.image, address) != nullptr;
   };
 
   if (effective.scan_static_pointer_tables) {
@@ -2710,6 +2804,7 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
       case GuestEntryKind::NativeReplacement: return 4;
       case GuestEntryKind::Function: return 3;
       case GuestEntryKind::RuntimeHelper: return 2;
+      case GuestEntryKind::ImportThunk: return 2;
       case GuestEntryKind::AlternateBlock: return 1;
     }
     return 0;
@@ -2731,6 +2826,24 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
   };
 
   for (const auto& function : report.functions) {
+    if (function.import_thunk) {
+      // Deliberately uncompiled (see analyze_function_candidate()'s
+      // import-thunk short-circuit) but still a legitimate dispatch target:
+      // publish it as an entry so entry-integrity validation recognizes a
+      // `bl` OR plain-branch/tail-call edge landing here as valid, instead
+      // of reporting a hole - resolution itself still happens purely at
+      // runtime via XenonSession::call()'s guest_thunk match, never via a
+      // codegen entry.
+      GuestEntryPoint entry{};
+      entry.address = function.guest_start;
+      entry.owner_function = function.guest_start;
+      entry.block = function.guest_start;
+      entry.kind = GuestEntryKind::ImportThunk;
+      entry.sources = function.sources;
+      entry.confidence = function.confidence;
+      add_entry(std::move(entry));
+      continue;
+    }
     if (!function.compiled) continue;
     GuestEntryPoint entry{};
     entry.address = function.guest_start;
@@ -2891,6 +3004,14 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
   for (const auto& function : report.functions) {
     if (function.native_replacement) {
       ++diagnostics.native_replacements_applied;
+      continue;
+    }
+    if (function.import_thunk) {
+      // Deliberately uncompiled (see analyze_function_candidate()'s
+      // import-thunk short-circuit) - not an analysis error, so this skips
+      // the hinted/auto_discovered and analysis_errors accounting below
+      // exactly like the native_replacement case above.
+      ++diagnostics.import_thunks_recognized;
       continue;
     }
     if (source_contains(function, DiscoverySource::ModuleHint)) ++diagnostics.hinted_functions;
@@ -3736,6 +3857,7 @@ std::string format_report(const AnalysisReport& report) {
       << " unresolved_indirect_sites=" << diagnostics.unresolved_indirect_sites
       << " native_replacements_applied=" << diagnostics.native_replacements_applied
       << " native_replacements_unsupported=" << diagnostics.native_replacements_unsupported
+      << " import_thunks_recognized=" << diagnostics.import_thunks_recognized
       << " data_or_ignored_regions=" << diagnostics.data_or_ignored_regions
       << " pointer_tables=" << diagnostics.pointer_tables_discovered
       << " pointer_targets=" << diagnostics.pointer_table_targets_discovered
@@ -3830,6 +3952,7 @@ std::string format_report_json(const AnalysisReport& report) {
       << ", \"unresolved_indirect_sites\": " << diagnostics.unresolved_indirect_sites
       << ", \"native_replacements_applied\": " << diagnostics.native_replacements_applied
       << ", \"native_replacements_unsupported\": " << diagnostics.native_replacements_unsupported
+      << ", \"import_thunks_recognized\": " << diagnostics.import_thunks_recognized
       << ", \"data_or_ignored_regions\": " << diagnostics.data_or_ignored_regions
       << ", \"analysis_errors\": " << diagnostics.analysis_errors
       << ", \"register_save_helpers\": " << diagnostics.register_save_helpers
@@ -3962,6 +4085,10 @@ std::string format_report_json(const AnalysisReport& report) {
     if (function.native_replacement)
       out << ", \"native_replacement\": \""
           << analysis::native_replacement_kind_name(*function.native_replacement) << "\"";
+    if (function.import_thunk)
+      out << ", \"import_thunk\": {\"module\": \"" << json_escape(function.import_thunk->module)
+          << "\", \"symbol\": \"" << json_escape(function.import_thunk->symbol)
+          << "\", \"ordinal\": " << function.import_thunk->ordinal << "}";
     if (!function.error.empty()) out << ", \"error\": \"" << json_escape(function.error) << "\"";
     out << "}";
     if (i + 1 != report.functions.size()) out << ',';

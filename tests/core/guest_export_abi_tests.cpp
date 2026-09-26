@@ -15,12 +15,19 @@
 // XEX_HEADER_IMPORT_LIBRARIES import table - see
 // xex_loader.cpp's parse_native_import_libraries()) and, on a match, calls
 // external_call(module, ordinal, state, memory) - reaching the exact same
-// core::ExportRegistry every other subsystem's exports already use. No
-// codegen or analysis change was needed: an import's callable guest_thunk
-// address is a type-1 native import record (record type in the top byte,
-// ordinal in the low 16 bits), never
-// real PPC instructions a function could be discovered/compiled at, so a
-// call to one always falls into this path for every title.
+// core::ExportRegistry every other subsystem's exports already use. An
+// import's callable guest_thunk address is a type-1 native import record
+// (record type in the top byte, ordinal in the low 16 bits), never real PPC
+// instructions a function could be discovered/compiled at, so a call to one
+// always falls into this path for every title. Static analysis itself now
+// knows this too (analyze_function_candidate()'s import-thunk short-circuit
+// in driver.cpp, added alongside a real Ace Combat 6 repro where a `bl` to
+// such an address used to be decoded as PPC and misreported as an
+// "unsupported"/"invalid PPC encoding" error) - a recognized guest_thunk
+// address gets a DiscoveredFunction entry (for diagnostics, via
+// DiscoveredFunction::import_thunk), but is deliberately left uncompiled,
+// so this runtime bridge remains the only path that ever resolves a call to
+// one, exactly as before.
 //
 // The three imports proven here (covering all three system library classes -
 // xboxkrnl, xam, and Audio V1's xboxkrnl-registered export surface):
@@ -515,18 +522,39 @@ int main() {
          "distinct from an import thunk");
 
   // No import's guest_thunk should ever have become a real discovered
-  // function - the codegen-assertion this test cares about: if a future
-  // change made the analyzer try to treat a thunk address as a callable
-  // guest function instead of falling through to the external-call bridge,
-  // this would start failing (either the thunk shows up compiled, or the
-  // whole analysis errors out trying to decode the placeholder word).
+  // *compiled* function, and analysis must never error out trying to decode
+  // the placeholder word there - the two failure modes this test actually
+  // cares about (see analyze_function_candidate()'s import-thunk
+  // short-circuit in driver.cpp, and DiscoveredFunction::import_thunk in
+  // driver.hpp). A guest_thunk address MAY now appear in report.functions -
+  // deliberately, as a recognized-but-uncompiled entry carrying its
+  // module/ordinal for diagnostics (AnalysisDiagnostics::
+  // import_thunks_recognized) - so the invariant this asserts is the real
+  // Xbox-visible one directly (never compiled, never a decode error), not
+  // "absent from report.functions", which was only ever a proxy for it.
+  bool found_audio_thunk = false, found_xam_thunk = false, found_create_file_thunk = false;
   for (const auto& function : report.functions) {
-    assert(function.guest_start != kLoadAddress + kThunkAudioRva &&
+    const bool is_audio_thunk = function.guest_start == kLoadAddress + kThunkAudioRva;
+    const bool is_xam_thunk = function.guest_start == kLoadAddress + kThunkXamRva;
+    const bool is_create_file_thunk = function.guest_start == kLoadAddress + kThunkCreateFileRva;
+    if (!is_audio_thunk && !is_xam_thunk && !is_create_file_thunk) continue;
+    found_audio_thunk |= is_audio_thunk;
+    found_xam_thunk |= is_xam_thunk;
+    found_create_file_thunk |= is_create_file_thunk;
+    assert(!function.compiled &&
            "an import thunk must never be treated as a discovered/compiled function");
-    assert(function.guest_start != kLoadAddress + kThunkXamRva &&
-           "an import thunk must never be treated as a discovered/compiled function");
-    assert(function.guest_start != kLoadAddress + kThunkCreateFileRva &&
-           "an import thunk must never be treated as a discovered/compiled function");
+    assert(function.import_thunk.has_value() &&
+           "a guest_thunk-address DiscoveredFunction must always be the recognized import-thunk "
+           "short-circuit, never an ordinary (rejected-but-somehow-kept) analysis candidate");
+  }
+  assert(found_audio_thunk && found_xam_thunk && found_create_file_thunk &&
+         "all three import thunks should be recognized (AnalysisDiagnostics::import_thunks_recognized)");
+  assert(report.diagnostics.import_thunks_recognized == 3);
+  for (const auto& unresolved : report.unresolved) {
+    assert(unresolved.address != kLoadAddress + kThunkAudioRva &&
+           unresolved.address != kLoadAddress + kThunkXamRva &&
+           unresolved.address != kLoadAddress + kThunkCreateFileRva &&
+           "an import thunk's placeholder word must never produce a decode-failure diagnostic");
   }
 
   assert(xenon::recomp::generate_project(options, report, error) && error.empty());

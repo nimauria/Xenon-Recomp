@@ -61,6 +61,25 @@ class KernelProcess final : public KernelObject {
   void set_exit_code(std::uint32_t exit_code);
   void terminate(std::uint32_t exit_code);
 
+  // Real, mutable KeGetCurrentProcessType/KeSetCurrentProcessType state
+  // (X_PROCTYPE_IDLE=0/X_PROCTYPE_USER=1/X_PROCTYPE_SYSTEM=2 - verified
+  // against xenia-project/xenia's kernel_state, including its default of
+  // X_PROCTYPE_USER for a running title process), not a hardcoded constant:
+  // a title that calls Set then Get must observe its own change.
+  [[nodiscard]] std::uint32_t process_type() const noexcept { return process_type_; }
+  void set_process_type(std::uint32_t process_type) noexcept { process_type_ = process_type; }
+
+  // Guards the guest-visible X_RTL_CRITICAL_SECTION lock_count/
+  // recursion_count/owning_thread field updates (Rtl*CriticalSection
+  // exports) across every critical section in this process - deliberately
+  // one process-wide mutex rather than per-address atomic guest-memory
+  // operations: it makes Enter/TryEnter/Leave's read-modify-write sequences
+  // trivially race-free across Xenon's 1:1 guest-thread:host-thread model
+  // without needing atomic compare-exchange primitives on guest memory
+  // itself. Held only for the brief field read-modify-write, never across an
+  // actual blocking wait - see xboxkrnl_rtl_critical_section_exports.cpp.
+  [[nodiscard]] std::mutex& critical_section_mutex() noexcept { return critical_section_mutex_; }
+
   // Environment variables (simplified)
   [[nodiscard]] std::string get_env(const std::string& name) const;
   void set_env(std::string name, std::string value);
@@ -68,6 +87,9 @@ class KernelProcess final : public KernelObject {
  private:
   std::uint32_t process_id_;
   std::uint32_t exit_code_{0};
+  // X_PROCTYPE_USER (1) - see process_type()'s doc comment.
+  std::uint32_t process_type_{1};
+  std::mutex critical_section_mutex_{};
   std::shared_ptr<KernelMemory> memory_;
   GuestHeapManager guest_heap_;
   ThreadManager thread_manager_;

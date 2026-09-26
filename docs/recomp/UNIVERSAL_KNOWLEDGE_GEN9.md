@@ -106,7 +106,10 @@ stage proportional to executable code size rather than to database size.
 
 Blocked data regions and import thunks remain ineligible.  Every nominated
 function must survive normal analysis plus the full Gen 9 matcher before it can
-remain in the report.
+remain in the report.  (Ordinary `bl`-discovered candidates get the same
+import-thunk exclusion for free now too: `analyze_function_candidate()`
+short-circuits on any callable `XexImport::guest_thunk` address before
+decoding it - see docs/recomp/RECOMP_ANALYSIS_V3.md's import-thunk section.)
 
 ## Universal record types
 

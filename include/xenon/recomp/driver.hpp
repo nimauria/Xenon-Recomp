@@ -186,6 +186,14 @@ enum class GuestEntryKind : std::uint8_t {
   AlternateBlock,
   RuntimeHelper,
   NativeReplacement,
+  // A recognized XEX-native import thunk (DiscoveredFunction::import_thunk).
+  // Like RuntimeHelper, this has no compiled owner - resolution happens at
+  // runtime via XenonSession::call()'s guest_thunk match, never via a
+  // materialized local CFG block or a lookup_compiled() case. Entered into
+  // report.entries purely so entry-integrity validation recognizes a `bl` or
+  // plain-branch edge into one as landing on a legitimate dispatchable
+  // target, not a hole.
+  ImportThunk,
 };
 
 // Gen 6 call/return fixed-point result. MayReturn means at least one proven
@@ -290,6 +298,25 @@ struct DiscoveredFunction {
   // generate_project() emits a call to that implementation instead of
   // compiling guest bytes at this address.
   std::optional<analysis::NativeReplacementKind> native_replacement;
+  // Set when this candidate's start address is an XEX-native import record's
+  // callable guest_thunk (xbox::XexImport::callable()) - the address is
+  // loader-owned placeholder data (ordinal/attributes/record-type, see
+  // xex_loader.cpp's parse_native_import_libraries()), never guest PPC
+  // bytes, and must never be decoded/compiled. Xenon's runtime import
+  // dispatch (XenonSession::call(), src/core/session.cpp) already resolves
+  // calls to this exact address by matching it against
+  // XexImage::imports[].guest_thunk; this field only records the
+  // recognition so static analysis never misclassifies the address as an
+  // "unsupported"/"invalid" PPC function and never shadows that dispatch
+  // with a bogus compiled entry. `compiled` stays false for these entries
+  // deliberately - see analyze_function_candidate()'s import-thunk
+  // short-circuit in driver.cpp.
+  struct ImportThunkBinding {
+    std::string module;
+    std::string symbol;
+    std::uint16_t ordinal{};
+  };
+  std::optional<ImportThunkBinding> import_thunk;
 };
 
 // Analysis diagnostics (Part 1.12 / 6.2): counts useful for judging whether
@@ -305,6 +332,10 @@ struct AnalysisDiagnostics {
   std::size_t unresolved_indirect_sites{};
   std::size_t native_replacements_applied{};
   std::size_t native_replacements_unsupported{};
+  // Count of DiscoveredFunction entries recognized as XEX-native import
+  // thunks (DiscoveredFunction::import_thunk set) - see
+  // analyze_function_candidate()'s import-thunk short-circuit.
+  std::size_t import_thunks_recognized{};
   std::size_t data_or_ignored_regions{};
   std::size_t analysis_errors{};
   // Register-range RuntimeHelperKind families (Part 9) - counts of declared

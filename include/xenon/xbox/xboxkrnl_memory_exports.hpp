@@ -1,0 +1,35 @@
+#pragma once
+
+namespace xenon::core {
+class ExportRegistry;
+struct ExportCallContext;
+}
+namespace xenon::kernel {
+class KernelProcess;
+}
+
+namespace xenon::xbox {
+
+// NtAllocateVirtualMemory needs kernel::KernelProcess (for its
+// KernelMemory/AddressSpace), which is not yet constructed at
+// XenonSession::init_exports() time - exposed individually so the caller can
+// register a lambda that dereferences its own lazily-bound KernelProcess
+// pointer at CALL time, exactly like xboxkrnl_sync_exports.hpp's Nt* handlers
+// (see XenonSession::init_exports()'s kSyncBindings).
+[[nodiscard]] bool nt_allocate_virtual_memory_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+
+// Registers the xboxkrnl guest memory-management exports this pass adds that
+// need no KernelProcess: KeFlushUserModeTb. Ordinal verified against the
+// xenia-project/xenia xboxkrnl export table (xboxkrnl_table.inc) rather than
+// guessed, per this project's own hard-learned lesson about
+// plausible-but-wrong ordinals (RtlImageXexHeaderField / 0x12B).
+//
+// Safe to call repeatedly on the same registry. No session dependency: the
+// handler here touches no session/process state at all - see
+// xboxkrnl_memory_exports.cpp for why a no-op is the behaviorally-correct
+// implementation on Xenon's host-VM-backed memory model, not a placeholder.
+[[nodiscard]] bool register_xboxkrnl_memory_exports(
+    xenon::core::ExportRegistry& registry);
+
+}  // namespace xenon::xbox

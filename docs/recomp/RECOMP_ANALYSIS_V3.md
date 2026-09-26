@@ -48,9 +48,26 @@ Audited and found **not currently a source of bad seeds**: XEX relocations
 the Recomp Driver for seeding at all - Part 6's "relocation parsing
 mistakes" concern does not currently apply to this codebase's architecture,
 since relocations simply aren't a discovery input yet. Exports, the entry
-point, and unwind metadata were already used (V1/V2); import thunks are
-resolved as call targets naturally via the existing import/export machinery
-elsewhere in Xenon, not as a direct recomp-analysis seed source.
+point, and unwind metadata were already used (V1/V2).
+
+Import thunks are resolved as call targets at runtime via the existing
+import/export machinery (`XenonSession::call()` matching
+`XexImage::imports[].guest_thunk`) - but a `bl` to a callable import thunk's
+guest_thunk address is a completely ordinary `DirectCall` discovery, exactly
+like a `bl` to real guest code, so it always *does* reach the static
+discovery pass. `analyze_function_candidate()` now short-circuits on it
+before any decode is attempted (`find_callable_import_thunk()` in
+driver.cpp), because the bytes at a guest_thunk address are loader-owned
+placeholder metadata, not PPC - decoding them is a false positive at best
+("unsupported"/"invalid PPC encoding" for what is really an unresolved
+import record) and, in the worst case, a coincidentally-valid decode could
+register a bogus compiled function that shadows the correct runtime import
+dispatch in the generated `lookup_compiled()` table. The resulting
+`DiscoveredFunction` is recorded (`import_thunk` field,
+`AnalysisDiagnostics::import_thunks_recognized`) but deliberately left
+`compiled = false`, so no codegen entry is ever emitted for it and the
+existing `lookup_compiled()`-miss -> runtime-dispatch fallback chain reaches
+the correct import machinery unshadowed.
 
 ## Suspicious-seed audit (Part 6)
 

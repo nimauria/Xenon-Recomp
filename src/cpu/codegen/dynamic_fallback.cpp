@@ -511,6 +511,24 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   const auto first_stamp = context.memory.executable_page_stamp(target);
   if (!first_stamp.executable()) return out;  // Not ours; imports may handle it.
 
+  // A recognized import thunk's bytes are loader-owned placeholder metadata
+  // (ordinal/attributes/record-type), never real guest PPC, even though the
+  // page containing them is marked executable (native XEX import records
+  // commonly live inside the same executable section as real code). Decoding
+  // them here would hit the exact "unsupported instruction" trap this
+  // interpreter exists to avoid, for what is really a perfectly resolvable
+  // import call - route straight to the runtime's own import dispatch
+  // instead, the same way execute_call() below already falls through to
+  // context.runtime.call() as its own last resort for a target this
+  // interpreter cannot otherwise handle. Checked once here (covering both
+  // try_execute()'s top-level entry and this same run() being re-entered for
+  // a nested call below) rather than on every compiled-call hot path.
+  if (context.runtime.is_recognized_import_thunk(target)) {
+    out.public_result.handled = true;
+    out.public_result.result = context.runtime.call(target, context.state, context.memory);
+    return out;
+  }
+
   out.public_result.handled = true;
   if (depth > config_.max_nested_calls) {
     out.reason = DynamicFallbackStopReason::CallDepthLimit;
