@@ -24,7 +24,14 @@ _savegprlr_15:  std r15, OFFSET+8(r1)     <- entered directly when only r15..r31
 _savegprlr_16:  std r16, OFFSET+16(r1)
 ...
 _savegprlr_31:  std r31, OFFSET+136(r1)
-                std r0,  LR_OFFSET(r1)    <- caller's own mflr'd LR
+                stw r0,  LR_OFFSET(r1)    <- caller's own mflr'd LR (32-bit,
+                                             unlike the 64-bit GPR slots above -
+                                             confirmed against the real AC6
+                                             binary's paired save/restore
+                                             sequence at guest 0x82382A28/
+                                             0x82382A78: every GPR slot uses
+                                             std/ld, but the LR slot always
+                                             uses a plain stw/lwz)
                 blr
 ```
 
@@ -97,7 +104,7 @@ instantiate exactly the variants a title actually uses, e.g.
 
 | Kind | Base register | Offset formula | Confirmed against real disassembly? |
 |---|---|---|---|
-| `SaveGprLr`/`RestoreGprLr` | `r1` | `r1 - 0x98 + (reg-14)*8`; LR at `r1-0x08` | **Yes** - community reverse-engineering of real Xbox 360 binaries (`std r14,-0x98(r1)`, ascending 8 bytes/register) |
+| `SaveGprLr`/`RestoreGprLr` | `r1` | `r1 - 0x98 + (reg-14)*8` (64-bit); LR at `r1-0x08` (32-bit) | **Yes** - confirmed against the real AC6 binary (`std r14,-0x98(r1)`, ascending 8 bytes/register; LR via plain `stw`/`lwz -8(r1)`, not `std`/`ld`) |
 | `SaveVmx`/`RestoreVmx` | `r12` (not `r1` - see below) | `r12 - 0x120 + (reg-14)*16` | **Yes** (`li r11,-0x120` + `lvx v14,r11,r12`) |
 | `SaveVmx128`/`RestoreVmx128` | `r12` | `r12 - 0x400 + (reg-64)*16` | **Yes** (`li r11,-0x400` + `lvx128 v64,r11,r12`) |
 | `SaveFpr`/`RestoreFpr` | `r1` | `r1 - 0x420 + (reg-14)*8` | **No** - a self-consistent placeholder in its own reserved band, clear of the other three confirmed ranges so combined use never aliases; not independently confirmed against a real disassembly this pass. **Verify against a real title's disassembly before relying on this for actual FPR-spilling guest code.** |

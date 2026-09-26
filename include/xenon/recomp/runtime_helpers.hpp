@@ -86,7 +86,17 @@ cpu::ExecutionResult save_gpr_lr_v2(cpu::ExecutionContext& context) {
   // immediately before its `bl` into this entry point - a real ABI
   // precondition of this shared helper, exactly like the real guest
   // routine relies on.
-  context.memory.write64_be(effective_address(r1, kGprLrLrOffset), state.gpr[0]);
+  //
+  // The LR slot is a plain 32-bit word, not a 64-bit field: confirmed
+  // against the real AC6 binary's own paired save/restore sequence
+  // (`stw r12,-8(r1)` / `lwz r12,-8(r1)` at guest 0x82382A28/0x82382A78 -
+  // every GPR slot above it uses std/ld, but the LR slot never does).
+  // Writing it as write64_be would place the meaningful 32 bits at
+  // r1-4 instead of r1-8, so any call chain that reaches the shared
+  // restore trailer via raw guest bytes (rather than through this same
+  // native helper) would read back 0 instead of the real return address.
+  context.memory.write32_be(effective_address(r1, kGprLrLrOffset),
+                            static_cast<std::uint32_t>(state.gpr[0]));
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
 }
 
@@ -104,7 +114,10 @@ cpu::ExecutionResult restore_gpr_lr_v2(cpu::ExecutionContext& context) {
   // have clobbered) and returns through it - this entry point is a tail
   // substitute for the calling function's own epilogue, so it returns to
   // that function's *caller*, not back into itself.
-  state.lr = context.memory.read64_be(effective_address(r1, kGprLrLrOffset));
+  //
+  // 32-bit read, matching the real `lwz r12,-8(r1)` trailer instruction -
+  // see the matching comment in save_gpr_lr_v2 above.
+  state.lr = context.memory.read32_be(effective_address(r1, kGprLrLrOffset));
   return {cpu::FlowReason::Return, static_cast<cpu::GuestAddress>(state.lr & ~3ull), 0u};
 }
 

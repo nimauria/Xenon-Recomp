@@ -81,7 +81,11 @@ void test_gpr_lr(xenon::memory::AddressSpace& memory, TestRuntime& runtime,
     const auto address = static_cast<GuestAddress>(stack_pointer + offset);
     assert(memory.read64_be(address) == original[reg]);
   }
-  assert(memory.read64_be(static_cast<GuestAddress>(stack_pointer - 0x08)) == kOriginalCallerLr);
+  // The LR slot is a plain 32-bit word (confirmed against the real AC6
+  // binary's paired `stw`/`lwz -8(r1)` sequence), not a 64-bit field like
+  // the GPR slots above it.
+  assert(memory.read32_be(static_cast<GuestAddress>(stack_pointer - 0x08)) ==
+         static_cast<std::uint32_t>(kOriginalCallerLr));
 
   // Clobber every saved register and LR to prove restore genuinely reads
   // back from guest memory rather than trusting live state.
