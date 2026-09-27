@@ -42,6 +42,20 @@ int main() {
 
   const auto cat = Decoder::opcode_catalog();
   assert(cat.size() == 455);
+
+  // CPU V2 Phase 2: the declarative catalogue must have a deterministic,
+  // strongly-typed identity and deterministic decode ordering.  The existing
+  // exhaustive lift/AOT loops below remain the lowering/backend coverage gate.
+  const auto catalog_validation = Decoder::validate_catalog();
+  assert(catalog_validation.entry_count == cat.size());
+  assert(catalog_validation.duplicate_ids == 0);
+  assert(catalog_validation.ambiguous_overlaps == 0);
+  assert(catalog_validation.deterministic);
+  for (const auto& op : cat) {
+    assert(op.id.valid());
+    assert(Decoder::opcode_info(op.id) == &op);
+  }
+
   Decoder d;
   std::size_t mismatch = 0;
   for (const auto& op : cat) {

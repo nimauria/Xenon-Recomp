@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <vulkan/vulkan.h>
 
@@ -9,6 +10,10 @@ namespace xenon::gpu::vulkan {
 
 struct ContextConfig {
   bool enable_validation{};
+  // Window-system extensions (for example VK_KHR_surface + Win32/Wayland/XCB)
+  // are supplied by the runtime. The renderer stays independent of the UI
+  // toolkit and native-window library.
+  std::vector<const char*> instance_extensions{};
 };
 
 struct DeviceProperties {
@@ -16,6 +21,11 @@ struct DeviceProperties {
   std::uint32_t api_version{};
   VkPhysicalDeviceType device_type{VK_PHYSICAL_DEVICE_TYPE_OTHER};
   std::uint64_t device_local_bytes{};
+  // True when the selected device exposes VK_KHR_portability_subset (for
+  // example a Vulkan implementation layered over Metal). Xbox semantics stay
+  // in the canonical GPU layer; backends may use this to choose compatible
+  // implementation details without platform-name checks.
+  bool portability_subset{};
 };
 
 class Context {
@@ -36,6 +46,9 @@ class Context {
   [[nodiscard]] std::uint32_t graphics_queue_family() const noexcept {
     return graphics_queue_family_;
   }
+  [[nodiscard]] bool swapchain_supported() const noexcept {
+    return swapchain_supported_;
+  }
   [[nodiscard]] const DeviceProperties& properties() const noexcept {
     return properties_;
   }
@@ -48,6 +61,7 @@ class Context {
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   std::uint32_t graphics_queue_family_{};
   DeviceProperties properties_{};
+  bool swapchain_supported_{};
   std::string error_{};
 };
 

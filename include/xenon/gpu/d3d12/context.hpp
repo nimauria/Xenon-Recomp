@@ -35,6 +35,7 @@ class Context {
 
   [[nodiscard]] ID3D12Device* device() const noexcept { return device_.Get(); }
   [[nodiscard]] IDXGIAdapter1* adapter() const noexcept { return adapter_.Get(); }
+  [[nodiscard]] IDXGIFactory6* factory() const noexcept { return factory_.Get(); }
   [[nodiscard]] const DeviceProperties& properties() const noexcept {
     return properties_;
   }

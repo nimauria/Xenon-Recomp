@@ -1,8 +1,24 @@
 #include "xenon/gpu/vulkan/memory.hpp"
 
+#include <utility>
+
 namespace xenon::gpu::vulkan {
 
 Buffer::~Buffer() { reset(); }
+
+Buffer::Buffer(Buffer&& other) noexcept { *this = std::move(other); }
+
+Buffer& Buffer::operator=(Buffer&& other) noexcept {
+  if (this == &other) return *this;
+  reset();
+  device_ = std::exchange(other.device_, VK_NULL_HANDLE);
+  buffer_ = std::exchange(other.buffer_, VK_NULL_HANDLE);
+  memory_ = std::exchange(other.memory_, VK_NULL_HANDLE);
+  size_ = std::exchange(other.size_, 0);
+  mapped_ = std::exchange(other.mapped_, nullptr);
+  error_ = std::move(other.error_);
+  return *this;
+}
 
 bool Buffer::initialize(VkPhysicalDevice physical_device, VkDevice device,
                         VkDeviceSize size, VkBufferUsageFlags usage,

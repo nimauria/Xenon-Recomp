@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <stdexcept>
 
 namespace xenon::cpu {
@@ -21,6 +22,8 @@ std::size_t FlatMemory::offset(GuestAddress address, std::size_t width) const {
 void FlatMemory::touched() {
   ++generation_;
   if (generation_ == 0) generation_ = 1;
+  reservation_token_ = 0;
+  reservation_width_ = 0;
 }
 
 std::uint8_t FlatMemory::read8(GuestAddress a) { return bytes_[offset(a,1)]; }
@@ -51,12 +54,58 @@ void FlatMemory::write16_le(GuestAddress a,std::uint16_t v){ auto p=offset(a,2);
 void FlatMemory::write32_le(GuestAddress a,std::uint32_t v){ auto p=offset(a,4); for(unsigned i=0;i<4;++i) bytes_[p+i]=std::uint8_t(v>>(8*i)); touched(); }
 void FlatMemory::write64_le(GuestAddress a,std::uint64_t v){ auto p=offset(a,8); for(unsigned i=0;i<8;++i) bytes_[p+i]=std::uint8_t(v>>(8*i)); touched(); }
 
-std::uint64_t FlatMemory::reserve32(GuestAddress a,std::uint32_t& v){ v=read32_be(a); return generation_; }
-std::uint64_t FlatMemory::reserve64(GuestAddress a,std::uint64_t& v){ v=read64_be(a); return generation_; }
-bool FlatMemory::store_conditional32(GuestAddress a,std::uint64_t token,std::uint32_t v){ if(token!=generation_) return false; write32_be(a,v); return true; }
-bool FlatMemory::store_conditional64(GuestAddress a,std::uint64_t token,std::uint64_t v){ if(token!=generation_) return false; write64_be(a,v); return true; }
+void FlatMemory::read_bytes(GuestAddress a, std::span<std::byte> destination) {
+  if (destination.empty()) return;
+  const auto p = offset(a, destination.size());
+  std::memcpy(destination.data(), bytes_.data() + p, destination.size());
+}
 
-void FlatMemory::barrier(BarrierKind){ std::atomic_thread_fence(std::memory_order_seq_cst); }
+void FlatMemory::write_bytes(GuestAddress a, std::span<const std::byte> source) {
+  if (source.empty()) return;
+  const auto p = offset(a, source.size());
+  std::memcpy(bytes_.data() + p, source.data(), source.size());
+  touched();
+}
+
+void FlatMemory::fill_bytes(GuestAddress a, std::uint32_t size,
+                            std::uint8_t value) {
+  if (!size) return;
+  const auto p = offset(a, size);
+  std::memset(bytes_.data() + p, value, size);
+  touched();
+}
+
+std::uint64_t FlatMemory::reserve32(GuestAddress a,std::uint32_t& v){
+  v=read32_be(a);
+  auto token=next_reservation_token_++;
+  if(!token) token=next_reservation_token_++;
+  reservation_token_=token; reservation_address_=a; reservation_width_=4;
+  return token;
+}
+std::uint64_t FlatMemory::reserve64(GuestAddress a,std::uint64_t& v){
+  v=read64_be(a);
+  auto token=next_reservation_token_++;
+  if(!token) token=next_reservation_token_++;
+  reservation_token_=token; reservation_address_=a; reservation_width_=8;
+  return token;
+}
+bool FlatMemory::store_conditional32(GuestAddress a,std::uint64_t token,std::uint32_t v){
+  const bool ok=token && token==reservation_token_ && reservation_width_==4 && reservation_address_==a;
+  reservation_token_=0; reservation_width_=0;
+  if(!ok) return false;
+  write32_be(a,v); return true;
+}
+bool FlatMemory::store_conditional64(GuestAddress a,std::uint64_t token,std::uint64_t v){
+  const bool ok=token && token==reservation_token_ && reservation_width_==8 && reservation_address_==a;
+  reservation_token_=0; reservation_width_=0;
+  if(!ok) return false;
+  write64_be(a,v); return true;
+}
+void FlatMemory::cancel_reservation(std::uint64_t token) noexcept {
+  if(token && token==reservation_token_){ reservation_token_=0; reservation_width_=0; }
+}
+
+void FlatMemory::barrier(BarrierKind kind){ host_memory_ordering::apply(kind); }
 void FlatMemory::zero_cache_block(GuestAddress a,std::uint32_t n){ auto aligned=GuestAddress(a & ~(n-1u)); auto p=offset(aligned,n); std::fill_n(bytes_.begin()+static_cast<std::ptrdiff_t>(p),n,std::uint8_t{0}); touched(); }
 void FlatMemory::instruction_cache_invalidate(GuestAddress){ /* no code cache in FlatMemory */ }
 

@@ -37,6 +37,7 @@ struct ProcessedPrimitiveBatch {
 // PM4 immediate packing or guest endian modes independently.
 [[nodiscard]] ProcessedPrimitiveBatch process_primitives(
     const ir::DrawPacket& draw, std::span<const std::byte> physical_memory,
-    const PrimitiveProcessingOptions& options = {});
+    const PrimitiveProcessingOptions& options = {},
+    std::uint32_t physical_base = 0u);
 
 }  // namespace xenon::gpu

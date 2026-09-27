@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="280" viewBox="0 0 640 280" fill="none">
+
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+  <stop offset="0%" stop-color="#0B1118"/>
+  <stop offset="100%" stop-color="#0A0F14"/>
+ </linearGradient>
+ <filter id="glow"><feGaussianBlur stdDeviation="8"/></filter>
+</defs>
+<rect x="3" y="3" width="634" height="274" rx="18" fill="url(#bg)"/>
+<rect x="3" y="3" width="634" height="274" rx="18" stroke="#F6A623" stroke-opacity="0.22" stroke-width="2"/>
+<path d="M28 3H122" stroke="#F6A623" stroke-width="3" stroke-linecap="round"/>
+<path d="M518 277H612" stroke="#F6A623" stroke-width="3" stroke-linecap="round"/>
+<path d="M3 42L42 3" stroke="#F6A623" stroke-opacity="0.4" stroke-width="2"/>
+<path d="M598 277L637 238" stroke="#F6A623" stroke-opacity="0.4" stroke-width="2"/>
+<path d="M12 12H120" stroke="#F6A623" stroke-opacity="0.10" stroke-width="14" filter="url(#glow)"/>
+<path d="M520 268H628" stroke="#F6A623" stroke-opacity="0.10" stroke-width="14" filter="url(#glow)"/>
+
+</svg>

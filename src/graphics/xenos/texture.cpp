@@ -1,4 +1,5 @@
 #include "xenon/gpu/texture.hpp"
+#include "xenon/memory/address_space.hpp"
 
 #include <algorithm>
 #include <array>
@@ -180,6 +181,12 @@ std::optional<std::uint8_t> raw_resolve_texture_format(
   }
 }
 
+std::uint8_t depth_resolve_texture_format(
+    DepthRenderTargetFormat format) noexcept {
+  return format == DepthRenderTargetFormat::D24FS8 ? std::uint8_t{23}
+                                                   : std::uint8_t{22};
+}
+
 std::uint64_t tiled_offset_2d(std::uint32_t x, std::uint32_t y,
                               std::uint32_t pitch,
                               std::uint32_t bytes_per_block) noexcept {
@@ -298,7 +305,8 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
 }
 
 DecodedTexture decode_texture(const TextureDescriptor& descriptor,
-                              std::span<const std::byte> physical_memory) {
+                              std::span<const std::byte> physical_memory,
+                              std::uint32_t physical_base) {
   DecodedTexture result{};
   result.layout = build_texture_layout(descriptor);
   if (!result.layout.valid || !result.layout.format.host_supported()) {
@@ -331,14 +339,17 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           const auto destination = sub.linear_offset_bytes +
               (std::uint64_t(z) * sub.height_blocks + y) * sub.linear_row_pitch_bytes +
               std::uint64_t(x) * bpb;
-          if (source + bpb > physical_memory.size() ||
+          if (source < physical_base ||
+              source + bpb >
+                  std::uint64_t{physical_base} + physical_memory.size() ||
               destination + bpb > result.linear_data.size()) {
             result.error = "Xenos texture references guest memory outside physical RAM";
             result.linear_data.clear();
             return result;
           }
           endian_copy(result.linear_data.data() + destination,
-                      physical_memory.data() + source, bpb, descriptor.endian);
+                      physical_memory.data() + (source - physical_base), bpb,
+                      descriptor.endian);
         }
       }
     }
@@ -440,7 +451,7 @@ void apply_endian128(std::span<std::byte> data, Endian128 endian) noexcept {
 ResolveWriteResult write_raw_resolve(
     const CopyResolveState& copy, const ResolveRectangle& rectangle,
     std::span<const std::byte> source, std::uint32_t source_row_pitch,
-    std::span<std::byte> physical_memory) {
+    memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
   if (copy.command != CopyCommand::Raw) {
     result.error = "converted Xenos resolve requires format conversion";
@@ -498,19 +509,23 @@ ResolveWriteResult write_raw_resolve(
           : tiled_offset_2d(destination_x, destination_y, pitch_aligned,
                             bytes_per_pixel);
       const auto destination = std::uint64_t(copy.destination_base) + tiled;
-      if (destination + bytes_per_pixel > physical_memory.size()) {
+      if (destination + bytes_per_pixel > memory::kPhysicalMemorySize) {
         result.error = "raw resolve destination is outside physical memory";
         return result;
       }
       const auto block_address = static_cast<std::uint32_t>(destination & ~15ull);
       auto [block_it, inserted] = blocks.try_emplace(block_address);
       if (inserted) {
-        if (std::uint64_t(block_address) + 16u > physical_memory.size()) {
+        if (std::uint64_t(block_address) + 16u >
+            memory::kPhysicalMemorySize) {
           result.error = "raw resolve endian block is outside physical memory";
           return result;
         }
-        std::memcpy(block_it->second.data(),
-                    physical_memory.data() + block_address, 16);
+        if (!physical_memory.copy_physical_range(block_address,
+                                                  block_it->second)) {
+          result.error = "raw resolve could not snapshot destination block";
+          return result;
+        }
         apply_endian128(block_it->second, copy.destination_endian);
       }
       const auto block_offset = static_cast<std::size_t>(destination & 15ull);
@@ -528,12 +543,20 @@ ResolveWriteResult write_raw_resolve(
     result.error = "raw resolve produced no destination blocks";
     return result;
   }
-  for (auto& [address, block] : blocks) {
-    apply_endian128(block, copy.destination_endian);
-    std::memcpy(physical_memory.data() + address, block.data(), block.size());
-  }
   const auto first = blocks.begin()->first;
   const auto last = blocks.rbegin()->first + 16u;
+  auto write = physical_memory.physical_write_span(first, last - first);
+  if (!write) {
+    result.error = "raw resolve could not acquire physical write span";
+    return result;
+  }
+  for (auto& [address, block] : blocks) {
+    apply_endian128(block, copy.destination_endian);
+    if (!write.write(address - first, block)) {
+      result.error = "raw resolve write span overflow";
+      return result;
+    }
+  }
   result.modified_address = first;
   result.modified_size = last - first;
   result.valid = true;
@@ -543,7 +566,7 @@ ResolveWriteResult write_raw_resolve(
 ResolveWriteResult write_converted_resolve(
     const CopyResolveState& copy, ColorRenderTargetFormat source_format,
     const ResolveRectangle& rectangle, std::span<const std::byte> source,
-    std::uint32_t source_row_pitch, std::span<std::byte> physical_memory) {
+    std::uint32_t source_row_pitch, memory::AddressSpace& physical_memory) {
   ResolveWriteResult result{};
   if (copy.command != CopyCommand::Convert && copy.command != CopyCommand::Raw) {
     result.error = "Xenos resolve command cannot use color conversion";
@@ -671,9 +694,44 @@ ResolveWriteResult write_converted_resolve(
                            width * destination_bytes, physical_memory);
 }
 
+ResolveWriteResult write_depth_resolve(
+    const CopyResolveState& copy, DepthRenderTargetFormat source_format,
+    const ResolveRectangle& rectangle, std::span<const std::uint32_t> source,
+    std::uint32_t source_row_pitch, memory::AddressSpace& physical_memory) {
+  ResolveWriteResult result{};
+  if (copy.command != CopyCommand::Raw && copy.command != CopyCommand::Convert) {
+    result.error = "Xenos depth resolve command is unsupported";
+    return result;
+  }
+
+  // Direct3D 9 commonly programs the color-style 8_8_8_8 destination format
+  // for depth copies. Xenos actually stores the selected depth sample in the
+  // depth target's native 24_8 / 24_8_FLOAT bit layout, with stencil intact.
+  auto raw_copy = copy;
+  raw_copy.command = CopyCommand::Raw;
+  raw_copy.destination_format = depth_resolve_texture_format(source_format);
+  raw_copy.destination_exponent_bias = 0;
+  raw_copy.destination_red_blue_swap = false;
+  return write_raw_resolve(raw_copy, rectangle, std::as_bytes(source),
+                           source_row_pitch, physical_memory);
+}
+
 void TextureDirtyTracker::track(std::uint64_t key, const TextureLayout& layout) {
   const std::scoped_lock lock(mutex_);
   Entry entry{};
+  for (const auto& sub : layout.subresources) {
+    entry.ranges.emplace_back(sub.guest_address,
+                              std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
+  }
+  entries_[key] = std::move(entry);
+}
+void TextureDirtyTracker::track_clean(std::uint64_t key,
+                                      const TextureLayout& layout,
+                                      std::uint64_t clean_epoch) {
+  const std::scoped_lock lock(mutex_);
+  Entry entry{};
+  entry.dirty = false;
+  entry.clean_epoch = clean_epoch;
   for (const auto& sub : layout.subresources) {
     entry.ranges.emplace_back(sub.guest_address,
                               std::uint64_t(sub.guest_address) + sub.guest_size_bytes);
@@ -707,6 +765,32 @@ bool TextureDirtyTracker::consume_dirty(std::uint64_t key) noexcept {
   if (it == entries_.end() || !it->second.dirty) return false;
   it->second.dirty = false;
   return true;
+}
+bool TextureDirtyTracker::consume_dirty(
+    std::uint64_t key, const memory::GuestMemoryCoherency& coherency,
+    std::uint64_t through_epoch) noexcept {
+  const std::scoped_lock lock(mutex_);
+  const auto it = entries_.find(key);
+  if (it == entries_.end()) return false;
+  auto& entry = it->second;
+  bool dirty = entry.dirty;
+  if (!dirty) {
+    for (const auto& range : entry.ranges) {
+      if (range.first >= memory::kPhysicalMemorySize) continue;
+      const auto width64 = std::min<std::uint64_t>(
+          range.second - range.first, memory::kPhysicalMemorySize - range.first);
+      if (width64 && coherency.range_changed_since(
+                         static_cast<std::uint32_t>(range.first),
+                         static_cast<std::uint32_t>(width64),
+                         entry.clean_epoch, through_epoch)) {
+        dirty = true;
+        break;
+      }
+    }
+  }
+  entry.dirty = false;
+  entry.clean_epoch = through_epoch;
+  return dirty;
 }
 bool TextureDirtyTracker::is_dirty(std::uint64_t key) const noexcept {
   const std::scoped_lock lock(mutex_);

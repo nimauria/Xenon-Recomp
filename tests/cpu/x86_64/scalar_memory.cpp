@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 
 #include "xenon/cpu/flat_memory.hpp"
 #include "xenon/cpu/runtime.hpp"
@@ -13,6 +14,7 @@ FN(mem_lbz); FN(mem_lhz); FN(mem_lha); FN(mem_lwz); FN(mem_lwa); FN(mem_ld); FN(
 FN(mem_lhbrx); FN(mem_lwbrx); FN(mem_ldbrx); FN(mem_stb); FN(mem_sth); FN(mem_stw); FN(mem_std); FN(mem_stwu);
 FN(mem_sthbrx); FN(mem_stwbrx); FN(mem_stdbrx); FN(mem_lfs); FN(mem_lfd); FN(mem_stfs); FN(mem_stfd); FN(mem_stfiwx);
 FN(mem_lmw); FN(mem_stmw); FN(mem_lswi); FN(mem_stswi); FN(mem_lswx); FN(mem_stswx); FN(mem_dcbz); FN(mem_dcbz128);
+FN(mem_fault_site);
 #undef FN
 
 int main(){
@@ -98,6 +100,14 @@ int main(){
   // Cache block zero aligns down to the architected block size.
   s.gpr[5]=0x12Fu; for(unsigned i=0x120;i<0x140;++i)mem.write8(base+i,0xAA); mem_dcbz(s,mem,rt); for(unsigned i=0x120;i<0x140;++i)assert(mem.read8(base+i)==0);
   s.gpr[5]=0x1FFu; for(unsigned i=0x180;i<0x200;++i)mem.write8(base+i,0xBB); mem_dcbz128(s,mem,rt); for(unsigned i=0x180;i<0x200;++i)assert(mem.read8(base+i)==0);
+
+  s.gpr[3] = 0;
+  bool faulted = false;
+  try { (void)mem_fault_site(s, mem, rt); }
+  catch (const std::out_of_range&) { faulted = true; }
+  assert(faulted);
+  assert(s.cia == 0x5004u && s.nia == 0x5008u);
+  assert(s.gpr[3] == 1u);  // The instruction following the fault did not run.
 
   std::cout<<"xenon_cpu_scalar_memory: ok\n";
 }

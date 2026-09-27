@@ -13,7 +13,9 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "XENON_BUILD_TESTS": "ON"
+        "XENON_BUILD_TESTS": "ON",
+        "XENON_DEPENDENCY_MODE": "AUTO",
+        "XENON_AUTO_BOOTSTRAP_DEPS": "ON"
       }
     },
     {
@@ -33,7 +35,22 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "XENON_ENABLE_MEMORY": "ON",
-        "XENON_ENABLE_GRAPHICS": "ON"
+        "XENON_ENABLE_GRAPHICS": "ON",
+        "XENON_DEPENDENCY_MODE": "MANAGED",
+        "XENON_PREFER_BUNDLED_FFMPEG": "OFF",
+        "XENON_BUILD_INSTALLER": "ON",
+        "XENON_BUILD_LAUNCHER": "ON",
+        "XENON_ENABLE_FILESYSTEM": "ON",
+        "XENON_ENABLE_KERNEL": "ON",
+        "XENON_ENABLE_VULKAN": "ON",
+        "XENON_ENABLE_DXC": "ON",
+        "XENON_ENABLE_AUDIO": "ON",
+        "XENON_ENABLE_INPUT": "ON",
+        "XENON_INPUT_ENABLE_SDL2": "ON",
+        "XENON_AUTO_BOOTSTRAP_DEPS": "ON",
+        "XENON_FETCH_MISSING_DEPS": "ON",
+        "XENON_INPUT_ENABLE_SDL3": "OFF",
+        "XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE": "OFF"
       }
     },
     {
@@ -53,8 +70,68 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "XENON_ENABLE_MEMORY": "ON",
-        "XENON_ENABLE_GRAPHICS": "ON"
+        "XENON_ENABLE_GRAPHICS": "ON",
+        "XENON_DEPENDENCY_MODE": "MANAGED",
+        "XENON_PREFER_BUNDLED_FFMPEG": "OFF",
+        "XENON_BUILD_INSTALLER": "ON",
+        "XENON_BUILD_LAUNCHER": "ON",
+        "XENON_ENABLE_FILESYSTEM": "ON",
+        "XENON_ENABLE_KERNEL": "ON",
+        "XENON_ENABLE_VULKAN": "ON",
+        "XENON_ENABLE_DXC": "ON",
+        "XENON_ENABLE_AUDIO": "ON",
+        "XENON_ENABLE_INPUT": "ON",
+        "XENON_INPUT_ENABLE_SDL2": "ON",
+        "XENON_AUTO_BOOTSTRAP_DEPS": "ON",
+        "XENON_FETCH_MISSING_DEPS": "ON",
+        "XENON_ENABLE_D3D12": "ON",
+        "XENON_INPUT_ENABLE_SDL3": "OFF",
+        "XENON_LAUNCHER_ENABLE_DISCORD_RICH_PRESENCE": "OFF"
       }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-x64-release",
+      "configurePreset": "linux-x64-release",
+      "jobs": 0
+    },
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64-release",
+      "jobs": 0
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-x64-release",
+      "configurePreset": "linux-x64-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "linux-x64-release-deb",
+      "configurePreset": "linux-x64-release",
+      "generators": [
+        "DEB"
+      ]
+    },
+    {
+      "name": "windows-x64-release-installer",
+      "configurePreset": "windows-x64-release",
+      "generators": [
+        "NSIS"
+      ]
     }
   ]
 }

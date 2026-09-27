@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 
+#include "xenon/memory/gpu_coherency.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 
 namespace {
@@ -15,6 +16,317 @@ void write_fetch(xenon::gpu::ResourceStateTracker& tracker, unsigned slot,
   tracker.apply({xenon::gpu::ResourceStateTracker::kFetchConstantBase +
                      slot * 6u + dword,
                  value});
+}
+
+
+void write_memexport_stream(xenon::gpu::ResourceStateTracker& tracker,
+                            xenon::gpu::ShaderStage stage,
+                            std::uint16_t constant_index,
+                            std::uint32_t base_address_dwords,
+                            std::uint8_t format,
+                            std::uint32_t index_count,
+                            xenon::gpu::Endian128 endian =
+                                xenon::gpu::Endian128::None,
+                            std::uint8_t number_format = 0,
+                            bool red_blue_swap = false) {
+  const std::uint32_t bank =
+      stage == xenon::gpu::ShaderStage::Pixel ? 0x4400u : 0x4000u;
+  const auto reg = bank + std::uint32_t(constant_index) * 4u;
+  tracker.apply({reg + 0u, (base_address_dwords & 0x3FFFFFFFu) | (1u << 30u)});
+  tracker.apply({reg + 1u, 0x4B000000u});
+  tracker.apply({reg + 2u,
+                 std::uint32_t(endian) | (std::uint32_t(format) << 8u) |
+                     (std::uint32_t(number_format) << 16u) |
+                     (std::uint32_t(red_blue_swap) << 19u) |
+                     (0x4B0u << 20u)});
+  tracker.apply({reg + 3u,
+                 (index_count & 0x7FFFFFu) | (0x96u << 23u)});
+}
+
+
+void test_guest_memory_coherency_ranges() {
+  using xenon::memory::GuestMemoryGpuCoherency;
+
+  GuestMemoryGpuCoherency tracker;
+  tracker.reset(0x10000u);
+  auto cpu = tracker.cpu_dirty_ranges();
+  assert(cpu.size() == 1 && cpu[0].address == 0 &&
+         cpu[0].size == 0x10000u);
+  tracker.mark_cpu_uploaded(0, 0x10000u);
+  assert(tracker.cpu_dirty_ranges().empty());
+
+  // A shader owns this byte range after memexport.
+  tracker.mark_gpu_write(0x2000u, 0x1000u);
+  assert(tracker.has_gpu_dirty(0x2400u, 4));
+
+  // A four-byte CPU write in the middle wins only for those bytes. The rest of
+  // the GPU-authored range must stay GPU-owned so a later CPU upload cannot
+  // clobber unrelated memexport data on the same page.
+  tracker.mark_cpu_write(0x2400u, 4u);
+  const auto gpu = tracker.gpu_dirty_ranges();
+  assert(gpu.size() == 2);
+  assert(gpu[0].address == 0x2000u && gpu[0].size == 0x400u);
+  assert(gpu[1].address == 0x2404u && gpu[1].size == 0xBFCu);
+  cpu = tracker.cpu_dirty_ranges();
+  assert(cpu.size() == 1 && cpu[0].address == 0x2400u && cpu[0].size == 4u);
+
+  // CPU visibility is demand-driven and may cover only a subrange.
+  tracker.mark_gpu_downloaded(0x2800u, 0x100u);
+  assert(!tracker.has_gpu_dirty(0x2800u, 0x100u));
+  assert(tracker.has_gpu_dirty(0x2700u, 0x100u));
+  assert(tracker.has_gpu_dirty(0x2900u, 0x100u));
+
+  // A later GPU export supersedes pending CPU ownership for exactly the bytes
+  // it writes. Adjacent CPU dirt remains uploadable.
+  tracker.mark_cpu_write(0x4000u, 0x100u);
+  tracker.mark_gpu_write(0x4040u, 0x20u);
+  cpu = tracker.cpu_dirty_ranges(0x4000u, 0x100u);
+  assert(cpu.size() == 2);
+  assert(cpu[0].address == 0x4000u && cpu[0].size == 0x40u);
+  assert(cpu[1].address == 0x4060u && cpu[1].size == 0xA0u);
+
+  // Xenon Memory, rather than either native API, builds requested-range upload
+  // plans and tracks which bytes are valid in the device mirror.
+  xenon::memory::GuestMemoryCoherency memory_writes;
+  GuestMemoryGpuCoherency planned;
+  planned.reset(0x10000u, false);
+  memory_writes.mark_write(0x100u, 4u);
+  memory_writes.mark_write(0x300u, 8u);
+  auto plan = planned.plan_upload(memory_writes, 0x300u, 4u, 2u);
+  assert(plan.exact_history);
+  assert(plan.ranges.size() == 2u);
+  assert(plan.ranges[0].address == 0x300u && plan.ranges[0].size == 2u);
+  assert(plan.ranges[1].address == 0x302u && plan.ranges[1].size == 2u);
+  assert(!planned.device_range_valid(0x300u, 4u));
+  for (const auto& range : plan.ranges)
+    planned.commit_cpu_upload(range.address, range.size);
+  assert(planned.device_range_valid(0x300u, 4u));
+  assert(!planned.device_range_valid(0x100u, 4u));
+
+  // Dirt outside the first request remains pending even though the journal
+  // epoch has advanced, and a later exact CPU write invalidates only its byte.
+  plan = planned.plan_upload(memory_writes, 0x100u, 4u);
+  assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x100u &&
+         plan.ranges[0].size == 4u);
+  memory_writes.mark_write(0x301u, 1u);
+  plan = planned.plan_upload(memory_writes, 0x301u, 1u);
+  assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x301u &&
+         plan.ranges[0].size == 1u);
+  assert(!planned.device_range_valid(0x300u, 4u));
+
+  // CPU ownership is reconciled before a readback plan is emitted. A CPU write
+  // that is newer than the GPU ownership removes only the overlapping bytes
+  // from the requested GPU range instead of allowing stale device data to win.
+  GuestMemoryGpuCoherency preplan_tracker;
+  preplan_tracker.reset(0x10000u, false);
+  preplan_tracker.mark_gpu_write(0x480u, 8u);
+  memory_writes.mark_write(0x482u, 2u);
+  const auto preplan = preplan_tracker.plan_readback(
+      memory_writes, 0x480u, 8u);
+  assert(preplan.ranges.size() == 2u);
+  assert(preplan.ranges[0].address == 0x480u && preplan.ranges[0].size == 2u);
+  assert(preplan.ranges[1].address == 0x484u && preplan.ranges[1].size == 4u);
+
+  // GPU->CPU readback publication is source-aware. The mirror's own physical
+  // write must not immediately appear as CPU dirt that needs uploading back to
+  // the same device mirror.
+  GuestMemoryGpuCoherency readback_tracker;
+  readback_tracker.reset(0x10000u, false);
+  readback_tracker.mark_gpu_write(0x500u, 8u);
+  const auto readback_plan = readback_tracker.plan_readback(
+      memory_writes, 0x500u, 8u);
+  assert(readback_plan.action ==
+         xenon::memory::GpuSynchronizationAction::Copy);
+  assert(readback_plan.ranges.size() == 1u);
+  const auto self_epoch = memory_writes.mark_write(0x500u, 8u);
+  assert(readback_tracker.commit_gpu_download(
+      memory_writes, readback_plan.ranges[0], 0x500u, 8u, self_epoch));
+  assert(!readback_tracker.has_gpu_dirty(0x500u, 8u));
+  assert(readback_tracker.cpu_dirty_ranges(0x500u, 8u).empty());
+  assert(readback_tracker.device_range_valid(0x500u, 8u));
+  auto echo_plan = readback_tracker.plan_upload(memory_writes, 0x500u, 8u);
+  assert(echo_plan.ranges.empty());
+
+  // An unrelated CPU publication before the mirror's own readback epoch must
+  // survive acknowledgement and remain uploadable byte-precisely.
+  readback_tracker.mark_gpu_write(0x600u, 8u);
+  const auto conflict_plan = readback_tracker.plan_readback(
+      memory_writes, 0x600u, 8u);
+  memory_writes.mark_write(0x603u, 1u);
+  const auto conflict_safe = readback_tracker.prepare_gpu_download(
+      memory_writes, conflict_plan.ranges[0]);
+  assert(conflict_safe.size() == 2u);
+  assert(conflict_safe[0].address == 0x600u && conflict_safe[0].size == 3u);
+  assert(conflict_safe[1].address == 0x604u && conflict_safe[1].size == 4u);
+  for (const auto& safe : conflict_safe) {
+    const auto conflict_self_epoch =
+        memory_writes.mark_write(safe.address, safe.size);
+    assert(readback_tracker.commit_gpu_download(
+        memory_writes, safe, safe.address, safe.size, conflict_self_epoch));
+  }
+  const auto conflict_cpu = readback_tracker.cpu_dirty_ranges(0x600u, 8u);
+  assert(conflict_cpu.size() == 1u);
+  assert(conflict_cpu[0].address == 0x603u && conflict_cpu[0].size == 1u);
+  assert(!readback_tracker.device_range_valid(0x603u, 1u));
+
+  // GPU generations are range-local. An unrelated later GPU write must not
+  // invalidate the planned ownership of 0x700, while a newer overlapping write
+  // must survive the older readback commit.
+  readback_tracker.mark_gpu_write(0x700u, 4u);
+  const auto independent_plan = readback_tracker.plan_readback(
+      memory_writes, 0x700u, 4u);
+  readback_tracker.mark_gpu_write(0x800u, 4u);
+  const auto independent_self_epoch = memory_writes.mark_write(0x700u, 4u);
+  assert(readback_tracker.commit_gpu_download(
+      memory_writes, independent_plan.ranges[0], 0x700u, 4u,
+      independent_self_epoch));
+  assert(!readback_tracker.has_gpu_dirty(0x700u, 4u));
+  assert(readback_tracker.has_gpu_dirty(0x800u, 4u));
+
+  readback_tracker.mark_gpu_write(0x900u, 8u);
+  const auto stale_plan = readback_tracker.plan_readback(
+      memory_writes, 0x900u, 8u);
+  readback_tracker.mark_gpu_write(0x902u, 2u);
+  const auto stale_safe = readback_tracker.prepare_gpu_download(
+      memory_writes, stale_plan.ranges[0]);
+  assert(stale_safe.size() == 2u);
+  assert(stale_safe[0].address == 0x900u && stale_safe[0].size == 2u);
+  assert(stale_safe[1].address == 0x904u && stale_safe[1].size == 4u);
+  for (const auto& safe : stale_safe) {
+    const auto epoch = memory_writes.mark_write(safe.address, safe.size);
+    assert(readback_tracker.commit_gpu_download(
+        memory_writes, safe, safe.address, safe.size, epoch));
+  }
+  assert(!readback_tracker.has_gpu_dirty(0x900u, 2u));
+  assert(readback_tracker.has_gpu_dirty(0x902u, 2u));
+  assert(!readback_tracker.has_gpu_dirty(0x904u, 4u));
+
+  // UMA/mobile-capable policy is represented without changing Xbox semantics.
+  // A shared-host-visible implementation receives the same requested ranges,
+  // but executes cache/visibility work instead of redundant memory copies.
+  GuestMemoryGpuCoherency uma_tracker;
+  uma_tracker.reset(0x10000u, false,
+                    xenon::memory::GpuMemoryTopology::SharedHostVisible);
+  memory_writes.mark_write(0xA00u, 4u);
+  const auto uma_upload = uma_tracker.plan_upload(memory_writes, 0xA00u, 4u);
+  assert(uma_upload.action ==
+         xenon::memory::GpuSynchronizationAction::VisibilityOnly);
+  assert(uma_upload.ranges.size() == 1u);
+  uma_tracker.mark_gpu_write(0xB00u, 4u);
+  const auto uma_readback = uma_tracker.plan_readback(
+      memory_writes, 0xB00u, 4u);
+  assert(uma_readback.action ==
+         xenon::memory::GpuSynchronizationAction::VisibilityOnly);
+  assert(uma_readback.ranges.size() == 1u);
+}
+
+void test_memexport_stream_planning() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  write_memexport_stream(tracker, ShaderStage::Vertex, 7, 0x1000u, 37, 12,
+                         Endian128::Swap8In32, 2, true);
+  // Same base with a larger stream must merge to one maximum-sized range.
+  write_memexport_stream(tracker, ShaderStage::Vertex, 9, 0x1000u, 37, 20);
+
+  DecodedShader shader{};
+  shader.stage = ShaderStage::Vertex;
+  shader.reflection.writes_export_address = true;
+  shader.reflection.memory_export_mask = 0b00101;
+  shader.reflection.memory_exports = 2;
+  shader.reflection.memexport_stream_constants = {7, 9};
+  const auto plan = tracker.plan_memexport(shader);
+  assert(plan.valid && plan.has_writes());
+  assert(!plan.requires_dynamic_address_analysis);
+  assert(plan.export_mask == 0b00101);
+  assert(plan.streams.size() == 2);
+  assert(plan.streams[0].valid && plan.streams[1].valid);
+  assert(plan.streams[0].base_address_dwords == 0x1000u);
+  assert(plan.streams[0].base_address_bytes == 0x4000u);
+  assert(plan.streams[0].format == 37);
+  assert(plan.streams[0].element_size_bytes == 8);
+  assert(plan.streams[0].index_count == 12);
+  assert(plan.streams[0].size_bytes() == 96);
+  assert(plan.streams[0].endian == Endian128::Swap8In32);
+  assert(plan.streams[0].number_format == 2);
+  assert(plan.streams[0].red_blue_swap);
+  assert(plan.ranges.size() == 1);
+  assert(plan.ranges[0].base_address_dwords == 0x1000u);
+  assert(plan.ranges[0].size_bytes == 160);
+
+  // A shader with both a recoverable stream and another noncanonical eA path
+  // may use the static range, but must still advertise dynamic analysis.
+  shader.reflection.requires_dynamic_memexport_address = true;
+  const auto mixed_plan = tracker.plan_memexport(shader);
+  assert(mixed_plan.ranges.size() == 1);
+  assert(mixed_plan.requires_dynamic_address_analysis);
+  shader.reflection.requires_dynamic_memexport_address = false;
+
+  // Pixel shaders use the second architectural float-constant bank.
+  ResourceStateTracker pixel_tracker;
+  write_memexport_stream(pixel_tracker, ShaderStage::Pixel, 4, 0x2000u, 6, 32);
+  DecodedShader pixel{};
+  pixel.stage = ShaderStage::Pixel;
+  pixel.reflection.writes_export_address = true;
+  pixel.reflection.memory_export_mask = 1;
+  pixel.reflection.memory_exports = 1;
+  pixel.reflection.memexport_stream_constants = {4};
+  const auto pixel_plan = pixel_tracker.plan_memexport(pixel);
+  assert(pixel_plan.ranges.size() == 1);
+  assert(pixel_plan.streams[0].valid);
+  assert(pixel_plan.streams[0].base_address_bytes == 0x8000u);
+  assert(pixel_plan.streams[0].element_size_bytes == 4);
+  assert(pixel_plan.ranges[0].size_bytes == 128);
+}
+
+void test_memexport_dynamic_and_invalid_streams_stay_explicit() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  DecodedShader dynamic{};
+  dynamic.stage = ShaderStage::Vertex;
+  dynamic.reflection.writes_export_address = true;
+  dynamic.reflection.memory_export_mask = 1;
+  dynamic.reflection.memory_exports = 1;
+  auto plan = tracker.plan_memexport(dynamic);
+  assert(plan.valid && plan.has_writes());
+  assert(plan.requires_dynamic_address_analysis);
+  assert(plan.streams.empty() && plan.ranges.empty());
+
+  write_memexport_stream(tracker, ShaderStage::Vertex, 3, 0x1000u, 6, 8);
+  // Break the required normalized-float guard word. This can legitimately be
+  // encountered when a conditional export path isn't taken, so it is skipped
+  // rather than being turned into a guessed memory range.
+  tracker.apply({0x4000u + 3u * 4u + 1u, 0u});
+  dynamic.reflection.memexport_stream_constants = {3};
+  plan = tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(!plan.streams[0].error.empty());
+  assert(plan.ranges.empty());
+  assert(plan.requires_dynamic_address_analysis);
+
+  // Byte-addressability alone must not make an arbitrary texture format a
+  // legal memexport format. Format 33 is outside the Xenos color-export set.
+  ResourceStateTracker invalid_format_tracker;
+  write_memexport_stream(invalid_format_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 33, 8);
+  plan = invalid_format_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("non-exportable") != std::string::npos);
+  assert(plan.ranges.empty() && plan.requires_dynamic_address_analysis);
+
+  // Reserved endian and number-format encodings also remain explicit.
+  ResourceStateTracker invalid_encoding_tracker;
+  write_memexport_stream(invalid_encoding_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 6, 8, static_cast<Endian128>(6), 4);
+  plan = invalid_encoding_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("endian") != std::string::npos);
+
+  ResourceStateTracker invalid_number_tracker;
+  write_memexport_stream(invalid_number_tracker, ShaderStage::Vertex, 3,
+                         0x1000u, 6, 8, Endian128::None, 4);
+  plan = invalid_number_tracker.plan_memexport(dynamic);
+  assert(plan.streams.size() == 1 && !plan.streams[0].valid);
+  assert(plan.streams[0].error.find("number format") != std::string::npos);
 }
 
 void test_texture_descriptor() {
@@ -250,6 +562,15 @@ void test_copy_resolve_state() {
   assert(rectangle.valid);
   assert(rectangle.left == 0 && rectangle.top == 0);
   assert(rectangle.right == 16 && rectangle.bottom == 16);
+  const auto snapshot_rectangle = decode_resolve_rectangle(
+      tracker.snapshot(),
+      std::span<const std::byte>(memory).subspan(0x1000, sizeof(vertices)),
+      0x1000u);
+  assert(snapshot_rectangle.valid);
+  assert(snapshot_rectangle.left == rectangle.left &&
+         snapshot_rectangle.top == rectangle.top &&
+         snapshot_rectangle.right == rectangle.right &&
+         snapshot_rectangle.bottom == rectangle.bottom);
 
   auto plan_state = tracker.snapshot();
   plan_state.raster.msaa_samples_log2 = 2;
@@ -262,10 +583,41 @@ void test_copy_resolve_state() {
   assert(resolve_plan.selected_sample_count == 1);
   assert(resolve_plan.host_sample_for_guest[2] == 2);
   assert(!resolve_plan.native_color_average);
+  plan_state.copy.sample_select = CopySampleSelect::Samples01;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
+  assert(resolve_plan.guest_sample_mask == 0x3);
+  assert(resolve_plan.selected_sample_count == 2);
+  assert(resolve_plan.host_sample_for_guest[0] == 0);
+  assert(resolve_plan.host_sample_for_guest[1] == 1);
+  plan_state.copy.sample_select = CopySampleSelect::Samples23;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
+  assert(resolve_plan.guest_sample_mask == 0xC);
+  assert(resolve_plan.selected_sample_count == 2);
+  assert(resolve_plan.host_sample_for_guest[2] == 2);
+  assert(resolve_plan.host_sample_for_guest[3] == 3);
   plan_state.copy.sample_select = CopySampleSelect::Samples0123;
   resolve_plan = plan_resolve(plan_state, memory);
-  assert(resolve_plan.valid && resolve_plan.native_color_average);
+  assert(resolve_plan.valid && !resolve_plan.native_color_average);
   assert(resolve_plan.guest_sample_mask == 0xF);
+
+  // Depth resolves never average. Pair/full selections sanitize to one guest
+  // sample before the native backend sees the plan.
+  plan_state.copy.source_select = 4;
+  plan_state.copy.sample_select = CopySampleSelect::Samples0123;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && resolve_plan.depth);
+  assert(!resolve_plan.native_color_average);
+  assert(resolve_plan.copy.sample_select == CopySampleSelect::Sample0);
+  assert(resolve_plan.guest_sample_mask == 0x1);
+  assert(resolve_plan.selected_sample_count == 1);
+  plan_state.copy.sample_select = CopySampleSelect::Samples23;
+  resolve_plan = plan_resolve(plan_state, memory);
+  assert(resolve_plan.valid && resolve_plan.depth);
+  assert(resolve_plan.copy.sample_select == CopySampleSelect::Sample2);
+  assert(resolve_plan.guest_sample_mask == 0x4);
+  assert(resolve_plan.selected_sample_count == 1);
 
   tracker.apply({0x2080, 8u | (8u << 16)});
   tracker.apply({0x2205, 1u << 16});
@@ -379,6 +731,9 @@ void test_preferred_polygon_offset() {
 }  // namespace
 
 int main() {
+  test_guest_memory_coherency_ranges();
+  test_memexport_stream_planning();
+  test_memexport_dynamic_and_invalid_streams_stay_explicit();
   test_texture_descriptor();
   test_vertex_and_render_state();
   test_constant_buffer_abi();

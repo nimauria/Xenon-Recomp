@@ -13,6 +13,10 @@ class Buffer {
  public:
   Buffer() = default;
   ~Buffer();
+  Buffer(const Buffer&) = delete;
+  Buffer& operator=(const Buffer&) = delete;
+  Buffer(Buffer&& other) noexcept;
+  Buffer& operator=(Buffer&& other) noexcept;
   [[nodiscard]] bool initialize(VkPhysicalDevice physical_device,
                                 VkDevice device, VkDeviceSize size,
                                 VkBufferUsageFlags usage,

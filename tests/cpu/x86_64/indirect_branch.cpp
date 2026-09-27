@@ -14,6 +14,36 @@ ExecutionResult ib_bcctr(CpuState&,MemoryPort&,RuntimeServices&);
 ExecutionResult ib_bcctrl(CpuState&,MemoryPort&,RuntimeServices&);
 ExecutionResult ib_bcctr_true(CpuState&,MemoryPort&,RuntimeServices&);
 ExecutionResult ib_bcctr_false(CpuState&,MemoryPort&,RuntimeServices&);
+ExecutionResult ib_bcctr_v2(ExecutionContext&);
+ExecutionResult ib_bcctrl_v2(ExecutionContext&);
+
+namespace {
+constexpr GuestAddress kBranchNativeTarget = 0x5678u;
+constexpr GuestAddress kCallNativeTarget = 0x6788u;
+unsigned native_branch_calls{};
+unsigned native_call_calls{};
+
+ExecutionResult native_branch_target(ExecutionContext& context) {
+  ++native_branch_calls;
+  context.state.gpr[9] = 0xBEEFu;
+  return {FlowReason::Fallthrough, kBranchNativeTarget + 4u, 0u};
+}
+
+ExecutionResult native_call_target(ExecutionContext& context) {
+  ++native_call_calls;
+  context.state.gpr[10] = 0xCAFEu;
+  return {FlowReason::Return, 0x3018u, 0u};
+}
+
+NativeCompiledEntry lookup_native(void*, ExecutionContext&, GuestAddress target,
+                                  CompiledLookupKind kind) {
+  if (kind == CompiledLookupKind::Branch && target == kBranchNativeTarget)
+    return native_branch_target;
+  if (kind == CompiledLookupKind::Call && target == kCallNativeTarget)
+    return native_call_target;
+  return nullptr;
+}
+}  // namespace
 
 struct RecordingRuntime final : RuntimeServices {
   GuestAddress last_call{}; unsigned calls{};
@@ -63,6 +93,27 @@ int main(){
   assert(r.reason==FlowReason::Branch && r.next_address==0x7000u && s.ctr==0x7003u);
   s.set_cr_bit(5,false); r=ib_bcctr_true(s,mem,rt); assert(r.reason==FlowReason::Fallthrough);
   r=ib_bcctr_false(s,mem,rt); assert(r.reason==FlowReason::Branch && r.next_address==0x7000u);
+
+  // CPU V2 indirect branch dispatch can jump straight to a compiled native
+  // entry through the ExecutionContext registry without a RuntimeServices
+  // call or guest opcode dispatch.
+  s={}; rt.calls=0; s.ctr=0x567Bu;
+  ExecutionContext branch_context(s,mem,rt);
+  branch_context.compiled_lookup=&lookup_native;
+  r=ib_bcctr_v2(branch_context);
+  assert(native_branch_calls==1u && s.gpr[9]==0xBEEFu);
+  assert(r.reason==FlowReason::Fallthrough && r.next_address==0x567Cu);
+  assert(rt.calls==0u);
+
+  // Call lookups are a separate contract so only entries proven safe for a
+  // normal LR return are eligible for direct native host-call semantics.
+  s={}; rt.calls=0; s.ctr=0x678Bu;
+  ExecutionContext call_context(s,mem,rt);
+  call_context.compiled_lookup=&lookup_native;
+  r=ib_bcctrl_v2(call_context);
+  assert(native_call_calls==1u && s.gpr[10]==0xCAFEu);
+  assert(s.lr==0x3018u && r.reason==FlowReason::Fallthrough);
+  assert(rt.calls==0u);
 
   std::cout<<"xenon_cpu_indirect_branch: ok\n";
 }

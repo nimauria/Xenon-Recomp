@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "qt_version": "6.10.3",
+  "qt_sources": [
+    {
+      "name": "qtbase",
+      "url": "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtbase-everywhere-src-6.10.3.tar.xz",
+      "sha256": "383dc907816338f0cba72088a524c07458dfc69ce684ca9132fcc4fe91c24b0b"
+    },
+    {
+      "name": "qtdeclarative",
+      "url": "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtdeclarative-everywhere-src-6.10.3.tar.xz",
+      "sha256": "dadf80d43b8e08ca63aa65d46859a42b920a7777cf7e0ecfcb4c4537f9e65c76"
+    },
+    {
+      "name": "qtsvg",
+      "url": "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtsvg-everywhere-src-6.10.3.tar.xz",
+      "sha256": "b3223fe005f6a4c7f21f34e4ee6ce0094737cff9503ba15bbb171ac18794f76d"
+    },
+    {
+      "name": "qtshadertools",
+      "url": "https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/qtshadertools-everywhere-src-6.10.3.tar.xz",
+      "sha256": "c75837e2ea493ec0b9747b227c455d4a12cafe90068abf607992da9a403616c6"
+    }
+  ]
+}

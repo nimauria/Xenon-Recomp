@@ -412,6 +412,63 @@ bool decode_host_color_sample(ColorRenderTargetFormat format,
   }
 }
 
+bool average_host_color_samples(
+    ColorRenderTargetFormat format, std::uint32_t width,
+    std::uint32_t height, std::span<const std::byte> source_a,
+    std::uint32_t source_a_pitch, std::span<const std::byte> source_b,
+    std::uint32_t source_b_pitch, std::vector<std::byte>& destination,
+    std::uint32_t& destination_pitch) noexcept {
+  destination.clear();
+  destination_pitch = 0;
+  const auto bytes_per_pixel = color_host_bytes_per_pixel(format);
+  if (!width || !height || !bytes_per_pixel ||
+      source_a_pitch < width * bytes_per_pixel ||
+      source_b_pitch < width * bytes_per_pixel ||
+      std::uint64_t(source_a_pitch) * height > source_a.size() ||
+      std::uint64_t(source_b_pitch) * height > source_b.size()) {
+    return false;
+  }
+
+  destination_pitch = width * bytes_per_pixel;
+  destination.resize(std::size_t(destination_pitch) * height);
+  for (std::uint32_t y = 0; y < height; ++y) {
+    for (std::uint32_t x = 0; x < width; ++x) {
+      const auto source_a_offset = std::uint64_t(y) * source_a_pitch +
+                                   std::uint64_t(x) * bytes_per_pixel;
+      const auto source_b_offset = std::uint64_t(y) * source_b_pitch +
+                                   std::uint64_t(x) * bytes_per_pixel;
+      ColorSample a{};
+      ColorSample b{};
+      if (!decode_host_color_sample(
+              format, source_a.subspan(source_a_offset, bytes_per_pixel), a) ||
+          !decode_host_color_sample(
+              format, source_b.subspan(source_b_offset, bytes_per_pixel), b)) {
+        destination.clear();
+        destination_pitch = 0;
+        return false;
+      }
+      ColorSample average{};
+      for (std::size_t component = 0; component < average.components.size();
+           ++component) {
+        average.components[component] =
+            (a.components[component] + b.components[component]) * 0.5f;
+      }
+      const auto destination_offset =
+          std::uint64_t(y) * destination_pitch +
+          std::uint64_t(x) * bytes_per_pixel;
+      if (!encode_host_color_sample(
+              format, average,
+              std::span(destination).subspan(destination_offset,
+                                             bytes_per_pixel))) {
+        destination.clear();
+        destination_pitch = 0;
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 bool edram_color_to_host(ColorRenderTargetFormat format, std::uint32_t width,
                          std::uint32_t height,
                          std::span<const std::byte> source,
@@ -598,8 +655,9 @@ bool resolve_edram_raw(const Edram& edram, const EdramSurfaceLayout& layout,
                        std::uint32_t sample, std::span<std::byte> destination,
                        std::uint32_t destination_pitch) noexcept {
   const auto pixel_bytes = layout.is_64bpp ? 8u : 4u;
-  if (!width || !height || left + width > layout.pitch_pixels ||
-      top + height > layout.height_pixels ||
+  if (!width || !height ||
+      std::uint64_t(left) + width > layout.pitch_pixels ||
+      std::uint64_t(top) + height > layout.height_pixels ||
       destination_pitch < width * pixel_bytes ||
       std::uint64_t(destination_pitch) * height > destination.size()) return false;
   for (std::uint32_t y = 0; y < height; ++y) {
@@ -621,8 +679,9 @@ bool store_edram_raw(Edram& edram, const EdramSurfaceLayout& layout,
                      std::span<const std::byte> source,
                      std::uint32_t source_pitch) noexcept {
   const auto pixel_bytes = layout.is_64bpp ? 8u : 4u;
-  if (!width || !height || left + width > layout.pitch_pixels ||
-      top + height > layout.height_pixels ||
+  if (!width || !height ||
+      std::uint64_t(left) + width > layout.pitch_pixels ||
+      std::uint64_t(top) + height > layout.height_pixels ||
       source_pitch < width * pixel_bytes ||
       std::uint64_t(source_pitch) * height > source.size()) return false;
   for (std::uint32_t y = 0; y < height; ++y) {

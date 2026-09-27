@@ -109,17 +109,30 @@ struct alignas(64) CpuState {
   }
 
   [[nodiscard]] std::uint8_t cr_field(unsigned field) const noexcept;
-  void set_cr_field(unsigned field, std::uint8_t value) noexcept;
+  void set_cr_field(unsigned field, std::uint8_t value) noexcept {
+    const unsigned shift = (7u - (field & 7u)) * 4u;
+    cr = (cr & ~(0xFu << shift)) |
+         ((static_cast<std::uint32_t>(value) & 0xFu) << shift);
+  }
   [[nodiscard]] bool cr_bit(unsigned bit) const noexcept;
   void set_cr_bit(unsigned bit, bool value) noexcept;
 
   [[nodiscard]] bool xer_ca() const noexcept { return (xer & xer_bits::CA) != 0; }
   [[nodiscard]] bool xer_ov() const noexcept { return (xer & xer_bits::OV) != 0; }
   [[nodiscard]] bool xer_so() const noexcept { return (xer & xer_bits::SO) != 0; }
-  void set_xer_ca(bool v) noexcept;
-  void set_xer_ov(bool v) noexcept;
-  void set_xer_so(bool v) noexcept;
-  void set_xer_overflow(bool overflow) noexcept;
+  void set_xer_ca(bool v) noexcept {
+    xer = v ? (xer | xer_bits::CA) : (xer & ~xer_bits::CA);
+  }
+  void set_xer_ov(bool v) noexcept {
+    xer = v ? (xer | xer_bits::OV) : (xer & ~xer_bits::OV);
+  }
+  void set_xer_so(bool v) noexcept {
+    xer = v ? (xer | xer_bits::SO) : (xer & ~xer_bits::SO);
+  }
+  void set_xer_overflow(bool overflow) noexcept {
+    set_xer_ov(overflow);
+    if (overflow) set_xer_so(true);
+  }
   [[nodiscard]] std::uint8_t xer_byte_count() const noexcept {
     return static_cast<std::uint8_t>(xer & xer_bits::BYTE_COUNT);
   }
@@ -135,7 +148,13 @@ struct alignas(64) CpuState {
   void set_vector_saturated() noexcept { vscr |= vscr_bits::SAT; }
   void clear_vector_saturated() noexcept { vscr &= ~vscr_bits::SAT; }
 
-  void update_cr0_signed(std::uint64_t result) noexcept;
+  void update_cr0_signed(std::uint64_t result) noexcept {
+    const auto signed_result = static_cast<std::int64_t>(result);
+    const std::uint8_t field = static_cast<std::uint8_t>(
+        (signed_result < 0 ? 0x8u : signed_result > 0 ? 0x4u : 0x2u) |
+        (xer_so() ? 0x1u : 0u));
+    set_cr_field(0, field);
+  }
   void update_cr1_from_fpscr() noexcept;
 };
 

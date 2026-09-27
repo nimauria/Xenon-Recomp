@@ -1,0 +1,784 @@
+#include "input_feature.hpp"
+
+#include "../settings/settings_feature.hpp"
+#include "../../services/path_service.hpp"
+
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <QTimer>
+
+#include <array>
+#include <algorithm>
+#include <filesystem>
+
+#ifndef XENON_LAUNCHER_RUNTIME_INPUT
+#define XENON_LAUNCHER_RUNTIME_INPUT 0
+#endif
+
+#if XENON_LAUNCHER_RUNTIME_INPUT
+#include "xenon/input/module_api_provider.hpp"
+#include "xenon/input/profile.hpp"
+#include "xenon/input/sdl_driver.hpp"
+#include "xenon/input/system.hpp"
+#include "xenon/input/xinput_driver.hpp"
+#endif
+
+namespace xenon::launcher::frontend_backend {
+namespace {
+
+QString connectionName(int value) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  using xenon::input::ConnectionType;
+  switch (static_cast<ConnectionType>(value)) {
+    case ConnectionType::Wired: return QStringLiteral("Wired");
+    case ConnectionType::Wireless: return QStringLiteral("Wireless");
+    case ConnectionType::Virtual: return QStringLiteral("Virtual");
+    case ConnectionType::Unknown: break;
+  }
+#endif
+  return QStringLiteral("Unknown");
+}
+
+QString subtypeName(int value) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  using xenon::input::DeviceSubtype;
+  switch (static_cast<DeviceSubtype>(value)) {
+    case DeviceSubtype::Gamepad: return QStringLiteral("Gamepad");
+    case DeviceSubtype::Wheel: return QStringLiteral("Wheel");
+    case DeviceSubtype::ArcadeStick: return QStringLiteral("Arcade Stick");
+    case DeviceSubtype::FlightStick: return QStringLiteral("Flight Stick / HOTAS");
+    case DeviceSubtype::DancePad: return QStringLiteral("Dance Pad");
+    case DeviceSubtype::Guitar: return QStringLiteral("Guitar");
+    case DeviceSubtype::DrumKit: return QStringLiteral("Drum Kit");
+    case DeviceSubtype::Unknown: break;
+  }
+#endif
+  return QStringLiteral("Unknown");
+}
+
+QString familyName(int value) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  using xenon::input::ControllerFamily;
+  switch (static_cast<ControllerFamily>(value)) {
+    case ControllerFamily::Xbox: return QStringLiteral("Xbox");
+    case ControllerFamily::PlayStation: return QStringLiteral("PlayStation");
+    case ControllerFamily::Nintendo: return QStringLiteral("Nintendo");
+    case ControllerFamily::Steam: return QStringLiteral("Steam");
+    case ControllerFamily::Generic: return QStringLiteral("Generic");
+    case ControllerFamily::Virtual: return QStringLiteral("Virtual");
+    case ControllerFamily::Unknown: break;
+  }
+#endif
+  return QStringLiteral("Unknown");
+}
+
+}  // namespace
+
+class InputFeature::Impl {
+ public:
+  Impl(InputFeature& owner, SettingsFeature& settings, PathService& paths, bool test_mode)
+      : owner(owner), settings(settings), paths(paths), test_mode(test_mode) {}
+
+  InputFeature& owner;
+  SettingsFeature& settings;
+  PathService& paths;
+  bool test_mode{};
+  QString last_status{QStringLiteral("Input runtime unavailable")};
+
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  std::unique_ptr<xenon::input::InputSystem> system{};
+  std::unique_ptr<xenon::input::module_api::Provider> module_api{};
+  QTimer hotplug_timer{};
+  std::array<xenon::input::GamepadState, xenon::input::kMaxUsers> frontend_previous_states{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_has_previous{};
+
+  // Part 6: analog-stick-driven navigation repeat state, independent per
+  // user and per direction so holding a direction repeats deterministically
+  // instead of racing frame-rate-dependent polling, and independent of the
+  // D-pad's own always-discrete button edges.
+  struct DirectionRepeatState {
+    bool held = false;
+    qint64 next_fire_ms = 0;
+  };
+  static constexpr qint64 kInitialRepeatDelayMs = 420;
+  static constexpr qint64 kRepeatIntervalMs = 120;
+  // Up, Down, Left, Right per user.
+  std::array<std::array<DirectionRepeatState, 4>, xenon::input::kMaxUsers> frontend_direction_repeat{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_left_trigger_held{};
+  std::array<bool, xenon::input::kMaxUsers> frontend_right_trigger_held{};
+
+  QString storePath() const {
+    return QDir{paths.configuredPath(QStringLiteral("profiles"))}
+        .filePath(QStringLiteral("input-profiles-v1.conf"));
+  }
+
+  static QString profileIdForUser(const xenon::input::InputSystem& input,
+                                  std::uint32_t user) {
+    const auto binding = input.profiles().user_binding(user);
+    return binding ? QString::fromStdString(*binding) : QString{};
+  }
+
+  std::optional<xenon::input::DeviceId> idForIdentity(const QString& identity) const {
+    if (!system) return std::nullopt;
+    for (const auto& device : system->devices()) {
+      if (QString::fromStdString(device.identity_key) == identity && device.connected)
+        return device.id;
+    }
+    return std::nullopt;
+  }
+
+  void persistAssignments() {
+    if (!system) return;
+    for (std::uint32_t user = 0; user < xenon::input::kMaxUsers; ++user) {
+      QStringList identities;
+      for (const auto& identity : system->desired_sources_for_user(user)) {
+        identities.push_back(QString::fromStdString(identity));
+      }
+      settings.setValue(QStringLiteral("input/user%1/sources").arg(user), identities);
+      settings.setValue(QStringLiteral("input/user%1/automatic").arg(user),
+                        system->auto_assignment(user));
+    }
+  }
+
+  void restoreAssignments() {
+    if (!system) return;
+    for (std::uint32_t user = 0; user < xenon::input::kMaxUsers; ++user) {
+      const auto key = QStringLiteral("input/user%1/sources").arg(user);
+      const auto identities = settings.value(key).toStringList();
+      const auto automatic_key =
+          QStringLiteral("input/user%1/automatic").arg(user);
+      const auto saved_automatic = settings.value(automatic_key);
+      const bool any_identity_is_live = std::any_of(
+          identities.begin(), identities.end(),
+          [&](const QString& identity) { return idForIdentity(identity).has_value(); });
+      // V1 did not persist an assignment mode. If its backend-specific
+      // identity cannot exist under V2's SDL-first Automatic backend, migrate
+      // the slot back to automatic instead of leaving it permanently dead.
+      const bool automatic =
+          saved_automatic.isValid()
+              ? saved_automatic.toBool()
+              : (identities.isEmpty() || !any_identity_is_live);
+      if (automatic) {
+        system->set_auto_assignment(user, true);
+        continue;
+      }
+      std::vector<std::string> desired;
+      desired.reserve(static_cast<std::size_t>(identities.size()));
+      for (const auto& identity : identities) {
+        desired.push_back(identity.toStdString());
+      }
+      static_cast<void>(system->set_user_source_identities(user,
+                                                           std::move(desired)));
+    }
+  }
+
+  void applyProfileDefaults() {
+    if (!system) return;
+    auto profile = system->profiles().profile("default");
+    if (!profile) return;
+    const auto deadzone = static_cast<float>(settings.numberValue(QStringLiteral("input/deadzone"), 0.10));
+    profile->left_stick.inner_deadzone = std::clamp(deadzone, 0.0f, 0.5f);
+    profile->right_stick.inner_deadzone = std::clamp(deadzone, 0.0f, 0.5f);
+    static_cast<void>(system->profiles().upsert(*profile));
+    system->set_background_input_policy(settings.boolValue(QStringLiteral("input/backgroundInput"), false)
+        ? xenon::input::BackgroundInputPolicy::Always
+        : xenon::input::BackgroundInputPolicy::ForegroundOnly);
+  }
+
+  bool configureSystem(const QString& backend) {
+    system = std::make_unique<xenon::input::InputSystem>();
+
+    auto add_sdl = [&]() {
+      auto driver = xenon::input::create_sdl_input_driver();
+      if (driver) static_cast<void>(system->add_driver(std::move(driver)));
+    };
+    auto add_xinput = [&]() {
+      auto driver = xenon::input::create_xinput_driver();
+      if (driver) static_cast<void>(system->add_driver(std::move(driver)));
+    };
+
+#if defined(Q_OS_WIN)
+    if (backend == QStringLiteral("Native XInput")) {
+      add_xinput();
+    } else {
+      // SDL handles Xbox pads as well as DualSense, Steam, Nintendo and
+      // generic controllers. Prefer it for Automatic to avoid both excluding
+      // non-XInput hardware and double-enumerating one physical controller.
+      add_sdl();
+    }
+#else
+    static_cast<void>(backend);
+    add_sdl();
+#endif
+
+    auto result = system->setup();
+#if defined(Q_OS_WIN)
+    if (result != xenon::input::Result::Success &&
+        backend == QStringLiteral("Automatic")) {
+      system.reset();
+      module_api.reset();
+      system = std::make_unique<xenon::input::InputSystem>();
+      add_xinput();
+      result = system->setup();
+    }
+#endif
+    if (result != xenon::input::Result::Success) {
+      system.reset();
+      module_api.reset();
+      return false;
+    }
+    module_api = std::make_unique<xenon::input::module_api::Provider>(*system);
+    return true;
+  }
+
+  void configureFrontendRouter() {
+    if (!system) return;
+    using namespace xenon::input;
+    auto& router = system->frontend_router();
+    router.clear();
+    const FrontendInputSource source = FrontendInputSource::Gamepad;
+    router.bind({source, GamepadButton::DpadUp, FrontendInputAction::Up});
+    router.bind({source, GamepadButton::DpadDown, FrontendInputAction::Down});
+    router.bind({source, GamepadButton::DpadLeft, FrontendInputAction::Left});
+    router.bind({source, GamepadButton::DpadRight, FrontendInputAction::Right});
+    router.bind({source, GamepadButton::A, FrontendInputAction::Confirm});
+    router.bind({source, GamepadButton::B, FrontendInputAction::Cancel});
+    // X is reserved for a page-specific secondary action (Part 5); Y opens
+    // the focused item's context menu, the controller equivalent of
+    // right-click/Shift+F10 (Part 17 requires this to reach the same action
+    // model, not a separate one).
+    router.bind({source, GamepadButton::X, FrontendInputAction::Secondary});
+    router.bind({source, GamepadButton::Y, FrontendInputAction::Context});
+    router.bind({source, GamepadButton::Guide, FrontendInputAction::QuickCenter});
+    router.bind({source, GamepadButton::LeftShoulder, FrontendInputAction::PageBack});
+    router.bind({source, GamepadButton::RightShoulder, FrontendInputAction::PageForward});
+    router.bind({source, GamepadButton::Start, FrontendInputAction::QuickCenter});
+    frontend_previous_states.fill({});
+    frontend_has_previous.fill(false);
+    frontend_direction_repeat.fill({});
+    frontend_left_trigger_held.fill(false);
+    frontend_right_trigger_held.fill(false);
+  }
+
+  using TopologyEntry = std::pair<xenon::input::DeviceId, bool>;
+
+  std::vector<TopologyEntry> topology() const {
+    std::vector<TopologyEntry> result;
+    if (!system) return result;
+    const auto devices = system->devices();
+    result.reserve(devices.size());
+    for (const auto& device : devices) {
+      result.emplace_back(device.id, device.connected);
+    }
+    return result;
+  }
+#endif
+};
+
+InputFeature::InputFeature(SettingsFeature& settings, PathService& paths,
+                           bool test_mode, QObject* parent)
+    : QObject(parent), impl_(std::make_unique<Impl>(*this, settings, paths, test_mode)) {}
+
+InputFeature::~InputFeature() { shutdown(); }
+
+ServiceResult InputFeature::initialize() {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  const auto backend = impl_->settings.stringValue(QStringLiteral("input/backend"), QStringLiteral("Automatic"));
+  if (!impl_->configureSystem(backend)) {
+    impl_->last_status = QStringLiteral("Input compiled, but no host input backend initialized");
+    emit changed();
+    return ServiceResult::success(QStringLiteral("Input unavailable"), impl_->last_status);
+  }
+
+  impl_->applyProfileDefaults();
+  impl_->configureFrontendRouter();
+  const auto store = impl_->storePath();
+  const QFileInfo info{store};
+  if (info.exists()) {
+    static_cast<void>(impl_->system->profiles().load(std::filesystem::path(store.toStdString())));
+  } else {
+    QDir{}.mkpath(info.absolutePath());
+    static_cast<void>(impl_->system->profiles().save(std::filesystem::path(store.toStdString())));
+  }
+
+  impl_->restoreAssignments();
+  impl_->hotplug_timer.setInterval(1500);
+  impl_->hotplug_timer.setTimerType(Qt::CoarseTimer);
+  QObject::disconnect(&impl_->hotplug_timer, nullptr, this, nullptr);
+  connect(&impl_->hotplug_timer, &QTimer::timeout, this, [this]() {
+    if (!impl_->system) return;
+    const auto before = impl_->topology();
+    impl_->system->refresh_devices();
+    if (before != impl_->topology()) {
+      impl_->frontend_previous_states.fill({});
+      impl_->frontend_has_previous.fill(false);
+      emit changed();
+    }
+  });
+  impl_->hotplug_timer.start();
+  impl_->last_status = QStringLiteral("Input v2 connected");
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input ready"),
+                                QStringLiteral("Live Xenon Input devices and module API v1 are connected to the launcher."));
+#else
+  impl_->last_status = QStringLiteral("Input support is not compiled in this build");
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input unavailable"), impl_->last_status);
+#endif
+}
+
+QVariantList InputFeature::frontendActions() {
+  QVariantList result;
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return result;
+  using namespace xenon::input;
+  const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+  // Same fraction-of-full-range deadzone the guest-facing default profile
+  // uses (input/deadzone setting) - one meaningful "controller deadzone"
+  // concept for the user, applied here in the raw int16 axis domain since
+  // frontend navigation reads raw gamepad state directly rather than going
+  // through the guest profile's own deadzone-shaping code path.
+  const auto deadzone_fraction =
+      std::clamp(static_cast<float>(impl_->settings.numberValue(QStringLiteral("input/deadzone"), 0.10)),
+                0.0f, 0.5f);
+  const auto stick_deadzone = static_cast<std::int16_t>(deadzone_fraction * 32767.0f);
+  constexpr std::uint8_t kTriggerThreshold = 40;  // out of 255
+
+  for (std::uint32_t user = 0; user < kMaxUsers; ++user) {
+    State state{};
+    if (impl_->system->get_state(user, state) != Result::Success) continue;
+    const auto previous = impl_->frontend_previous_states[user];
+    const bool had_previous = impl_->frontend_has_previous[user];
+    impl_->frontend_previous_states[user] = state.gamepad;
+    impl_->frontend_has_previous[user] = true;
+    if (!had_previous) continue;
+
+    // Part 5/6: D-pad and left-stick both drive Up/Down/Left/Right through
+    // the same timed-repeat state machine, so holding either feels
+    // identical and neither can "race" the poll rate - each repeat fires at
+    // most once per kRepeatIntervalMs regardless of how often this function
+    // is called.
+    const bool dpad_up = (state.gamepad.buttons & GamepadButton::DpadUp) != 0;
+    const bool dpad_down = (state.gamepad.buttons & GamepadButton::DpadDown) != 0;
+    const bool dpad_left = (state.gamepad.buttons & GamepadButton::DpadLeft) != 0;
+    const bool dpad_right = (state.gamepad.buttons & GamepadButton::DpadRight) != 0;
+    const bool stick_up = state.gamepad.thumb_ly > stick_deadzone;
+    const bool stick_down = state.gamepad.thumb_ly < -stick_deadzone;
+    const bool stick_left = state.gamepad.thumb_lx < -stick_deadzone;
+    const bool stick_right = state.gamepad.thumb_lx > stick_deadzone;
+    const std::array<bool, 4> held_now{dpad_up || stick_up, dpad_down || stick_down,
+                                       dpad_left || stick_left, dpad_right || stick_right};
+    constexpr std::uint16_t kDirectionCode[4] = {GamepadButton::DpadUp, GamepadButton::DpadDown,
+                                                 GamepadButton::DpadLeft, GamepadButton::DpadRight};
+    for (int direction = 0; direction < 4; ++direction) {
+      auto& repeat_state = impl_->frontend_direction_repeat[user][static_cast<std::size_t>(direction)];
+      if (held_now[static_cast<std::size_t>(direction)]) {
+        if (!repeat_state.held) {
+          repeat_state.held = true;
+          repeat_state.next_fire_ms = now_ms + Impl::kInitialRepeatDelayMs;
+          impl_->system->frontend_router().dispatch(FrontendInputSource::Gamepad,
+                                                     kDirectionCode[direction], true, false);
+        } else if (now_ms >= repeat_state.next_fire_ms) {
+          repeat_state.next_fire_ms = now_ms + Impl::kRepeatIntervalMs;
+          impl_->system->frontend_router().dispatch(FrontendInputSource::Gamepad,
+                                                     kDirectionCode[direction], true, true);
+        }
+      } else {
+        repeat_state.held = false;
+      }
+    }
+
+    // Triggers are analog (Part 5's "page/scroll larger content"), not
+    // discrete button codes the router's bind()/dispatch() lookup covers, so
+    // push their events directly - edge-triggered (press again after
+    // releasing to scroll again), matching how a real trigger click feels
+    // rather than continuously repeating while held down.
+    const bool left_trigger_now = state.gamepad.left_trigger > kTriggerThreshold;
+    const bool right_trigger_now = state.gamepad.right_trigger > kTriggerThreshold;
+    if (left_trigger_now && !impl_->frontend_left_trigger_held[user]) {
+      impl_->system->frontend_router().push(
+          {FrontendInputSource::Gamepad, FrontendInputAction::ScrollUp,
+           state.gamepad.left_trigger, static_cast<std::uint64_t>(now_ms), true, false});
+    }
+    if (right_trigger_now && !impl_->frontend_right_trigger_held[user]) {
+      impl_->system->frontend_router().push(
+          {FrontendInputSource::Gamepad, FrontendInputAction::ScrollDown,
+           state.gamepad.right_trigger, static_cast<std::uint64_t>(now_ms), true, false});
+    }
+    impl_->frontend_left_trigger_held[user] = left_trigger_now;
+    impl_->frontend_right_trigger_held[user] = right_trigger_now;
+
+    constexpr std::uint16_t buttons[] = {
+        GamepadButton::A, GamepadButton::B, GamepadButton::X,
+        GamepadButton::Y, GamepadButton::Guide,
+        GamepadButton::LeftShoulder, GamepadButton::RightShoulder,
+        GamepadButton::Start};
+    for (const auto button : buttons) {
+      const bool was_down = (previous.buttons & button) != 0;
+      const bool is_down = (state.gamepad.buttons & button) != 0;
+      if (!was_down && is_down) {
+        impl_->system->frontend_router().dispatch(
+            FrontendInputSource::Gamepad, button, true, false);
+      }
+    }
+    FrontendInputEvent event{};
+    while (impl_->system->frontend_router().poll(event)) {
+      QString action;
+      switch (event.action) {
+        case FrontendInputAction::Up: action = QStringLiteral("up"); break;
+        case FrontendInputAction::Down: action = QStringLiteral("down"); break;
+        case FrontendInputAction::Left: action = QStringLiteral("left"); break;
+        case FrontendInputAction::Right: action = QStringLiteral("right"); break;
+        case FrontendInputAction::Confirm: action = QStringLiteral("confirm"); break;
+        case FrontendInputAction::Cancel: action = QStringLiteral("cancel"); break;
+        case FrontendInputAction::Menu: action = QStringLiteral("menu"); break;
+        case FrontendInputAction::QuickCenter: action = QStringLiteral("quickCenter"); break;
+        case FrontendInputAction::PageBack: action = QStringLiteral("pageBack"); break;
+        case FrontendInputAction::PageForward: action = QStringLiteral("pageForward"); break;
+        case FrontendInputAction::Context: action = QStringLiteral("context"); break;
+        case FrontendInputAction::Secondary: action = QStringLiteral("secondary"); break;
+        case FrontendInputAction::ScrollUp: action = QStringLiteral("scrollUp"); break;
+        case FrontendInputAction::ScrollDown: action = QStringLiteral("scrollDown"); break;
+        case FrontendInputAction::Search: action = QStringLiteral("search"); break;
+        default: break;
+      }
+      if (!action.isEmpty()) result.append(action);
+    }
+  }
+#endif
+  return result;
+}
+
+void InputFeature::shutdown() noexcept {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  impl_->hotplug_timer.stop();
+  impl_->frontend_previous_states.fill({});
+  impl_->frontend_has_previous.fill(false);
+  if (impl_->system) {
+    const auto store = impl_->storePath();
+    const QFileInfo info{store};
+    QDir{}.mkpath(info.absolutePath());
+    static_cast<void>(impl_->system->profiles().save(std::filesystem::path(store.toStdString())));
+    impl_->system->shutdown();
+    impl_->module_api.reset();
+    impl_->system.reset();
+  }
+#endif
+}
+
+bool InputFeature::available() const noexcept {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  return impl_->system != nullptr;
+#else
+  return false;
+#endif
+}
+
+QString InputFeature::status() const { return impl_->last_status; }
+
+QVariantList InputFeature::devices() const {
+  QVariantList result;
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return result;
+  for (const auto& device : impl_->system->devices()) {
+    QVariantMap item;
+    item.insert(QStringLiteral("id"), QString::number(device.id));
+    item.insert(QStringLiteral("ordinal"), static_cast<int>(device.ordinal));
+    item.insert(QStringLiteral("identityKey"), QString::fromStdString(device.identity_key));
+    item.insert(QStringLiteral("driver"), QString::fromStdString(device.driver_name));
+    item.insert(QStringLiteral("name"), QString::fromStdString(device.name));
+    item.insert(QStringLiteral("family"), familyName(static_cast<int>(device.family)));
+    item.insert(QStringLiteral("subtype"), subtypeName(static_cast<int>(device.subtype)));
+    item.insert(QStringLiteral("connection"), connectionName(static_cast<int>(device.connection)));
+    item.insert(QStringLiteral("vendorId"), QStringLiteral("%1").arg(device.vendor_id, 4, 16, QLatin1Char('0')).toUpper());
+    item.insert(QStringLiteral("productId"), QStringLiteral("%1").arg(device.product_id, 4, 16, QLatin1Char('0')).toUpper());
+    item.insert(QStringLiteral("connected"), device.connected);
+    item.insert(QStringLiteral("supportsVibration"), device.supports_vibration);
+    item.insert(QStringLiteral("supportsPower"), device.supports_power_info);
+    item.insert(QStringLiteral("supportsPlayerIndicator"), device.supports_player_indicator);
+    item.insert(QStringLiteral("supportsMotion"), device.supports_motion);
+    item.insert(QStringLiteral("supportsTouchpad"), device.supports_touchpad);
+    item.insert(QStringLiteral("supportsLightColor"), device.supports_light_color);
+    if (device.power_valid) {
+      item.insert(QStringLiteral("batteryPercent"), device.power.percentage == 0xFFu ? -1 : device.power.percentage);
+    } else {
+      item.insert(QStringLiteral("batteryPercent"), -1);
+    }
+    result.append(item);
+  }
+#endif
+  return result;
+}
+
+QVariantList InputFeature::users() const {
+  QVariantList result;
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  for (std::uint32_t user = 0; user < xenon::input::kMaxUsers; ++user) {
+    QVariantMap row;
+    row.insert(QStringLiteral("userIndex"), static_cast<int>(user));
+    QVariantList sources;
+    if (impl_->system) {
+      for (const auto id : impl_->system->sources_for_user(user)) {
+        const auto device = impl_->system->device(id);
+        if (!device) continue;
+        sources.append(QVariantMap{{QStringLiteral("id"), QString::number(id)},
+                                   {QStringLiteral("identityKey"), QString::fromStdString(device->identity_key)},
+                                   {QStringLiteral("name"), QString::fromStdString(device->name)},
+                                   {QStringLiteral("subtype"), subtypeName(static_cast<int>(device->subtype))}});
+      }
+      const auto primary = impl_->system->device_for_user(user);
+      if (primary) {
+        const auto device = impl_->system->device(*primary);
+        if (device) {
+          row.insert(QStringLiteral("deviceId"), QString::number(*primary));
+          row.insert(QStringLiteral("identityKey"), QString::fromStdString(device->identity_key));
+          row.insert(QStringLiteral("deviceName"), QString::fromStdString(device->name));
+        }
+      }
+      const auto profile_id = Impl::profileIdForUser(*impl_->system, user);
+      row.insert(QStringLiteral("profileId"), profile_id);
+      row.insert(QStringLiteral("automatic"),
+                 impl_->system->auto_assignment(user));
+    }
+    row.insert(QStringLiteral("sources"), sources);
+    result.append(row);
+  }
+#endif
+  return result;
+}
+
+QVariantList InputFeature::profiles() const {
+  QVariantList result;
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return result;
+  for (const auto& profile : impl_->system->profiles().profiles()) {
+    result.append(QVariantMap{{QStringLiteral("id"), QString::fromStdString(profile.id)},
+                              {QStringLiteral("name"), QString::fromStdString(profile.name)},
+                              {QStringLiteral("enabled"), profile.enabled},
+                              {QStringLiteral("leftDeadzone"), profile.left_stick.inner_deadzone},
+                              {QStringLiteral("rightDeadzone"), profile.right_stick.inner_deadzone}});
+  }
+#endif
+  return result;
+}
+
+QVariantMap InputFeature::diagnostics() const {
+  QVariantMap result;
+  result.insert(QStringLiteral("available"), available());
+  result.insert(QStringLiteral("status"), status());
+  result.insert(QStringLiteral("profileStorePath"), profileStorePath());
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (impl_->system) {
+    const auto diagnostics = impl_->system->diagnostics();
+    result.insert(QStringLiteral("setup"), diagnostics.setup);
+    result.insert(QStringLiteral("enabled"), diagnostics.enabled);
+    result.insert(QStringLiteral("focused"), diagnostics.focused);
+    result.insert(QStringLiteral("effectiveActive"), diagnostics.effective_active);
+    result.insert(QStringLiteral("driverCount"), static_cast<qlonglong>(diagnostics.driver_count));
+    result.insert(QStringLiteral("connectedDeviceCount"), static_cast<qlonglong>(diagnostics.connected_device_count));
+    result.insert(QStringLiteral("assignedUserCount"), static_cast<qlonglong>(diagnostics.assigned_user_count));
+  }
+#endif
+  return result;
+}
+
+QVariantMap InputFeature::moduleApiInfo() const {
+  QVariantMap result;
+  result.insert(QStringLiteral("name"), QStringLiteral("Xenon Input Module API"));
+  result.insert(QStringLiteral("id"), QStringLiteral("input"));
+  result.insert(QStringLiteral("version"), 1);
+  result.insert(QStringLiteral("header"), QStringLiteral("xenon/input/module_api.hpp"));
+  result.insert(QStringLiteral("cmakeTarget"), QStringLiteral("Xenon::InputAPI"));
+  result.insert(QStringLiteral("manifestKey"), QStringLiteral("runtimeApis.input"));
+  result.insert(QStringLiteral("guestXamBridge"), true);
+  result.insert(QStringLiteral("features"), QStringList{
+      QStringLiteral("state"), QStringLiteral("capabilities"), QStringLiteral("vibration"),
+      QStringLiteral("power"), QStringLiteral("device-metadata"), QStringLiteral("profiles"),
+      QStringLiteral("multi-source"), QStringLiteral("flight-devices")});
+  return result;
+}
+
+QString InputFeature::profileStorePath() const {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  return impl_->storePath();
+#else
+  return {};
+#endif
+}
+
+void InputFeature::setFrontendFocused(bool focused) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (impl_->system) impl_->system->set_focused(focused);
+#else
+  static_cast<void>(focused);
+#endif
+}
+
+ServiceResult InputFeature::refresh() {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return ServiceResult::failure(QStringLiteral("Input unavailable"), impl_->last_status);
+  impl_->system->refresh_devices();
+  impl_->frontend_previous_states.fill({});
+  impl_->frontend_has_previous.fill(false);
+  impl_->restoreAssignments();
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input refreshed"), QStringLiteral("Connected input devices were rescanned."));
+#else
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not compiled in this build."));
+#endif
+}
+
+ServiceResult InputFeature::reconfigure() {
+  shutdown();
+  return initialize();
+}
+
+ServiceResult InputFeature::applySettings() {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system) return ServiceResult::failure(QStringLiteral("Input unavailable"), impl_->last_status);
+  impl_->applyProfileDefaults();
+  static_cast<void>(impl_->system->profiles().save(std::filesystem::path(impl_->storePath().toStdString())));
+  emit changed();
+  return ServiceResult::success();
+#else
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::assignUser(int user_index, const QString& identity_key) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input assignment"), QStringLiteral("Invalid input user."));
+  const auto id = impl_->idForIdentity(identity_key);
+  if (!id) return ServiceResult::failure(QStringLiteral("Input assignment"), QStringLiteral("The selected device is not connected."));
+  const auto status = impl_->system->assign_user(static_cast<std::uint32_t>(user_index), *id);
+  if (status != xenon::input::Result::Success)
+    return ServiceResult::failure(QStringLiteral("Input assignment"), QString::fromLatin1(xenon::input::to_string(status).data(), static_cast<qsizetype>(xenon::input::to_string(status).size())));
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Controller assigned"), QStringLiteral("Xbox user %1 now uses the selected device.").arg(user_index + 1));
+#else
+  static_cast<void>(user_index); static_cast<void>(identity_key);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not compiled in this build."));
+#endif
+}
+
+ServiceResult InputFeature::clearUser(int user_index) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input assignment"), QStringLiteral("Invalid input user."));
+  static_cast<void>(impl_->system->clear_user(static_cast<std::uint32_t>(user_index)));
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Controller cleared"));
+#else
+  static_cast<void>(user_index);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::setUserAutomatic(int user_index) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 ||
+      user_index >= static_cast<int>(xenon::input::kMaxUsers)) {
+    return ServiceResult::failure(QStringLiteral("Input assignment"),
+                                  QStringLiteral("Invalid input user."));
+  }
+  impl_->system->set_auto_assignment(static_cast<std::uint32_t>(user_index),
+                                     true);
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(
+      QStringLiteral("Automatic controller assignment enabled"));
+#else
+  static_cast<void>(user_index);
+  return ServiceResult::failure(
+      QStringLiteral("Input unavailable"),
+      QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::addUserSource(int user_index, const QString& identity_key) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("Invalid input user."));
+  const auto id = impl_->idForIdentity(identity_key);
+  if (!id) return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("The selected device is not connected."));
+  const auto status = impl_->system->add_user_source(static_cast<std::uint32_t>(user_index), *id);
+  if (status != xenon::input::Result::Success) return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("The source could not be added."));
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input source added"));
+#else
+  static_cast<void>(user_index); static_cast<void>(identity_key);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::removeUserSource(int user_index, const QString& identity_key) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("Invalid input user."));
+  const auto id = impl_->idForIdentity(identity_key);
+  if (!id) return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("The selected device is not connected."));
+  const auto status = impl_->system->remove_user_source(static_cast<std::uint32_t>(user_index), *id);
+  if (status != xenon::input::Result::Success) return ServiceResult::failure(QStringLiteral("Input source"), QStringLiteral("The source was not assigned."));
+  impl_->persistAssignments();
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input source removed"));
+#else
+  static_cast<void>(user_index); static_cast<void>(identity_key);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::bindUserProfile(int user_index, const QString& profile_id) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input profile"), QStringLiteral("Invalid input user."));
+  if (!impl_->system->profiles().bind_user(static_cast<std::uint32_t>(user_index), profile_id.toStdString()))
+    return ServiceResult::failure(QStringLiteral("Input profile"), QStringLiteral("The requested input profile does not exist."));
+  static_cast<void>(impl_->system->profiles().save(std::filesystem::path(impl_->storePath().toStdString())));
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input profile assigned"));
+#else
+  static_cast<void>(user_index); static_cast<void>(profile_id);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::clearUserProfile(int user_index) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Input profile"), QStringLiteral("Invalid input user."));
+  static_cast<void>(impl_->system->profiles().clear_user(static_cast<std::uint32_t>(user_index)));
+  static_cast<void>(impl_->system->profiles().save(std::filesystem::path(impl_->storePath().toStdString())));
+  emit changed();
+  return ServiceResult::success(QStringLiteral("Input profile cleared"));
+#else
+  static_cast<void>(user_index);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+ServiceResult InputFeature::testVibration(int user_index) {
+#if XENON_LAUNCHER_RUNTIME_INPUT
+  if (!impl_->system || user_index < 0 || user_index >= static_cast<int>(xenon::input::kMaxUsers))
+    return ServiceResult::failure(QStringLiteral("Rumble test"), QStringLiteral("Invalid input user."));
+  if (!impl_->settings.boolValue(QStringLiteral("input/rumble"), true))
+    return ServiceResult::failure(QStringLiteral("Rumble disabled"), QStringLiteral("Enable controller rumble before testing it."));
+  const auto status = impl_->system->set_vibration(static_cast<std::uint32_t>(user_index), {26000, 16000});
+  if (status != xenon::input::Result::Success)
+    return ServiceResult::failure(QStringLiteral("Rumble unavailable"), QStringLiteral("The selected device does not support vibration."));
+  QTimer::singleShot(300, this, [this, user_index]() {
+    if (impl_->system) static_cast<void>(impl_->system->set_vibration(static_cast<std::uint32_t>(user_index), {}));
+  });
+  return ServiceResult::success(QStringLiteral("Rumble test"), QStringLiteral("A short vibration test was sent."));
+#else
+  static_cast<void>(user_index);
+  return ServiceResult::failure(QStringLiteral("Input unavailable"), QStringLiteral("Input support is not available in this build or session."));
+#endif
+}
+
+}  // namespace xenon::launcher::frontend_backend

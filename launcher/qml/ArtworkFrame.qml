@@ -4,22 +4,28 @@ Rectangle {
     id: root
 
     property url source: ""
-    property string fallbackTitle: "MODULE ARTWORK"
+    property string fallbackTitle: ""
     property bool hero: false
+    // Normalized [0,1] source-image point that must stay visible under the
+    // cover crop (e.g. supplied by a module's tileArtFocal/heroArtFocal
+    // manifest metadata). Defaults to center, matching prior behavior for
+    // any artwork that declares no focal point.
+    property real focalX: 0.5
+    property real focalY: 0.5
 
-    radius: 8
+    radius: Theme.controlRadius
     clip: true
     color: Theme.surfaceAlt
-    border.width: 1
+    border.width: Theme.borderWidth
     border.color: Theme.border
 
-    Image {
+    CoverImage {
         anchors.fill: parent
         source: root.source
         visible: root.source.toString().length > 0
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-        cache: true
+        fitMode: "cover"
+        focalX: root.focalX
+        focalY: root.focalY
     }
 
     Rectangle {
@@ -31,33 +37,26 @@ Rectangle {
             GradientStop { position: 1.0; color: Theme.surface }
         }
 
-        Rectangle {
+        XenonBrand {
             anchors.centerIn: parent
-            width: root.hero ? 110 : 42
+            width: root.hero ? Math.min(100, parent.width * 0.15) : Math.min(44, parent.width * 0.44)
             height: width
-            radius: width / 2
-            color: Theme.surface
-            border.width: 1
-            border.color: Theme.accent
-            opacity: 0.85
-
-            Text {
-                anchors.centerIn: parent
-                text: "X"
-                color: Theme.accent
-                font.pixelSize: root.hero ? 46 : 20
-                font.weight: Font.Light
-            }
+            asset: "mark"
+            brandColor: Theme.accent
+            opacity: 0.88
         }
 
         Text {
+            visible: root.fallbackTitle.length > 0
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottom: parent.bottom
-            anchors.bottomMargin: root.hero ? 24 : 9
+            anchors.bottomMargin: root.hero ? Theme.spaceLg : Theme.spaceSm
+            width: parent.width - Theme.spaceLg * 2
             text: root.fallbackTitle
             color: Theme.textMuted
-            font.pixelSize: root.hero ? 13 : 8
-            font.letterSpacing: root.hero ? 2 : 1
+            font.pixelSize: Theme.typeCaption
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
         }
     }
 }

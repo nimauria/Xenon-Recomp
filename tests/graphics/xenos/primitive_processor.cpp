@@ -21,6 +21,10 @@ int main() {
   auto batch = process_primitives(draw, memory);
   assert(batch.valid && batch.indexed);
   assert((batch.indices == std::vector<std::uint32_t>{1, 2, 3, 3, 2, 4}));
+  const auto snapshot_batch = process_primitives(
+      draw, std::span<const std::byte>(memory).subspan(8, 8), {}, 8);
+  assert(snapshot_batch.valid && snapshot_batch.indexed);
+  assert(snapshot_batch.indices == batch.indices);
 
   draw = {};
   draw.source = DrawSource::Immediate;
@@ -69,5 +73,16 @@ int main() {
   assert(batch.valid && !batch.indexed && batch.requires_rectangle_expansion);
   assert(batch.topology == HostPrimitiveTopology::TriangleList);
   assert((batch.indices == std::vector<std::uint32_t>{0, 1, 2}));
+  const std::vector<std::uint32_t> rectangle_indices{0, 1, 2};
+  for (const auto primitive : {PrimitiveType::CopyRectList0,
+                               PrimitiveType::CopyRectList1,
+                               PrimitiveType::CopyRectList2,
+                               PrimitiveType::CopyRectList3,
+                               PrimitiveType::FillRectList}) {
+    draw.primitive_type = primitive;
+    batch = process_primitives(draw, memory);
+    assert(batch.valid && batch.requires_rectangle_expansion);
+    assert(batch.indices == rectangle_indices);
+  }
   std::cout << "xenon_primitive_processor_tests: ok\n";
 }

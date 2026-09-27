@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Xenon Recomp
+Comment=Xbox 360 static recompilation launcher
+Exec=xenon_launcher
+Icon=xenon-recomp
+Terminal=false
+Categories=Game;Utility;
+StartupNotify=true

@@ -24,6 +24,14 @@ int main(int argc, char** argv) {
       {"xm_stwcx", 0x100Cu, x(0x7C00012Du, 7, 0, 3)},
       {"xm_dcbz", 0x1010u, x(0x7C0007ECu, 0, 0, 3)},
       {"xm_icbi", 0x1014u, x(0x7C0007ACu, 0, 0, 3)},
+      {"xm_sync", 0x1018u, 0x7C0004ACu},
+      {"xm_lwsync", 0x101Cu, 0x7C2004ACu},
+      {"xm_eieio", 0x1020u, 0x7C0006ACu},
+      {"xm_isync", 0x1024u, 0x4C00012Cu},
+      {"xm_lswi", 0x1028u, x(0x7C0004AAu, 30, 3, 6)},
+      {"xm_stswi", 0x102Cu, x(0x7C0005AAu, 30, 3, 6)},
+      {"xm_lvlx", 0x1030u, x(0x7C00040Eu, 1, 0, 3)},
+      {"xm_stvlx", 0x1034u, x(0x7C00050Eu, 1, 0, 3)},
   };
   std::ofstream out(argv[1]);
   if (!out) return 3;

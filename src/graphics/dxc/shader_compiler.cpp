@@ -33,6 +33,7 @@ std::uint64_t cache_key(const LoweredShader& shader,
   key = mix(key, options.debug);
   key = mix(key, options.optimize);
   key = mix(key, options.warnings_as_errors);
+  key = mix(key, options.spirv_stencil_export);
   for (unsigned char c : options.spirv_environment) key = mix(key, c);
   return key;
 }
@@ -110,7 +111,11 @@ CompiledShader DxcShaderCompiler::compile(const LoweredShader& shader,
     args.push_back(L"-spirv");
     args.push_back(environment.c_str());
     args.push_back(L"-fvk-use-dx-layout");
-    args.push_back(L"-fspv-reflect");
+    if (options.spirv_stencil_export)
+      args.push_back(L"-fspv-extension=SPV_EXT_shader_stencil_export");
+    // Do not request DXC's Google reflection extensions. Project Xenon owns
+    // the descriptor ABI explicitly, and enabling reflection metadata here
+    // makes otherwise valid modules require VK_GOOGLE_* device extensions.
     // Keep HLSL register classes in non-overlapping Vulkan binding ranges.
     // Set zero is the common Xenon graphics ABI used by ResourceLayout.
     args.push_back(L"-fvk-b-shift"); args.push_back(L"0"); args.push_back(L"0");

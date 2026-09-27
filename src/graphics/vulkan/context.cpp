@@ -1,10 +1,58 @@
 #include "xenon/gpu/vulkan/context.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <vector>
 
 namespace xenon::gpu::vulkan {
+namespace {
+std::vector<VkExtensionProperties> enumerate_instance_extensions() {
+  std::uint32_t count{};
+  if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) !=
+      VK_SUCCESS) {
+    return {};
+  }
+  std::vector<VkExtensionProperties> extensions(count);
+  if (count != 0u &&
+      vkEnumerateInstanceExtensionProperties(nullptr, &count,
+                                             extensions.data()) != VK_SUCCESS) {
+    return {};
+  }
+  extensions.resize(count);
+  return extensions;
+}
+
+bool supports_extension(const std::vector<VkExtensionProperties>& extensions,
+                        const char* name) {
+  return name &&
+         std::any_of(extensions.begin(), extensions.end(), [&](const auto& e) {
+           return std::strcmp(e.extensionName, name) == 0;
+         });
+}
+
+[[maybe_unused]] bool contains_extension(const std::vector<const char*>& extensions,
+                        const char* name) {
+  return name && std::any_of(extensions.begin(), extensions.end(),
+                             [&](const char* extension) {
+                               return extension &&
+                                      std::strcmp(extension, name) == 0;
+                             });
+}
+
+bool supports_device_extension(VkPhysicalDevice device, const char* name) {
+  std::uint32_t count{};
+  if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) !=
+      VK_SUCCESS) return false;
+  std::vector<VkExtensionProperties> extensions(count);
+  if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count,
+                                            extensions.data()) != VK_SUCCESS)
+    return false;
+  return std::any_of(extensions.begin(), extensions.end(), [&](const auto& e) {
+    return std::strcmp(e.extensionName, name) == 0;
+  });
+}
+}  // namespace
 
 Context::~Context() { reset(); }
 
@@ -15,8 +63,36 @@ bool Context::initialize(const ContextConfig& config) {
   app.pApplicationName = "Xenon Recomp";
   app.apiVersion = VK_API_VERSION_1_3;
   const char* validation = "VK_LAYER_KHRONOS_validation";
+  const auto available_instance_extensions = enumerate_instance_extensions();
+  std::vector<const char*> instance_extensions = config.instance_extensions;
+  for (const char* requested : config.instance_extensions) {
+    if (!supports_extension(available_instance_extensions, requested)) {
+      error_ = std::string("required Vulkan instance extension is unavailable: ") +
+               (requested ? requested : "<null>");
+      return false;
+    }
+  }
+
   VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   instance_info.pApplicationInfo = &app;
+#if defined(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)
+  // Capability-driven rather than Apple-specific: any Vulkan loader exposing
+  // the portability enumeration extension gets the flag required to surface
+  // portability devices (including MoltenVK on Apple platforms).
+  if (supports_extension(available_instance_extensions,
+                         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+    if (!contains_extension(instance_extensions,
+                            VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+      instance_extensions.push_back(
+          VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+    instance_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+  }
+#endif
+  instance_info.enabledExtensionCount =
+      static_cast<std::uint32_t>(instance_extensions.size());
+  instance_info.ppEnabledExtensionNames =
+      instance_extensions.empty() ? nullptr : instance_extensions.data();
   if (config.enable_validation) {
     instance_info.enabledLayerCount = 1;
     instance_info.ppEnabledLayerNames = &validation;
@@ -46,7 +122,8 @@ bool Context::initialize(const ContextConfig& config) {
     candidate_features.pNext = &candidate12;
     vkGetPhysicalDeviceFeatures2(candidate, &candidate_features);
     if (!candidate12.timelineSemaphore || !candidate13.synchronization2 ||
-        !candidate13.dynamicRendering) {
+        !candidate13.dynamicRendering ||
+        !candidate_features.features.sampleRateShading) {
       continue;
     }
     std::uint32_t queue_count = 0;
@@ -103,12 +180,50 @@ bool Context::initialize(const ContextConfig& config) {
   // filled rendering remains available and non-solid pipeline creation will
   // fail explicitly rather than being silently rendered as fill.
   enabled_features.fillModeNonSolid = features.features.fillModeNonSolid;
+  // Exact Xenos EDRAM ownership transfers address individual MSAA samples.
+  // Sample-rate fragment execution is required so writes can preserve every
+  // unrelated host sample instead of using a native averaging resolve.
+  enabled_features.sampleRateShading = VK_TRUE;
   const float priority = 1.0f;
   VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
   queue_info.queueFamilyIndex = graphics_queue_family_;
   queue_info.queueCount = 1;
   queue_info.pQueuePriorities = &priority;
   VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  std::vector<const char*> device_extensions;
+  // VK_KHR_portability_subset is intentionally detected by capability string
+  // rather than host platform. Portability implementations require the device
+  // extension to be enabled when exposed, while the common Xenos layer remains
+  // unchanged. Avoid depending on beta-extension C++ declarations here because
+  // Xenon does not consume any portability-subset structs directly.
+  constexpr const char* kPortabilitySubsetExtension =
+      "VK_KHR_portability_subset";
+  properties_.portability_subset =
+      supports_device_extension(physical_device_, kPortabilitySubsetExtension);
+  if (properties_.portability_subset) {
+    device_extensions.push_back(kPortabilitySubsetExtension);
+  }
+  if (supports_device_extension(physical_device_,
+                                VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME)) {
+    device_extensions.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+  }
+  const bool surface_enabled =
+      std::any_of(instance_extensions.begin(), instance_extensions.end(),
+                  [](const char* extension) {
+                    return extension &&
+                           std::strcmp(extension, VK_KHR_SURFACE_EXTENSION_NAME) ==
+                               0;
+                  });
+  swapchain_supported_ =
+      surface_enabled && supports_device_extension(
+                             physical_device_, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  if (swapchain_supported_) {
+    device_extensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  }
+  device_info.enabledExtensionCount =
+      static_cast<std::uint32_t>(device_extensions.size());
+  device_info.ppEnabledExtensionNames =
+      device_extensions.empty() ? nullptr : device_extensions.data();
   device_info.pNext = &features12;
   device_info.pEnabledFeatures = &enabled_features;
   device_info.queueCreateInfoCount = 1;
@@ -131,6 +246,7 @@ void Context::reset() noexcept {
   graphics_queue_ = VK_NULL_HANDLE;
   graphics_queue_family_ = 0;
   properties_ = {};
+  swapchain_supported_ = false;
 }
 
 }  // namespace xenon::gpu::vulkan

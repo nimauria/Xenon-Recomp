@@ -7,179 +7,346 @@ Rectangle {
 
     property alias searchText: searchField.text
     property bool maximized: false
+    property bool compact: false
+    property int currentPage: 0
+    property int activityRevision: 0
+    readonly property var downloadActivity: {
+        var revision = root.activityRevision
+        return launcherBridge.downloadActivitySnapshot()
+    }
+    readonly property int downloadAttentionCount: Number(downloadActivity.activeCount || 0)
+        + Number(downloadActivity.readyCount || 0) + Number(downloadActivity.failureCount || 0)
 
     signal minimizeRequested()
     signal maximizeRequested()
     signal closeRequested()
-    signal profilesRequested()
+    signal quickCenterRequested()
+    signal downloadsRequested()
 
-    implicitHeight: 72
+    function toggleQuickCenter() {
+        if (quickCenter.visible) quickCenter.close()
+        else quickCenter.open()
+    }
+
+    function closeQuickCenter() { quickCenter.close() }
+    function focusSearch() { searchField.forceActiveFocus() }
+    function quickCenterVisible() { return quickCenter.visible }
+
+    readonly property int chromeHeight: 36
+    readonly property int toolbarHeight: Math.max(60, Theme.controlHeight + 16)
+
+    implicitHeight: chromeHeight + toolbarHeight
     color: Theme.header
-    border.width: 1
+    border.width: Theme.borderWidth
     border.color: Theme.divider
 
-    MouseArea {
-        id: titleDragArea
-        anchors.fill: parent
-        acceptedButtons: Qt.LeftButton
-        onPressed: {
-            if (root.Window.window)
-                root.Window.window.startSystemMove()
+    Shortcut {
+        sequence: "Ctrl+K"
+        onActivated: {
+            if (commandPalette.visible) {
+                commandPalette.close()
+                searchField.clear()
+            } else {
+                searchField.forceActiveFocus()
+                commandPalette.openPalette()
+            }
         }
-        onDoubleClicked: root.maximizeRequested()
+    }
+
+    Connections {
+        target: launcherBridge
+        function onDownloadActivityChanged() { activityRefreshThrottle.restart() }
+    }
+
+    Timer {
+        id: activityRefreshThrottle
+        interval: 120
+        repeat: false
+        onTriggered: root.activityRevision += 1
+    }
+
+    Item {
+        id: chromeRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        height: root.chromeHeight
+
+        Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Theme.spaceLg
+            anchors.verticalCenter: parent.verticalCenter
+            text: "Xenon Launcher"
+            color: Theme.textMuted
+            font.pixelSize: Math.max(11, Theme.typeCaption * 0.86)
+            font.weight: Font.Medium
+        }
+
+        RowLayout {
+            id: windowControls
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+            spacing: 0
+            z: 4
+
+            XWindowButton {
+                automationId: "window-minimize"
+                kind: "minimize"
+                Layout.fillHeight: true
+                onClicked: root.minimizeRequested()
+            }
+
+            XWindowButton {
+                automationId: "window-maximize"
+                kind: "maximize"
+                maximized: root.maximized
+                Layout.fillHeight: true
+                onClicked: root.maximizeRequested()
+            }
+
+            XWindowButton {
+                automationId: "window-close"
+                kind: "close"
+                Layout.fillHeight: true
+                onClicked: root.closeRequested()
+            }
+        }
+
+        MouseArea {
+            id: titleDragArea
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: windowControls.left
+            acceptedButtons: Qt.LeftButton
+            z: 1
+            onPressed: {
+                if (root.Window.window)
+                    root.Window.window.startSystemMove()
+            }
+            onDoubleClicked: root.maximizeRequested()
+        }
+    }
+
+    Rectangle {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: chromeRow.bottom
+        height: 1
+        color: Theme.divider
     }
 
     RowLayout {
-        anchors.fill: parent
-        anchors.leftMargin: 20
-        anchors.rightMargin: 8
-        spacing: 16
+        id: toolbarRow
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: chromeRow.bottom
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Theme.spaceXl
+        anchors.rightMargin: Theme.spaceXl
+        spacing: Theme.spaceMd
 
-        RowLayout {
-            Layout.preferredWidth: 360
-            spacing: 12
+        XenonBrand {
+            Layout.preferredWidth: root.compact ? 132 : 168
+            Layout.preferredHeight: root.compact ? 30 : 34
+            asset: "lockup"
+            brandColor: Theme.accent
+        }
 
-            Item {
-                Layout.preferredWidth: 42
-                Layout.preferredHeight: 42
+        XTextField {
+            id: searchField
+            automationId: "global-search"
+            Layout.fillWidth: true
+            Layout.maximumWidth: 660
+            Layout.preferredHeight: Theme.controlHeight
+            placeholderText: "Search games, modules, profiles, settings and commands…"
+            accessibleName: "Search Xenon"
+            accessibleDescription: "Global command palette. Press Control K from anywhere in the launcher."
 
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 8
-                    height: 39
-                    radius: 4
-                    color: Theme.accent
-                    rotation: 45
-                }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 8
-                    height: 39
-                    radius: 4
-                    color: Theme.accent
-                    rotation: -45
-                }
+            onActiveFocusChanged: {
+                if (activeFocus) commandPalette.openPalette()
             }
+            onTextEdited: commandPalette.openPalette()
 
-            ColumnLayout {
-                spacing: 0
-
-                Text {
-                    text: "XENON"
-                    color: Theme.text
-                    font.pixelSize: 24
-                    font.weight: Font.DemiBold
-                    font.letterSpacing: 4
-                }
-
-                Text {
-                    text: "PLAY   PRESERVE   REIMAGINE"
-                    color: Theme.textMuted
-                    font.pixelSize: 8
-                    font.letterSpacing: 2.8
+            Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Down) {
+                    commandPalette.openPalette()
+                    commandPalette.moveSelection(1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Up) {
+                    commandPalette.openPalette()
+                    commandPalette.moveSelection(-1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    if (commandPalette.visible && commandPalette.activateSelected()) {
+                        searchField.clear()
+                        event.accepted = true
+                    }
+                } else if (event.key === Qt.Key_Escape) {
+                    commandPalette.close()
+                    searchField.clear()
+                    event.accepted = true
                 }
             }
         }
 
-        TextField {
-            id: searchField
-            Layout.fillWidth: true
-            Layout.maximumWidth: 680
-            Layout.preferredHeight: 42
-            placeholderText: "Search games, modules, or content..."
-            color: Theme.text
-            placeholderTextColor: Theme.textMuted
-            selectionColor: Theme.accent
-            selectedTextColor: Theme.accentText
-            leftPadding: 16
-            rightPadding: 16
-
-            background: Rectangle {
-                radius: 9
-                color: Theme.input
-                border.width: 1
-                border.color: searchField.activeFocus ? Theme.accent : Theme.border
+        CommandPalette {
+            id: commandPalette
+            parent: searchField
+            x: 0
+            y: searchField.height + Theme.spaceXs
+            width: Math.max(560, searchField.width)
+            query: searchField.text
+            onCommandExecuted: {
+                searchField.clear()
+                root.forceActiveFocus()
+            }
+            onClosed: {
+                if (!searchField.activeFocus) searchField.clear()
             }
         }
 
         Item { Layout.fillWidth: true }
 
-        ComboBox {
-            id: profileCombo
-            Layout.preferredWidth: 190
-            Layout.preferredHeight: 42
-            model: [launcherBridge.profileName, "Manage profiles…"]
+        Item {
+            id: downloadActivityButtonHost
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
 
-            onActivated: function(index) {
-                if (index === 1) {
-                    root.profilesRequested()
-                    currentIndex = 0
-                }
+            XIconButton {
+                id: downloadActivityButton
+                anchors.fill: parent
+                iconName: "downloads"
+                tooltip: root.downloadAttentionCount > 0
+                    ? (Number(root.downloadActivity.activeCount || 0) + " active • "
+                       + Number(root.downloadActivity.readyCount || 0) + " ready • "
+                       + Number(root.downloadActivity.failureCount || 0) + " issues")
+                    : "Downloads and activity"
+                variant: root.currentPage === 5 || Number(root.downloadActivity.activeCount || 0) > 0 ? "filled" : "ghost"
+                onClicked: root.downloadsRequested()
             }
 
-            contentItem: Text {
-                text: "●  " + profileCombo.displayText
-                color: Theme.text
-                verticalAlignment: Text.AlignVCenter
-                leftPadding: 14
-                font.pixelSize: 13
-                font.weight: Font.Medium
-            }
-
-            background: Rectangle {
+            Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: -2
+                anchors.top: parent.top
+                anchors.topMargin: -2
+                width: Math.max(18, activityBadgeText.implicitWidth + 8)
+                height: 18
                 radius: 9
-                color: Theme.surface
-                border.width: 1
-                border.color: profileCombo.hovered ? Theme.accent : Theme.border
-            }
-        }
-
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.preferredHeight: 30
-            color: Theme.divider
-        }
-
-        Repeater {
-            model: [
-                { glyph: "−", role: "minimize" },
-                { glyph: root.maximized ? "❐" : "□", role: "maximize" },
-                { glyph: "×", role: "close" }
-            ]
-
-            delegate: Rectangle {
-                required property var modelData
-
-                Layout.preferredWidth: 44
-                Layout.fillHeight: true
-                color: buttonMouse.containsMouse
-                       ? (modelData.role === "close" ? Theme.danger : Theme.surfaceHover)
-                       : "transparent"
+                color: Number(root.downloadActivity.failureCount || 0) > 0 ? Theme.danger
+                    : Number(root.downloadActivity.activeCount || 0) > 0 ? Theme.accent : Theme.warning
+                border.width: 2
+                border.color: Theme.header
+                visible: root.downloadAttentionCount > 0
 
                 Text {
+                    id: activityBadgeText
                     anchors.centerIn: parent
-                    text: modelData.glyph
-                    color: buttonMouse.containsMouse && modelData.role === "close" ? "white" : Theme.textMuted
-                    font.pixelSize: modelData.role === "close" ? 24 : 20
-                }
-
-                MouseArea {
-                    id: buttonMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (modelData.role === "minimize")
-                            root.minimizeRequested()
-                        else if (modelData.role === "maximize")
-                            root.maximizeRequested()
-                        else
-                            root.closeRequested()
-                    }
+                    text: root.downloadAttentionCount > 99 ? "99+" : String(root.downloadAttentionCount)
+                    color: "white"
+                    font.pixelSize: 9
+                    font.weight: Font.Bold
                 }
             }
+        }
+
+        Item {
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
+
+            XIconButton {
+                id: notificationButton
+                anchors.fill: parent
+                iconName: "notification"
+                tooltip: launcherBridge.notificationUnreadCount > 0
+                         ? "Notifications (" + launcherBridge.notificationUnreadCount + " unread)"
+                         : "Notifications"
+                variant: notificationPanel.visible ? "filled" : "ghost"
+                onClicked: notificationPanel.togglePanel()
+            }
+
+            Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: -2
+                anchors.top: parent.top
+                anchors.topMargin: -2
+                width: Math.max(18, badgeText.implicitWidth + 8)
+                height: 18
+                radius: 9
+                color: Theme.danger
+                border.width: 2
+                border.color: Theme.header
+                visible: launcherBridge.notificationUnreadCount > 0
+
+                Text {
+                    id: badgeText
+                    anchors.centerIn: parent
+                    text: launcherBridge.notificationUnreadCount > 99 ? "99+" : String(launcherBridge.notificationUnreadCount)
+                    color: "white"
+                    font.pixelSize: 9
+                    font.weight: Font.Bold
+                }
+            }
+
+            NotificationCenter {
+                id: notificationPanel
+                parent: notificationButton
+                x: notificationButton.width - width
+                y: notificationButton.height + Theme.spaceXs
+            }
+        }
+
+        XIconButton {
+            id: helpButton
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
+            iconName: "help"
+            tooltip: "Help and keyboard shortcuts"
+            variant: "ghost"
+            onClicked: helpPopup.visible ? helpPopup.close() : helpPopup.open()
+
+            HelpPopover {
+                id: helpPopup
+                x: helpButton.width - width
+                y: helpButton.height + Theme.spaceXs
+            }
+        }
+
+        XIconButton {
+            id: quickCenterButton
+            Layout.preferredWidth: Theme.controlHeight
+            Layout.preferredHeight: Theme.controlHeight
+            iconName: "menu"
+            tooltip: "Quick Center"
+            variant: quickCenter.visible ? "filled" : "ghost"
+            onClicked: root.toggleQuickCenter()
+
+            QuickCenter {
+                id: quickCenter
+                parent: quickCenterButton
+                x: quickCenterButton.width - width
+                y: quickCenterButton.height + Theme.spaceXs
+            }
+        }
+
+        ProfileMenu {
+            Layout.preferredWidth: root.compact ? 166 : 196
+            Layout.preferredHeight: Theme.controlHeight
         }
     }
 
+    Image {
+        anchors.left: parent.left
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Theme.spaceLg
+        width: Math.min(300, parent.width * 0.28)
+        height: 18
+        source: Theme.decorAsset("divider_notch")
+        visible: Theme.decorLevel !== "Minimal" && source.toString().length > 0
+        fillMode: Image.PreserveAspectFit
+        opacity: 0.36
+        smooth: true
+    }
 }

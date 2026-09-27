@@ -258,3 +258,137 @@ HLSL applies `ldexp` after texture sampling. The DXC-enabled Visual C++ Release
 tree compiles both DXIL and SPIR-V variants. The complete Release suite passes
 24/24; the Debug tree passes its 23 configured tests (DXC discovery was not
 enabled in that existing build tree).
+
+## GPU PM4 execution/completeness pass — 2026-09-19
+
+The post-Memory-V2 GPU audit found that several Type-3 opcodes were already
+recognized by the frontend but were only retained as passive IR even though
+they have command-processor side effects. The common Xenos layer now executes
+`REG_RMW`, `REG_TO_MEM`, `COND_WRITE`, `WAIT_REG_MEM`, `WAIT_REG_EQ`,
+`WAIT_REG_GTE`, and `LOAD_ALU_CONSTANT` instead of relying on a host backend to
+interpret those packets.
+
+Regression coverage validates immediate and register-source RMW operations,
+register-to-memory endian conversion, true and false conditional writes,
+register and physical-memory compare paths, a Memory-V2-safe concurrent
+`WAIT_REG_MEM` satisfaction, compact register waits, and fetch-constant loads
+from physical RAM. Primitive values `0x10+` also now force explicit major mode
+in the normalized draw IR, matching the command-processor research used by the
+Xenos frontend.
+
+On the reconstructed 19 September source tree, both GCC 14 Release and Clang
+17 Release pass the full 34/34 CTest matrix with the new frontend behavior
+enabled. The focused GPU frontend test also passes GCC 14 ASan+UBSan and TSan;
+the TSan run includes the concurrent `WAIT_REG_MEM` fixture in which another
+thread satisfies a physical-memory poll through Memory V2.
+
+This pass is backend-neutral; no Vulkan SDK is installed in the Linux validation
+environment, so it does not replace the existing Windows hardware-backed
+Vulkan/D3D12 validation recorded above.
+
+
+## GPU PM4 state-save/conditional execution pass — 2026-09-19
+
+The next frontend pass implements additional evidence-backed Xenos-era PM4
+state behavior: counted `REG_TO_MEM`, `COND_EXEC`, `SET_SHADER_BASES` partition
+decoding, vertex/pixel `IM_STORE` export and the verified vertex/pixel portions
+of `INVALIDATE_STATE`. Regression fixtures cover false and true conditional
+execution blocks, multi-register memory saves, shader partition fields, an
+`IM_STORE` -> `IM_LOAD` round trip and selective shader invalidation before a
+draw.
+
+`SET_STATE`, counter writes, shared instruction-store selector behavior and
+unverified invalidate/event bits remain losslessly represented rather than
+being assigned guessed Xbox semantics.
+
+Validation on the reconstructed 19 September tree after this pass:
+
+- GCC Release: full CTest matrix **34/34 passed**.
+- Clang 17 Release: full CTest matrix **34/34 passed**.
+- GCC ASan+UBSan: expanded `xenon_gpu_frontend_tests` passed.
+- GCC TSan: expanded `xenon_gpu_frontend_tests` passed, including the
+  concurrent Memory-V2-backed wait fixture.
+
+The Linux environment still does not provide the Windows/Vulkan native hardware
+fixture, so this pass changes only the host-independent frontend and retains the
+existing Windows backend validation status.
+
+
+## GPU PM4 event/query and normalized replay pass — 2026-09-19
+
+The host-independent frontend now executes the evidence-backed completion paths
+needed by real command streams: `EVENT_WRITE`, `EVENT_WRITE_SHD`,
+`EVENT_WRITE_EXT`, `VIZ_QUERY` and `INTERRUPT`. Completion fences use Memory V2
+controlled physical writes, including Xenos address-selected endian conversion
+and the `EVENT_WRITE_SHD` progress-counter source. Visibility queries cover all
+64 IDs and distinguish an empty query from a query scope containing a valid
+draw.
+
+`GraphicsSystem` now provides deterministic in-process capture/replay for both
+linear buffers and wrapped primary rings. Regression coverage verifies initial
+and final register snapshots, per-submission IR isolation, ring metadata, a
+complete register preamble on replay, and that replay itself does not consume
+the live guest stream. Resource-complete standalone frame capture is intentionally
+not claimed by this checkpoint.
+
+Validation on the reconstructed 19 September tree after this pass:
+
+- GCC Release: full CTest matrix **34/34 passed**.
+- The expanded `xenon_gpu_frontend_tests` passes the new literal and
+  counter-sourced event fences, 8-in-16 extent writeback, visible/empty query
+  scopes, six-thread interrupt mask routing, linear capture/replay and wrapped
+  ring capture.
+- GCC ASan+UBSan: expanded `xenon_gpu_frontend_tests` passed.
+- GCC TSan: expanded `xenon_gpu_frontend_tests` passed, including the existing
+  concurrent Memory-V2-backed wait plus the new fence/query/replay paths.
+- Clang 17 Release: full CTest matrix **34/34 passed**.
+
+The implementation remains backend-neutral. The next native-hardware milestone
+is to replay/cross-check a resource-complete AC6 capture on Windows Vulkan and
+D3D12 rather than adding backend-specific PM4 semantics.
+
+## GPU portable resource capture / Memory V2 replay pass — 2026-09-19
+
+The normalized frontend capture now has a persistent schema-v1 companion that
+can carry the guest resource state required by one GPU submission. Resource
+discovery is performed from the common register/resource tracker and normalized
+IR rather than by Vulkan or D3D12. Captured dependencies include command and
+indirect streams, active shader programs, vertex/index buffers, texture
+subresources, statically known memory-export ranges, resolve destinations,
+frontend memory side effects and the complete canonical 10 MiB EDRAM store.
+
+The capture path explicitly uses Golden Memory V2 as the source of truth. Before
+snapshotting, native GPU-newer guest ranges are made CPU-visible, then copied by
+`AddressSpace::copy_physical_range`. Replay restores them with
+`AddressSpace::write_physical`, preserving Memory V2 dirty/coherency and
+reservation semantics. Native EDRAM is canonicalized before capture and native
+ownership is discarded before replaying a restored canonical EDRAM image.
+
+A regression fixture validates a shader loaded in a previous submission, an
+active vertex-buffer dependency, a frontend physical-memory side effect and an
+EDRAM byte. The artifact is saved to disk, loaded into a new capture object,
+the live RAM/EDRAM state is deliberately changed, then portable replay restores
+the captured state and emits the register/shader/IR preamble into a fresh
+backend state.
+
+During reconstruction of the uploaded full repository ZIP, the primitive
+major-mode helper was found to have reverted while its regression test and docs
+still expected the established explicit-mode behavior. The helper was restored
+to treat a non-implicit major mode or primitive encoding `0x10+` as explicit,
+matching the previous GPU checkpoint.
+
+Release validation on the uploaded 19 September repository after this pass:
+
+- GCC Release: full CTest matrix **41/41 passed**. The higher count relative to
+  earlier GPU checkpoints comes from additional CPU V2/kernel tests in the
+  supplied repository, not reduced graphics coverage.
+- `xenon_gpu_frontend_tests` passes the persistent capture/save/load/restore
+  fixture in the common host-independent graphics layer.
+- GCC 14 ASan+UBSan: expanded `xenon_gpu_frontend_tests` passed, including
+  binary save/load and Memory-V2-backed restore of the portable capture.
+- GCC 14 TSan: expanded `xenon_gpu_frontend_tests` passed, including the
+  concurrent Memory-V2-backed wait fixture and the new capture path.
+- Clang 17 Release: full CTest matrix **41/41 passed**.
+- The Linux build does not provide the Vulkan SDK or Windows D3D12 runtime, so
+  the new native-backend EDRAM invalidation hooks still require the next Windows
+  hardware qualification pass alongside real AC6 captures.

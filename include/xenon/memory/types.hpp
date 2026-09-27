@@ -14,6 +14,10 @@ constexpr std::uint32_t kBasePageSize = 0x1000u;            // 4 KiB
 constexpr std::uint32_t kLargePageSize = 0x10000u;          // 64 KiB
 constexpr std::uint32_t kHugePageSize = 0x01000000u;        // 16 MiB
 constexpr std::uint32_t kReservationGranuleSize = 128u;
+constexpr std::uint32_t kPhysicalSystemReserveSize = kHugePageSize;
+constexpr std::uint32_t kPhysicalTopReservedSize = kLargePageSize;
+constexpr std::uint32_t kPhysicalAllocatableEndExclusive =
+    kPhysicalMemorySize - kPhysicalTopReservedSize;
 
 // Xbox 360 guest address-space layout used by Xenon.
 constexpr GuestAddress kVirtual4KBase = 0x00000000u;
@@ -38,6 +42,8 @@ constexpr GuestAddress kMmioEnd = 0xFFFFFFFFu;
 // The 0xE... physical view is offset by 4 KiB relative to the other direct
 // physical views on the retail memory map.
 constexpr std::uint32_t kPhysical4KViewOffset = 0x1000u;
+constexpr std::uint32_t kPhysical4KAddressableEndInclusive =
+    kPhysical4KViewOffset + (kPhysical4KHeapEnd - kPhysical4KBase);
 
 enum class RegionKind : std::uint8_t {
   Virtual,
@@ -65,6 +71,12 @@ enum class PageState : std::uint8_t {
   Free,
   Reserved,
   Committed,
+};
+
+enum class PhysicalPageClass : std::uint8_t {
+  Page4K,
+  Page64K,
+  Page16M,
 };
 
 enum class Protect : std::uint8_t {
@@ -96,6 +108,78 @@ constexpr Protect kReadWrite = Protect::Read | Protect::Write;
 constexpr Protect kReadExecute = Protect::Read | Protect::Execute;
 constexpr Protect kReadWriteExecute =
     Protect::Read | Protect::Write | Protect::Execute;
+
+struct VirtualAllocationOptions {
+  // Xbox/NT allocation policy is intentionally represented independently of
+  // address selection. A caller may reserve address space without committing
+  // backing and may request MEM_NOZERO-style commit behavior when appropriate.
+  bool commit{true};
+  bool zero_initialize{true};
+};
+
+struct PhysicalAllocationOptions {
+  PhysicalPageClass page_class{PhysicalPageClass::Page4K};
+  std::uint32_t alignment{};
+  std::uint32_t minimum_address{kPhysicalSystemReserveSize};
+  // Inclusive Xbox physical-address bound.
+  std::uint32_t maximum_address{kPhysicalAllocatableEndExclusive - 1u};
+  Protect protect{kReadWrite};
+  // Xbox MmAllocatePhysicalMemoryEx allocates from the high end of the
+  // selected physical heap unless a lower-level caller explicitly requests a
+  // different policy.
+  bool top_down{true};
+  bool zero_initialize{true};
+};
+
+struct PhysicalAllocationInfo {
+  std::uint32_t physical_address{};
+  std::uint32_t allocation_base{};
+  std::uint32_t allocation_size{};
+  std::uint32_t page_size{kBasePageSize};
+  PhysicalPageClass page_class{PhysicalPageClass::Page4K};
+  Protect allocation_protect{kReadWrite};
+  Protect current_protect{kReadWrite};
+};
+
+// Canonical Xbox-visible memory type. This is deliberately separate from host
+// page-cache attributes: Xenon may translate a guest cache policy into ordering,
+// coherency and access-path rules when the host cannot safely create an alias
+// with the same native cache attribute.
+enum class MemoryType : std::uint8_t {
+  NormalCached,
+  WriteCombined,
+  CacheInhibited,
+  Device,
+};
+
+// Describes how Xenon represents the guest memory type in host virtual memory.
+// The shared 512 MiB backing has many aliases, so changing the native cache type
+// of one alias independently can be illegal or unsafe on desktop hosts. WC/CI
+// therefore use the compact translation path and explicit ordering/coherency
+// semantics unless a future alias-safe backend supplies a native mapping mode.
+enum class HostMappingPolicy : std::uint8_t {
+  DefaultCachedShared,
+  TranslatedWriteCombined,
+  TranslatedCacheInhibited,
+  DeviceDispatcher,
+};
+
+struct MemoryTypeInfo {
+  MemoryType type{MemoryType::NormalCached};
+  HostMappingPolicy host_policy{HostMappingPolicy::DefaultCachedShared};
+  bool mapped{};
+  bool executable{};
+  bool direct_aperture_eligible{};
+  bool explicit_device_visibility{};
+};
+
+[[nodiscard]] constexpr bool valid_memory_type_protection(
+    Protect protect) noexcept {
+  // Xbox PAGE_NOCACHE / PAGE_WRITECOMBINE are distinct cache modes. Mirroring
+  // Win32/XDK semantics, they are not a meaningful combined mapping type.
+  return !(has(protect, Protect::NoCache) &&
+           has(protect, Protect::WriteCombine));
+}
 
 struct RegionDescriptor {
   GuestAddress base{};

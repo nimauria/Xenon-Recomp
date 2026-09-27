@@ -1,6 +1,9 @@
 #include "xenon/gpu/vulkan/resource_layout.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
+#include <vector>
 
 namespace xenon::gpu::vulkan {
 
@@ -52,115 +55,185 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
     reset();
     return false;
   }
-  const std::array pool_sizes{
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 128},
-      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 32}};
-  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  pool_info.maxSets = 1;
-  pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
-  pool_info.pPoolSizes = pool_sizes.data();
-  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &descriptor_pool_) != VK_SUCCESS) {
-    error_ = "vkCreateDescriptorPool failed for the Xenon resource ABI";
-    reset();
-    return false;
+
+  for (auto& frame : frames_) {
+    const std::array pool_sizes{
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                             CommandQueue::kBatchCommandCount},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                             2u * CommandQueue::kBatchCommandCount},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                             128u * CommandQueue::kBatchCommandCount},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER,
+                             32u * CommandQueue::kBatchCommandCount}};
+    VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool_info.maxSets = CommandQueue::kBatchCommandCount;
+    pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
+    pool_info.pPoolSizes = pool_sizes.data();
+    if (vkCreateDescriptorPool(device_, &pool_info, nullptr,
+                               &frame.descriptor_pool) != VK_SUCCESS) {
+      error_ = "vkCreateDescriptorPool failed for a Xenon submission frame";
+      reset();
+      return false;
+    }
+    std::array<VkDescriptorSetLayout, CommandQueue::kBatchCommandCount> layouts{};
+    layouts.fill(descriptor_set_layout_);
+    VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocate.descriptorPool = frame.descriptor_pool;
+    allocate.descriptorSetCount = CommandQueue::kBatchCommandCount;
+    allocate.pSetLayouts = layouts.data();
+    if (vkAllocateDescriptorSets(device_, &allocate,
+                                 frame.descriptor_sets.data()) != VK_SUCCESS) {
+      error_ = "vkAllocateDescriptorSets failed for Xenon draw snapshots";
+      reset();
+      return false;
+    }
+    for (std::uint32_t draw = 0; draw < CommandQueue::kBatchCommandCount; ++draw) {
+      if (!frame.constants[draw].initialize(
+              physical_device, device_, kConstantBufferBytes,
+              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+          !frame.constants[draw].map(frame.constants_mappings[draw])) {
+        error_ = frame.constants[draw].error();
+        reset();
+        return false;
+      }
+    }
   }
-  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-  allocate.descriptorPool = descriptor_pool_;
-  allocate.descriptorSetCount = 1;
-  allocate.pSetLayouts = &descriptor_set_layout_;
-  if (vkAllocateDescriptorSets(device_, &allocate, &descriptor_set_) != VK_SUCCESS) {
-    error_ = "vkAllocateDescriptorSets failed for the Xenon resource ABI";
-    reset();
-    return false;
-  }
-  if (!constants_.initialize(physical_device, device_, kConstantBufferBytes,
-                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-    error_ = constants_.error();
-    reset();
-    return false;
-  }
-  VkDescriptorBufferInfo constants_info{constants_.buffer(), 0, kConstantBufferBytes};
-  VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  write.dstSet = descriptor_set_;
-  write.dstBinding = kConstantBinding;
-  write.descriptorCount = 1;
-  write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-  write.pBufferInfo = &constants_info;
-  vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+  constants_staging_.fill(std::byte{});
   return true;
 }
 
 bool ResourceLayout::bind_guest_memory(VkBuffer buffer, VkDeviceSize size) {
-  if (!device_ || !descriptor_set_ || !buffer || !size) {
+  if (!device_ || !buffer || !size) {
     error_ = "Vulkan guest-memory descriptor requires an initialized layout and buffer";
     return false;
   }
-  VkDescriptorBufferInfo buffer_info{buffer, 0, size};
-  std::array writes{
-      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET},
-      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-  for (auto& write : writes) {
-    write.dstSet = descriptor_set_;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.pBufferInfo = &buffer_info;
-  }
-  writes[0].dstBinding = kGuestMemoryBinding;
-  writes[1].dstBinding = kMemoryExportBinding;
-  vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
-                         writes.data(), 0, nullptr);
+  guest_memory_buffer_ = buffer;
+  guest_memory_size_ = size;
   return true;
 }
 
 bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension,
                                   VkImageView view, VkSampler sampler) {
-  if (!device_ || !descriptor_set_ || slot >= 32 || !view || !sampler) {
+  if (!device_ || slot >= texture_bindings_.size() || !view || !sampler) {
     error_ = "Vulkan texture binding requires a valid slot, image view and sampler";
     return false;
   }
-  std::uint32_t binding{};
-  switch (dimension) {
-    case TextureDimension::OneD: binding = kTexture1DBinding; break;
-    case TextureDimension::TwoDOrStacked: binding = kTexture2DBinding; break;
-    case TextureDimension::ThreeD: binding = kTexture3DBinding; break;
-    case TextureDimension::Cube: binding = kTextureCubeBinding; break;
-  }
-  VkDescriptorImageInfo image_info{};
-  image_info.imageView = view;
-  image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  VkDescriptorImageInfo sampler_info{};
-  sampler_info.sampler = sampler;
-  std::array writes{VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET},
-                    VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-  writes[0].dstSet = descriptor_set_;
-  writes[0].dstBinding = binding;
-  writes[0].dstArrayElement = slot;
-  writes[0].descriptorCount = 1;
-  writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-  writes[0].pImageInfo = &image_info;
-  writes[1].dstSet = descriptor_set_;
-  writes[1].dstBinding = kSamplerBinding;
-  writes[1].dstArrayElement = slot;
-  writes[1].descriptorCount = 1;
-  writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-  writes[1].pImageInfo = &sampler_info;
-  vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
-                         writes.data(), 0, nullptr);
+  texture_bindings_[slot] = {true, dimension, view, sampler};
   return true;
 }
 
+void ResourceLayout::prepare_draw(std::uint32_t frame_index,
+                                  std::uint32_t draw_slot) {
+  if (!device_ || frame_index >= frames_.size() ||
+      draw_slot >= CommandQueue::kBatchCommandCount) return;
+  auto& frame = frames_[frame_index];
+  const auto descriptor_set = frame.descriptor_sets[draw_slot];
+  std::copy(constants_staging_.begin(), constants_staging_.end(),
+            frame.constants_mappings[draw_slot].begin());
+
+  std::vector<VkWriteDescriptorSet> writes;
+  writes.reserve(3 + texture_bindings_.size() * 2);
+  std::vector<VkDescriptorBufferInfo> buffers;
+  buffers.reserve(3);
+  buffers.push_back({frame.constants[draw_slot].buffer(), 0, kConstantBufferBytes});
+  VkWriteDescriptorSet constants_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+  constants_write.dstSet = descriptor_set;
+  constants_write.dstBinding = kConstantBinding;
+  constants_write.descriptorCount = 1;
+  constants_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  constants_write.pBufferInfo = &buffers.back();
+  writes.push_back(constants_write);
+
+  if (guest_memory_buffer_ && guest_memory_size_) {
+    buffers.push_back({guest_memory_buffer_, 0, guest_memory_size_});
+    VkWriteDescriptorSet read_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    read_write.dstSet = descriptor_set;
+    read_write.dstBinding = kGuestMemoryBinding;
+    read_write.descriptorCount = 1;
+    read_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    read_write.pBufferInfo = &buffers.back();
+    writes.push_back(read_write);
+    // The vector may reallocate after push_back, so repair pointers below after
+    // all buffer infos are stable.
+    buffers.push_back({guest_memory_buffer_, 0, guest_memory_size_});
+    VkWriteDescriptorSet export_write = read_write;
+    export_write.dstBinding = kMemoryExportBinding;
+    export_write.pBufferInfo = &buffers.back();
+    writes.push_back(export_write);
+  }
+
+  std::vector<VkDescriptorImageInfo> images;
+  std::vector<VkDescriptorImageInfo> samplers;
+  images.reserve(texture_bindings_.size());
+  samplers.reserve(texture_bindings_.size());
+  for (std::uint32_t slot = 0; slot < texture_bindings_.size(); ++slot) {
+    const auto& binding = texture_bindings_[slot];
+    if (!binding.valid) continue;
+    std::uint32_t image_binding{};
+    switch (binding.dimension) {
+      case TextureDimension::OneD: image_binding = kTexture1DBinding; break;
+      case TextureDimension::TwoDOrStacked: image_binding = kTexture2DBinding; break;
+      case TextureDimension::ThreeD: image_binding = kTexture3DBinding; break;
+      case TextureDimension::Cube: image_binding = kTextureCubeBinding; break;
+    }
+    images.push_back({VK_NULL_HANDLE, binding.view,
+                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+    VkWriteDescriptorSet image_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    image_write.dstSet = descriptor_set;
+    image_write.dstBinding = image_binding;
+    image_write.dstArrayElement = slot;
+    image_write.descriptorCount = 1;
+    image_write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    image_write.pImageInfo = &images.back();
+    writes.push_back(image_write);
+
+    samplers.push_back({binding.sampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED});
+    VkWriteDescriptorSet sampler_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    sampler_write.dstSet = descriptor_set;
+    sampler_write.dstBinding = kSamplerBinding;
+    sampler_write.dstArrayElement = slot;
+    sampler_write.descriptorCount = 1;
+    sampler_write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    sampler_write.pImageInfo = &samplers.back();
+    writes.push_back(sampler_write);
+  }
+
+  // Repair pBufferInfo pointers after vector growth.
+  std::size_t buffer_index = 0;
+  for (auto& write : writes) {
+    if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+        write.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+      write.pBufferInfo = &buffers[buffer_index++];
+    }
+  }
+  // Image vectors were reserved to their maximum size, so their element
+  // addresses stay stable while writes are assembled.
+  vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
+                         writes.data(), 0, nullptr);
+}
+
 void ResourceLayout::reset() noexcept {
-  if (device_ && descriptor_pool_) vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
-  constants_.reset();
-  if (device_ && pipeline_layout_) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
+  texture_bindings_.fill({});
+  guest_memory_buffer_ = VK_NULL_HANDLE;
+  guest_memory_size_ = 0;
+  constants_staging_.fill(std::byte{});
+  for (auto& frame : frames_) {
+    for (std::uint32_t draw = 0; draw < CommandQueue::kBatchCommandCount; ++draw) {
+      frame.constants_mappings[draw] = {};
+      frame.constants[draw].reset();
+      frame.descriptor_sets[draw] = VK_NULL_HANDLE;
+    }
+    if (device_ && frame.descriptor_pool)
+      vkDestroyDescriptorPool(device_, frame.descriptor_pool, nullptr);
+    frame.descriptor_pool = VK_NULL_HANDLE;
+  }
+  if (device_ && pipeline_layout_)
+    vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
   if (device_ && descriptor_set_layout_)
     vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
-  descriptor_set_ = VK_NULL_HANDLE;
-  descriptor_pool_ = VK_NULL_HANDLE;
   pipeline_layout_ = VK_NULL_HANDLE;
   descriptor_set_layout_ = VK_NULL_HANDLE;
   device_ = VK_NULL_HANDLE;

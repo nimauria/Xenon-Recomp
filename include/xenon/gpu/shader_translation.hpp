@@ -24,6 +24,10 @@ struct ShaderLoweringOptions {
   bool emit_debug_comments{};
   PixelDepthOutputMode pixel_depth_output{PixelDepthOutputMode::Native};
   bool force_sample_frequency{};
+  // Use the guest-memory UAV/storage-buffer ABI even when this shader does not
+  // itself memexport. Required when another stage in the same draw writes the
+  // shared mirror while this stage may read it.
+  bool force_guest_memory_rw{};
 };
 
 struct LoweredShader {
@@ -36,6 +40,15 @@ struct LoweredShader {
   ShaderReflection reflection{};
   std::vector<std::string> diagnostics{};
   bool complete{};
+  // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
+  // fallback audit"): structured counts alongside the human-readable
+  // diagnostics above, filled in at the exact point lower() recognizes each
+  // case, so a caller can fold specific unsupported-operation categories
+  // into GpuUnsupportedCounters without fragile string matching on
+  // diagnostics' free-text messages.
+  std::uint32_t unsupported_instructions{};
+  std::uint32_t unsupported_features{};
+  std::uint32_t unsupported_fetch_formats{};
 };
 
 class HlslShaderLowerer {
@@ -55,6 +68,10 @@ class HlslShaderLowerer {
 [[nodiscard]] LoweredShader make_transfer_fullscreen_vertex_shader();
 [[nodiscard]] LoweredShader make_color_sample_read_shader(MsaaSamples samples);
 [[nodiscard]] LoweredShader make_color_sample_write_shader();
+[[nodiscard]] LoweredShader make_depth_sample_read_shader(MsaaSamples samples);
+[[nodiscard]] LoweredShader make_depth_sample_write_shader();
+[[nodiscard]] LoweredShader make_depth_only_sample_write_shader();
+[[nodiscard]] LoweredShader make_stencil_mask_write_shader();
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};
@@ -62,6 +79,7 @@ struct ShaderCompileOptions {
   bool optimize{true};
   bool warnings_as_errors{true};
   std::string spirv_environment{"vulkan1.3"};
+  bool spirv_stencil_export{};
 };
 
 struct CompiledShader {

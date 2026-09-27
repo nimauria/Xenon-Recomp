@@ -222,7 +222,55 @@ void test_sample_transfer_shaders() {
              "Texture2DMS<float4,2>") != std::string::npos);
   assert(make_color_sample_write_shader().hlsl.find("SV_SampleIndex") !=
          std::string::npos);
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    const auto read = make_depth_sample_read_shader(samples);
+    assert(read.complete);
+    assert(compiler.compile(read, {}).succeeded);
+    assert(compiler.compile(read, spirv).succeeded);
+  }
+  const auto write = make_depth_sample_write_shader();
+  assert(write.complete && write.hlsl.find("SV_StencilRef") != std::string::npos);
+  assert(compiler.compile(write, {}).succeeded);
+  spirv.spirv_stencil_export = true;
+  assert(compiler.compile(write, spirv).succeeded);
+  for (const auto& fallback : {make_depth_only_sample_write_shader(),
+                               make_stencil_mask_write_shader()}) {
+    assert(fallback.complete);
+    assert(compiler.compile(fallback, {}).succeeded);
+    assert(compiler.compile(fallback, spirv).succeeded);
+  }
 }
+
+
+void test_memexport_translation_targets() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Vertex);
+  shader.reflection.memory_exports = 1;
+  shader.reflection.memory_export_mask = 1;
+  shader.reflection.writes_export_address = true;
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("#define XENON_MEMORY_RW 1") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_memexport_flush") != std::string::npos);
+
+  DxcShaderCompiler compiler;
+  ShaderCompileOptions dxil{};
+  assert(compiler.compile(lowered, dxil).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+
+  auto companion = make_shader(ShaderStage::Vertex);
+  ShaderLoweringOptions rw_options{};
+  rw_options.force_guest_memory_rw = true;
+  const auto rw = HlslShaderLowerer::lower(companion, rw_options);
+  assert(rw.complete);
+  assert(rw.hlsl.find("#define XENON_MEMORY_RW 1") != std::string::npos);
+  assert(rw.hlsl.find("xenon_memexport_flush") == std::string::npos);
+  assert(compiler.compile(rw, dxil).succeeded);
+  assert(compiler.compile(rw, spirv).succeeded);
+}
+
 
 }  // namespace
 
@@ -234,5 +282,6 @@ int main() {
   test_texture_lod_and_gradient_lowering();
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
+  test_memexport_translation_targets();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

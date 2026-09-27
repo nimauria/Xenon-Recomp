@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 
 Popup {
     id: root
@@ -7,9 +8,9 @@ Popup {
     property string titleText: ""
     property string messageText: ""
 
-    x: parent ? parent.width - width - 24 : 0
+    x: parent ? parent.width - width - Theme.spaceXl : 0
     y: parent ? parent.height - height - 48 : 0
-    width: Math.min(460, parent ? parent.width - 48 : 460)
+    width: Math.min(460, parent ? parent.width - Theme.spaceXl * 2 : 460)
     padding: 0
     modal: false
     focus: false
@@ -23,43 +24,50 @@ Popup {
     }
 
     background: Rectangle {
-        radius: 10
-        color: Theme.surface
-        border.width: 1
+        radius: Theme.panelRadius
+        color: Theme.surfaceRaised
+        border.width: Theme.borderWidth
         border.color: Theme.accent
     }
 
     contentItem: Item {
-        implicitHeight: column.implicitHeight + 28
+        // Popup itself is not an Item (it wraps one), so the Accessible
+        // attached property belongs here, on the actual Item, rather than on
+        // the Popup - attaching it to the Popup produced a real (if benign)
+        // "must be attached to an object deriving from Item or Action"
+        // warning on every launch.
+        Accessible.role: Accessible.AlertMessage
+        Accessible.name: root.titleText + ". " + root.messageText
+        implicitHeight: column.implicitHeight + Theme.spaceXl
 
-        Column {
+        ColumnLayout {
             id: column
             anchors.fill: parent
-            anchors.margins: 14
-            spacing: 6
+            anchors.margins: Theme.spaceMd
+            spacing: Theme.spaceXs
 
             Text {
-                width: parent.width
+                Layout.fillWidth: true
                 text: root.titleText
                 color: Theme.text
-                font.pixelSize: 13
+                font.pixelSize: Theme.typeBody
                 font.weight: Font.DemiBold
             }
 
             Text {
-                width: parent.width
+                Layout.fillWidth: true
                 text: root.messageText
                 color: Theme.textMuted
                 wrapMode: Text.WordWrap
-                font.pixelSize: 11
-                lineHeight: 1.2
+                font.pixelSize: Theme.typeCaption
+                lineHeight: 1.25
             }
         }
     }
 
     Timer {
         id: closeTimer
-        interval: 3600
+        interval: launcherBridge.boolSetting("accessibility/reduceMotion", false) ? 5000 : 3800
         repeat: false
         onTriggered: root.close()
     }

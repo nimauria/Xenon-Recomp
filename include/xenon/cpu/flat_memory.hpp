@@ -37,12 +37,18 @@ class FlatMemory final : public MemoryPort {
   void write32_le(GuestAddress address, std::uint32_t value) override;
   void write64_le(GuestAddress address, std::uint64_t value) override;
 
+  void read_bytes(GuestAddress address, std::span<std::byte> destination) override;
+  void write_bytes(GuestAddress address, std::span<const std::byte> source) override;
+  void fill_bytes(GuestAddress address, std::uint32_t size,
+                  std::uint8_t value) override;
+
   std::uint64_t reserve32(GuestAddress address, std::uint32_t& value) override;
   std::uint64_t reserve64(GuestAddress address, std::uint64_t& value) override;
   bool store_conditional32(GuestAddress address, std::uint64_t token,
                            std::uint32_t value) override;
   bool store_conditional64(GuestAddress address, std::uint64_t token,
                            std::uint64_t value) override;
+  void cancel_reservation(std::uint64_t token) noexcept override;
 
   void barrier(BarrierKind kind) override;
   void zero_cache_block(GuestAddress address, std::uint32_t bytes) override;
@@ -58,6 +64,10 @@ class FlatMemory final : public MemoryPort {
   GuestAddress base_{};
   std::vector<std::uint8_t> bytes_{};
   std::uint64_t generation_{1};
+  std::uint64_t next_reservation_token_{1};
+  std::uint64_t reservation_token_{};
+  GuestAddress reservation_address_{};
+  std::uint32_t reservation_width_{};
 };
 
 }  // namespace xenon::cpu

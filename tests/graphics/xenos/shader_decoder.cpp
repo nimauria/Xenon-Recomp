@@ -80,6 +80,67 @@ void test_pixel_depth_export_reflection() {
   assert(decoded.reflection.memory_exports == 0);
 }
 
+
+void test_memexport_reflection_and_stream_constant() {
+  using namespace xenon::gpu;
+  const auto cf = pack_cf(1u | (2u << 12),
+      std::uint16_t(std::uint16_t(ControlFlowOpcode::ExecEnd) << 12));
+
+  // mad eA, r3, c5, c7 - c7 is the conventional stream constant source.
+  const std::uint32_t ea0 = 32u | (1u << 15) | (0xFu << 16) | (50u << 26);
+  const std::uint32_t ea1 = 0xE4u | (0xE4u << 8) | (0xE4u << 16);
+  const std::uint32_t ea2 = 7u | (5u << 8) | (3u << 16) |
+                            (11u << 24) | (1u << 31);
+
+  // eM2 write. Only the export register identity matters to reflection here.
+  const std::uint32_t em0 = 35u | (1u << 15) | (0xFu << 16) | (50u << 26);
+  const std::uint32_t em1 = 0xE4u | (0xE4u << 8) | (0xE4u << 16);
+  const std::uint32_t em2 = 1u | (1u << 8) | (1u << 16) |
+                            (1u << 29) | (1u << 30) | (1u << 31);
+
+  const std::vector<std::uint32_t> words = {
+      cf[0], cf[1], cf[2], ea0, ea1, ea2, em0, em1, em2};
+  const auto decoded = ShaderDecoder::decode(
+      ShaderProgram(ShaderStage::Vertex, words));
+  assert(decoded.complete);
+  assert(decoded.reflection.writes_export_address);
+  assert(decoded.reflection.memory_exports == 1);
+  assert(decoded.reflection.memory_export_mask == (1u << 2));
+  assert(decoded.reflection.memexport_stream_constants ==
+         std::vector<std::uint16_t>{7});
+  assert(!decoded.reflection.requires_dynamic_memexport_address);
+  assert((decoded.reflection.exports ==
+          std::vector<std::uint8_t>{32, 35}));
+}
+
+void test_noncanonical_memexport_address_stays_dynamic() {
+  using namespace xenon::gpu;
+  const auto cf = pack_cf(1u | (2u << 12),
+      std::uint16_t(std::uint16_t(ControlFlowOpcode::ExecEnd) << 12));
+
+  // A partial/clamped MAD to eA must not be treated as the conventional
+  // statically recoverable stream-address pattern.
+  const std::uint32_t ea0 = 32u | (1u << 15) | (0x7u << 16) |
+                            (1u << 24) | (50u << 26);
+  const std::uint32_t ea1 = 0xE4u | (0xE4u << 8) | (0xE4u << 16);
+  const std::uint32_t ea2 = 7u | (5u << 8) | (3u << 16) |
+                            (11u << 24) | (1u << 31);
+  const std::uint32_t em0 = 33u | (1u << 15) | (0xFu << 16) | (50u << 26);
+  const std::uint32_t em1 = 0xE4u | (0xE4u << 8) | (0xE4u << 16);
+  const std::uint32_t em2 = 1u | (1u << 8) | (1u << 16) |
+                            (1u << 29) | (1u << 30) | (1u << 31);
+
+  const std::vector<std::uint32_t> words = {
+      cf[0], cf[1], cf[2], ea0, ea1, ea2, em0, em1, em2};
+  const auto decoded = ShaderDecoder::decode(
+      ShaderProgram(ShaderStage::Vertex, words));
+  assert(decoded.complete);
+  assert(decoded.reflection.writes_export_address);
+  assert(decoded.reflection.memory_export_mask == 1u);
+  assert(decoded.reflection.memexport_stream_constants.empty());
+  assert(decoded.reflection.requires_dynamic_memexport_address);
+}
+
 void test_malformed_stream_is_diagnostic() {
   using namespace xenon::gpu;
   const std::uint32_t words[] = {1, 2};
@@ -92,6 +153,8 @@ int main() {
   test_mixed_exec_and_reflection();
   test_texture_predicate_and_loop();
   test_pixel_depth_export_reflection();
+  test_memexport_reflection_and_stream_constant();
+  test_noncanonical_memexport_address_stays_dynamic();
   test_malformed_stream_is_diagnostic();
   std::cout << "xenon_shader_decoder_tests: ok\n";
 }

@@ -1,13 +1,12 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 #include <string>
-#include <vector>
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/memory/gpu_coherency.hpp"
 
 namespace xenon::gpu::vulkan {
 
@@ -19,21 +18,34 @@ class GuestMemoryMirror {
                                 memory::AddressSpace& memory);
   void reset() noexcept;
   [[nodiscard]] bool synchronize();
+  [[nodiscard]] bool synchronize_range(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::Generic);
+  void mark_gpu_write(std::uint32_t address, std::uint32_t width);
+  [[nodiscard]] bool make_cpu_visible(
+      std::uint32_t address, std::uint32_t width,
+      memory::GpuRangeUsage usage = memory::GpuRangeUsage::RenderReadback);
+  [[nodiscard]] bool has_gpu_dirty(std::uint32_t address,
+                                   std::uint32_t width) const;
+  [[nodiscard]] bool device_range_valid(std::uint32_t address,
+                                        std::uint32_t width) const {
+    return coherency_.device_range_valid(address, width);
+  }
+  void prepare_shader_access(VkCommandBuffer command, bool writable);
   [[nodiscard]] VkBuffer buffer() const noexcept { return mirror_.buffer(); }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
-  static constexpr std::uint32_t kPageSize = 4096;
-  static constexpr std::uint32_t kUploadSize = 16u * 1024u * 1024u;
-  void mark_dirty(std::uint32_t address, std::uint32_t width);
+  static constexpr std::uint32_t kTransferSize = 16u * 1024u * 1024u;
+
   memory::AddressSpace* memory_{};
   CommandQueue* queue_{};
   Buffer mirror_{};
   Buffer upload_{};
-  std::uint64_t callback_id_{};
-  std::vector<std::uint8_t> dirty_pages_{};
-  std::mutex dirty_mutex_{};
+  Buffer readback_{};
+  memory::GuestMemoryGpuCoherency coherency_{};
   bool shader_read_state_{};
+  bool shader_write_state_{};
   std::string error_{};
 };
 

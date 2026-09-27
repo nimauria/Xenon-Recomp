@@ -63,8 +63,12 @@ enum class IndexFormat : std::uint8_t {
 };
 
 [[nodiscard]] constexpr bool is_explicit_major_mode(
-    MajorMode mode, PrimitiveType /*primitive*/) noexcept {
-  return mode == MajorMode::Explicit;
+    MajorMode mode, PrimitiveType primitive) noexcept {
+  // R6xx/A2xx-family command streams use implicit major mode only for the
+  // low primitive range. Reserved/non-zero major-mode encodings are treated
+  // as explicit, and primitive values 0x10+ force explicit interpretation.
+  return mode != MajorMode::Implicit ||
+         static_cast<std::uint8_t>(primitive) >= 0x10u;
 }
 
 enum class Endian : std::uint8_t {
