@@ -510,6 +510,7 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp
     src/xbox/exports/xboxkrnl_xex_module_exports.cpp
     src/xbox/exports/xboxkrnl_tls_exports.cpp
+    src/xbox/exports/xboxkrnl_video_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
@@ -977,6 +978,20 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_tls_export_tests PRIVATE xenon_core)
     xenon_enable_test_asserts(xenon_tls_export_tests)
     add_test(NAME xenon_tls_export_tests COMMAND xenon_tls_export_tests)
+  endif()
+
+  # xboxkrnl Vd* Xenos GPU control-plane exports - the missing kernel ABI
+  # surface between the fully-implemented Xenos GPU frontend
+  # (src/graphics/xenos/) and a live XenonSession: VdInitializeRingBuffer/
+  # VdEnableRingBufferRPtrWriteBack/VdSetGraphicsInterruptCallback/VdSwap hand
+  # the guest's GPU command ring buffer, front buffer and vblank interrupt
+  # callback to KernelProcess's Gpu*State for a separate GPU pump thread
+  # workstream to consume.
+  if(TARGET xenon_core)
+    add_executable(xenon_video_export_tests tests/xbox/video_export_tests.cpp)
+    target_link_libraries(xenon_video_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_video_export_tests)
+    add_test(NAME xenon_video_export_tests COMMAND xenon_video_export_tests)
   endif()
 
   # Phase 1/3 (AC6 Runtime Readiness pass): xboxkrnl handle-based (Nt*) sync
