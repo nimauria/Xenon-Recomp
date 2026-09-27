@@ -394,6 +394,20 @@ int main(int argc, char** argv) {
   auto start_result = session.start();
   status.write(session, start_result.success ? "Running" : "Start failed");
   if (!start_result.success) {
+    // A real, confirmed crash lived here: create_guest_process() (called
+    // inside start()) can already have spawned the audio/GPU-pump/timer
+    // threads - which persist across a failed start() the same way they
+    // persist across stop()/start() cycles, per their own documented
+    // process-lifetime design - before some later step in start() fails and
+    // returns here. Those threads may already be logging through
+    // XenonSession's console_log_mutex()-guarded paths concurrently with
+    // this write; writing here without the same lock corrupted the shared
+    // freopen'd stdout/stderr FILE*'s internal CRT state, observed as a
+    // debug-CRT invalid_parameter fast-fail (STATUS_STACK_BUFFER_OVERRUN)
+    // inside fwrite/unlock_file - the same class of bug the stdout/stderr
+    // race fix elsewhere in this codebase addressed, just at a call site
+    // that fix didn't reach.
+    std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
     std::cerr << "[runtime_host] " << start_result.message << std::endl;
     status.write_fatal("Game execution failed to start: " + start_result.message,
                        xenon::runtime_host::LaunchFailureCategory::StartFailed);
@@ -486,6 +500,13 @@ int main(int argc, char** argv) {
 #endif
 
   status.write(session, "Session ended");
-  std::cout << "[runtime_host] Session ended: " << session.last_error() << std::endl;
+  {
+    // Same reasoning as the "Start failed" write above: the audio/GPU-pump/
+    // timer threads are process-lifetime (stopped only in shutdown(), which
+    // nothing here has called), so they may still be alive and logging
+    // concurrently with this final write.
+    std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
+    std::cout << "[runtime_host] Session ended: " << session.last_error() << std::endl;
+  }
   return session.state() == xenon::core::SessionState::Failed ? 1 : 0;
 }
