@@ -38,6 +38,7 @@
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
 #include "xenon/xbox/xboxkrnl_tls_exports.hpp"
+#include "xenon/xbox/xboxkrnl_video_exports.hpp"
 #include "xenon/xbox/xboxkrnl_xex_module_exports.hpp"
 
 #if defined(_WIN32)
@@ -872,6 +873,28 @@ bool XenonSession::init_exports() {
         {0x153u, "KeTlsFree", &xbox::ke_tls_free_export},
         {0x154u, "KeTlsGetValue", &xbox::ke_tls_get_value_export},
         {0x155u, "KeTlsSetValue", &xbox::ke_tls_set_value_export},
+        // Vd* Xenos GPU control-plane exports - hand the guest's GPU command
+        // ring buffer, front buffer and vblank interrupt callback over to
+        // KernelProcess's Gpu*State (see xboxkrnl_video_exports.cpp/
+        // process.hpp), the write side of the contract a separate,
+        // already-landed XenonSession GPU pump thread workstream reads from.
+        {0x1B1u, "VdCallGraphicsNotificationRoutines",
+         &xbox::vd_call_graphics_notification_routines_export},
+        {0x1B6u, "VdEnableRingBufferRPtrWriteBack",
+         &xbox::vd_enable_ring_buffer_rptr_write_back_export},
+        {0x1BAu, "VdGetCurrentDisplayInformation",
+         &xbox::vd_get_current_display_information_export},
+        {0x1BDu, "VdGetSystemCommandBuffer", &xbox::vd_get_system_command_buffer_export},
+        {0x1C2u, "VdInitializeEngines", &xbox::vd_initialize_engines_export},
+        {0x1C3u, "VdInitializeRingBuffer", &xbox::vd_initialize_ring_buffer_export},
+        {0x1C6u, "VdIsHSIOTrainingSucceeded", &xbox::vd_is_hsio_training_succeeded_export},
+        {0x1CAu, "VdQueryVideoMode", &xbox::vd_query_video_mode_export},
+        {0x1D5u, "VdSetGraphicsInterruptCallback",
+         &xbox::vd_set_graphics_interrupt_callback_export},
+        {0x1D9u, "VdSetSystemCommandBufferGpuIdentifierAddress",
+         &xbox::vd_set_system_command_buffer_gpu_identifier_address_export},
+        {0x1DCu, "VdShutdownEngines", &xbox::vd_shutdown_engines_export},
+        {0x25Bu, "VdSwap", &xbox::vd_swap_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
