@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -431,9 +432,15 @@ int main(int argc, char** argv) {
         // real Xbox 360 dashboard/game-close behavior - it does not
         // terminate this process directly (the hard-stop grace-period
         // path below still applies if the game does not cooperate).
-        std::cout << "[runtime_host] Window close requested" << std::endl;
+        {
+          std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
+          std::cout << "[runtime_host] Window close requested" << std::endl;
+        }
         const auto stop_result = session.stop();
-        std::cout << "[runtime_host] " << stop_result.message << std::endl;
+        {
+          std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
+          std::cout << "[runtime_host] " << stop_result.message << std::endl;
+        }
         stop_sent = true;
         stop_deadline = std::chrono::steady_clock::now() + kStopGracePeriod;
       }
@@ -441,6 +448,7 @@ int main(int argc, char** argv) {
         session.set_focused(events.focused);
       }
       if (events.resized) {
+        std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
         std::cout << "[runtime_host] Presentation resized to " << events.width << "x"
                   << events.height << std::endl;
       }
@@ -448,14 +456,21 @@ int main(int argc, char** argv) {
 #endif
 
     if (!stop_sent && status.stop_requested()) {
-      std::cout << "[runtime_host] Stop requested by launcher" << std::endl;
+      {
+        std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
+        std::cout << "[runtime_host] Stop requested by launcher" << std::endl;
+      }
       const auto stop_result = session.stop();
-      std::cout << "[runtime_host] " << stop_result.message << std::endl;
+      {
+        std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
+        std::cout << "[runtime_host] " << stop_result.message << std::endl;
+      }
       stop_sent = true;
       stop_deadline = std::chrono::steady_clock::now() + kStopGracePeriod;
     }
 
     if (stop_deadline && std::chrono::steady_clock::now() >= *stop_deadline) {
+      std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
       std::cout << "[runtime_host] Guest execution did not stop cooperatively within "
                 << kStopGracePeriod.count() << "s; terminating" << std::endl;
       status.write_fatal("Stopped: game did not exit cooperatively and was terminated");

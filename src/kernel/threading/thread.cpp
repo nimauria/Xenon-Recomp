@@ -173,6 +173,23 @@ bool KernelThread::join(std::uint32_t timeout_ms) {
     return false;
   }
 
+  // A thread must never join itself: std::thread::join() is documented to
+  // throw std::system_error(resource_deadlock_would_occur) when called with
+  // get_id()==std::this_thread::get_id(), and this is genuinely reachable
+  // here - the last std::shared_ptr<KernelThread> reference can drop (e.g. a
+  // temporary from ThreadManager::get_thread() going out of scope) while
+  // still executing guest code ON this same host thread, late in
+  // thread_main()'s own natural completion, running this destructor/join
+  // synchronously on itself. Detach instead: the host thread is already at
+  // (or extremely close to) completion_future_ being ready in that case, so
+  // there is nothing left to actually wait for.
+  if (std::this_thread::get_id() == host_thread_->get_id()) {
+    if (host_thread_->joinable()) {
+      host_thread_->detach();
+    }
+    return true;
+  }
+
   // completion_future_ is set exactly once by thread_main() right before it
   // returns, on every exit path (entry_() returned naturally, or the thread
   // was terminated before ever running entry_()) - so waiting on it, rather
@@ -197,6 +214,10 @@ bool KernelThread::join(std::uint32_t timeout_ms) {
     host_thread_->join();
   }
   return true;
+}
+
+bool KernelThread::is_current_host_thread() const noexcept {
+  return host_thread_ && std::this_thread::get_id() == host_thread_->get_id();
 }
 
 std::optional<std::uint64_t> KernelThread::get_tls(std::uint32_t slot) const {
@@ -267,8 +288,14 @@ ThreadManager::~ThreadManager() {
 
 std::shared_ptr<KernelThread> ThreadManager::create_thread(
     ThreadEntry entry, const ThreadCreationParams& params) {
+  // Opportunistic housekeeping: reap any threads that finished since the
+  // last time something triggered cleanup. Must run BEFORE acquiring
+  // mutex_ below - reap_finished_threads() takes it itself, and it is not
+  // recursive.
+  reap_finished_threads();
+
   std::scoped_lock lock(mutex_);
-  
+
   auto thread = std::make_shared<KernelThread>(std::move(entry), params);
   threads_[thread->thread_id()] = thread;
   
@@ -279,6 +306,12 @@ std::shared_ptr<KernelThread> ThreadManager::get_thread(std::uint32_t thread_id)
   std::scoped_lock lock(mutex_);
   auto it = threads_.find(thread_id);
   return it != threads_.end() ? it->second : nullptr;
+}
+
+KernelThread* ThreadManager::get_thread_ptr(std::uint32_t thread_id) const noexcept {
+  std::scoped_lock lock(mutex_);
+  auto it = threads_.find(thread_id);
+  return it != threads_.end() ? it->second.get() : nullptr;
 }
 
 std::shared_ptr<KernelThread> ThreadManager::current_thread() const {
@@ -292,6 +325,40 @@ void ThreadManager::set_current_thread(std::shared_ptr<KernelThread> thread) {
 void ThreadManager::remove_thread(std::uint32_t thread_id) {
   std::scoped_lock lock(mutex_);
   threads_.erase(thread_id);
+}
+
+std::size_t ThreadManager::reap_finished_threads() {
+  std::vector<std::shared_ptr<KernelThread>> finished;
+  {
+    std::scoped_lock lock(mutex_);
+    for (auto it = threads_.begin(); it != threads_.end();) {
+      // is_current_host_thread() (not merely !is_terminated()) is what
+      // makes this safe to call from within a still-running thread's own
+      // entry_(): terminate() can set is_terminated() from another thread
+      // while this thread is still executing (a mid-dispatch preemptive
+      // terminate), so is_terminated() alone cannot tell "I just finished"
+      // apart from "I am still on my own stack, marked terminated out from
+      // under me". A thread can never be its own is_current_host_thread()
+      // match while calling this, so it can never reap itself.
+      if (it->second->is_terminated() && !it->second->is_current_host_thread()) {
+        finished.push_back(std::move(it->second));
+        it = threads_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  // `finished` is destroyed here, outside mutex_. If ThreadManager held the
+  // last reference to a given thread, this synchronously runs
+  // ~KernelThread(), which already performs its own bounded
+  // terminate()+join(5s)+detach-on-timeout (see the destructor) - the same
+  // shape of cleanup shutdown() relies on. Deliberately not join()-ing
+  // again first: is_terminated()==true does not guarantee the host thread
+  // has actually returned (terminate() cannot interrupt non-preemptible
+  // compiled guest code already in flight), and an extra untimed join here
+  // could stall whatever called reap_finished_threads() (e.g.
+  // create_thread(), on what may be a hot path) on a wedged thread.
+  return finished.size();
 }
 
 void ThreadManager::shutdown() {

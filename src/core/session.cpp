@@ -37,6 +37,8 @@
 #include "xenon/xbox/xboxkrnl_process_exports.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
+#include "xenon/xbox/xboxkrnl_tls_exports.hpp"
+#include "xenon/xbox/xboxkrnl_xex_module_exports.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -265,6 +267,7 @@ void XenonSession::set_state(SessionState new_state, std::string message) {
     state_ = new_state;
   }
   if (config_.enable_logging && !message.empty()) {
+    std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] " << message << std::endl;
   }
 }
@@ -276,6 +279,7 @@ void XenonSession::set_error(std::string error) {
     state_ = SessionState::Failed;
   }
   if (config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] " << error << std::endl;
   }
 }
@@ -461,6 +465,7 @@ bool XenonSession::init_kernel() {
   // this pass needs to add a second handler.
   exception_dispatcher_.register_handler([this](const kernel::ExceptionRecord& record) {
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest exception 0x" << std::hex
                 << static_cast<std::uint32_t>(record.code) << " at 0x" << record.address
                 << std::dec << std::endl;
@@ -492,6 +497,14 @@ bool XenonSession::init_gpu() {
   // ("automatic", "vulkan", "d3d12") either constructs a real native backend
   // or fails initialization outright; it never silently falls back to Null.
   const std::string requested = ascii_lower(config_.graphics_backend);
+
+  // The Xenos PM4 frontend is independent of which native Backend renders
+  // its output, and is needed even with a Null backend (e.g. a headless test
+  // session that still wants to exercise ring-buffer decode) - constructed
+  // once here, before backend selection, rather than duplicated in each
+  // branch below. init_memory() (called before init_gpu() in initialize())
+  // guarantees memory_ is already non-null.
+  graphics_system_ = std::make_unique<gpu::GraphicsSystem>(*memory_);
 
   if (requested == "null" || requested == "none") {
     gpu_ = std::make_unique<gpu::NullBackend>();
@@ -855,6 +868,10 @@ bool XenonSession::init_exports() {
          &xbox::rtl_initialize_critical_section_and_spin_count_export},
         {0x130u, "RtlLeaveCriticalSection", &xbox::rtl_leave_critical_section_export},
         {0x141u, "RtlTryEnterCriticalSection", &xbox::rtl_try_enter_critical_section_export},
+        {0x152u, "KeTlsAlloc", &xbox::ke_tls_alloc_export},
+        {0x153u, "KeTlsFree", &xbox::ke_tls_free_export},
+        {0x154u, "KeTlsGetValue", &xbox::ke_tls_get_value_export},
+        {0x155u, "KeTlsSetValue", &xbox::ke_tls_set_value_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -870,6 +887,27 @@ bool XenonSession::init_exports() {
         set_error(std::string("Failed to register xboxkrnl sync export: ") + binding.name);
         return false;
       }
+    }
+  }
+
+  // Register XexCheckExecutablePrivilege (ordinal 0x194 / 404 - AC6's boot
+  // path calls this immediately after its first RtlEnterCriticalSection/
+  // RtlLeaveCriticalSection pair). loaded_xex_ does not exist yet at this
+  // point in a fresh session either - same lazy-dereference-at-call-time
+  // pattern as kernel_process_ above.
+  {
+    core::ExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl.exe";
+    descriptor.name = "XexCheckExecutablePrivilege";
+    descriptor.ordinal = 0x194u;
+    descriptor.requirement = ExportRequirement::Required;
+    descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      if (!loaded_xex_) return false;
+      return xbox::xex_check_executable_privilege_export(loaded_xex_->image, ctx);
+    };
+    if (!export_registry_.register_export(std::move(descriptor))) {
+      set_error("Failed to register xboxkrnl XexCheckExecutablePrivilege export");
+      return false;
     }
   }
 
@@ -1207,6 +1245,7 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   effective_identity_ =
       xbox::compute_effective_identity(base_image, has_title_update ? &patched_image : nullptr);
   if (config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] Effective executable: title_id=0x" << std::hex
               << effective_identity_->title_id << " media_id=0x" << effective_identity_->media_id
               << std::dec << " title_update_applied=" << (has_title_update ? "yes" : "no")
@@ -1444,6 +1483,7 @@ bool XenonSession::resolve_xex_imports() {
     unresolved_imports_.push_back(
         UnresolvedImport{import.module, import.symbol, import.ordinal});
     if (config_.enable_export_diagnostics) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Unresolved "
                 << (import.is_variable() ? "variable import: " : "import: ")
                 << import.module << " '" << import.symbol << "' ordinal "
@@ -1690,6 +1730,14 @@ JsonValue XenonSession::capability_report() const {
   // of returning to baseline) is actually observable. Omitted until a
   // kernel process exists, matching "gpu"/"shader"'s own convention.
   if (kernel_process_) {
+    // Opportunistic reap before reading liveThreads below, so this figure
+    // reflects real, current liveness rather than "threads ever created
+    // minus threads reaped by unrelated activity elsewhere" - cleanup is
+    // lazy (see ThreadManager::reap_finished_threads()'s doc comment), so a
+    // session that hasn't triggered a reap via any other path recently
+    // would otherwise report a stale, inflated count here.
+    kernel_process_->thread_manager().reap_finished_threads();
+
     JsonValue kernel_objects_section = JsonValue::make_object();
     kernel_objects_section.set(
         "liveThreads",
@@ -1978,6 +2026,7 @@ void XenonSession::load_native_extension() {
                                    ? "failed to load native extension library"
                                    : load_error;
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Native extension load failed: " << native_extension_error_
                 << std::endl;
     }
@@ -1989,6 +2038,7 @@ void XenonSession::load_native_extension() {
     native_extension_error_ =
         std::string("native extension does not export '") + kBindCompiledRegistrySymbol + "'";
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Native extension load failed: " << native_extension_error_
                 << std::endl;
     }
@@ -2019,6 +2069,7 @@ void XenonSession::load_native_extension() {
               "native extension does not declare compatibility with the effective executable "
               "revision (hash " + effective_hash_hex + "); module declares: " + declared;
           if (config_.enable_logging) {
+            std::scoped_lock console_log_lock(console_log_mutex());
             std::cout << "[XenonSession] Native extension rejected: " << native_extension_error_
                       << std::endl;
           }
@@ -2033,6 +2084,7 @@ void XenonSession::load_native_extension() {
   compiled_registry_binder_ = [bind_fn](cpu::ExecutionContext& context) { bind_fn(context); };
   native_extension_bound_ = true;
   if (config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] Native extension bound: " << config_.native_extension_path
               << std::endl;
   }
@@ -2098,6 +2150,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
       }
     }
     if (!crashed && config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest entry returned: reason="
                 << cpu::flow_reason_name(result.reason)
                 << " next=0x" << std::hex << std::uppercase << result.next_address
@@ -2111,7 +2164,8 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     }
 
     constexpr std::uint32_t kMaxTopLevelDispatches = 1'000'000u;
-    for (std::uint32_t dispatch_count = 0u;
+    std::uint32_t dispatch_count = 0u;
+    for (;
          !crashed && !stop_requested_.load() &&
          !(thread && thread->is_terminated()) &&
          dispatch_count < kMaxTopLevelDispatches;) {
@@ -2127,6 +2181,31 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
         }
       }
       switch (result.reason) {
+        case cpu::FlowReason::Return:
+          // A Return reaching this OUTER dispatch loop (as opposed to being
+          // absorbed by a nested C++ call's own "if next != expected, return
+          // rr" propagation - see the giant per-function switch tables
+          // codegen emits) can mean two different things. The top-level
+          // guest entry genuinely finishing is the next_address==0/lr==0
+          // sentinel pattern (see run_execution()'s caller, which sets the
+          // initial synthetic LR to 0 specifically to detect this) - that
+          // case is handled below, unchanged. But a nonzero next_address
+          // means a tail branch (bctr/bclr with LK=0, not bl) crossed a
+          // compiled-function boundary into a shared helper - most commonly
+          // a register-restore helper (see runtime_helpers.hpp's
+          // restore_gpr_lr_v2 and friends) - whose own Return is really
+          // "continue at my caller's real return address", exactly like
+          // Branch/Fallthrough below, just arriving as FlowReason::Return
+          // because the helper had no idea it was reached via a tail branch
+          // from a *different* enclosing function rather than entered as
+          // this thread's own top-level function. Treating every such
+          // Return as terminal previously made any tail-branch-into-helper
+          // pattern that crosses a compiled-function boundary look like a
+          // broken/early return, even though the guest call chain was
+          // genuinely still live and simply needs to keep dispatching at
+          // result.next_address.
+          if (result.next_address == 0u && state.lr == 0u) break;
+          [[fallthrough]];
         case cpu::FlowReason::Branch:
         case cpu::FlowReason::Fallthrough: {
           if (result.next_address == 0u) {
@@ -2158,6 +2237,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
             result = next_fn(context);
           }
           if (config_.enable_logging) {
+            std::scoped_lock console_log_lock(console_log_mutex());
             std::cout << "[XenonSession] Guest dispatch returned: reason="
                       << cpu::flow_reason_name(result.reason)
                       << " next=0x" << std::hex << std::uppercase
@@ -2172,16 +2252,6 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
           }
           continue;
         }
-        case cpu::FlowReason::Return:
-          if (result.next_address != 0u || state.lr != 0u) {
-            std::ostringstream diagnostic;
-            diagnostic << "Guest entry returned from a non-terminal compiled "
-                       << "boundary (next=0x" << std::hex << std::uppercase
-                       << result.next_address << ", lr=0x" << state.lr
-                       << ')';
-            fail_execution(diagnostic.str(), 0xC000001Du);
-          }
-          break;
         case cpu::FlowReason::Halt:
           break;
         case cpu::FlowReason::Trap:
@@ -2203,8 +2273,15 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
       }
       break;
     }
+    // Distinguishes "the loop genuinely exhausted its dispatch budget" from
+    // "a terminal case (Halt/Trap/a real Return-with-null-sentinel/...)
+    // explicitly broke out of the switch" by checking the real counter
+    // rather than inferring it from result.reason - Return can now reach
+    // this point via either path (see the Return case above), so
+    // result.reason alone can no longer tell them apart the way it could
+    // when only Branch/Fallthrough ever re-entered the loop.
     if (!crashed && !stop_requested_.load() && !(thread && thread->is_terminated()) &&
-        result.reason == cpu::FlowReason::Branch) {
+        dispatch_count >= kMaxTopLevelDispatches) {
       fail_execution("Guest execution exceeded the top-level dispatch limit",
                      0xC000001Du);
     }
@@ -2343,9 +2420,20 @@ std::uint32_t XenonSession::run_execution() {
   // See run_created_guest_thread()'s matching cleanup: main_thread_ is
   // tracked by ThreadManager the same way a created thread is, and must
   // stop being counted as live once its dispatch has genuinely ended,
-  // regardless of which outcome branch below is taken.
-  if (kernel_process_ && main_thread_) {
-    kernel_process_->thread_manager().remove_thread(main_thread_->thread_id());
+  // regardless of which outcome branch below is taken. This runs AS
+  // main_thread_'s own entry_() (see start(), which spawns it exactly like
+  // a created guest thread), so directly calling
+  // remove_thread(main_thread_->thread_id()) here would be the same
+  // self-destruction hazard described at run_created_guest_thread()'s
+  // reap_finished_threads() call below - it could drop the map's last
+  // *other* reference and destroy main_thread_ while thread_main() is
+  // still executing on top of it. reap_finished_threads() is safe here
+  // because it can never remove the calling thread itself; main_thread_
+  // gets cleaned up by the next opportunistic reap elsewhere (another
+  // thread finishing, a new create_thread(), a capability_report() call),
+  // or unconditionally by ThreadManager::shutdown() at teardown.
+  if (kernel_process_) {
+    kernel_process_->thread_manager().reap_finished_threads();
   }
 
   if (outcome.crashed) {
@@ -2394,6 +2482,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
   if (outcome.crashed) {
     exit_code = outcome.crash_exit_code;
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Created guest thread "
                 << (thread ? thread->thread_id() : 0u)
                 << " crashed: " << outcome.crash_message << std::endl;
@@ -2404,6 +2493,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
     // not any in-flight register state.
     exit_code = thread ? thread->exit_code() : 0;
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Created guest thread "
                 << (thread ? thread->thread_id() : 0u)
                 << " terminated mid-dispatch, exit_code=" << exit_code << std::endl;
@@ -2418,6 +2508,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
     // main-thread Trap (returns final_result.detail, not gpr[3]).
     exit_code = outcome.final_result.detail;
     if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Created guest thread "
                 << (thread ? thread->thread_id() : 0u)
                 << " trapped (code " << exit_code << ')' << std::endl;
@@ -2445,19 +2536,34 @@ std::uint32_t XenonSession::run_created_guest_thread(
   // and must never be silently inherited by a different, later thread.
   exception_dispatcher_.clear_thread_handlers(thread ? thread->thread_id() : 0u);
 
-  // Real, found-while-auditing bug: nothing ever called
-  // ThreadManager::remove_thread() anywhere in production, so
-  // ThreadManager::thread_count() silently counted "threads ever created
-  // this session" rather than threads still live - a session that created
-  // and finished many short-lived guest threads would report an
-  // ever-growing count forever. Safe to remove here even though this code
-  // runs inside the thread's own ThreadEntry closure: the guest handle
-  // (HandleTable) and this function's own `thread` shared_ptr keep the
-  // KernelThread object itself alive: this only stops the scheduler from
-  // tracking a thread that will never run guest code again, matching the
-  // exception-handler cleanup just above.
-  if (kernel_process_ && thread) {
-    kernel_process_->thread_manager().remove_thread(thread->thread_id());
+  // NOT calling ThreadManager::remove_thread(thread->thread_id()) here,
+  // deliberately - a real, confirmed use-after-free bug used to live at
+  // this exact spot. This function runs AS entry_(), called by
+  // KernelThread::thread_main() (see thread.cpp) as `result = entry_();`;
+  // thread_main() then keeps running AFTER entry_() returns, touching
+  // mutex_/state_/completion_promise_ on `this`. This function's own
+  // `thread` parameter is a BY-VALUE std::shared_ptr<KernelThread> copy -
+  // the guest HandleTable's reference is the only other one once removed
+  // from the map (a game may already have closed the handle before the
+  // thread naturally finishes). Removing the map's reference here could
+  // therefore drop the very last reference and run ~KernelThread()
+  // synchronously, right before `thread` (this function's own copy) is
+  // destroyed as this function returns - destroying the KernelThread
+  // object while thread_main() is still executing ON it, one call frame
+  // up. thread_main()'s subsequent member accesses then hit freed memory:
+  // this was reachable in practice (any short-lived guest thread whose
+  // handle closes before it returns - not merely a hypothetical "handle
+  // closed early" edge case) and manifested as intermittent heap
+  // corruption/access violations/hangs depending on heap layout - never a
+  // clean, reliable crash, which is why this took so long to isolate.
+  //
+  // ThreadManager::reap_finished_threads() is the fix: it can never remove
+  // the calling thread itself (see KernelThread::is_current_host_thread()),
+  // only OTHER threads that have already finished, so it is safe to call
+  // from right here, on this thread's own stack, one statement before this
+  // function - and thread_main() above it - returns.
+  if (kernel_process_) {
+    kernel_process_->thread_manager().reap_finished_threads();
   }
 
   return exit_code;
@@ -2733,6 +2839,7 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
       // which already turns a terminal Trap into a dispatched guest
       // exception instead of pretending nothing happened.
       if (config_.enable_export_diagnostics) {
+        std::scoped_lock console_log_lock(console_log_mutex());
         std::cout << "[XenonSession] Unresolved import call: " << import.module << "!"
                   << (import.symbol.empty() ? std::to_string(import.ordinal) : import.symbol)
                   << " at 0x" << std::hex << target << std::dec << std::endl;
@@ -2750,6 +2857,7 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
   // must be a terminal, diagnosable failure rather than a silently
   // swallowed non-terminal Branch.
   if (config_.enable_export_diagnostics) {
+    std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] Unresolved call target: 0x" << std::hex << target
               << " (neither compiled guest code nor a known import)" << std::dec << std::endl;
   }
@@ -2778,7 +2886,8 @@ cpu::ExecutionResult XenonSession::trap(std::uint32_t trap_code,
                                        cpu::MemoryPort& memory) {
   // Handle traps
   if (config_.enable_logging) {
-    std::cout << "[XenonSession] Trap: code=" << trap_code 
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] Trap: code=" << trap_code
               << " at 0x" << std::hex << state.cia << std::dec << std::endl;
   }
   return {cpu::FlowReason::Trap, state.cia, trap_code};
@@ -2912,6 +3021,11 @@ bool XenonSession::external_call(std::string_view module,
   const std::uint32_t r4_before = static_cast<std::uint32_t>(state.gpr[4]);
   const std::uint32_t r5_before = static_cast<std::uint32_t>(state.gpr[5]);
   const std::uint32_t r6_before = static_cast<std::uint32_t>(state.gpr[6]);
+  if (config_.enable_export_diagnostics) {
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] BEGIN " << module << "!" << ordinal
+              << " thread=" << calling_thread_id << std::endl;
+  }
   auto result = export_registry_.invoke(module, ordinal, context);
 
   if (result.handled) {
@@ -2923,6 +3037,7 @@ bool XenonSession::external_call(std::string_view module,
     // return value.
     if (config_.enable_export_diagnostics) {
       const auto* desc = export_registry_.resolve(module, ordinal);
+      std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] call " << module << "!"
                 << (desc ? desc->name : std::to_string(ordinal)) << "(ordinal=" << ordinal
                 << ") at 0x" << std::hex << state.cia << " args(r3-r6)=0x" << r3_before << ",0x"
@@ -2941,8 +3056,9 @@ bool XenonSession::external_call(std::string_view module,
 
   // Unknown export
   if (config_.enable_export_diagnostics) {
-    std::cout << "[XenonSession] Unknown export: " << module 
-              << " ordinal " << ordinal 
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] Unknown export: " << module
+              << " ordinal " << ordinal
               << " at 0x" << std::hex << state.cia << std::dec << std::endl;
   }
 

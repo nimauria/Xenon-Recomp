@@ -94,6 +94,18 @@ class KernelThread final : public KernelObject {
     return terminated_.load(std::memory_order_acquire);
   }
 
+  // True when called from this KernelThread's own host thread. This is the
+  // load-bearing safety check for ThreadManager::reap_finished_threads():
+  // is_terminated() alone is NOT sufficient to prove "not currently
+  // executing", because terminate() can set it from another thread while
+  // this thread's own entry_() is still running (a preemptive-safepoint
+  // mid-dispatch terminate) - only host-thread identity distinguishes "I am
+  // the thread that just finished" from "I am still on my own stack, and
+  // someone else marked me terminated out from under me". Same check
+  // join() already relies on (see thread.cpp) to detect and avoid a
+  // same-thread join().
+  [[nodiscard]] bool is_current_host_thread() const noexcept;
+
   // Waits up to timeout_ms for the host thread to finish running entry_()
   // (or, for a still-parked create_suspended thread, to be terminated
   // without ever running it) - a real, honored timeout via a completion
@@ -106,6 +118,12 @@ class KernelThread final : public KernelObject {
   // TLS support
   [[nodiscard]] std::optional<std::uint64_t> get_tls(std::uint32_t slot) const;
   [[nodiscard]] bool set_tls(std::uint32_t slot, std::uint64_t value);
+  // Public accessor for kTlsSlotCount below - KeTlsAlloc/KeTlsFree's
+  // process-wide slot-allocation bitmap (see kernel::KernelProcess) must stay
+  // in sync with the actual per-thread storage capacity this class provides.
+  [[nodiscard]] static constexpr std::uint32_t tls_slot_count() noexcept {
+    return kTlsSlotCount;
+  }
 
   // Thread-local kernel state
   void* kernel_data() const noexcept { return kernel_data_; }
@@ -168,8 +186,38 @@ class ThreadManager {
   [[nodiscard]] std::shared_ptr<KernelThread> get_thread(std::uint32_t thread_id) const;
   [[nodiscard]] std::shared_ptr<KernelThread> current_thread() const;
 
+  // Non-owning lookup for callers running as guest code ON the thread they
+  // are asking about (e.g. KeTlsAlloc/KeTlsGetValue/KeTlsSetValue resolving
+  // ExportCallContext::thread_id) - verified-safe pattern from rexglue-sdk's
+  // XThread::GetCurrentThread(), which returns a raw pointer for the exact
+  // same reason: a thread that is currently executing is, by construction,
+  // still alive for the duration of the call, so taking an owning
+  // std::shared_ptr copy here is unnecessary and actively unsafe - if the
+  // ThreadManager's own map entry happens to be the last *other* reference
+  // (e.g. a closed guest handle), a temporary copy from get_thread() going
+  // out of scope at the end of the caller's function can drop the true last
+  // reference and destroy the KernelThread while it is still on its own
+  // call stack (thread_main() calling back into now-freed members) -
+  // undefined behavior that manifested as intermittent heap corruption/
+  // stack-cookie failures. A raw pointer can never do that.
+  [[nodiscard]] KernelThread* get_thread_ptr(std::uint32_t thread_id) const noexcept;
+
   void set_current_thread(std::shared_ptr<KernelThread> thread);
   void remove_thread(std::uint32_t thread_id);
+
+  // Removes and destroys every tracked thread that has finished AND is not
+  // the calling thread itself, returning the count removed. Safe to call
+  // from ANY context, including from within a still-running thread's own
+  // entry_() (e.g. XenonSession::run_execution()/run_created_guest_thread()
+  // right before they return) - see KernelThread::is_current_host_thread().
+  // This replaces the old, hazardous pattern of a finishing thread calling
+  // remove_thread() on its own id, which could destroy the KernelThread
+  // object while thread_main() was still executing on top of it. Cleanup is
+  // therefore lazy/opportunistic (triggered by create_thread(),
+  // run_execution(), run_created_guest_thread(), and capability_report()),
+  // not immediate on join().
+  std::size_t reap_finished_threads();
+
   void shutdown();
 
   [[nodiscard]] std::vector<std::shared_ptr<KernelThread>> enumerate_threads() const;

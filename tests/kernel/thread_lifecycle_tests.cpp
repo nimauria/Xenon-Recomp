@@ -154,6 +154,148 @@ void test_concurrent_joiners_are_all_satisfied_safely() {
   assert(thread.exit_code() == 42u);
 }
 
+// Real bug found while auditing the KeTlsAlloc/KeTlsGetValue/KeTlsSetValue
+// exports: ThreadManager::get_thread() returns an OWNING std::shared_ptr, so
+// a caller running as guest code on the thread it is asking about (the
+// common case for these exports, which resolve ExportCallContext::thread_id)
+// could accidentally drop the map's last *other* reference via a temporary
+// going out of scope, destroying the KernelThread object while it is still
+// executing on its own call stack - intermittent heap corruption, not a
+// clean crash. get_thread_ptr() returns a non-owning raw pointer instead
+// (the verified-safe pattern rexglue-sdk's XThread::GetCurrentThread() also
+// uses), which can never trigger destruction.
+void test_get_thread_ptr_is_non_owning() {
+  ThreadManager manager;
+  ThreadCreationParams params{};
+  auto thread = manager.create_thread([]() -> std::uint32_t { return 0; }, params);
+  const auto id = thread->thread_id();
+
+  auto* ptr = manager.get_thread_ptr(id);
+  assert(ptr == thread.get());
+  assert(manager.get_thread_ptr(id + 1000u) == nullptr);
+
+  // Dropping every OTHER reference must not affect a raw pointer previously
+  // obtained via get_thread_ptr() - proving it is genuinely non-owning.
+  thread.reset();
+  assert(manager.get_thread_ptr(id) != nullptr);
+}
+
+// Regression test for ThreadManager::reap_finished_threads() - the
+// mechanism that replaces the old, hazardous pattern of a thread removing
+// itself from the map right before its own entry_() returns (see
+// XenonSession::run_execution()/run_created_guest_thread()). Proves it
+// removes only threads that have actually finished, leaving a still-running
+// thread untouched.
+void test_reap_finished_threads_removes_only_terminated_threads() {
+  ThreadManager manager;
+  ThreadCreationParams params{};
+
+  auto finished = manager.create_thread([]() -> std::uint32_t { return 0; }, params);
+  const auto finished_id = finished->thread_id();
+  assert(finished->start());
+  assert(finished->join(2000));
+
+  // Drop the test's own reference to `finished` - the manager's map entry is
+  // the only remaining reference, so reap can actually erase-and-destroy it.
+  // Reap explicitly here, BEFORE creating the still-running thread below:
+  // create_thread() itself opportunistically reaps (see ThreadManager's
+  // implementation), so creating `running` first would already remove
+  // `finished` as a side effect and make this call's return value 0, not 1 -
+  // this ordering isolates reap_finished_threads()'s own return value from
+  // that opportunistic side channel.
+  finished.reset();
+  assert(manager.reap_finished_threads() == 1u);
+  assert(manager.get_thread_ptr(finished_id) == nullptr);
+
+  std::atomic<bool> allowed_to_return{false};
+  auto running = manager.create_thread([&]() -> std::uint32_t {
+    while (!allowed_to_return.load()) {
+      std::this_thread::sleep_for(1ms);
+    }
+    return 0;
+  }, params);
+  const auto running_id = running->thread_id();
+  assert(running->start());
+
+  // A still-running thread must survive a reap untouched.
+  assert(manager.reap_finished_threads() == 0u);
+  assert(manager.get_thread_ptr(running_id) != nullptr);
+
+  allowed_to_return.store(true);
+  assert(running->join(2000));
+  running.reset();
+  assert(manager.reap_finished_threads() == 1u);
+  assert(manager.get_thread_ptr(running_id) == nullptr);
+}
+
+// The critical self-safety proof for ThreadManager::reap_finished_threads():
+// it must be safe to call from a thread's OWN entry_() even when that
+// thread's is_terminated() is already true - which can happen mid-dispatch
+// via an externally-issued terminate() (KernelThread::terminate() sets
+// terminated_ immediately regardless of which thread calls it), not only at
+// natural completion. This is the exact shape of the call sites in
+// XenonSession::run_execution()/run_created_guest_thread(): both call
+// reap_finished_threads() from inside their own entry_(), after
+// dispatch_guest_thread() has already observed is_terminated()==true for
+// the very thread that's still running. A naive implementation keyed only
+// on is_terminated() (rather than KernelThread::is_current_host_thread())
+// would destroy the calling thread's own KernelThread object right here -
+// the same use-after-free class this whole mechanism exists to prevent.
+void test_self_reap_never_destroys_the_calling_thread() {
+  ThreadManager manager;
+  ThreadCreationParams params{};
+
+  std::atomic<bool> entry_started{false};
+  std::atomic<bool> reap_returned_without_crashing{false};
+  std::atomic<bool> continuation_completed{false};
+  // Chicken-and-egg: the entry closure needs to read the very shared_ptr
+  // create_thread() is about to return, so it's captured by reference and
+  // assigned before start() is called - thread_main() cannot observe it
+  // unset because the host OS thread doesn't exist until start() runs.
+  std::shared_ptr<KernelThread> self_thread;
+
+  self_thread = manager.create_thread([&]() -> std::uint32_t {
+    entry_started.store(true);
+    // Wait for the test's thread to terminate() us from the outside while
+    // we are still running here - simulating an externally-issued,
+    // mid-dispatch preemptive terminate.
+    while (!self_thread->is_terminated()) {
+      std::this_thread::sleep_for(1ms);
+    }
+    // The hazardous call shape under test: reap while is_terminated() is
+    // already true for the very thread making this call.
+    manager.reap_finished_threads();
+    reap_returned_without_crashing.store(true);
+    // Keep running a bit longer - if reap had incorrectly destroyed this
+    // KernelThread out from under us, touching shared state afterward would
+    // corrupt or crash rather than reach here cleanly.
+    std::this_thread::sleep_for(20ms);
+    continuation_completed.store(true);
+    return 0x11111111u;  // Must never be observed as the final exit code.
+  }, params);
+
+  const auto id = self_thread->thread_id();
+  assert(self_thread->start());
+  while (!entry_started.load()) {
+    std::this_thread::sleep_for(1ms);
+  }
+
+  assert(self_thread->terminate(0x99999999u));
+  assert(self_thread->join(2000));
+  assert(reap_returned_without_crashing.load());
+  assert(continuation_completed.load());
+  assert(self_thread->exit_code() == 0x99999999u &&
+         "terminate()'s exit code must survive the thread's own reap call and "
+         "its subsequent natural return");
+
+  // The thread's own reap call must not have removed itself from the map.
+  assert(manager.get_thread_ptr(id) != nullptr);
+
+  self_thread.reset();
+  assert(manager.reap_finished_threads() == 1u);
+  assert(manager.get_thread_ptr(id) == nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +306,9 @@ int main() {
   test_join_timeout_does_not_block_past_the_requested_duration();
   test_terminate_during_natural_return_does_not_clobber_exit_code();
   test_concurrent_joiners_are_all_satisfied_safely();
+  test_get_thread_ptr_is_non_owning();
+  test_reap_finished_threads_removes_only_terminated_threads();
+  test_self_reap_never_destroys_the_calling_thread();
 
   std::cout << "All KernelThread lifecycle tests passed!\n";
   return 0;

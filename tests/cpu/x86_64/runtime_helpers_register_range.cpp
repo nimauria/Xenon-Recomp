@@ -52,17 +52,19 @@ class TestRuntime final : public RuntimeServices {
   std::uint64_t read_time_base(const CpuState& state) override { return state.time_base; }
 };
 
-// GPR/LR family: entered via `bl` (save) / tail `b` (restore). r0 carries
-// the caller's own mflr'd LR value into save; restore must load the STACK
-// value back into LR (not whatever is currently live), then return through
-// it - proving the two are genuinely independent, not aliased.
+// GPR/LR family: entered via `bl` (save) / tail `b` (restore). r12 (not r0 -
+// confirmed against the real AC6 binary's `mfspr r12,LR` / `stw r12,-8(r1)`
+// save sequence) carries the caller's own mflr'd LR value into save; restore
+// must load the STACK value back into LR (not whatever is currently live),
+// then return through it - proving the two are genuinely independent, not
+// aliased.
 template <std::uint32_t RegisterStart>
 void test_gpr_lr(xenon::memory::AddressSpace& memory, TestRuntime& runtime,
                   std::uint64_t stack_pointer) {
   CpuState state{};
   state.gpr[1] = stack_pointer;
   constexpr std::uint64_t kOriginalCallerLr = 0x80010004ull;  // what save_v2 must return to
-  state.gpr[0] = kOriginalCallerLr;                           // mflr'd by the caller before `bl`
+  state.gpr[12] = kOriginalCallerLr;                          // mflr'd by the caller before `bl`
   state.lr = 0x80010004ull;  // the `bl`'s own return-into-caller address
   for (std::uint32_t reg = RegisterStart; reg <= 31u; ++reg)
     state.gpr[reg] = 0x1000000000000000ull | reg;
@@ -236,12 +238,19 @@ int main() {
   // collision for its own frame layout to be sound - this test only needs
   // to prove Xenon's own read/write offsets for each family stay isolated
   // from one another when the two base registers are, in fact, distinct.
+  //
+  // r12 is also the GPR/LR family's own transient LR-carry register (see
+  // test_gpr_lr above) - real compiled functions only hold r12 = mflr'd LR
+  // for the brief window of the `bl __savegprlr_N`/`bl __restgprlr_N` call
+  // itself, then immediately repurpose it as the VMX base for subsequent
+  // vector spills. This test reproduces that same real ordering rather than
+  // holding one fixed r12 value across every call.
   {
     CpuState state{};
     state.gpr[1] = frame;
-    state.gpr[12] = frame - 0x800ull;
-    state.gpr[0] = 0x80050000ull;
-    state.lr = 0x80050000ull;
+    constexpr std::uint64_t kOriginalCallerLr = 0x80050000ull;
+    const auto vmx_base = frame - 0x800ull;
+    state.lr = kOriginalCallerLr;
     for (std::uint32_t reg = 20u; reg <= 31u; ++reg) state.gpr[reg] = 0x2000000000000000ull | reg;
     for (std::uint32_t reg = 20u; reg <= 31u; ++reg) state.fpr_bits[reg] = 0x3000000000000000ull | reg;
     for (std::uint32_t reg = 20u; reg <= 31u; ++reg)
@@ -250,10 +259,12 @@ int main() {
     const auto fpr_before = state.fpr_bits;
     const auto vmx_before = state.vr;
 
+    state.gpr[12] = kOriginalCallerLr;  // mflr'd, transient, for this call only
     ExecutionContext gpr_save(state, *address_space, runtime);
     save_gpr_lr_v2<20>(gpr_save);
     ExecutionContext fpr_save(state, *address_space, runtime);
     save_fpr_v2<20>(fpr_save);
+    state.gpr[12] = vmx_base;  // repurposed as the VMX base, as real code does
     ExecutionContext vmx_save(state, *address_space, runtime);
     save_vmx_v2<20>(vmx_save);
 
@@ -266,6 +277,7 @@ int main() {
     restore_gpr_lr_v2<20>(gpr_restore);
     ExecutionContext fpr_restore(state, *address_space, runtime);
     restore_fpr_v2<20>(fpr_restore);
+    state.gpr[12] = vmx_base;  // still the VMX base at this point in the epilogue
     ExecutionContext vmx_restore(state, *address_space, runtime);
     restore_vmx_v2<20>(vmx_restore);
 

@@ -508,6 +508,8 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_memory_exports.cpp
     src/xbox/exports/xboxkrnl_process_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp
+    src/xbox/exports/xboxkrnl_xex_module_exports.cpp
+    src/xbox/exports/xboxkrnl_tls_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
@@ -753,6 +755,11 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_boot_checkpoint_tests)
   add_test(NAME xenon_boot_checkpoint_tests COMMAND xenon_boot_checkpoint_tests)
 
+  add_executable(xenon_logger_stream_mutex_tests tests/logging/logger_stream_mutex_tests.cpp)
+  target_link_libraries(xenon_logger_stream_mutex_tests PRIVATE xenon_logging)
+  xenon_enable_test_asserts(xenon_logger_stream_mutex_tests)
+  add_test(NAME xenon_logger_stream_mutex_tests COMMAND xenon_logger_stream_mutex_tests)
+
   if(TARGET xenon_network)
     add_executable(xenon_network_tests tests/network/network_tests.cpp)
     target_link_libraries(xenon_network_tests PRIVATE Xenon::Network)
@@ -942,6 +949,25 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_rtl_critical_section_export_tests)
     add_test(NAME xenon_rtl_critical_section_export_tests
              COMMAND xenon_rtl_critical_section_export_tests)
+  endif()
+
+  # xboxkrnl XexCheckExecutablePrivilege - the next real export Ace Combat
+  # 6's boot path calls once the gpr[12]-vs-gpr[0] save/restore-helper
+  # LR-source bug was fixed.
+  if(TARGET xenon_core)
+    add_executable(xenon_xex_module_export_tests tests/xbox/xex_module_export_tests.cpp)
+    target_link_libraries(xenon_xex_module_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_xex_module_export_tests)
+    add_test(NAME xenon_xex_module_export_tests COMMAND xenon_xex_module_export_tests)
+  endif()
+
+  # xboxkrnl KeTls* exports - the next real export Ace Combat 6's boot path
+  # calls once XexCheckExecutablePrivilege above was fixed.
+  if(TARGET xenon_core)
+    add_executable(xenon_tls_export_tests tests/xbox/tls_export_tests.cpp)
+    target_link_libraries(xenon_tls_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_tls_export_tests)
+    add_test(NAME xenon_tls_export_tests COMMAND xenon_tls_export_tests)
   endif()
 
   # Phase 1/3 (AC6 Runtime Readiness pass): xboxkrnl handle-based (Nt*) sync

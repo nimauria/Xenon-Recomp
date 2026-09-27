@@ -48,4 +48,80 @@ void KernelProcess::set_env(std::string name, std::string value) {
   environment_[std::move(name)] = std::move(value);
 }
 
+std::uint32_t KernelProcess::allocate_tls_slot() noexcept {
+  std::scoped_lock lock(tls_mutex_);
+  for (std::size_t slot = 0; slot < tls_free_slots_.size(); ++slot) {
+    if (tls_free_slots_.test(slot)) {
+      tls_free_slots_.reset(slot);
+      return static_cast<std::uint32_t>(slot);
+    }
+  }
+  return kTlsOutOfIndexes;
+}
+
+void KernelProcess::free_tls_slot(std::uint32_t slot) noexcept {
+  std::scoped_lock lock(tls_mutex_);
+  if (slot < tls_free_slots_.size()) {
+    tls_free_slots_.set(slot);
+  }
+}
+
+KernelProcess::GpuRingBufferState KernelProcess::gpu_ring_buffer() const noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  return gpu_ring_buffer_;
+}
+
+void KernelProcess::configure_gpu_ring_buffer(std::uint32_t base_address,
+                                              std::uint32_t capacity_dwords) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_ring_buffer_.base_address = base_address;
+  gpu_ring_buffer_.capacity_dwords = capacity_dwords;
+  gpu_ring_buffer_.write_index = 0;
+  gpu_ring_buffer_.read_index = 0;
+}
+
+void KernelProcess::set_gpu_ring_buffer_write_index(std::uint32_t write_index) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_ring_buffer_.write_index = write_index;
+}
+
+void KernelProcess::set_gpu_ring_buffer_read_index(std::uint32_t read_index) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_ring_buffer_.read_index = read_index;
+}
+
+void KernelProcess::set_gpu_ring_buffer_rptr_writeback(std::uint32_t address) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_ring_buffer_.rptr_writeback_address = address;
+}
+
+KernelProcess::GpuInterruptCallbackState KernelProcess::gpu_interrupt_callback() const noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  return gpu_interrupt_callback_;
+}
+
+void KernelProcess::set_gpu_interrupt_callback(std::uint32_t callback_address,
+                                               std::uint32_t context) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_interrupt_callback_.callback_address = callback_address;
+  gpu_interrupt_callback_.context = context;
+}
+
+KernelProcess::GpuFrontBufferState KernelProcess::gpu_front_buffer() const noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  return gpu_front_buffer_;
+}
+
+void KernelProcess::set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
+                                         std::uint32_t height, std::uint32_t pitch,
+                                         std::uint8_t format) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_front_buffer_.base_address = base_address;
+  gpu_front_buffer_.width = width;
+  gpu_front_buffer_.height = height;
+  gpu_front_buffer_.pitch = pitch;
+  gpu_front_buffer_.format = format;
+  ++gpu_front_buffer_.generation;
+}
+
 }  // namespace xenon::kernel

@@ -608,6 +608,54 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
     return finish_call(result, expected_return, next_pc);
   };
 
+  // An UNLINKED branch (bx/bcx/bclrx/bcctrx with LK=0 - a tail call/tail
+  // branch, common compiler output for e.g. "if (x) return f();") never goes
+  // through execute_call() above, so it never re-entered run() and never hit
+  // the is_recognized_import_thunk() check at this function's own top for
+  // the ORIGINAL entry target. Without this, a tail branch landing on an
+  // import-thunk address (the exact same loader-owned placeholder bytes a
+  // `bl` into the same address is already correctly routed around) would
+  // fall through to `next_pc = branch_target` and get decoded as PPC on the
+  // next loop iteration, producing a spurious "unsupported instruction"
+  // trap for what is really a perfectly resolvable import call - real guest
+  // code make no ABI distinction between reaching an import via `bl` or via
+  // a tail branch, so neither should Xenon.
+  const auto execute_tail_branch = [&](GuestAddress branch_target) -> bool {
+    if (auto* native = context.lookup_compiled(branch_target, CompiledLookupKind::Branch)) {
+      out.reason = DynamicFallbackStopReason::CompiledHandoff;
+      out.exit = branch_target;
+      out.public_result.result = native(context);
+      return true;
+    }
+    if (context.runtime.is_recognized_import_thunk(branch_target)) {
+      out.reason = DynamicFallbackStopReason::CompiledHandoff;
+      out.exit = branch_target;
+      out.public_result.handled = true;
+      auto result = context.runtime.call(branch_target, context.state, context.memory);
+      // XenonSession::call()'s Fallthrough convention ("the export ran;
+      // continue at state.cia") is only meaningful to a caller that already
+      // knows the real continuation address itself - a linked `bl` call site
+      // does (its own expected_return, computed from pc+4 - see
+      // execute_call()/finish_call() above), so it can safely ignore
+      // Fallthrough's next_address field entirely. An UNLINKED tail branch
+      // has no such fallback: state.cia at this point is still this bx
+      // instruction's own address (nothing updates it before the call), so
+      // forwarding Fallthrough as-is would make the OUTER dispatch loop
+      // re-dispatch this exact same branch forever. A tail branch never
+      // expects control back at all - it IS this function's own return, so
+      // completing it means returning to the function's real caller via the
+      // untouched LR, exactly as the equivalent real guest bytes
+      // (`bl <import-thunk-copy>`/`blr`, or the loader-owned thunk's own
+      // `mtctr`/`bctr`) would.
+      if (result.reason == FlowReason::Fallthrough) {
+        result = {FlowReason::Return, static_cast<GuestAddress>(context.state.lr & ~3ull), 0u};
+      }
+      out.public_result.result = result;
+      return true;
+    }
+    return false;
+  };
+
   for (std::uint32_t local_count = 0u;
        local_count < config_.max_instructions_per_dispatch; ++local_count) {
     if (!validate_page(pc)) {
@@ -655,13 +703,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
           return out;
         }
       } else {
-        if (auto* native = context.lookup_compiled(branch_target,
-                                                   CompiledLookupKind::Branch)) {
-          out.reason = DynamicFallbackStopReason::CompiledHandoff;
-          out.exit = branch_target;
-          out.public_result.result = native(context);
-          return out;
-        }
+        if (execute_tail_branch(branch_target)) return out;
         next_pc = branch_target;
       }
     } else if (mnemonic == "bcx") {
@@ -679,13 +721,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
             return out;
           }
         } else {
-          if (auto* native = context.lookup_compiled(branch_target,
-                                                     CompiledLookupKind::Branch)) {
-            out.reason = DynamicFallbackStopReason::CompiledHandoff;
-            out.exit = branch_target;
-            out.public_result.result = native(context);
-            return out;
-          }
+          if (execute_tail_branch(branch_target)) return out;
           next_pc = branch_target;
         }
       }
@@ -716,13 +752,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
           out.public_result.result = {FlowReason::Return, branch_target, 0u};
           return out;
         } else {
-          if (auto* native = context.lookup_compiled(branch_target,
-                                                     CompiledLookupKind::Branch)) {
-            out.reason = DynamicFallbackStopReason::CompiledHandoff;
-            out.exit = branch_target;
-            out.public_result.result = native(context);
-            return out;
-          }
+          if (execute_tail_branch(branch_target)) return out;
           next_pc = branch_target;
         }
       }

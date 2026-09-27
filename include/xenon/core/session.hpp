@@ -25,12 +25,14 @@
 #include "xenon/cpu/state.hpp"
 #include "xenon/filesystem/virtual_file_system.hpp"
 #include "xenon/gpu/backend.hpp"
+#include "xenon/gpu/graphics_system.hpp"
 #include "xenon/input/system.hpp"
 #include "xenon/input/xam_guest.hpp"
 #include "xenon/kernel/exception.hpp"
 #include "xenon/kernel/io_manager.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/xbox_io_guest.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/xam_session.hpp"
 #include "xenon/xbox/imports.hpp"
@@ -168,6 +170,20 @@ class XenonSession final : public cpu::RuntimeServices {
   XenonSession(const XenonSession&) = delete;
   XenonSession& operator=(const XenonSession&) = delete;
 
+  // Shared, process-wide lock for every "[XenonSession]"/"[runtime_host]"
+  // diagnostic line written to std::cout. main.cpp's own supervision loop
+  // runs concurrently with every guest thread this class dispatches, and all
+  // of them write to the SAME std::cout the launcher's main() has freopen'd
+  // to this session's log file. This forwards to logging::Logger's own
+  // stream_mutex() (rather than keeping a second, independent mutex) because
+  // xenon::logging::Logger::log()'s default (no-sink) path writes to that
+  // exact same std::cout/std::cerr from every subsystem in the process - two
+  // separate locks would each serialize their own call sites but do nothing
+  // to stop the two mechanisms from racing each other.
+  [[nodiscard]] static std::mutex& console_log_mutex() noexcept {
+    return logging::Logger::stream_mutex();
+  }
+
   // Lifecycle
   [[nodiscard]] SessionResult initialize(const SessionConfig& config);
   
@@ -242,6 +258,13 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] kernel::KernelIoManager* kernel_io() noexcept;
   [[nodiscard]] input::InputSystem* input() noexcept { return input_.get(); }
   [[nodiscard]] gpu::Backend* gpu() noexcept { return gpu_.get(); }
+  // The Xenos PM4 frontend (register file, EDRAM, IR stream, command
+  // processor) that decodes a guest's GPU command ring buffer into IR and
+  // plays it into gpu_. Constructed in init_gpu() once memory_ exists (it
+  // holds a reference, not a copy, of the session's AddressSpace) - null
+  // whenever gpu_ itself is null (graphics disabled). Read by the GPU pump
+  // thread (see start_gpu_pump_thread()/run_gpu_pump_thread()).
+  [[nodiscard]] gpu::GraphicsSystem* graphics_system() noexcept { return graphics_system_.get(); }
   [[nodiscard]] audio::AudioSystem* audio() noexcept {
 #if defined(XENON_HAS_AUDIO)
     return audio_.get();
@@ -486,6 +509,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // canonical dispatch path. Declared after input_ so it is destroyed first.
   std::unique_ptr<input::xam::guest::GuestInputBridge> input_bridge_{};
   std::unique_ptr<gpu::Backend> gpu_{};
+  // See graphics_system()'s doc comment above. Declared after gpu_ (destroyed
+  // first) since nothing here holds a reference the other way.
+  std::unique_ptr<gpu::GraphicsSystem> graphics_system_{};
 #if defined(XENON_HAS_AUDIO)
   std::unique_ptr<audio::AudioSystem> audio_{};
 #endif

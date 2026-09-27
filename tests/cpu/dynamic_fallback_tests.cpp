@@ -23,6 +23,39 @@ void seed_simple_return(AddressSpace& memory) {
   write_instruction(memory, kCode + 0u, 0x3860002Au);
   write_instruction(memory, kCode + 4u, 0x4E800020u);
 }
+
+// A single recognized import-thunk address; call() records what it was
+// invoked with instead of just branching into it like NullRuntimeServices,
+// so a test can prove the real import dispatch ran rather than the
+// interpreter decoding the thunk's placeholder bytes as PPC.
+class ImportThunkRuntimeServices final : public RuntimeServices {
+ public:
+  explicit ImportThunkRuntimeServices(GuestAddress thunk_address)
+      : thunk_address_(thunk_address) {}
+
+  bool is_recognized_import_thunk(GuestAddress target) override {
+    return target == thunk_address_;
+  }
+  ExecutionResult call(GuestAddress target, CpuState& state, MemoryPort&) override {
+    ++call_count;
+    last_call_target = target;
+    state.gpr[3] = 0x99u;
+    return {FlowReason::Return, static_cast<GuestAddress>(state.lr), 0u};
+  }
+  ExecutionResult syscall(std::uint32_t level, CpuState& state, MemoryPort&) override {
+    return {FlowReason::Syscall, state.cia + 4u, level};
+  }
+  ExecutionResult trap(std::uint32_t trap_code, CpuState& state, MemoryPort&) override {
+    return {FlowReason::Trap, state.cia, trap_code};
+  }
+  std::uint64_t read_spr(std::uint32_t, const CpuState&) override { return 0; }
+  void write_spr(std::uint32_t, std::uint64_t, CpuState&) override {}
+  std::uint64_t read_time_base(const CpuState& state) override { return state.time_base; }
+
+  const GuestAddress thunk_address_;
+  int call_count = 0;
+  GuestAddress last_call_target = 0;
+};
 }  // namespace
 
 int main() {
@@ -112,6 +145,37 @@ int main() {
   assert(unsupported.handled);
   assert(unsupported.result.reason == FlowReason::Trap);
   assert(fallback.unsupported_instructions() >= 1u);
+
+  // An UNLINKED tail branch (bcctrx/bctr with LK=0 - real compiler output
+  // for e.g. "if (x) return f();") landing on a recognized import-thunk
+  // address must be routed through RuntimeServices::call(), never decoded
+  // as PPC. Only a linked `bl` into the same address was previously routed
+  // correctly (via execute_call() re-entering run(), which re-checks
+  // is_recognized_import_thunk() at the top) - a plain tail branch just set
+  // next_pc and looped back into the decoder, hitting the thunk's
+  // loader-owned placeholder bytes and producing a spurious "unsupported
+  // instruction" trap for what is really a perfectly resolvable import call.
+  constexpr GuestAddress kThunk = kCode + 0x300u;
+  write_instruction(memory, kCode + 0u, 0x4E800420u);  // bctr (unconditional, LK=0)
+  write_instruction(memory, kThunk, 0x00000000u);      // real hardware: loader-owned
+                                                        // placeholder bytes, never valid PPC
+  ImportThunkRuntimeServices thunk_runtime(kThunk);
+  CpuState thunk_state{};
+  thunk_state.ctr = kThunk;
+  thunk_state.lr = kReturn;
+  DynamicFallbackExecutor thunk_fallback;
+  ExecutionContext thunk_context(thunk_state, memory, thunk_runtime);
+  thunk_fallback.bind(thunk_context);
+  const auto tail_branch_to_thunk =
+      thunk_context.try_dynamic_fallback(kCode, CompiledLookupKind::Call);
+  assert(tail_branch_to_thunk.handled);
+  assert(tail_branch_to_thunk.result.reason == FlowReason::Return);
+  assert(thunk_runtime.call_count == 1 &&
+         "the tail branch must reach RuntimeServices::call(), not the PPC decoder");
+  assert(thunk_runtime.last_call_target == kThunk);
+  assert(thunk_state.gpr[3] == 0x99u);
+  assert(thunk_fallback.unsupported_instructions() == 0u &&
+         "the thunk's placeholder bytes must never be decoded as PPC");
 
   // Guest self-modifying code invalidates the active fallback source snapshot.
   // stw r4,4(r3) rewrites the next instruction on the executable page; the

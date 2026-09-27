@@ -71,6 +71,20 @@ struct SessionExecutionTestAccess {
                             cpu::MemoryPort& memory) {
     return session.external_call(module, ordinal, state, memory);
   }
+
+  // For driving run_execution() end-to-end in a test - the corrected
+  // main_thread_ cleanup path (see run_execution()'s reap_finished_threads()
+  // call) runs AS main_thread_'s own entry_(), exactly like a created guest
+  // thread's run_created_guest_thread(), and needs a real main_thread_
+  // assigned to exercise it.
+  static void set_main_thread(XenonSession& session,
+                              std::shared_ptr<kernel::KernelThread> thread) {
+    session.main_thread_ = std::move(thread);
+  }
+
+  static std::uint32_t run_execution(XenonSession& session) {
+    return session.run_execution();
+  }
 };
 
 }  // namespace xenon::core
@@ -627,6 +641,14 @@ void test_thread_count_returns_to_baseline_after_threads_finish() {
            kernel::KernelIoCode::Success);
     auto& thread = static_cast<kernel::KernelThread&>(*view.object);
     assert(thread.join(2000));
+    // Cleanup is now lazy/opportunistic (ThreadManager::reap_finished_threads(),
+    // triggered by create_thread()/run_execution()/run_created_guest_thread()/
+    // capability_report()), not automatic the instant join() returns - a
+    // finished thread's own entry_() can never safely remove itself from the
+    // map (see session.cpp's run_created_guest_thread()/run_execution()), so
+    // nothing here does that implicitly either. Reap explicitly, from the
+    // test's own thread, to observe the post-cleanup baseline.
+    thread_manager.reap_finished_threads();
   };
 
   create_and_join_one();
@@ -690,6 +712,53 @@ void test_capability_report_kernel_objects_section_reflects_real_liveness() {
     assert(kernel_objects->get_number("liveHandles") == 0.0 &&
            "closing the thread's handle must bring liveHandles back down");
   }
+}
+
+// Direct regression test for the run_execution() half of the thread
+// self-destruction fix (the counterpart to run_created_guest_thread(),
+// which the tests above already exercise indirectly via thread_count()/
+// capability_report()). main_thread_ runs run_execution() AS its own
+// entry_() exactly like a created guest thread (see XenonSession::start(),
+// which spawns it via ThreadManager::create_thread()+start()) - so its
+// post-dispatch cleanup had the identical self-destruction hazard until
+// run_execution()'s remove_thread(main_thread_->thread_id()) call was
+// replaced with reap_finished_threads(). Drives main_thread_ through
+// run_execution() end-to-end via the real production entry point and
+// proves the corrected cleanup neither hangs nor corrupts the thread's own
+// state, and that main_thread_ cannot reap itself.
+void test_run_execution_reaps_main_thread_without_self_destruction() {
+  g_entry_ran.store(false);
+  g_observed_start_context.store(0);
+  ThreadCreationHarness harness(&echo_increment_entry);
+  // configure() points loaded_xex_->image.entry_point at 0x1000 - register
+  // the same entry function there so run_execution()'s dispatch actually
+  // succeeds rather than merely crashing on an unresolved address (either
+  // way the reap_finished_threads() call under test runs unconditionally,
+  // but a real successful dispatch is the more representative case).
+  harness.registry.entries.emplace(0x1000u, &echo_increment_entry);
+
+  kernel::ThreadCreationParams params{};
+  params.name = "MainThread";
+  auto main_thread = harness.session.kernel_process()->thread_manager().create_thread(
+      [&harness]() -> std::uint32_t {
+        return xenon::core::SessionExecutionTestAccess::run_execution(harness.session);
+      },
+      params);
+  xenon::core::SessionExecutionTestAccess::set_main_thread(harness.session, main_thread);
+
+  assert(main_thread->start());
+  // A hang or crash here would mean the corrected cleanup path deadlocked
+  // or destroyed main_thread_ out from under itself.
+  assert(main_thread->join(5000));
+  assert(g_entry_ran.load());
+
+  auto& thread_manager = harness.session.kernel_process()->thread_manager();
+  // main_thread_ can never reap itself - it must still be tracked right
+  // after join(), disappearing only once something else (here, the test
+  // itself) triggers the deferred reap.
+  assert(thread_manager.get_thread_ptr(main_thread->thread_id()) != nullptr);
+  main_thread.reset();
+  assert(thread_manager.reap_finished_threads() == 1u);
 }
 
 // Part 15 of the AC6 Runtime Readiness pass ("boot phase checkpoints"):
@@ -813,6 +882,7 @@ int main() {
   test_external_call_resolves_real_calling_thread_identity();
   test_thread_count_returns_to_baseline_after_threads_finish();
   test_capability_report_kernel_objects_section_reflects_real_liveness();
+  test_run_execution_reaps_main_thread_without_self_destruction();
   test_boot_checkpoints_reached_via_real_export_calls();
 
   std::cout << "All ExCreateThread tests passed!\n";

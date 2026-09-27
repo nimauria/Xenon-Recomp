@@ -49,6 +49,7 @@ void Logger::log(Level level, std::string_view category, std::string_view messag
   entry.set("category", std::string(category));
   entry.set("message", std::string(message));
   auto& stream = (level >= Level::Error) ? std::cerr : std::cout;
+  std::scoped_lock lock(stream_mutex_);
   stream << entry.dump() << '\n';
 }
 

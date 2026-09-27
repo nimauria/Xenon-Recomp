@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -12,9 +14,35 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(_WIN32) && defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 
 namespace xenon::memory {
 namespace {
+
+#if defined(_WIN32) && defined(_DEBUG)
+// A debug-CRT assertion/abort (vector bounds check, heap corruption, etc.)
+// otherwise shows a blocking "Debug Error!" dialog via _CrtDbgReport. This
+// runtime host process normally runs detached with no visible console or
+// window (see runtime_host/src/main.cpp) - a modal dialog nobody can ever
+// click hangs the process forever instead of failing. The dynamic debug CRT
+// (ucrtbased.dll, used by a Debug-configured game module) is one shared
+// instance per process, so running this once, from any Xenon library linked
+// into that module, redirects every report from every module sharing it to
+// stderr (already redirected to this session's log file) instead of a
+// dialog - the process still aborts on a real assertion, but does so
+// promptly and leaves the reason in the log rather than hanging silently.
+struct SuppressBlockingCrtDialogs {
+  SuppressBlockingCrtDialogs() noexcept {
+    for (int report_type : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) {
+      _CrtSetReportMode(report_type, _CRTDBG_MODE_FILE);
+      _CrtSetReportFile(report_type, _CRTDBG_FILE_STDERR);
+    }
+  }
+};
+const SuppressBlockingCrtDialogs g_suppress_blocking_crt_dialogs{};
+#endif
 
 constexpr std::array<RegionDescriptor, 9> kRegions{{
     {kVirtual4KBase, kVirtual4KEnd, kBasePageSize, RegionKind::Virtual},
@@ -1346,11 +1374,42 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
   if (!std::has_single_bit(alignment)) return false;
   size = align_up(size, page_size);
 
+  // Defensive bound: first+count must never exceed pages_.size() before any
+  // pages_[...] index below runs. This is not a "this can't happen" belt -
+  // real corruption reaching this vector (from anywhere in the process, not
+  // necessarily this function's own arithmetic) has been observed in
+  // practice as an unhandled MSVC debug-CRT "vector subscript out of range"
+  // crash deep inside this exact loop; failing the allocation cleanly here
+  // (with a diagnostic identifying the actual bad index) is strictly better
+  // than propagating an out-of-bounds access into undefined behavior.
+  const auto page_index_in_bounds = [this](std::uint32_t first, std::uint32_t count) noexcept {
+    if (count == 0u) return true;
+    const auto last = static_cast<std::uint64_t>(first) + (count - 1u);
+    if (last >= pages_.size()) {
+      std::fprintf(stderr,
+                   "[AddressSpace::allocate] out-of-bounds page index: first=0x%08X count=0x%08X "
+                   "last=0x%016llX pages_.size()=0x%016zX\n",
+                   first, count, static_cast<unsigned long long>(last), pages_.size());
+      // This is never a legitimate "allocation full"/OOM condition - an
+      // out-of-bounds page index reaching here means corruption occurred
+      // somewhere. In debug/test builds, fail loudly (this file's
+      // SuppressBlockingCrtDialogs above already redirects any debug-CRT
+      // assert to stderr instead of a blocking dialog, so this aborts
+      // promptly with the reason in the log rather than hanging). Release
+      // builds still degrade to the quiet `return false` below, which the
+      // existing allocation-failure paths already handle safely.
+      assert(false && "AddressSpace::allocate: out-of-bounds page index (see stderr diagnostic)");
+      return false;
+    }
+    return true;
+  };
+
   if (!top_down) {
     for (std::uint64_t candidate = align_up(region->base, alignment);
          candidate + size - 1u <= region->end; candidate += alignment) {
       const auto first = static_cast<std::uint32_t>(candidate) >> kPageShift;
       const auto count = size >> kPageShift;
+      if (!page_index_in_bounds(first, count)) return false;
       bool free = true;
       for (std::uint32_t i = 0; i < count; ++i) {
         if (pages_[first + i].state != PageState::Free) { free = false; break; }
@@ -1370,6 +1429,7 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       if (candidate < region->base) break;
       const auto first = static_cast<std::uint32_t>(candidate) >> kPageShift;
       const auto count = size >> kPageShift;
+      if (!page_index_in_bounds(first, count)) return false;
       bool free = true;
       for (std::uint32_t i = 0; i < count; ++i) {
         if (pages_[first + i].state != PageState::Free) { free = false; break; }

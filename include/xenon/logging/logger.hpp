@@ -74,12 +74,27 @@ class Logger {
     return call_count_.load(std::memory_order_relaxed);
   }
 
+  // The one lock every writer of std::cout/std::cerr in this process must
+  // hold for the full duration of a write. Concurrent, unsynchronized writes
+  // to a freopen'd stdout/stderr from multiple guest threads have been
+  // observed (via a real debugger stack trace: MSVCP140 basic_filebuf::xsputn
+  // -> ucrtbase!fwrite -> isatty_proc -> invalid_parameter_noinfo) to race the
+  // CRT's own lazy console-vs-file buffering-mode detection and fast-fail the
+  // whole process with STATUS_STACK_BUFFER_OVERRUN. log()'s own default
+  // (no-sink) path uses this; any other subsystem writing directly to
+  // std::cout/std::cerr (see core::XenonSession::console_log_mutex(), which
+  // forwards here) must use the same lock rather than one of its own.
+  [[nodiscard]] static std::mutex& stream_mutex() noexcept {
+    return instance().stream_mutex_;
+  }
+
  private:
   Logger() = default;
 
   std::atomic<Level> min_level_{Level::Warning};
   std::atomic<std::uint64_t> call_count_{0};
   std::mutex sink_mutex_;
+  std::mutex stream_mutex_;
   Sink sink_;
 };
 
