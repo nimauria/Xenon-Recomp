@@ -462,6 +462,37 @@ class XenonSession final : public cpu::RuntimeServices {
   // AudioSystem's guest-callback pump loop until stop_guest_callback_pump().
   [[nodiscard]] std::uint32_t run_audio_callback_thread();
 #endif
+  // Single combined GPU pump thread: drains the guest's PM4 command ring
+  // buffer into graphics_system_/gpu_ and, at ~60Hz, presents the current
+  // front buffer and fires the guest's registered vsync interrupt callback -
+  // all serialized on this ONE dedicated host thread. This is deliberate:
+  // gpu::Backend's begin_submission()/consume()/end_submission()/present()
+  // have no internal synchronization over shared mutable state (pipeline
+  // caches, EDRAM trackers, presentation state), so ring-drain and present
+  // must never run concurrently on two different threads. Mirrors the audio
+  // callback thread's KernelThread/KPCR/TLS machinery exactly (see
+  // start_audio_guest_thread()/invoke_audio_callback() above) because vsync
+  // also needs to call INTO GUEST CODE (the registered graphics interrupt
+  // callback) with a real guest thread identity, not a bare CpuState.
+  [[nodiscard]] bool invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
+                                                   cpu::GuestAddress context);
+  // Creates and starts gpu_pump_thread_ (its own KPCR/static-TLS block,
+  // distinct from main_thread_tls_/audio_thread_tls_) and marks the pump
+  // loop active. Called once from create_guest_process(), after
+  // kernel_process_/loaded_xex_ exist and init_gpu() has already constructed
+  // gpu_/graphics_system_ (see initialize()), so the pump thread always has
+  // a legitimate KernelProcess/KernelThread/KPCR/TLS identity before it ever
+  // touches the guest ring buffer or calls a guest interrupt callback.
+  [[nodiscard]] bool start_gpu_pump_thread();
+  // Entry point (kernel::ThreadEntry) for gpu_pump_thread_: registers itself
+  // as the current KernelThread, then runs run_gpu_pump_thread()'s loop body
+  // until stop_gpu_pump_thread() clears gpu_pump_running_.
+  [[nodiscard]] std::uint32_t run_gpu_pump_thread();
+  // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
+  // started. Safe to call unconditionally (including when the thread was
+  // never created, e.g. graphics disabled or start_gpu_pump_thread() never
+  // reached).
+  void stop_gpu_pump_thread() noexcept;
   void load_native_extension();
   void unload_native_extension() noexcept;
 
@@ -591,6 +622,23 @@ class XenonSession final : public cpu::RuntimeServices {
   std::shared_ptr<kernel::KernelThread> audio_thread_{};
   GuestThreadTlsContext audio_thread_tls_{};
 #endif
+
+  // GPU pump thread state. Not gated behind a feature macro like
+  // XENON_HAS_AUDIO's audio_* members above - graphics is always compiled
+  // in (config_.enable_graphics/gpu_/graphics_system_ decide whether it
+  // actually runs, not a build-time flag). Stack is allocated once in
+  // init_gpu() (mirroring audio_callback_stack_base_'s allocation in
+  // init_audio()); the KPCR/TLS context and KernelThread are created once in
+  // start_gpu_pump_thread() (called from create_guest_process(), mirroring
+  // start_audio_guest_thread()) and torn down in shutdown()/
+  // release_partial_guest_process() in the same relative order as the audio
+  // thread's own teardown (stop flag -> join -> release TLS/stack), before
+  // gpu_.reset()/graphics_system_.reset().
+  memory::GuestAddress gpu_pump_callback_stack_base_{};
+  std::uint32_t gpu_pump_callback_stack_size_{};
+  std::shared_ptr<kernel::KernelThread> gpu_pump_thread_{};
+  GuestThreadTlsContext gpu_pump_thread_tls_{};
+  std::atomic<bool> gpu_pump_running_{false};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> execution_active_{false};
