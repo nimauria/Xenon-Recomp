@@ -261,6 +261,27 @@ bool ke_set_base_priority_thread_export(kernel::KernelProcess& process,
   return true;
 }
 
+// KeQueryBasePriorityThread (ordinal 0x81 / 129)
+// Guest ABI: r3 = guest KTHREAD pointer -> r3 = current base priority (LONG).
+// A pure read of the same priority state KeSetBasePriorityThread writes.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool ke_query_base_priority_thread_export(kernel::KernelProcess& process,
+                                          ExportCallContext& context) {
+  const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+
+  kernel::KernelThread* target = nullptr;
+  for (const auto& thread : process.thread_manager().enumerate_threads()) {
+    if (thread->guest_kthread_address() == thread_ptr) {
+      target = thread.get();
+      break;
+    }
+  }
+  context.cpu.gpr[3] =
+      target ? static_cast<std::uint32_t>(static_cast<std::int32_t>(target->priority())) : 0u;
+  return true;
+}
+
 // KeSetAffinityThread (ordinal 0x97)
 // Guest ABI: r3 = guest KTHREAD pointer, r4 = new affinity mask (nonzero),
 // r5 = optional guest pointer to receive the previous affinity mask ->
@@ -315,6 +336,7 @@ constexpr KeSyncExportSpec kKeSyncExports[] = {
     {0x0AFu, "KeWaitForMultipleObjects"},
     {0x0B0u, "KeWaitForSingleObject"},
     {0x099u, "KeSetBasePriorityThread"},
+    {0x081u, "KeQueryBasePriorityThread"},
     {0x097u, "KeSetAffinityThread"},
 };
 
@@ -351,6 +373,11 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   if (name == "KeSetBasePriorityThread") {
     return [&process](ExportCallContext& ctx) {
       return ke_set_base_priority_thread_export(process, ctx);
+    };
+  }
+  if (name == "KeQueryBasePriorityThread") {
+    return [&process](ExportCallContext& ctx) {
+      return ke_query_base_priority_thread_export(process, ctx);
     };
   }
   if (name == "KeSetAffinityThread") {

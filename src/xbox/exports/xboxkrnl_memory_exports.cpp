@@ -298,6 +298,30 @@ bool mm_allocate_physical_memory_ex_export(kernel::KernelProcess& process,
   return true;
 }
 
+// MmFreePhysicalMemory (ordinal 0xBD / 189)
+// Guest ABI: r3 = type (unused, matches rexglue-sdk's MmFreePhysicalMemory_
+// entry, which also ignores it), r4 = base address (the guest-visible
+// physical alias address a prior MmAllocatePhysicalMemoryEx/VdPersistDisplay-
+// style allocation returned) -> void (no meaningful return).
+//
+// Real hardware's heap allocator recovers the original allocation's size
+// from the address itself (LookupHeap(base_address) walks its own free-list
+// bookkeeping). Xenon's memory::AddressSpace::free_physical() instead
+// requires the caller to already know the size, and there is currently no
+// guest-alias-address -> allocation-size reverse lookup to recover it from
+// here. This is a genuine, narrow gap: the call is accepted safely (there is
+// no NTSTATUS for a caller to observe failure through either way - a real
+// caller cannot tell the difference between "freed" and "accepted, not yet
+// reclaimed" from this API), but the host-side physical page is not
+// actually released back to the allocator. In practice this is bounded and
+// rare (a handful of small blocks at boot, e.g. VdPersistDisplay's pairing
+// call above), not a per-frame/per-allocation leak - implementing the real
+// address->size reverse lookup is tracked as a known follow-up rather than
+// guessed at here.
+bool mm_free_physical_memory_export(ExportCallContext&) {
+  return true;
+}
+
 namespace {
 
 // KeFlushUserModeTb (ordinal 0x65)
@@ -331,6 +355,7 @@ struct MemoryExportSpec {
 // (xboxkrnl_table.inc), not guessed - see xboxkrnl_memory_exports.hpp.
 const MemoryExportSpec kMemoryExports[] = {
     {0x065u, "KeFlushUserModeTb", &ke_flush_user_mode_tb_export},
+    {0x0BDu, "MmFreePhysicalMemory", &mm_free_physical_memory_export},
 };
 
 }  // namespace

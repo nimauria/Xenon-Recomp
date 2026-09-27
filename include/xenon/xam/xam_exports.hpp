@@ -153,6 +153,23 @@ constexpr std::uint32_t XamUserCreateStatsEnumerator = 0x02F7;
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamGetExecutionId = 0x0280;
 
+// ---------------------------------------------------------------------------
+// System information (xam_table.inc 0x282)
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamGetSystemVersion = 0x0282;
+
+// ---------------------------------------------------------------------------
+// NetDll_* (XNet/Winsock guest ABI, xam_table.inc 0x33-0x34). The generic
+// Xbox Live/system-link network stack every title links against through
+// xam.xex - distinct from the unrelated, future Xenon Network client. Only
+// the small subset actually reachable during offline boot is modeled here;
+// see docs/xam/XAM_V1.md for the rest of this ordinal range's status.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t NetDll_WSAStartup = 0x0001;
+constexpr std::uint32_t NetDll_WSACleanup = 0x0002;
+constexpr std::uint32_t NetDll_XNetStartup = 0x0033;
+constexpr std::uint32_t NetDll_XNetCleanup = 0x0034;
+
 }  // namespace ordinal
 
 }  // namespace xenon::xam

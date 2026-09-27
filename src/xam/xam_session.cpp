@@ -9,6 +9,8 @@ bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& loca
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager);
 bool register_notification_exports(core::ExportRegistry& registry, NotificationManager& notification_manager);
 bool register_achievement_exports(core::ExportRegistry& registry, AchievementManager& achievement_manager);
+bool register_system_exports(core::ExportRegistry& registry);
+bool register_net_exports(core::ExportRegistry& registry);
 }
 
 namespace xenon::xam {
@@ -44,7 +46,9 @@ bool XamSession::register_exports(core::ExportRegistry& registry) {
   ok = register_content_exports(registry, *content_manager_) && ok;
   ok = register_notification_exports(registry, *notification_manager_) && ok;
   ok = register_achievement_exports(registry, *achievement_manager_) && ok;
-  
+  ok = register_system_exports(registry) && ok;
+  ok = register_net_exports(registry) && ok;
+
   return ok;
 }
 

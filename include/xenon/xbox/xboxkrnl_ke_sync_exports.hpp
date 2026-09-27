@@ -46,6 +46,10 @@ namespace xenon::xbox {
 [[nodiscard]] bool ke_set_base_priority_thread_export(xenon::kernel::KernelProcess& process,
                                                       xenon::core::ExportCallContext& context);
 // Same guest-KTHREAD-pointer resolution as ke_set_base_priority_thread_export
+// above (see its comment) - the read-only counterpart.
+[[nodiscard]] bool ke_query_base_priority_thread_export(xenon::kernel::KernelProcess& process,
+                                                        xenon::core::ExportCallContext& context);
+// Same guest-KTHREAD-pointer resolution as ke_set_base_priority_thread_export
 // above (see its comment).
 [[nodiscard]] bool ke_set_affinity_thread_export(xenon::kernel::KernelProcess& process,
                                                  xenon::core::ExportCallContext& context);

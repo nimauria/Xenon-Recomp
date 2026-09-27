@@ -71,6 +71,22 @@ namespace xenon::xbox {
     xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
 [[nodiscard]] bool vd_swap_export(
     xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_enable_disable_clock_gating_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_get_current_display_gamma_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_query_video_flags_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_set_display_mode_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_initialize_scaler_command_buffer_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_persist_display_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_retrain_edram_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+[[nodiscard]] bool vd_retrain_edram_worker_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
 
 // Convenience registrar for callers (tests/tools) that already have a
 // constructed KernelProcess - see xboxkrnl_tls_exports.hpp's identical note

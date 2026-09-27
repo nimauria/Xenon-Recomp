@@ -308,6 +308,38 @@ void test_nt_create_timer_set_and_cancel() {
   assert(result.handled && result.success && cpu.gpr[3] == 0u);
 }
 
+void test_nt_signal_and_wait_signals_then_waits() {
+  Fixture f;
+
+  // Create a manual-reset event, initially unset, to use as both the signal
+  // and wait object - NtSignalAndWaitForSingleObjectEx must observe its own
+  // signal, not just whatever state existed before the call.
+  const auto handle_out = f.alloc32();
+  cpu::CpuState create_cpu{};
+  create_cpu.gpr[3] = handle_out;
+  create_cpu.gpr[5] = 0u;  // manual reset
+  create_cpu.gpr[6] = 0u;  // initially unset
+  auto create_result = f.invoke(0x0D1u, create_cpu);
+  assert(create_result.handled && create_result.success);
+  const auto handle = f.address_space->read32_be(handle_out);
+
+  cpu::CpuState signal_wait_cpu{};
+  signal_wait_cpu.gpr[3] = handle;  // signal handle
+  signal_wait_cpu.gpr[4] = handle;  // wait handle (same object)
+  signal_wait_cpu.gpr[7] = 0u;      // no timeout pointer -> infinite, fine since it's signaled
+  auto result = f.invoke(0x0FBu, signal_wait_cpu);
+  assert(result.handled && result.success);
+  assert(signal_wait_cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+
+  // An unrecognized handle must produce STATUS_INVALID_HANDLE, not a crash.
+  cpu::CpuState bad_cpu{};
+  bad_cpu.gpr[3] = 0xDEADu;
+  bad_cpu.gpr[4] = handle;
+  auto bad_result = f.invoke(0x0FBu, bad_cpu);
+  assert(bad_result.handled && bad_result.success);
+  assert(bad_result.success && bad_cpu.gpr[3] != 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -319,6 +351,7 @@ int main() {
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
   test_nt_wait_for_multiple_objects_any_and_all();
   test_nt_create_timer_set_and_cancel();
+  test_nt_signal_and_wait_signals_then_waits();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";
   return 0;

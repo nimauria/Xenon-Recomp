@@ -32,6 +32,8 @@
 #include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
+#include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
+#include "xenon/xbox/xboxkrnl_misc_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_memory_exports.hpp"
@@ -865,6 +867,21 @@ bool XenonSession::init_exports() {
     return false;
   }
 
+  // Register xboxkrnl IRQL/critical-region/spin-lock exports
+  // (KeEnterCriticalRegion, KfAcquireSpinLock, etc.) - no KernelProcess
+  // dependency, so these can register directly like RTL/time/memory above.
+  if (!xbox::register_xboxkrnl_ke_irql_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl Ke IRQL/spin-lock exports");
+    return false;
+  }
+
+  // Register xboxkrnl misc exports (XeCryptSha, ExGetXConfigSetting,
+  // ExRegisterTitleTerminateNotification) - no KernelProcess dependency.
+  if (!xbox::register_xboxkrnl_misc_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl misc exports");
+    return false;
+  }
+
   // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1/3
   // of the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
   // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
@@ -912,6 +929,7 @@ bool XenonSession::init_exports() {
         {0x0F6u, "NtSetEvent", &xbox::nt_set_event_export},
         {0x0F5u, "NtResumeThread", &xbox::nt_resume_thread_export},
         {0x099u, "KeSetBasePriorityThread", &xbox::ke_set_base_priority_thread_export},
+        {0x081u, "KeQueryBasePriorityThread", &xbox::ke_query_base_priority_thread_export},
         {0x097u, "KeSetAffinityThread", &xbox::ke_set_affinity_thread_export},
         {0x066u, "KeGetCurrentProcessType", &xbox::ke_get_current_process_type_export},
         {0x09Au, "KeSetCurrentProcessType", &xbox::ke_set_current_process_type_export},
@@ -947,6 +965,18 @@ bool XenonSession::init_exports() {
          &xbox::vd_set_system_command_buffer_gpu_identifier_address_export},
         {0x1DCu, "VdShutdownEngines", &xbox::vd_shutdown_engines_export},
         {0x25Bu, "VdSwap", &xbox::vd_swap_export},
+        {0x0CFu, "NtClose", &xbox::nt_close_export},
+        {0x0FBu, "NtSignalAndWaitForSingleObjectEx",
+         &xbox::nt_signal_and_wait_for_single_object_ex_export},
+        {0x1B4u, "VdEnableDisableClockGating", &xbox::vd_enable_disable_clock_gating_export},
+        {0x1B9u, "VdGetCurrentDisplayGamma", &xbox::vd_get_current_display_gamma_export},
+        {0x1C9u, "VdQueryVideoFlags", &xbox::vd_query_video_flags_export},
+        {0x1D3u, "VdSetDisplayMode", &xbox::vd_set_display_mode_export},
+        {0x1C5u, "VdInitializeScalerCommandBuffer",
+         &xbox::vd_initialize_scaler_command_buffer_export},
+        {0x1C7u, "VdPersistDisplay", &xbox::vd_persist_display_export},
+        {0x269u, "VdRetrainEDRAM", &xbox::vd_retrain_edram_export},
+        {0x26Au, "VdRetrainEDRAMWorker", &xbox::vd_retrain_edram_worker_export},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -982,6 +1012,120 @@ bool XenonSession::init_exports() {
     };
     if (!export_registry_.register_export(std::move(descriptor))) {
       set_error("Failed to register xboxkrnl XexCheckExecutablePrivilege export");
+      return false;
+    }
+  }
+
+  // Register HalReturnToFirmware (ordinal 0x28 / 40). Real hardware: void
+  // HalReturnToFirmware(FIRMWARE_REENTRY routine) - routine must be 1
+  // (HalRebootRoutine); control never returns to the caller (the console
+  // reboots/halts). rexglue-sdk's own reference implementation
+  // (HalReturnToFirmware_entry) simply calls the host's exit(0) - too abrupt
+  // for Xenon, which owns a status.json/log.txt writer contract
+  // (docs/runtime/RUNTIME_HOST.md) a hard process exit would skip entirely.
+  // Xenon instead requests the same cooperative stop a launcher's
+  // stop.signal produces (sets stop_requested_ - see "Stopping a session" in
+  // RUNTIME_HOST.md), so the guest execution thread unwinds through its own
+  // normal shutdown path and status.json still reaches a real terminal
+  // state, rather than the process vanishing mid-write.
+  {
+    core::ExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl.exe";
+    descriptor.name = "HalReturnToFirmware";
+    descriptor.ordinal = 0x28u;
+    descriptor.requirement = ExportRequirement::Required;
+    descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      if (config_.enable_logging) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] Guest requested HalReturnToFirmware(routine="
+                  << ctx.cpu.gpr[3] << ") - requesting cooperative session stop" << std::endl;
+      }
+      stop_requested_.store(true, std::memory_order_relaxed);
+      return true;
+    };
+    if (!export_registry_.register_export(std::move(descriptor))) {
+      set_error("Failed to register xboxkrnl HalReturnToFirmware export");
+      return false;
+    }
+  }
+
+  // Register ObCreateSymbolicLink/ObDeleteSymbolicLink (ordinals 0x103/259,
+  // 0x104/260). Real hardware: NTSTATUS ObCreateSymbolicLink(PANSI_STRING
+  // path, PANSI_STRING target) registers a path alias (e.g. a title mapping
+  // its own logical device name to a real Xbox path) in the kernel object
+  // namespace; ObDeleteSymbolicLink(PANSI_STRING path) removes one. Routed
+  // to filesystem_'s real symbolic-link table
+  // (filesystem::VirtualFileSystem::register_symbolic_link/
+  // unregister_symbolic_link - the same mechanism the launcher/content
+  // system uses), not a fabricated no-op - a later NtCreateFile-style guest
+  // path lookup through that alias resolves for real. filesystem_ does not
+  // exist yet at this point in a fresh session (same lazy-dereference-at-
+  // call-time pattern as kernel_process_/loaded_xex_ above).
+  {
+    // ANSI_STRING layout (matches RtlInitAnsiString in xboxkrnl_rtl_exports.cpp):
+    // +0x0 Length (u16), +0x2 MaximumLength (u16), +0x4 Buffer (u32 guest ptr).
+    auto read_ansi_string = [](cpu::MemoryPort& memory, cpu::GuestAddress ptr) -> std::string {
+      if (ptr == 0u) return {};
+      const auto length = memory.read16_be(ptr + 0u);
+      const auto buffer = memory.read32_be(ptr + 4u);
+      if (buffer == 0u || length == 0u) return {};
+      std::string result;
+      result.reserve(length);
+      for (std::uint16_t i = 0; i < length; ++i) {
+        result.push_back(static_cast<char>(memory.read8(buffer + i)));
+      }
+      return result;
+    };
+
+    core::ExportDescriptor create_descriptor{};
+    create_descriptor.library = "xboxkrnl.exe";
+    create_descriptor.name = "ObCreateSymbolicLink";
+    create_descriptor.ordinal = 0x103u;
+    create_descriptor.requirement = ExportRequirement::Required;
+    create_descriptor.handler = [this, read_ansi_string](ExportCallContext& ctx) -> bool {
+      if (!filesystem_) {
+        ctx.cpu.gpr[3] = kernel::xbox::status::Unsuccessful;
+        return true;
+      }
+      auto path = read_ansi_string(ctx.memory, static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]));
+      const auto target =
+          read_ansi_string(ctx.memory, static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]));
+      constexpr std::string_view kNtObjectPrefix = "\\??\\";
+      if (path.rfind(kNtObjectPrefix, 0) == 0) path = path.substr(kNtObjectPrefix.size());
+
+      const auto error = filesystem_->register_symbolic_link(path, target);
+      ctx.cpu.gpr[3] = (error == filesystem::FsError::None)
+                            ? kernel::xbox::status::Success
+                            : kernel::xbox::status::Unsuccessful;
+      return true;
+    };
+    if (!export_registry_.register_export(std::move(create_descriptor))) {
+      set_error("Failed to register xboxkrnl ObCreateSymbolicLink export");
+      return false;
+    }
+
+    core::ExportDescriptor delete_descriptor{};
+    delete_descriptor.library = "xboxkrnl.exe";
+    delete_descriptor.name = "ObDeleteSymbolicLink";
+    delete_descriptor.ordinal = 0x104u;
+    delete_descriptor.requirement = ExportRequirement::Required;
+    delete_descriptor.handler = [this, read_ansi_string](ExportCallContext& ctx) -> bool {
+      if (!filesystem_) {
+        ctx.cpu.gpr[3] = kernel::xbox::status::Unsuccessful;
+        return true;
+      }
+      auto path = read_ansi_string(ctx.memory, static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]));
+      constexpr std::string_view kNtObjectPrefix = "\\??\\";
+      if (path.rfind(kNtObjectPrefix, 0) == 0) path = path.substr(kNtObjectPrefix.size());
+
+      const auto error = filesystem_->unregister_symbolic_link(path);
+      ctx.cpu.gpr[3] = (error == filesystem::FsError::None)
+                            ? kernel::xbox::status::Success
+                            : kernel::xbox::status::Unsuccessful;
+      return true;
+    };
+    if (!export_registry_.register_export(std::move(delete_descriptor))) {
+      set_error("Failed to register xboxkrnl ObDeleteSymbolicLink export");
       return false;
     }
   }
@@ -2473,6 +2617,83 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
                << " r9=0x" << state.gpr[9]
                << " r10=0x" << state.gpr[10]
                << " r13=0x" << state.gpr[13] << ']';
+    // Diagnostic-only globals probe (read-only): live investigation of a
+    // specific AC6 boot-path crash traced (via static analysis of the
+    // generated code + the stack walk below) to a pair of fixed-address
+    // global singleton pointers the game checks before taking a slow/
+    // lazy-init path that eventually reads a null object. Prints their
+    // live values (and one level of dereference where non-null) so this
+    // can be confirmed/refuted with real data instead of more static
+    // tracing. Safe to remove once the root cause is confirmed.
+    {
+      diagnostic << " globals=[";
+      for (const auto addr : {0x82000634u, 0x820006E0u}) {
+        std::uint32_t value = 0u;
+        std::uint32_t deref = 0u;
+        bool ok = false;
+        bool deref_ok = false;
+        try {
+          value = memory_->read32_be(static_cast<memory::GuestAddress>(addr));
+          ok = true;
+          if (value != 0u) {
+            deref = memory_->read32_be(static_cast<memory::GuestAddress>(value));
+            deref_ok = true;
+          }
+        } catch (const memory::MemoryFault&) {
+        }
+        diagnostic << "0x" << std::hex << addr << "=";
+        if (ok) {
+          diagnostic << "0x" << value;
+          if (deref_ok) diagnostic << "->0x" << deref;
+        } else {
+          diagnostic << "FAULT";
+        }
+        diagnostic << ' ';
+        // 0x820006E0's target had a zero first field on a prior run - dump
+        // its first 16 fields (64 bytes) to identify the struct shape.
+        if (addr == 0x820006E0u && deref_ok) {
+          diagnostic << "fields=[";
+          for (int i = 0; i < 16; ++i) {
+            std::uint32_t field = 0u;
+            try {
+              field = memory_->read32_be(static_cast<memory::GuestAddress>(value + i * 4u));
+              diagnostic << "0x" << field << ",";
+            } catch (const memory::MemoryFault&) {
+              diagnostic << "FAULT,";
+              break;
+            }
+          }
+          diagnostic << "] ";
+        }
+      }
+      diagnostic << ']';
+    }
+    // Diagnostic-only guest stack walk (read-only, never changes execution):
+    // standard PPC back-chain convention - [r1] = caller's saved r1, [r1+8] =
+    // caller's saved LR (the return address into this frame). Best-effort:
+    // a corrupt/absent frame chain stops the walk early rather than faulting
+    // again while already handling a fault.
+    {
+      diagnostic << " stack=[";
+      auto frame = static_cast<memory::GuestAddress>(state.gpr[1]);
+      bool first = true;
+      for (int depth = 0; depth < 16 && frame != 0u; ++depth) {
+        std::uint32_t saved_lr = 0u;
+        std::uint32_t next_frame = 0u;
+        try {
+          saved_lr = memory_->read32_be(frame + 8u);
+          next_frame = memory_->read32_be(frame);
+        } catch (const memory::MemoryFault&) {
+          break;
+        }
+        if (!first) diagnostic << ',';
+        first = false;
+        diagnostic << "0x" << std::hex << saved_lr;
+        if (next_frame <= frame) break;  // frame chain must strictly ascend
+        frame = static_cast<memory::GuestAddress>(next_frame);
+      }
+      diagnostic << ']' << std::dec;
+    }
     crash_message = diagnostic.str();
   } catch (const std::exception& ex) {
     crashed = true;

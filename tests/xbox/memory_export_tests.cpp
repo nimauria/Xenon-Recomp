@@ -312,6 +312,23 @@ void test_ke_flush_user_mode_tb_handles_and_leaves_memory_untouched() {
          "KeFlushUserModeTb must never write to guest memory");
 }
 
+void test_mm_free_physical_memory_registered_and_handled() {
+  core::ExportRegistry registry;
+  assert(xbox::register_xboxkrnl_memory_exports(registry));
+
+  assert(registry.contains("xboxkrnl", 0x0BDu));
+  assert(registry.contains("xboxkrnl", "MmFreePhysicalMemory"));
+
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = 1u;           // type
+  cpu.gpr[4] = 0xA0001000u;  // an arbitrary physical-alias-looking address
+  core::ExportCallContext call{cpu, memory, 0, 0};
+  const auto result = registry.invoke("xboxkrnl", 0x0BDu, call);
+  assert(result.handled && result.success);
+}
+
 }  // namespace
 
 int main() {
@@ -324,6 +341,7 @@ int main() {
   test_nt_allocate_virtual_memory_fixed_address();
   test_nt_allocate_virtual_memory_protection_is_real();
   test_nt_allocate_virtual_memory_rejects_invalid_parameters();
+  test_mm_free_physical_memory_registered_and_handled();
 
   std::cout << "All xboxkrnl memory export tests passed!\n";
   return 0;

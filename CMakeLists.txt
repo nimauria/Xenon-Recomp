@@ -110,6 +110,8 @@ add_library(xenon_core STATIC
   src/xam/xam_content_exports.cpp
   src/xam/xam_notification_exports.cpp
   src/xam/xam_achievement_exports.cpp
+  src/xam/xam_system_exports.cpp
+  src/xam/xam_net_exports.cpp
 )
 target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(xenon_core PUBLIC cxx_std_20)
@@ -515,6 +517,8 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
     src/xbox/exports/xboxkrnl_ke_sync_exports.cpp
+    src/xbox/exports/xboxkrnl_ke_irql_exports.cpp
+    src/xbox/exports/xboxkrnl_misc_exports.cpp
     src/xbox/exports/xboxkrnl_ob_exports.cpp
     src/xbox/xbox_time_convert.cpp
     src/xbox/xex_dispatcher_header.cpp
@@ -712,6 +716,12 @@ endif()
 # xboxkrnl I/O export wiring living in the same target.
 if(TARGET xenon_xbox_kernel_io)
   target_link_libraries(xenon_core PUBLIC xenon_xbox_kernel_io)
+endif()
+# src/xam/xam_net_exports.cpp calls the real host WSAStartup/WSACleanup for
+# NetDll_WSAStartup/NetDll_WSACleanup (see that file for why this is a real
+# implementation, not a stub).
+if(WIN32)
+  target_link_libraries(xenon_core PUBLIC ws2_32)
 endif()
 
 # -----------------------------------------------------------------------------
@@ -1017,6 +1027,23 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_xboxkrnl_ke_sync_export_tests PRIVATE xenon_core)
     xenon_enable_test_asserts(xenon_xboxkrnl_ke_sync_export_tests)
     add_test(NAME xenon_xboxkrnl_ke_sync_export_tests COMMAND xenon_xboxkrnl_ke_sync_export_tests)
+
+    add_executable(xenon_ke_irql_export_tests tests/xbox/ke_irql_export_tests.cpp)
+    target_link_libraries(xenon_ke_irql_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_ke_irql_export_tests)
+    add_test(NAME xenon_ke_irql_export_tests COMMAND xenon_ke_irql_export_tests)
+
+    add_executable(xenon_rtl_string_memory_export_tests
+      tests/xbox/rtl_string_memory_export_tests.cpp)
+    target_link_libraries(xenon_rtl_string_memory_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_rtl_string_memory_export_tests)
+    add_test(NAME xenon_rtl_string_memory_export_tests
+             COMMAND xenon_rtl_string_memory_export_tests)
+
+    add_executable(xenon_misc_export_tests tests/xbox/misc_export_tests.cpp)
+    target_link_libraries(xenon_misc_export_tests PRIVATE xenon_core)
+    xenon_enable_test_asserts(xenon_misc_export_tests)
+    add_test(NAME xenon_misc_export_tests COMMAND xenon_misc_export_tests)
   endif()
 
   add_executable(xenon_recomp_driver_tests tests/recomp/recomp_driver_tests.cpp)
