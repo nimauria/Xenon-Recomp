@@ -783,6 +783,15 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_thread_creation_tests)
   add_test(NAME xenon_thread_creation_tests COMMAND xenon_thread_creation_tests)
 
+  # GPU pump thread (single combined ring-drain + vsync-present host thread
+  # that drives the Xenos frontend/backend from a live XenonSession): startup/
+  # shutdown lifecycle, ring-buffer drain integration, and front-buffer/
+  # interrupt-callback vsync dispatch. See the file's header comment.
+  add_executable(xenon_gpu_pump_tests tests/core/gpu_pump_tests.cpp)
+  target_link_libraries(xenon_gpu_pump_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_gpu_pump_tests)
+  add_test(NAME xenon_gpu_pump_tests COMMAND xenon_gpu_pump_tests)
+
   # Phase 6 (AC6 Runtime Readiness pass): whole-XEX import capability audit
   # four-state classification (IMPLEMENTED/SAFE_STUB/PARTIAL/MISSING).
   add_executable(xenon_import_capability_report_tests tests/core/import_capability_report_tests.cpp)

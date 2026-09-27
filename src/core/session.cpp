@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -385,6 +386,28 @@ void XenonSession::shutdown() {
     audio_callback_stack_size_ = 0;
   }
 #endif
+
+  // Stop the GPU pump thread before unloading the compiled registry or
+  // destroying kernel_process_/gpu_/graphics_system_/memory_ below - same
+  // ordering rationale as the audio callback thread above: it must be
+  // stopped and joined before kernel_process_.reset() (which would otherwise
+  // try to join the same KernelThread again from ThreadManager::shutdown()
+  // while nothing is left draining its work) and before gpu_.reset()/
+  // graphics_system_.reset() (the pump thread is the only thread that ever
+  // touches those objects after start-up, and it must not be mid-drain or
+  // mid-present when they are destroyed - see the class-level doc comment on
+  // start_gpu_pump_thread() for why this must be one thread, not two).
+  stop_gpu_pump_thread();
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+  }
+  gpu_pump_thread_tls_ = {};
+  if (memory_ && gpu_pump_callback_stack_base_) {
+    (void)memory_->release(gpu_pump_callback_stack_base_);
+    gpu_pump_callback_stack_base_ = 0;
+    gpu_pump_callback_stack_size_ = 0;
+  }
+
   unload_native_extension();
 
   // Shutdown in reverse order of initialization
@@ -397,6 +420,11 @@ void XenonSession::shutdown() {
   }
 
   gpu_.reset();
+  // graphics_system_ holds a reference (not ownership) to memory_ and is only
+  // ever touched by the GPU pump thread, already stopped/joined above -
+  // reset it alongside gpu_ rather than leaving it dangling until the next
+  // init_gpu() overwrites it or the session is destroyed.
+  graphics_system_.reset();
   dynamic_fallback_.reset();
   code_cache_.reset();
 
@@ -505,6 +533,21 @@ bool XenonSession::init_gpu() {
   // branch below. init_memory() (called before init_gpu() in initialize())
   // guarantees memory_ is already non-null.
   graphics_system_ = std::make_unique<gpu::GraphicsSystem>(*memory_);
+
+  // The GPU pump thread's vsync-driven guest interrupt callback executes on
+  // its own dedicated PPC stack, exactly like the audio callback thread's
+  // audio_callback_stack_base_ (see init_audio()) - allocated once here,
+  // independent of which backend ends up selected below, since the pump
+  // thread itself is started later in create_guest_process() regardless of
+  // backend (even a Null backend still needs a live pump thread draining the
+  // ring buffer for headless/test sessions).
+  constexpr std::uint32_t kGpuPumpCallbackStackSize = 128u * 1024u;
+  if (!memory_->allocate(kGpuPumpCallbackStackSize, 16, memory::kReadWrite,
+                         /*top_down=*/true, gpu_pump_callback_stack_base_)) {
+    set_error("Failed to allocate guest GPU pump callback stack");
+    return false;
+  }
+  gpu_pump_callback_stack_size_ = kGpuPumpCallbackStackSize;
 
   if (requested == "null" || requested == "none") {
     gpu_ = std::make_unique<gpu::NullBackend>();
@@ -1959,6 +2002,19 @@ bool XenonSession::create_guest_process() {
   }
 #endif
 
+  // Give the GPU pump thread a real guest thread identity now that
+  // kernel_process_/loaded_xex_ exist, same rationale as the audio callback
+  // thread above: it independently drains the guest's PM4 ring buffer and,
+  // at vsync, calls into the guest's registered graphics interrupt callback,
+  // so it needs its own KernelThread/KPCR/TLS before either of those can
+  // happen safely. No XENON_HAS_AUDIO-style compile-time gate - graphics is
+  // always compiled in; config_.enable_graphics plus gpu_/graphics_system_
+  // (both set up by init_gpu(), see initialize()) decide whether it runs.
+  if (config_.enable_graphics && gpu_ && graphics_system_ && !start_gpu_pump_thread()) {
+    release_partial_guest_process();
+    return false;
+  }
+
   // The main KernelThread object itself is (re)created per start() call (see
   // start()), matching the previous bare-std::thread model's "each start()
   // creates a fresh runnable thread" behavior - a kernel::KernelThread
@@ -2006,6 +2062,17 @@ void XenonSession::release_partial_guest_process() noexcept {
   }
   audio_thread_tls_ = {};
 #endif
+  // start_gpu_pump_thread() cleans up its own gpu_pump_thread_/
+  // gpu_pump_thread_tls_ on failure, but guard here too in case a future
+  // step is ever inserted after it succeeds - same rationale as the audio
+  // guard above. The callback stack itself (gpu_pump_callback_stack_base_)
+  // was allocated in init_gpu(), not here, so - like audio_callback_stack_base_ -
+  // it is released in shutdown(), not here.
+  stop_gpu_pump_thread();
+  if (memory_) {
+    release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+  }
+  gpu_pump_thread_tls_ = {};
 }
 
 void XenonSession::load_native_extension() {
@@ -2797,6 +2864,203 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
   }
 }
 #endif
+
+bool XenonSession::start_gpu_pump_thread() {
+  if (!gpu_ || !graphics_system_ || !kernel_process_ || !memory_ || !loaded_xex_) {
+    return false;
+  }
+  if (!gpu_pump_callback_stack_base_ || !gpu_pump_callback_stack_size_) {
+    set_error("GPU pump callback stack was not allocated");
+    return false;
+  }
+
+  // A dedicated KPCR + static-TLS block for the GPU pump thread, independent
+  // of main_thread_tls_/audio_thread_tls_ - real Xbox 360 vsync interrupt
+  // dispatch runs on its own kernel context, never the game's main thread's.
+  std::string tls_error;
+  if (!setup_guest_thread_tls_context(*memory_, loaded_xex_->image.tls,
+                                      gpu_pump_callback_stack_base_,
+                                      gpu_pump_callback_stack_size_,
+                                      gpu_pump_thread_tls_, &tls_error)) {
+    set_error("Failed to set up GPU pump thread TLS: " + tls_error);
+    return false;
+  }
+
+  kernel::ThreadCreationParams thread_params{};
+  thread_params.stack_size = gpu_pump_callback_stack_size_;
+  thread_params.name = "GpuPumpThread";
+  gpu_pump_thread_ = kernel_process_->thread_manager().create_thread(
+      [this]() -> std::uint32_t { return run_gpu_pump_thread(); }, thread_params);
+  if (!gpu_pump_thread_) {
+    set_error("Failed to create GPU pump KernelThread");
+    release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    gpu_pump_thread_tls_ = {};
+    return false;
+  }
+
+  // Mark the pump active before starting the thread, so there is no window
+  // where the thread is running but gpu_pump_running_ has not been observed
+  // true yet.
+  gpu_pump_running_.store(true);
+
+  if (!gpu_pump_thread_->start()) {
+    set_error("Failed to start GPU pump KernelThread");
+    gpu_pump_running_.store(false);
+    gpu_pump_thread_.reset();
+    release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    gpu_pump_thread_tls_ = {};
+    return false;
+  }
+  return true;
+}
+
+void XenonSession::stop_gpu_pump_thread() noexcept {
+  gpu_pump_running_.store(false);
+  if (gpu_pump_thread_) {
+    static_cast<void>(gpu_pump_thread_->join());
+    gpu_pump_thread_.reset();
+  }
+}
+
+std::uint32_t XenonSession::run_gpu_pump_thread() {
+  // Registers this host thread as gpu_pump_thread_ for anything that
+  // resolves "current thread" via kernel::ThreadManager (thread_local) - the
+  // same mechanism run_execution()/run_audio_callback_thread() use - so a
+  // guest xboxkrnl export invoked from inside the vsync interrupt callback
+  // sees the pump thread's own identity.
+  if (kernel_process_ && gpu_pump_thread_) {
+    kernel_process_->thread_manager().set_current_thread(gpu_pump_thread_);
+  }
+
+  using Clock = std::chrono::steady_clock;
+  // Short poll interval so ring-buffer drain latency stays low; a separate
+  // accumulator (next_vsync) triggers vsync-rate work (present + interrupt)
+  // at ~60Hz regardless of how often this tighter loop actually wakes.
+  constexpr auto kPollInterval = std::chrono::milliseconds(3);
+  constexpr auto kVsyncInterval = std::chrono::nanoseconds(16'666'667);  // ~60Hz
+  auto next_vsync = Clock::now() + kVsyncInterval;
+
+  while (gpu_pump_running_.load(std::memory_order_relaxed)) {
+    std::this_thread::sleep_for(kPollInterval);
+    if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
+    if (!graphics_system_ || !gpu_ || !kernel_process_) continue;
+
+    const auto ring = kernel_process_->gpu_ring_buffer();
+    if (ring.configured() && ring.write_index != ring.read_index) {
+      try {
+        const auto new_read_index = graphics_system_->submit_ring(
+            ring.base_address, ring.capacity_dwords, ring.read_index,
+            ring.write_index);
+        kernel_process_->set_gpu_ring_buffer_read_index(new_read_index);
+        // Real Xenos read-pointer write-back hardware semantics
+        // (VdEnableRingBufferRPtrWriteBack): mirror the freshly-consumed
+        // read index into guest memory so the guest can poll its own copy.
+        if (ring.rptr_writeback_address != 0 && memory_) {
+          memory_->write32_be(ring.rptr_writeback_address, new_read_index);
+        }
+      } catch (const std::exception& ex) {
+        // Malformed/guest-corrupted ring content must not kill the pump
+        // thread - drop this drain attempt (read_index stays where it was;
+        // the next tick will retry from there) rather than crash or silently
+        // pretend nothing happened.
+        if (config_.enable_logging) {
+          std::scoped_lock console_log_lock(console_log_mutex());
+          std::cout << "[XenonSession] GPU pump: ring buffer decode failed: "
+                    << ex.what() << std::endl;
+        }
+      }
+    }
+
+    // Drain whatever graphics IR is now pending every tick, even when
+    // submit_ring() above produced nothing new this time - IR decoded by a
+    // previous tick's partial submission can still be waiting to be played
+    // into the backend (see GraphicsSystem::execute_ir()).
+    try {
+      graphics_system_->execute_ir(*gpu_);
+    } catch (const std::exception& ex) {
+      if (config_.enable_logging) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] GPU pump: IR execution failed: " << ex.what()
+                  << std::endl;
+      }
+    }
+
+    const auto now = Clock::now();
+    if (now < next_vsync) continue;
+    // Catch up rather than let a slow tick cause a burst of back-to-back
+    // vsyncs once it finally returns.
+    do {
+      next_vsync += kVsyncInterval;
+    } while (next_vsync <= now);
+
+    const auto front_buffer = kernel_process_->gpu_front_buffer();
+    if (front_buffer.base_address != 0) {
+      gpu::TextureDescriptor texture{};
+      texture.base_address = front_buffer.base_address;
+      texture.width = front_buffer.width;
+      texture.height = front_buffer.height;
+      texture.pitch = front_buffer.pitch;
+      texture.format = front_buffer.format;
+      gpu::PresentationFrame frame{};
+      frame.texture = texture;
+      frame.visible_width = front_buffer.width;
+      frame.visible_height = front_buffer.height;
+      static_cast<void>(graphics_system_->present(*gpu_, frame));
+    }
+
+    const auto interrupt = kernel_process_->gpu_interrupt_callback();
+    if (interrupt.callback_address != 0) {
+      static_cast<void>(invoke_gpu_interrupt_callback(interrupt.callback_address,
+                                                       interrupt.context));
+    }
+  }
+  return 0;
+}
+
+bool XenonSession::invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
+                                                 cpu::GuestAddress context) {
+  if (!callback || !memory_ || !compiled_registry_binder_ || !kernel_process_ ||
+      !gpu_pump_callback_stack_base_ || !gpu_pump_callback_stack_size_) {
+    return false;
+  }
+
+  cpu::CpuState state{};
+  state.cia = callback;
+  state.gpr[1] = static_cast<std::uint64_t>(gpu_pump_callback_stack_base_) +
+                 gpu_pump_callback_stack_size_ - 64u;
+  // Real VdSetGraphicsInterruptCallback ABI, verified against xenia-project/
+  // xenia's xboxkrnl_video.cc (callback registration comment: "r3 = bool
+  // 0/1 - 0 is normal interrupt, 1 is some acquire/lock") and
+  // gpu::GraphicsSystem::MarkVblank(), which dispatches the real vsync case
+  // with DispatchInterruptCallback(0, ...) - Xenon's pump thread only ever
+  // fires the normal vsync interrupt, so r3 is always 0 here. r4 is the
+  // guest-supplied context pointer from the registration call
+  // (VdSetGraphicsInterruptCallback's own second argument).
+  state.gpr[3] = 0;
+  state.gpr[4] = context;
+  state.gpr[13] = gpu_pump_thread_tls_.kpcr_address;
+
+  cpu::ExecutionContext exec_context(state, *memory_, *this);
+  if (dynamic_fallback_) dynamic_fallback_->bind(exec_context);
+  compiled_registry_binder_(exec_context);
+  if (!exec_context.compiled_lookup) return false;
+  auto* fn = exec_context.lookup_compiled(callback, cpu::CompiledLookupKind::Call);
+
+  try {
+    cpu::ExecutionResult result{};
+    if (fn) {
+      result = fn(exec_context);
+    } else {
+      const auto fallback = exec_context.try_dynamic_fallback(
+          callback, cpu::CompiledLookupKind::Call);
+      if (!fallback.handled) return false;
+      result = fallback.result;
+    }
+    return result.reason != cpu::FlowReason::Trap;
+  } catch (...) {
+    return false;
+  }
+}
 
 // RuntimeServices implementation
 
