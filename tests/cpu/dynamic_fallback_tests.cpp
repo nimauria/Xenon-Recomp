@@ -1,3 +1,4 @@
+#include <bit>
 #include <cassert>
 #include <cstdint>
 #include <iostream>
@@ -62,6 +63,12 @@ int main() {
   AddressSpace memory;
   assert(memory.initialize());
   assert(memory.commit_fixed(kCode, kBasePageSize, kReadWriteExecute));
+  // A separate, non-executable page for scratch data: sharing kCode's own
+  // page for data a test instruction stores to would (correctly) trip the
+  // self-modifying-code guard, since a write anywhere on an executing page
+  // invalidates that page's dispatch-time fingerprint.
+  constexpr GuestAddress kDataPage = kCode + kBasePageSize;
+  assert(memory.commit_fixed(kDataPage, kBasePageSize, kReadWrite));
 
   NullRuntimeServices runtime;
   CpuState state{};
@@ -258,6 +265,127 @@ int main() {
   const auto top_one = telemetry_fallback.fallback_hot_pcs(1u);
   assert(top_one.size() == 1u);
   assert(top_one.front().first == kCode);
+
+  // Real AC6 repro: the entire multiply/divide family (mulli, mullw*,
+  // mulhw*, divw*, and their 64-bit d-suffixed siblings) had no case in
+  // execute_simple() at all, so hitting one - even the extremely common
+  // "mulli" - fell through to the unsupported-instruction trap
+  // (kFallbackUnsupportedDetail) and killed guest execution. This is a
+  // fresh executor/context so it does not depend on the shared mutable
+  // `state` exercised by the tests above.
+  write_instruction(memory, kCode + 0x200u, 0x1C640006u);  // mulli r3, r4, 6
+  write_instruction(memory, kCode + 0x204u, 0x7CA321D6u);  // mullw r5, r3, r4
+  write_instruction(memory, kCode + 0x208u, 0x7CC52396u);  // divwu r6, r5, r4
+  write_instruction(memory, kCode + 0x20Cu, 0x4E800020u);  // blr
+  DynamicFallbackExecutor muldiv_fallback;
+  ExecutionContext muldiv_context(state, memory, runtime);
+  muldiv_fallback.bind(muldiv_context);
+  state = {};
+  state.gpr[4] = 7u;
+  state.lr = kReturn;
+  const auto muldiv =
+      muldiv_context.try_dynamic_fallback(kCode + 0x200u, CompiledLookupKind::Call);
+  assert(muldiv.handled);
+  assert(muldiv.result.reason == FlowReason::Return);
+  assert(muldiv.result.next_address == kReturn);
+  assert(state.gpr[3] == 42u);   // mulli:  4 * 6
+  assert(state.gpr[5] == 294u);  // mullw:  42 * 7
+  assert(state.gpr[6] == 42u);   // divwu: 294 / 7
+
+  // Real AC6 repro, part two: past the mulli fix, the very next unsupported
+  // instruction dynamic fallback hit was "lfs" - this interpreter had no
+  // floating-point support at all (no loads/stores, no arithmetic). Exercise
+  // a load (single->double promotion), a single-precision add (double->
+  // single->double round-trip), a double-precision multiply, and a store,
+  // matching real compiled-code shape (e.g. `float x = a + a; something(x*x);`).
+  constexpr GuestAddress kFloatSrc = kDataPage + 0x000u;
+  constexpr GuestAddress kDoubleDst = kDataPage + 0x100u;
+  memory.write32_be(kFloatSrc, std::bit_cast<std::uint32_t>(2.5f));
+  write_instruction(memory, kCode + 0x500u, 0xC0230000u);  // lfs f1, 0(r3)
+  write_instruction(memory, kCode + 0x504u, 0xEC41082Au);  // fadds f2, f1, f1
+  write_instruction(memory, kCode + 0x508u, 0xFC6200B2u);  // fmul f3, f2, f2
+  write_instruction(memory, kCode + 0x50Cu, 0xD8640008u);  // stfd f3, 8(r4)
+  write_instruction(memory, kCode + 0x510u, 0x4E800020u);  // blr
+  DynamicFallbackExecutor fpu_fallback;
+  ExecutionContext fpu_context(state, memory, runtime);
+  fpu_fallback.bind(fpu_context);
+  state = {};
+  state.gpr[3] = kFloatSrc;
+  state.gpr[4] = kDoubleDst - 8u;
+  state.lr = kReturn;
+  const auto fpu_result =
+      fpu_context.try_dynamic_fallback(kCode + 0x500u, CompiledLookupKind::Call);
+  assert(fpu_result.handled);
+  assert(fpu_result.result.reason == FlowReason::Return);
+  assert(fpu_result.result.next_address == kReturn);
+  assert(std::bit_cast<double>(state.fpr_bits[1]) == 2.5);   // lfs promoted to double
+  assert(std::bit_cast<double>(state.fpr_bits[2]) == 5.0);   // fadds: 2.5 + 2.5
+  assert(std::bit_cast<double>(state.fpr_bits[3]) == 25.0);  // fmul: 5.0 * 5.0
+  assert(std::bit_cast<double>(memory.read64_be(kDoubleDst)) == 25.0);  // stfd
+
+  // Real AC6 repro, part three: past the FPU fix, the next unsupported
+  // instruction was "addic." (this codebase's internal "addicx" name) - CA
+  // (carry) semantics that neither "addi"/"addis" nor any other case here
+  // modeled.
+  write_instruction(memory, kCode + 0x700u, 0x30A40005u);  // addic  r5, r4, 5
+  write_instruction(memory, kCode + 0x704u, 0x34C4FFFFu);  // addic. r6, r4, -1
+  write_instruction(memory, kCode + 0x708u, 0x4E800020u);  // blr
+  DynamicFallbackExecutor addic_fallback;
+  ExecutionContext addic_context(state, memory, runtime);
+  addic_fallback.bind(addic_context);
+  state = {};
+  state.gpr[4] = 7u;
+  state.lr = kReturn;
+  const auto addic_result =
+      addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call);
+  assert(addic_result.handled);
+  assert(addic_result.result.reason == FlowReason::Return);
+  assert(addic_result.result.next_address == kReturn);
+  assert(state.gpr[5] == 12u);        // addic:  7 + 5, no carry
+  assert(state.gpr[6] == 6u);         // addic.: 7 + (-1)
+  assert(state.xer_ca());            // 6 <u 7 -> carry set
+  assert((state.cr >> 28) == 0b0100u);  // CR0 = GT (6 is positive, nonzero)
+
+  // Real AC6 repro, part four: the entire VMX/VMX128 vector unit - the
+  // largest single gap this interpreter has ever had - had no case here at
+  // all, starting with "lvx128" (AC6's own compiled code executes this
+  // constantly for matrix/skinning math). Exercises the classic 32-register
+  // encodings (lvx/vaddfp/stvx) - the VX128-extended forms reuse pre-existing,
+  // already-relied-upon DecodedInstruction accessors (vx128_vd() etc.) this
+  // interpreter does not implement itself, so this proves the new dispatch
+  // logic (register indexing, aot::execute_vector wiring, load/store paths)
+  // rather than re-verifying the decoder's own bit-field extraction.
+  constexpr GuestAddress kVecA = kDataPage + 0x200u;
+  constexpr GuestAddress kVecB = kDataPage + 0x210u;
+  constexpr GuestAddress kVecSum = kDataPage + 0x220u;
+  const float vec_a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  const float vec_b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+  for (unsigned i = 0; i < 4; ++i) {
+    memory.write32_be(kVecA + i * 4u, std::bit_cast<std::uint32_t>(vec_a[i]));
+    memory.write32_be(kVecB + i * 4u, std::bit_cast<std::uint32_t>(vec_b[i]));
+  }
+  write_instruction(memory, kCode + 0x800u, 0x7C2018CEu);  // lvx v1, 0, r3  (r3 = kVecA)
+  write_instruction(memory, kCode + 0x804u, 0x7C4020CEu);  // lvx v2, 0, r4  (r4 = kVecB)
+  write_instruction(memory, kCode + 0x808u, 0x1061100Au);  // vaddfp v3, v1, v2
+  write_instruction(memory, kCode + 0x80Cu, 0x7C6029CEu);  // stvx v3, 0, r5 (r5 = kVecSum)
+  write_instruction(memory, kCode + 0x810u, 0x4E800020u);  // blr
+  DynamicFallbackExecutor vector_fallback;
+  ExecutionContext vector_context(state, memory, runtime);
+  vector_fallback.bind(vector_context);
+  state = {};
+  state.gpr[3] = kVecA;
+  state.gpr[4] = kVecB;
+  state.gpr[5] = kVecSum;
+  state.lr = kReturn;
+  const auto vector_result =
+      vector_context.try_dynamic_fallback(kCode + 0x800u, CompiledLookupKind::Call);
+  assert(vector_result.handled);
+  assert(vector_result.result.reason == FlowReason::Return);
+  assert(vector_result.result.next_address == kReturn);
+  for (unsigned i = 0; i < 4; ++i) {
+    const auto sum = std::bit_cast<float>(memory.read32_be(kVecSum + i * 4u));
+    assert(sum == vec_a[i] + vec_b[i]);
+  }
 
   std::cout << "dynamic fallback tests passed\n";
   return 0;

@@ -515,6 +515,7 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
     src/xbox/exports/xboxkrnl_ke_sync_exports.cpp
+    src/xbox/exports/xboxkrnl_ob_exports.cpp
     src/xbox/xbox_time_convert.cpp
     src/xbox/xex_dispatcher_header.cpp
     src/xbox/rtl.cpp

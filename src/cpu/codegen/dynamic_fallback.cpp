@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "xenon/cpu/aot_semantics.hpp"
+#include "xenon/cpu/vector_semantic.hpp"
 
 namespace xenon::cpu {
 namespace {
@@ -93,6 +94,97 @@ void write_compare(CpuState& state, unsigned field, std::uint64_t lhs,
     for (unsigned bit = 0u; bit <= me; ++bit) set_arch_bit(bit);
   }
   return mask;
+}
+
+// VMX/VMX128 register-field extraction. Xbox 360 extends classic 32-register
+// VMX with a 128-register VX128 encoding family that packs the extra address
+// bits into different word positions per sub-format; this mirrors
+// lifter_vector.cpp's own vd()/va()/vb()/vc() exactly (same real hardware
+// field layout, independently duplicated here since the interpreter has no
+// IR::Builder to share that code through).
+bool vector_extended_format(InstructionFormat f) noexcept {
+  return f == InstructionFormat::VX128 || f == InstructionFormat::VX128_1 ||
+        f == InstructionFormat::VX128_2 || f == InstructionFormat::VX128_3 ||
+        f == InstructionFormat::VX128_4 || f == InstructionFormat::VX128_5 ||
+        f == InstructionFormat::VX128_R || f == InstructionFormat::VX128_P;
+}
+unsigned vector_vd(const DecodedInstruction& i) noexcept {
+  return vector_extended_format(i.info->format) ? i.vx128_vd() : i.vd5();
+}
+unsigned vector_va(const DecodedInstruction& i) noexcept {
+  switch (i.info->format) {
+    case InstructionFormat::VX128: case InstructionFormat::VX128_2:
+    case InstructionFormat::VX128_5: case InstructionFormat::VX128_R:
+      return i.vx128_va();
+    default: return i.va5();
+  }
+}
+unsigned vector_vb(const DecodedInstruction& i) noexcept {
+  switch (i.info->format) {
+    case InstructionFormat::VX128: case InstructionFormat::VX128_2:
+    case InstructionFormat::VX128_3: case InstructionFormat::VX128_4:
+    case InstructionFormat::VX128_5: case InstructionFormat::VX128_R:
+    case InstructionFormat::VX128_P:
+      return i.vx128_vb();
+    default: return i.vb5();
+  }
+}
+unsigned vector_vc(const DecodedInstruction& i) noexcept {
+  if (i.info->format == InstructionFormat::VX128_2) return (i.word >> 8) & 7u;
+  return i.vc5();
+}
+
+// Maps a decoded guest mnemonic to the aot::VectorSemantic enumerator of the
+// exact same name (see vector_semantic.hpp) so the interpreter can reuse
+// aot::execute_vector() - the same runtime-dispatched semantic function the
+// AOT-compiled path calls for every vector op it does not special-case for
+// performance (see backend_cpp_aot.cpp's is_vector_compute() catch-all) -
+// instead of reimplementing VMX/VMX128 arithmetic a second time.
+std::optional<aot::VectorSemantic> vector_semantic_for(std::string_view m) noexcept {
+  static const std::unordered_map<std::string_view, aot::VectorSemantic> table = {
+#define V(name) {#name, aot::VectorSemantic::name}
+      V(vaddcuw), V(vaddfp), V(vaddfp128), V(vaddsbs), V(vaddshs), V(vaddsws),
+      V(vaddubm), V(vaddubs), V(vadduhm), V(vadduhs), V(vadduwm), V(vadduws),
+      V(vand), V(vand128), V(vandc), V(vandc128), V(vavgsb), V(vavgsh),
+      V(vavgsw), V(vavgub), V(vavguh), V(vavguw), V(vcfpsxws128),
+      V(vcfpuxws128), V(vcfsx), V(vcfux), V(vcmpbfp), V(vcmpbfp128),
+      V(vcmpeqfp), V(vcmpeqfp128), V(vcmpequb), V(vcmpequh), V(vcmpequw),
+      V(vcmpequw128), V(vcmpgefp), V(vcmpgefp128), V(vcmpgtfp),
+      V(vcmpgtfp128), V(vcmpgtsb), V(vcmpgtsh), V(vcmpgtsw), V(vcmpgtub),
+      V(vcmpgtuh), V(vcmpgtuw), V(vcsxwfp128), V(vctsxs), V(vctuxs),
+      V(vcuxwfp128), V(vexptefp), V(vexptefp128), V(vlogefp), V(vlogefp128),
+      V(vmaddcfp128), V(vmaddfp), V(vmaddfp128), V(vmaxfp), V(vmaxfp128),
+      V(vmaxsb), V(vmaxsh), V(vmaxsw), V(vmaxub), V(vmaxuh), V(vmaxuw),
+      V(vmhaddshs), V(vmhraddshs), V(vminfp), V(vminfp128), V(vminsb),
+      V(vminsh), V(vminsw), V(vminub), V(vminuh), V(vminuw), V(vmladduhm),
+      V(vmrghb), V(vmrghh), V(vmrghw), V(vmrghw128), V(vmrglb), V(vmrglh),
+      V(vmrglw), V(vmrglw128), V(vmsum3fp128), V(vmsum4fp128), V(vmsummbm),
+      V(vmsumshm), V(vmsumshs), V(vmsumubm), V(vmsumuhm), V(vmsumuhs),
+      V(vmulesb), V(vmulesh), V(vmuleub), V(vmuleuh), V(vmulfp128),
+      V(vmulosb), V(vmulosh), V(vmuloub), V(vmulouh), V(vnmsubfp),
+      V(vnmsubfp128), V(vnor), V(vnor128), V(vor), V(vor128), V(vperm),
+      V(vperm128), V(vpermwi128), V(vpkd3d128), V(vpkpx), V(vpkshss),
+      V(vpkshss128), V(vpkshus), V(vpkshus128), V(vpkswss), V(vpkswss128),
+      V(vpkswus), V(vpkswus128), V(vpkuhum), V(vpkuhum128), V(vpkuhus),
+      V(vpkuhus128), V(vpkuwum), V(vpkuwum128), V(vpkuwus), V(vpkuwus128),
+      V(vrefp), V(vrefp128), V(vrfim), V(vrfim128), V(vrfin), V(vrfin128),
+      V(vrfip), V(vrfip128), V(vrfiz), V(vrfiz128), V(vrlb), V(vrlh),
+      V(vrlimi128), V(vrlw), V(vrlw128), V(vrsqrtefp), V(vrsqrtefp128),
+      V(vsel), V(vsel128), V(vsl), V(vslb), V(vsldoi), V(vsldoi128), V(vslh),
+      V(vslo), V(vslo128), V(vslw), V(vslw128), V(vspltb), V(vsplth),
+      V(vspltisb), V(vspltish), V(vspltisw), V(vspltisw128), V(vspltw),
+      V(vspltw128), V(vsr), V(vsrab), V(vsrah), V(vsraw), V(vsraw128),
+      V(vsrb), V(vsrh), V(vsro), V(vsro128), V(vsrw), V(vsrw128), V(vsubcuw),
+      V(vsubfp), V(vsubfp128), V(vsubsbs), V(vsubshs), V(vsubsws),
+      V(vsububm), V(vsububs), V(vsubuhm), V(vsubuhs), V(vsubuwm),
+      V(vsubuws), V(vsum2sws), V(vsum4sbs), V(vsum4shs), V(vsum4ubs),
+      V(vsumsws), V(vupkd3d128), V(vupkhpx), V(vupkhsb), V(vupkhsb128),
+      V(vupkhsh), V(vupklpx), V(vupklsb), V(vupklsb128), V(vupklsh),
+      V(vxor), V(vxor128),
+#undef V
+  };
+  const auto it = table.find(m);
+  return it != table.end() ? std::optional(it->second) : std::nullopt;
 }
 
 struct ScalarAccess {
@@ -226,6 +318,21 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
     state.gpr[i.rt()] = base + static_cast<std::uint64_t>(imm);
     return true;
   }
+  // Real AC6 repro: past the FPU fix above, the next unsupported instruction
+  // was "addic." (this codebase's internal "addicx" name for the Rc-recording
+  // form) - unlike "addi"/"addis" above, addic/addic. also set XER CA from
+  // the addition's carry-out, which this interpreter had no case for at all.
+  if (m == "addic" || m == "addicx") {
+    const auto a = state.gpr[i.ra()];
+    const auto c = static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16()));
+    const auto value = a + c;
+    state.gpr[i.rt()] = value;
+    // carry = sum <u a (valid for two-input unsigned addition) - matches
+    // lifter_integer.cpp's emit_ca_from_add() exactly.
+    state.set_xer_ca(value < a);
+    if (m == "addicx") state.update_cr0_signed(value);
+    return true;
+  }
   if (m == "ori" || m == "oris" || m == "xori" || m == "xoris" ||
       m == "andix" || m == "andisx") {
     std::uint64_t imm = i.uimm16();
@@ -269,6 +376,225 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
     state.gpr[i.rt()] = value;
     if (i.rc()) state.update_cr0_signed(value);
     return true;
+  }
+  // Real AC6 repro: dynamic fallback hit "mulli" with no case here at all,
+  // trapping with kFallbackUnsupportedDetail and killing guest execution a
+  // few instructions after the very first guest thread's TLS setup - the
+  // whole multiply/divide family was simply missing from this interpreter
+  // (unlike the AOT-compiled path, which lowers them through the generic
+  // Op::Mul/MulHigh*/Div* IR and so never needed a per-mnemonic case here).
+  // XER SO/OV (the oe() bit) is intentionally not modeled, same as every
+  // other oe()-capable op in this function (addx/subfx above) - a real,
+  // pre-existing gap in this interpreter, not one introduced here.
+  if (m == "mulli") {
+    state.gpr[i.rt()] =
+        state.gpr[i.ra()] *
+        static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16()));
+    return true;
+  }
+  if (m == "mulldx" || m == "mullwx") {
+    const unsigned width = m == "mullwx" ? 32u : 64u;
+    auto a = state.gpr[i.ra()];
+    auto c = state.gpr[i.rb()];
+    if (width == 32) {
+      a = static_cast<std::uint32_t>(a);
+      c = static_cast<std::uint32_t>(c);
+    }
+    std::uint64_t value = a * c;
+    if (width == 32)
+      value = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(value)));
+    state.gpr[i.rt()] = value;
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  if (m == "mulhdx" || m == "mulhdux" || m == "mulhwx" || m == "mulhwux") {
+    const bool word = m == "mulhwx" || m == "mulhwux";
+    const bool uns = m == "mulhdux" || m == "mulhwux";
+    const unsigned width = word ? 32u : 64u;
+    const auto a = state.gpr[i.ra()];
+    const auto c = state.gpr[i.rb()];
+    auto value = uns ? aot::mul_hi_unsigned_width(a, c, width)
+                     : aot::mul_hi_signed_width(a, c, width);
+    if (word)
+      value = uns ? static_cast<std::uint64_t>(static_cast<std::uint32_t>(value))
+                  : static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(value)));
+    state.gpr[i.rt()] = value;
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  if (m == "divdx" || m == "divdux" || m == "divwx" || m == "divwux") {
+    const bool word = m == "divwx" || m == "divwux";
+    const bool uns = m == "divdux" || m == "divwux";
+    const unsigned width = word ? 32u : 64u;
+    const auto a = state.gpr[i.ra()];
+    const auto c = state.gpr[i.rb()];
+    auto value = uns ? aot::div_unsigned(a, c, width) : aot::div_signed(a, c, width);
+    if (word)
+      value = uns ? static_cast<std::uint64_t>(static_cast<std::uint32_t>(value))
+                  : static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(value)));
+    state.gpr[i.rt()] = value;
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  // Real AC6 repro: past the mulli fix above, the very next unsupported
+  // instruction was "lfs" - this interpreter had NO floating-point support
+  // at all (no loads/stores, no arithmetic), unlike the AOT-compiled path,
+  // which lowers every one of these through aot_semantics.hpp's fp_add/
+  // fp_sub/fp_mul/fp_div/fp_sqrt/fp_fma/update_fpscr/etc. Reusing those same
+  // free functions here (rather than reimplementing FPSCR/exception
+  // semantics a second time) keeps this interpreter bit-for-bit consistent
+  // with the compiled path - the same guarantee dynamic_fallback_semantic_
+  // tests already checks for the integer ops above.
+  {
+    const auto f64_at = [&](unsigned r) noexcept {
+      return std::bit_cast<double>(state.fpr_bits[r]);
+    };
+    const auto store_f64 = [&](unsigned r, double v) noexcept {
+      state.fpr_bits[r] = std::bit_cast<std::uint64_t>(v);
+    };
+    const auto update_cr1_if_rc = [&]() noexcept {
+      if (i.rc()) state.update_cr1_from_fpscr();
+    };
+
+    if (m == "lfd" || m == "lfdu" || m == "lfdx" || m == "lfdux" || m == "lfs" ||
+        m == "lfsu" || m == "lfsx" || m == "lfsux") {
+      const bool single = m.starts_with("lfs");
+      const ScalarAccess access{single ? 4u : 8u, false,
+                                m == "lfdu" || m == "lfdux" || m == "lfsu" || m == "lfsux",
+                                m.ends_with("x"), false};
+      const auto ea = effective_address(i, state, access);
+      if (single) {
+        const auto raw = static_cast<std::uint32_t>(load_scalar(mem, ea, access));
+        store_f64(i.frt(), static_cast<double>(std::bit_cast<float>(raw)));
+      } else {
+        state.fpr_bits[i.frt()] = load_scalar(mem, ea, access);
+      }
+      if (access.update) state.gpr[i.ra()] = ea;
+      return true;
+    }
+    if (m == "stfd" || m == "stfdu" || m == "stfdx" || m == "stfdux" || m == "stfs" ||
+        m == "stfsu" || m == "stfsx" || m == "stfsux") {
+      const bool single = m.starts_with("stfs");
+      const ScalarAccess access{single ? 4u : 8u, false,
+                                m == "stfdu" || m == "stfdux" || m == "stfsu" || m == "stfsux",
+                                m.ends_with("x"), false};
+      const auto ea = effective_address(i, state, access);
+      if (single) {
+        const auto raw = std::bit_cast<std::uint32_t>(static_cast<float>(f64_at(i.frs())));
+        store_scalar(mem, ea, access, raw);
+      } else {
+        store_scalar(mem, ea, access, state.fpr_bits[i.frs()]);
+      }
+      if (access.update) state.gpr[i.ra()] = ea;
+      return true;
+    }
+    if (m == "fmrx" || m == "fnegx" || m == "fabsx" || m == "fnabsx") {
+      auto v = f64_at(i.rb());
+      if (m == "fabsx" || m == "fnabsx") v = aot::fp_abs_bits(v);
+      if (m == "fnegx" || m == "fnabsx") v = aot::fp_neg_bits(v);
+      store_f64(i.frt(), v);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "faddx" || m == "faddsx" || m == "fsubx" || m == "fsubsx" ||
+        m == "fdivx" || m == "fdivsx") {
+      const bool single = m.ends_with("sx");
+      const auto a = f64_at(i.ra());
+      const auto c = f64_at(i.rb());
+      auto r = m.starts_with("fadd") ? aot::fp_add(state, a, c)
+                                     : m.starts_with("fsub") ? aot::fp_sub(state, a, c)
+                                                              : aot::fp_div(state, a, c);
+      if (single) r = aot::fp_round_single(state, r);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fmulx" || m == "fmulsx") {
+      const bool single = m == "fmulsx";
+      const auto a = f64_at(i.ra());
+      const auto c = f64_at(i.frc());
+      auto r = aot::fp_mul(state, a, c);
+      if (single) r = aot::fp_round_single(state, r);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fmaddx" || m == "fmaddsx" || m == "fmsubx" || m == "fmsubsx" ||
+        m == "fnmaddx" || m == "fnmaddsx" || m == "fnmsubx" || m == "fnmsubsx") {
+      const bool single = m.ends_with("sx");
+      const bool subtract = m.starts_with("fmsub") || m.starts_with("fnmsub");
+      const bool negate = m.starts_with("fnm");
+      const auto a = f64_at(i.ra());
+      const auto c = f64_at(i.frc());
+      const auto addend = f64_at(i.rb());
+      auto r = aot::fp_fma(state, a, c, subtract ? -addend : addend);
+      if (negate) r = -r;
+      if (single) r = aot::fp_round_single(state, r);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fsqrtx" || m == "fsqrtsx") {
+      const bool single = m == "fsqrtsx";
+      auto r = aot::fp_sqrt(state, f64_at(i.rb()));
+      if (single) r = aot::fp_round_single(state, r);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fresx" || m == "frsqrtex") {
+      const auto a = f64_at(i.rb());
+      const auto r = m == "fresx" ? aot::fp_reciprocal(state, a) : aot::fp_rsqrt(state, a);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fselx") {
+      const auto r = aot::fp_select(f64_at(i.ra()), f64_at(i.frc()), f64_at(i.rb()));
+      store_f64(i.frt(), r);
+      update_cr1_if_rc();  // fsel does not alter FPSCR.
+      return true;
+    }
+    if (m == "frspx") {
+      const auto r = aot::fp_round_single(state, f64_at(i.rb()));
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fcfidx") {
+      const auto r = aot::fp_from_i64(state, state.fpr_bits[i.rb()]);
+      store_f64(i.frt(), r);
+      aot::update_fpscr(state, r);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fctidx" || m == "fctidzx" || m == "fctiwx" || m == "fctiwzx") {
+      const bool to_zero = m == "fctidzx" || m == "fctiwzx";
+      const unsigned width = (m == "fctiwx" || m == "fctiwzx") ? 32u : 64u;
+      state.fpr_bits[i.frt()] =
+          aot::fp_to_integer_bits(state, f64_at(i.rb()), width, to_zero);
+      aot::update_fp_conversion_status(state);
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "fcmpu" || m == "fcmpo") {
+      const auto a = f64_at(i.ra());
+      const auto c = f64_at(i.rb());
+      state.set_cr_field(i.crfd(), aot::fp_compare_field(a, c));
+      aot::update_fp_compare_status(state, a, c, m == "fcmpo");
+      return true;
+    }
+    if (m == "mffsx") {
+      state.fpr_bits[i.frt()] = state.fpscr;
+      update_cr1_if_rc();
+      return true;
+    }
   }
   if (m == "extsbx" || m == "extshx" || m == "extswx") {
     const auto src = state.gpr[i.rs()];
@@ -427,6 +753,184 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
   // Cache hints have no architecturally visible data result in this fallback.
   if (m == "dcbf" || m == "dcbi" || m == "dcbst" || m == "dcbt" || m == "dcbtst")
     return true;
+
+  // Real AC6 repro: the entire VMX/VMX128 vector unit - the largest single
+  // gap this interpreter has ever had - had no case here at all, starting
+  // with "lvx128" (a real load AC6's own compiled code executes constantly
+  // for matrix/skinning math). Loads/stores are handled directly (mirroring
+  // lifter_memory.cpp's own vector-memory cases exactly); every arithmetic/
+  // logic/compare/permute/pack/splat/select/rotate/shift mnemonic reuses
+  // aot::execute_vector() - the same runtime-dispatched semantic function
+  // the AOT-compiled path calls for everything it does not special-case for
+  // performance (see vector_semantic_for()'s own comment above).
+  if (m == "lvx" || m == "lvxl" || m == "lvx128" || m == "lvxl128") {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>((base + state.gpr[i.rb()]) & ~0xFull);
+    state.vr[vector_vd(i)] = mem.read128(ea);
+    return true;
+  }
+  if (m == "stvx" || m == "stvxl" || m == "stvx128" || m == "stvxl128") {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>((base + state.gpr[i.rb()]) & ~0xFull);
+    mem.write128(ea, state.vr[vector_vd(i)]);
+    return true;
+  }
+  if (m == "lvebx" || m == "lvehx" || m == "lvewx" || m == "lvewx128") {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    const unsigned width = m == "lvebx" ? 1u : (m == "lvehx" ? 2u : 4u);
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::vector_load_element(state.vr[reg], mem, ea, width);
+    return true;
+  }
+  if (m == "stvebx" || m == "stvehx" || m == "stvewx" || m == "stvewx128") {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    const unsigned width = m == "stvebx" ? 1u : (m == "stvehx" ? 2u : 4u);
+    aot::vector_store_element(state.vr[vector_vd(i)], mem, ea, width);
+    return true;
+  }
+  if (m.starts_with("lvlx")) {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::vector_load_left(state.vr[reg], mem, ea);
+    return true;
+  }
+  if (m.starts_with("lvrx")) {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::vector_load_right(state.vr[reg], mem, ea);
+    return true;
+  }
+  if (m.starts_with("stvlx")) {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    aot::vector_store_left(state.vr[vector_vd(i)], mem, ea);
+    return true;
+  }
+  if (m.starts_with("stvrx")) {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(base + state.gpr[i.rb()]);
+    aot::vector_store_right(state.vr[vector_vd(i)], mem, ea);
+    return true;
+  }
+  if (m == "lvsl" || m == "lvsl128" || m == "lvsr" || m == "lvsr128") {
+    const auto base = i.ra() ? state.gpr[i.ra()] : 0u;
+    const auto ea = base + state.gpr[i.rb()];
+    state.vr[vector_vd(i)] = m.starts_with("lvsl") ? aot::vector_load_shift_left(ea)
+                                                   : aot::vector_load_shift_right(ea);
+    return true;
+  }
+  if (m == "mfvscr") {
+    Vector128 v{};
+    v.set_u32_be(3, state.vscr);
+    state.vr[i.vd5()] = v;
+    return true;
+  }
+  if (m == "mtvscr") {
+    state.vscr = state.vr[i.vb5()].u32_be(3);
+    return true;
+  }
+  // A handful of mnemonic families take a genuinely different operand set on
+  // the classic 3-register VA-form encoding than on Xbox's extended VX128
+  // encodings - mirroring lifter_vector.cpp's own per-format branches exactly
+  // (same real hardware operand wiring, independently duplicated here since
+  // the interpreter has no IR::Builder to share that code through). Every
+  // other mnemonic below uses the same (va, vb, vc) operand set regardless of
+  // format, which the generic dispatch after this block handles uniformly.
+  if (m.starts_with("vmaddfp") || m.starts_with("vmaddcfp") || m.starts_with("vnmsubfp")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    Vector128 a, b, c;
+    if (i.info->format == InstructionFormat::VA) {
+      a = state.vr[vector_va(i)];
+      b = state.vr[vector_vb(i)];
+      c = state.vr[vector_vc(i)];
+    } else {
+      a = state.vr[reg];
+      b = state.vr[vector_va(i)];
+      c = state.vr[vector_vb(i)];
+    }
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
+    return true;
+  }
+  if (m.starts_with("vsel")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    Vector128 a, b, c;
+    if (i.info->format == InstructionFormat::VA) {
+      a = state.vr[vector_va(i)];
+      b = state.vr[vector_vb(i)];
+      c = state.vr[vector_vc(i)];
+    } else {
+      a = state.vr[reg];
+      b = state.vr[vector_va(i)];
+      c = state.vr[vector_vb(i)];
+    }
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
+    return true;
+  }
+  if (m.starts_with("vsum") || m.starts_with("vmsum")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    const auto a = state.vr[vector_va(i)];
+    const auto b = state.vr[vector_vb(i)];
+    const auto c = i.info->format == InstructionFormat::VA ? state.vr[vector_vc(i)] : Vector128{};
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
+    return true;
+  }
+  if (m.starts_with("vpermwi")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    const auto b = state.vr[vector_vb(i)];
+    state.vr[reg] =
+        aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+    return true;
+  }
+  if (m.starts_with("vperm")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    if (i.info->format == InstructionFormat::VA || i.info->format == InstructionFormat::VX128_2) {
+      const auto a = state.vr[vector_va(i)];
+      const auto b = state.vr[vector_vb(i)];
+      const auto c = state.vr[vector_vc(i)];
+      state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
+    } else {
+      const auto b = state.vr[vector_vb(i)];
+      state.vr[reg] =
+          aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+    }
+    return true;
+  }
+  if (m.starts_with("vrlimi")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    const auto old = state.vr[reg];
+    const auto b = state.vr[vector_vb(i)];
+    state.vr[reg] =
+        aot::execute_vector(*semantic, i.word, state, old, b, Vector128{}, Vector128{});
+    return true;
+  }
+  if (const auto semantic = vector_semantic_for(m)) {
+    const auto reg = vector_vd(i);
+    const auto a = state.vr[vector_va(i)];
+    const auto b = state.vr[vector_vb(i)];
+    const auto c = state.vr[vector_vc(i)];
+    const auto result = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
+    state.vr[reg] = result;
+    if (m.starts_with("vcmp") && i.rc()) {
+      aot::update_cr6_from_vector_compare(state, result);
+    }
+    return true;
+  }
 
   return false;
 }

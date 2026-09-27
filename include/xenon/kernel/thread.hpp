@@ -61,6 +61,13 @@ class KernelThread final : public KernelObject {
   [[nodiscard]] std::uint32_t exit_code() const noexcept;
   [[nodiscard]] std::uint32_t processor_affinity() const noexcept;
   [[nodiscard]] const std::string& name() const noexcept { return name_; }
+  // The real Xbox 360/Win32 NtSuspendThread/NtResumeThread contract returns
+  // the PREVIOUS suspend count through an out parameter, which resume()'s
+  // own bool return (suspended-or-not) cannot express - exported read-only
+  // for exactly that need (see xboxkrnl_sync_exports.cpp's NtResumeThread).
+  [[nodiscard]] std::uint32_t suspend_count() const noexcept {
+    return suspend_count_.load(std::memory_order_acquire);
+  }
 
   void set_priority(ThreadPriority priority) noexcept;
   void set_processor_affinity(std::uint32_t affinity) noexcept;
@@ -129,6 +136,21 @@ class KernelThread final : public KernelObject {
   void* kernel_data() const noexcept { return kernel_data_; }
   void set_kernel_data(void* data) noexcept { kernel_data_ = data; }
 
+  // The guest-visible KTHREAD block XenonSession allocates for this thread
+  // (see guest_thread_context.hpp's GuestKthreadLayout) - the same address
+  // KPCR->prcb_data.current_thread points at for this thread's own CpuState.
+  // Exists so kernel exports that hand a guest KTHREAD pointer back to guest
+  // code (e.g. ObReferenceObjectByHandle on a thread handle) can return a
+  // real, dereferenceable address instead of an opaque placeholder. 0 until
+  // XenonSession sets it (every thread gets one, but only after its
+  // GuestThreadTlsContext is allocated).
+  [[nodiscard]] std::uint32_t guest_kthread_address() const noexcept {
+    return guest_kthread_address_;
+  }
+  void set_guest_kthread_address(std::uint32_t address) noexcept {
+    guest_kthread_address_ = address;
+  }
+
  private:
   void thread_main();
 
@@ -138,6 +160,7 @@ class KernelThread final : public KernelObject {
   std::uint32_t stack_size_;
   std::uint32_t creation_flags_;
   void* kernel_data_{nullptr};
+  std::uint32_t guest_kthread_address_{0};
 
   mutable std::mutex mutex_;
   // Guards the create_suspended entry-time park in thread_main(): resume()

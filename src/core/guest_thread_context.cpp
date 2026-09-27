@@ -21,6 +21,15 @@ bool setup_guest_thread_tls_context(memory::AddressSpace& memory,
   }
   memory.zero(kpcr_address, GuestKpcrLayout::kSize);
 
+  memory::GuestAddress kthread_address{};
+  if (!memory.allocate(GuestKthreadLayout::kSize, 16, memory::kReadWrite,
+                       /*top_down=*/false, kthread_address)) {
+    if (error) *error = "failed to allocate guest KTHREAD block";
+    static_cast<void>(memory.release(kpcr_address));
+    return false;
+  }
+  memory.zero(kthread_address, GuestKthreadLayout::kSize);
+
   memory::GuestAddress tls_address{};
   std::uint32_t tls_size = 0;
   if (tls_info && tls_info->data_size > 0) {
@@ -28,6 +37,7 @@ bool setup_guest_thread_tls_context(memory::AddressSpace& memory,
     if (!memory.allocate(tls_size, 16, memory::kReadWrite, /*top_down=*/false,
                          tls_address)) {
       if (error) *error = "failed to allocate guest TLS block";
+      static_cast<void>(memory.release(kthread_address));
       static_cast<void>(memory.release(kpcr_address));
       return false;
     }
@@ -50,9 +60,14 @@ bool setup_guest_thread_tls_context(memory::AddressSpace& memory,
   memory.write32_be(kpcr_address + GuestKpcrLayout::kStackBaseOffset, stack_base);
   memory.write32_be(kpcr_address + GuestKpcrLayout::kStackLimitOffset,
                     stack_base - stack_size);
+  memory.write32_be(kpcr_address + GuestKpcrLayout::kCurrentThreadOffset, kthread_address);
   if (tls_address) {
     memory.write32_be(kpcr_address + GuestKpcrLayout::kTlsPtrOffset, tls_address);
   }
+
+  memory.write32_be(kthread_address + GuestKthreadLayout::kStackBaseOffset, stack_base);
+  memory.write32_be(kthread_address + GuestKthreadLayout::kStackLimitOffset,
+                    stack_base - stack_size);
 
   // A nonzero index_address is a compiler-emitted "TLS index" global (the
   // Win32-PE-TLS-directory convention): a single process-wide constant every
@@ -66,15 +81,27 @@ bool setup_guest_thread_tls_context(memory::AddressSpace& memory,
   }
 
   out_context.kpcr_address = kpcr_address;
+  out_context.kthread_address = kthread_address;
   out_context.tls_address = tls_address;
   out_context.tls_size = tls_size;
   return true;
+}
+
+void write_guest_thread_id(memory::AddressSpace& memory,
+                           const GuestThreadTlsContext& context,
+                           std::uint32_t thread_id) noexcept {
+  if (!context.kthread_address) return;
+  memory.write32_be(context.kthread_address + GuestKthreadLayout::kThreadIdOffset,
+                    thread_id);
 }
 
 void release_guest_thread_tls_context(memory::AddressSpace& memory,
                                       const GuestThreadTlsContext& context) noexcept {
   if (context.tls_address) {
     static_cast<void>(memory.release(context.tls_address));
+  }
+  if (context.kthread_address) {
+    static_cast<void>(memory.release(context.kthread_address));
   }
   if (context.kpcr_address) {
     static_cast<void>(memory.release(context.kpcr_address));

@@ -108,6 +108,37 @@ int main() {
     assert(memory.read32_be(ctx_a.kpcr_address + xenon::core::GuestKpcrLayout::kStackLimitOffset) ==
            stack_a - 4096u);
 
+    // Real AC6 compiled code dereferences KPCR->prcb_data.current_thread
+    // (offset 0x100) to read the current thread's own KTHREAD fields - see
+    // guest_thread_context.hpp's GuestKthreadLayout comment for the exact
+    // crash this used to cause (a null-pointer read at guest address 0x14C).
+    // Both threads must get their OWN, distinct KTHREAD block, wired from
+    // their OWN KPCR, each carrying that same thread's stack bounds and (once
+    // write_guest_thread_id() runs) its own real thread_id - never the other
+    // thread's.
+    assert(ctx_a.kthread_address != 0 && ctx_b.kthread_address != 0);
+    assert(ctx_a.kthread_address != ctx_b.kthread_address &&
+           "Two threads must get distinct KTHREAD blocks");
+    assert(memory.read32_be(ctx_a.kpcr_address +
+                            xenon::core::GuestKpcrLayout::kCurrentThreadOffset) ==
+           ctx_a.kthread_address);
+    assert(memory.read32_be(ctx_b.kpcr_address +
+                            xenon::core::GuestKpcrLayout::kCurrentThreadOffset) ==
+           ctx_b.kthread_address);
+    assert(memory.read32_be(ctx_a.kthread_address +
+                            xenon::core::GuestKthreadLayout::kStackBaseOffset) ==
+           stack_a);
+    assert(memory.read32_be(ctx_a.kthread_address +
+                            xenon::core::GuestKthreadLayout::kStackLimitOffset) ==
+           stack_a - 4096u);
+
+    xenon::core::write_guest_thread_id(memory, ctx_a, 0x1111u);
+    xenon::core::write_guest_thread_id(memory, ctx_b, 0x2222u);
+    assert(memory.read32_be(ctx_a.kthread_address +
+                            xenon::core::GuestKthreadLayout::kThreadIdOffset) == 0x1111u);
+    assert(memory.read32_be(ctx_b.kthread_address +
+                            xenon::core::GuestKthreadLayout::kThreadIdOffset) == 0x2222u);
+
     xenon::core::release_guest_thread_tls_context(memory, ctx_a);
     xenon::core::release_guest_thread_tls_context(memory, ctx_b);
   }
@@ -128,6 +159,13 @@ int main() {
     assert(ctx.kpcr_address != 0);
     assert(ctx.tls_address == 0 && "No XexTls -> no TLS block allocated");
     assert(memory.read32_be(ctx.kpcr_address + xenon::core::GuestKpcrLayout::kTlsPtrOffset) == 0);
+
+    // The KTHREAD block (and KPCR->current_thread pointing at it) is
+    // independent of whether the title has any compiler-emitted TLS at all.
+    assert(ctx.kthread_address != 0);
+    assert(memory.read32_be(ctx.kpcr_address +
+                            xenon::core::GuestKpcrLayout::kCurrentThreadOffset) ==
+           ctx.kthread_address);
 
     xenon::core::release_guest_thread_tls_context(memory, ctx);
   }

@@ -1,5 +1,6 @@
 #include "xenon/xbox/xboxkrnl_memory_exports.hpp"
 
+#include <algorithm>
 #include <cstdint>
 
 #include "xenon/core/export_registry.hpp"
@@ -209,6 +210,91 @@ bool nt_allocate_virtual_memory_export(kernel::KernelProcess& process,
   context.memory.write32_be(base_address_ptr, static_cast<std::uint32_t>(result_address));
   context.memory.write32_be(region_size_ptr, aligned_size);
   context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// MmAllocatePhysicalMemoryEx (ordinal 0xBA)
+// Guest ABI verified against xenia-project/xenia's real implementation: r3 =
+// flags (unused - real hardware ignores it too), r4 = region size, r5 =
+// Protect (PAGE_* flags, plus MEM_LARGE_PAGES/MEM_16MB_PAGES page-size
+// selectors OR'd in - a real Xbox 360 XDK quirk, not a bug: this API packs
+// page size into the same field NtAllocateVirtualMemory uses only for
+// protection), r6 = minimum physical address, r7 = maximum physical address
+// (inclusive), r8 = alignment -> r3 = guest-visible base address, or 0 on
+// failure (NOT an NTSTATUS - real MmAllocatePhysicalMemoryEx returns a
+// pointer-or-null, matching xenia's own reference).
+//
+// Backed by memory::AddressSpace::allocate_physical()/physical_guest_alias()
+// exactly as Xenon's own physical-memory consumers already are (see
+// audio/xma.cpp's XMA context-array allocation for the same
+// allocate-then-alias pattern) - memory::PhysicalAllocationOptions'
+// minimum_address/maximum_address fields exist specifically for this export
+// (see their doc comment in memory/types.hpp), so the guest's requested
+// physical range is genuinely honored, not silently dropped.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool mm_allocate_physical_memory_ex_export(kernel::KernelProcess& process,
+                                           ExportCallContext& context) {
+  const auto region_size = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  const auto protect_bits = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  const auto min_addr_range = static_cast<std::uint32_t>(context.cpu.gpr[6]);
+  const auto max_addr_range = static_cast<std::uint32_t>(context.cpu.gpr[7]);
+  const auto alignment_in = static_cast<std::uint32_t>(context.cpu.gpr[8]);
+
+  if (region_size == 0u || (protect_bits & (kPageReadOnly | kPageReadWrite)) == 0u) {
+    context.cpu.gpr[3] = 0u;
+    return true;
+  }
+
+  memory::PhysicalAllocationOptions options{};
+  // X_MEM_16MB_PAGES (0x80000000) and X_MEM_LARGE_PAGES (kMemLargePages,
+  // 0x20000000) are checked in this priority order to match xenia's own
+  // reference: a caller that (incorrectly) sets both bits gets the coarser
+  // 16 MiB granularity, not an ambiguous/undefined one.
+  std::uint32_t page_size;
+  if ((protect_bits & 0x80000000u) != 0u) {
+    options.page_class = memory::PhysicalPageClass::Page16M;
+    page_size = memory::kHugePageSize;
+  } else if ((protect_bits & kMemLargePages) != 0u) {
+    options.page_class = memory::PhysicalPageClass::Page64K;
+    page_size = memory::kLargePageSize;
+  } else {
+    options.page_class = memory::PhysicalPageClass::Page4K;
+    page_size = memory::kBasePageSize;
+  }
+  options.alignment = alignment_in != 0u
+                          ? ((alignment_in + page_size - 1u) / page_size) * page_size
+                          : page_size;
+  // An unconstrained guest request (min=0, max=0xFFFFFFFF is the common
+  // case) must not narrow the allocator below/above its own real usable
+  // physical range - only a genuinely tighter guest-supplied bound should
+  // shrink it, matching real hardware clamping the request into what
+  // actually exists rather than treating "don't care" as "the whole 32-bit
+  // space, including reserved regions".
+  options.minimum_address = std::max(min_addr_range, options.minimum_address);
+  options.maximum_address = std::min(max_addr_range, options.maximum_address);
+  options.protect = translate_protect(protect_bits);
+  options.top_down = true;
+  options.zero_initialize = true;
+
+  const auto aligned_size = ((region_size + page_size - 1u) / page_size) * page_size;
+
+  std::uint32_t physical_base = 0u;
+  if (!process.memory().address_space().allocate_physical(aligned_size, options,
+                                                           physical_base)) {
+    context.cpu.gpr[3] = 0u;
+    return true;
+  }
+  const auto alias =
+      memory::AddressSpace::physical_guest_alias(physical_base, options.page_class);
+  if (!alias) {
+    static_cast<void>(
+        process.memory().address_space().free_physical(physical_base, aligned_size));
+    context.cpu.gpr[3] = 0u;
+    return true;
+  }
+
+  context.cpu.gpr[3] = static_cast<std::uint64_t>(*alias);
   return true;
 }
 

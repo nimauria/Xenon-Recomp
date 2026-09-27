@@ -35,6 +35,7 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_memory_exports.hpp"
+#include "xenon/xbox/xboxkrnl_ob_exports.hpp"
 #include "xenon/xbox/xboxkrnl_process_exports.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
@@ -904,6 +905,14 @@ bool XenonSession::init_exports() {
         {0x0AFu, "KeWaitForMultipleObjects", &xbox::ke_wait_for_multiple_objects_export},
         {0x0B0u, "KeWaitForSingleObject", &xbox::ke_wait_for_single_object_export},
         {0x0CCu, "NtAllocateVirtualMemory", &xbox::nt_allocate_virtual_memory_export},
+        {0x0BAu, "MmAllocatePhysicalMemoryEx", &xbox::mm_allocate_physical_memory_ex_export},
+        {0x110u, "ObReferenceObjectByHandle", &xbox::ob_reference_object_by_handle_export},
+        {0x105u, "ObDereferenceObject", &xbox::ob_dereference_object_export},
+        {0x0CEu, "NtClearEvent", &xbox::nt_clear_event_export},
+        {0x0F6u, "NtSetEvent", &xbox::nt_set_event_export},
+        {0x0F5u, "NtResumeThread", &xbox::nt_resume_thread_export},
+        {0x099u, "KeSetBasePriorityThread", &xbox::ke_set_base_priority_thread_export},
+        {0x097u, "KeSetAffinityThread", &xbox::ke_set_affinity_thread_export},
         {0x066u, "KeGetCurrentProcessType", &xbox::ke_get_current_process_type_export},
         {0x09Au, "KeSetCurrentProcessType", &xbox::ke_set_current_process_type_export},
         {0x125u, "RtlEnterCriticalSection", &xbox::rtl_enter_critical_section_export},
@@ -1455,6 +1464,8 @@ SessionResult XenonSession::start() {
     set_error("Failed to create main KernelThread");
     return SessionResult::failure(last_error_);
   }
+  write_guest_thread_id(*memory_, main_thread_tls_, main_thread_->thread_id());
+  main_thread_->set_guest_kthread_address(main_thread_tls_.kthread_address);
   kernel_process_->set_main_thread(main_thread_);
   if (!main_thread_->start()) {
     set_error("Failed to start main KernelThread");
@@ -2740,6 +2751,8 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
     return true;
   }
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
+  write_guest_thread_id(*memory_, tls, thread->thread_id());
+  thread->set_guest_kthread_address(tls.kthread_address);
 
   kernel::Handle handle{};
   const auto insert_code = kernel_process_->handle_table().insert(
@@ -2806,6 +2819,8 @@ bool XenonSession::start_audio_guest_thread() {
     audio_thread_tls_ = {};
     return false;
   }
+  write_guest_thread_id(*memory_, audio_thread_tls_, audio_thread_->thread_id());
+  audio_thread_->set_guest_kthread_address(audio_thread_tls_.kthread_address);
 
   // Mark the pump active and wire the invoker before starting the thread, so
   // there is no window where the thread is running but has nothing to do (or
@@ -2920,6 +2935,8 @@ bool XenonSession::start_gpu_pump_thread() {
     gpu_pump_thread_tls_ = {};
     return false;
   }
+  write_guest_thread_id(*memory_, gpu_pump_thread_tls_, gpu_pump_thread_->thread_id());
+  gpu_pump_thread_->set_guest_kthread_address(gpu_pump_thread_tls_.kthread_address);
 
   // Mark the pump active before starting the thread, so there is no window
   // where the thread is running but gpu_pump_running_ has not been observed

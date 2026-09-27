@@ -37,6 +37,18 @@ namespace xenon::xbox {
                                                     xenon::core::ExportCallContext& context);
 [[nodiscard]] bool ke_wait_for_multiple_objects_export(xenon::kernel::KernelProcess& process,
                                                        xenon::core::ExportCallContext& context);
+// Not dispatcher-header-based like the rest of this file (see file comment
+// above): operates on a guest KTHREAD pointer (XenonSession's per-thread
+// GuestKthreadLayout block - see guest_thread_context.hpp), resolved back to
+// a KernelThread by scanning kernel::ThreadManager::enumerate_threads() for a
+// matching kernel::KernelThread::guest_kthread_address(). Lives here anyway
+// since it is still a Ke* export needing KernelProcess at call time.
+[[nodiscard]] bool ke_set_base_priority_thread_export(xenon::kernel::KernelProcess& process,
+                                                      xenon::core::ExportCallContext& context);
+// Same guest-KTHREAD-pointer resolution as ke_set_base_priority_thread_export
+// above (see its comment).
+[[nodiscard]] bool ke_set_affinity_thread_export(xenon::kernel::KernelProcess& process,
+                                                 xenon::core::ExportCallContext& context);
 
 // Convenience registrar for callers (tests/tools) that already have a
 // constructed KernelProcess. XenonSession::init_exports() instead registers

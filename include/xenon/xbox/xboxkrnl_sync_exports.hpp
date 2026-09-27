@@ -37,6 +37,12 @@ namespace xenon::xbox {
                                           xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_set_timer_ex_export(xenon::kernel::KernelProcess& process,
                                           xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_clear_event_export(xenon::kernel::KernelProcess& process,
+                                         xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_set_event_export(xenon::kernel::KernelProcess& process,
+                                       xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_resume_thread_export(xenon::kernel::KernelProcess& process,
+                                           xenon::core::ExportCallContext& context);
 
 // Registers the xboxkrnl handle-based (Nt*) synchronization exports this
 // pass adds: NtCreateEvent, NtCreateSemaphore, NtReleaseSemaphore,

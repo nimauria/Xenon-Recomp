@@ -23,6 +23,12 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "content_source.hpp"
 #include "launch_config.hpp"
 #include "presentation_host.hpp"
@@ -94,12 +100,47 @@ void redirect_log(const std::string& session_dir) {
 #if defined(_WIN32)
   FILE* out = nullptr;
   freopen_s(&out, log_path.c_str(), "a", stdout);
-  FILE* err = nullptr;
-  freopen_s(&err, log_path.c_str(), "a", stderr);
 #else
   std::freopen(log_path.c_str(), "a", stdout);
-  std::freopen(log_path.c_str(), "a", stderr);
 #endif
+  // Two real, confirmed bugs traced to here, both from giving stdout and
+  // stderr independent freopen()s of the same path:
+  //
+  // 1. Silent data loss: two separate FILE objects opened "a" on the same
+  //    path each cache their own idea of end-of-file and don't re-query it
+  //    on every write, so whichever stream flushes second overwrites bytes
+  //    the other just wrote instead of appending after them - reproduced
+  //    standalone (freopen both, write cout/cerr/cout, read the file back:
+  //    the cerr line is simply gone, no corruption, no error). Every
+  //    std::cerr line this process ever wrote to the log was at risk of
+  //    silently vanishing this way, including the ones diagnosing a fatal
+  //    startup failure - exactly the messages a log file exists to keep.
+  // 2. A real crash: the UCRT determines a freopen'd stream's buffering
+  //    mode (console vs. file) lazily, on that stream's first write, by
+  //    probing the underlying handle. Confirmed via cdb: main()'s very
+  //    first std::cerr write (the "Start failed" diagnostic, itself
+  //    already holding XenonSession::console_log_mutex(), which forwards
+  //    to logging::Logger::stream_mutex() - see session.hpp - with no
+  //    other writer active) crashed with STATUS_STACK_BUFFER_OVERRUN
+  //    (debug-CRT invalid_parameter fast-fail) inside ucrtbased!write,
+  //    called from that first cerr flush. A mutex serializes writers
+  //    against each other; it cannot make one stream's own first-write
+  //    probe safe.
+  //
+  // Fix for (1): give stderr no FILE object of its own - alias its fd onto
+  // stdout's already-open handle, so both streams share one OS-level file
+  // position instead of two independently cached ones (reproduced fixed
+  // standalone with the same repro above: nothing goes missing).
+  // Fix for (2): set each stream's buffering mode explicitly, immediately
+  // after it starts pointing at the log file and before any write can
+  // reach it, so the racy lazy probe never runs at all.
+#if defined(_WIN32)
+  _dup2(_fileno(stdout), _fileno(stderr));
+#else
+  dup2(fileno(stdout), fileno(stderr));
+#endif
+  std::setvbuf(stdout, nullptr, _IOFBF, BUFSIZ);
+  std::setvbuf(stderr, nullptr, _IOFBF, BUFSIZ);
   std::ios::sync_with_stdio(true);
 }
 

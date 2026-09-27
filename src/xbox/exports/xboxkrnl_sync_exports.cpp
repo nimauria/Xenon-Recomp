@@ -11,6 +11,7 @@
 #include "xenon/kernel/mutant.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/timer.hpp"
 #include "xenon/kernel/timer_manager.hpp"
 #include "xenon/kernel/wait.hpp"
@@ -223,6 +224,93 @@ bool nt_release_mutant_export(kernel::KernelProcess& process, ExportCallContext&
   }
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, static_cast<std::uint32_t>(previous));
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// NtClearEvent (ordinal 0xCE)
+// Guest ABI: r3 = handle -> r3 = NTSTATUS. The handle-based counterpart to
+// KeResetEvent's direct-pointer form (see xboxkrnl_ke_sync_exports.cpp) -
+// resets (clears the signaled state of) an event reached through
+// kernel::HandleTable rather than a raw guest DISPATCHER_HEADER.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool nt_clear_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Event) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  static_cast<kernel::KernelEvent&>(*view.object).reset();
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// NtSetEvent (ordinal 0xF6)
+// Guest ABI: r3 = handle, r4 = optional guest pointer to receive the
+// PREVIOUS signal state (BOOLEAN, nullable) -> r3 = NTSTATUS. The
+// handle-based counterpart to KeSetEvent's direct-pointer form.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto previous_state_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Event) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  auto& event = static_cast<kernel::KernelEvent&>(*view.object);
+  const std::uint32_t previous = event.signaled() ? 1u : 0u;
+  event.set();
+  if (previous_state_ptr != 0u) {
+    context.memory.write32_be(previous_state_ptr, previous);
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// NtResumeThread (ordinal 0xF5)
+// Guest ABI: r3 = thread handle, r4 = optional guest pointer to receive the
+// PREVIOUS suspend count -> r3 = NTSTATUS.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto previous_count_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Thread) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  const auto previous = thread.suspend_count();
+  static_cast<void>(thread.resume());
+  if (previous_count_ptr != 0u) {
+    context.memory.write32_be(previous_count_ptr, previous);
   }
   context.cpu.gpr[3] = status::Success;
   return true;
@@ -442,6 +530,9 @@ constexpr SyncExportSpec kSyncExports[] = {
     {0x0D7u, "NtCreateTimer"},
     {0x0CDu, "NtCancelTimer"},
     {0x0FAu, "NtSetTimerEx"},
+    {0x0CEu, "NtClearEvent"},
+    {0x0F6u, "NtSetEvent"},
+    {0x0F5u, "NtResumeThread"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -484,6 +575,15 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   }
   if (name == "NtSetTimerEx") {
     return [&process](ExportCallContext& ctx) { return nt_set_timer_ex_export(process, ctx); };
+  }
+  if (name == "NtClearEvent") {
+    return [&process](ExportCallContext& ctx) { return nt_clear_event_export(process, ctx); };
+  }
+  if (name == "NtSetEvent") {
+    return [&process](ExportCallContext& ctx) { return nt_set_event_export(process, ctx); };
+  }
+  if (name == "NtResumeThread") {
+    return [&process](ExportCallContext& ctx) { return nt_resume_thread_export(process, ctx); };
   }
   return {};
 }

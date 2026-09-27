@@ -19,6 +19,13 @@ namespace xenon::xbox {
 [[nodiscard]] bool nt_allocate_virtual_memory_export(
     xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
 
+// MmAllocatePhysicalMemoryEx (ordinal 0xBA). Same KernelProcess-at-call-time
+// need as NtAllocateVirtualMemory above.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+[[nodiscard]] bool mm_allocate_physical_memory_ex_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
+
 // Registers the xboxkrnl guest memory-management exports this pass adds that
 // need no KernelProcess: KeFlushUserModeTb. Ordinal verified against the
 // xenia-project/xenia xboxkrnl export table (xboxkrnl_table.inc) rather than

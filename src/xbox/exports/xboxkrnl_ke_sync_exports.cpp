@@ -11,6 +11,7 @@
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
@@ -222,6 +223,82 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   return true;
 }
 
+// KeSetBasePriorityThread (ordinal 0x99)
+// Guest ABI: r3 = guest KTHREAD pointer, r4 = new base priority (LONG) ->
+// r3 = previous base priority (LONG). Xenon models thread priority as the
+// ThreadPriority enum (Idle=0..TimeCritical=6, see kernel/thread.hpp); the
+// requested value is clamped into that range rather than rejected outright,
+// since real titles occasionally pass values outside the documented range
+// and real hardware does not fault on it either.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool ke_set_base_priority_thread_export(kernel::KernelProcess& process,
+                                        ExportCallContext& context) {
+  const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto requested = static_cast<std::int32_t>(context.cpu.gpr[4]);
+
+  kernel::KernelThread* target = nullptr;
+  for (const auto& thread : process.thread_manager().enumerate_threads()) {
+    if (thread->guest_kthread_address() == thread_ptr) {
+      target = thread.get();
+      break;
+    }
+  }
+  if (!target) {
+    context.cpu.gpr[3] = 0u;
+    return true;
+  }
+
+  const auto previous = static_cast<std::int32_t>(target->priority());
+  auto clamped = requested;
+  if (clamped < static_cast<std::int32_t>(kernel::ThreadPriority::Idle))
+    clamped = static_cast<std::int32_t>(kernel::ThreadPriority::Idle);
+  if (clamped > static_cast<std::int32_t>(kernel::ThreadPriority::TimeCritical))
+    clamped = static_cast<std::int32_t>(kernel::ThreadPriority::TimeCritical);
+  target->set_priority(static_cast<kernel::ThreadPriority>(clamped));
+
+  context.cpu.gpr[3] = static_cast<std::uint32_t>(previous);
+  return true;
+}
+
+// KeSetAffinityThread (ordinal 0x97)
+// Guest ABI: r3 = guest KTHREAD pointer, r4 = new affinity mask (nonzero),
+// r5 = optional guest pointer to receive the previous affinity mask ->
+// r3 = NTSTATUS (unlike KeSetBasePriorityThread, the previous value goes
+// through the out pointer, not the return value - real Xbox 360 behavior,
+// verified against the xenia-project/xenia reference).
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool ke_set_affinity_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto affinity = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  const auto previous_affinity_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+
+  if (affinity == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+
+  kernel::KernelThread* target = nullptr;
+  for (const auto& thread : process.thread_manager().enumerate_threads()) {
+    if (thread->guest_kthread_address() == thread_ptr) {
+      target = thread.get();
+      break;
+    }
+  }
+  if (!target) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+
+  if (previous_affinity_ptr != 0u) {
+    context.memory.write32_be(previous_affinity_ptr, target->processor_affinity());
+  }
+  target->set_processor_affinity(affinity);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 namespace {
 
 struct KeSyncExportSpec {
@@ -237,6 +314,8 @@ constexpr KeSyncExportSpec kKeSyncExports[] = {
     {0x09Du, "KeSetEvent"},
     {0x0AFu, "KeWaitForMultipleObjects"},
     {0x0B0u, "KeWaitForSingleObject"},
+    {0x099u, "KeSetBasePriorityThread"},
+    {0x097u, "KeSetAffinityThread"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -267,6 +346,16 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   if (name == "KeWaitForSingleObject") {
     return [&process](ExportCallContext& ctx) {
       return ke_wait_for_single_object_export(process, ctx);
+    };
+  }
+  if (name == "KeSetBasePriorityThread") {
+    return [&process](ExportCallContext& ctx) {
+      return ke_set_base_priority_thread_export(process, ctx);
+    };
+  }
+  if (name == "KeSetAffinityThread") {
+    return [&process](ExportCallContext& ctx) {
+      return ke_set_affinity_thread_export(process, ctx);
     };
   }
   return {};
