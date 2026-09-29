@@ -267,6 +267,23 @@ void test_ke_query_base_priority_thread_unknown_thread_is_safe() {
   assert(unknown_cpu.gpr[3] == 0u);
 }
 
+void test_ke_resume_thread_unknown_pointer_returns_invalid_handle() {
+  // Same guest-KTHREAD-pointer resolution as KeSetBasePriorityThread/
+  // KeQueryBasePriorityThread above - a pointer with no match must not
+  // crash, must not resume some unrelated thread, and (unlike those two,
+  // which return a safe default value) must report STATUS_INVALID_HANDLE,
+  // matching the real xboxkrnl/xenia-verified KeResumeThread contract.
+  Fixture f;
+  assert(f.registry.contains("xboxkrnl", 0x092u));
+  assert(f.registry.contains("xboxkrnl", "KeResumeThread"));
+
+  cpu::CpuState unknown_cpu{};
+  unknown_cpu.gpr[3] = 0xDEADBEEFu;
+  auto unknown_result = f.invoke(0x092u, unknown_cpu);
+  assert(unknown_result.handled && unknown_result.success);
+  assert(unknown_cpu.gpr[3] == 0xC0000008u);  // STATUS_INVALID_HANDLE
+}
+
 }  // namespace
 
 int main() {
@@ -279,6 +296,7 @@ int main() {
   test_ke_wait_for_multiple_objects_any_and_all();
   test_unsupported_dispatcher_type_is_rejected_not_misinterpreted();
   test_ke_query_base_priority_thread_unknown_thread_is_safe();
+  test_ke_resume_thread_unknown_pointer_returns_invalid_handle();
 
   std::cout << "All xboxkrnl Ke* sync export tests passed!\n";
   return 0;

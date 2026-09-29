@@ -247,6 +247,15 @@ Status IoFacade::read_file(Handle handle, std::span<std::byte> destination,
                            IoStatusBlock& iosb, Handle event,
                            std::uint64_t context) {
   const auto result = io_.read(handle, destination, byte_offset, true, context);
+  // A non-empty read that transfers nothing started at or beyond the end of the
+  // file. NT reports that as STATUS_END_OF_FILE (immediately, even on an
+  // asynchronous handle - there is nothing to wait for) rather than as a
+  // zero-byte success; titles branch on it (a read loop treats it as "done").
+  if (result.succeeded() && result.information == 0 && !destination.empty()) {
+    iosb.status = status::EndOfFile;
+    iosb.information = 0;
+    return signal_event_if_present(event, iosb.status);
+  }
   return finish_io_status(result, iosb, is_async_handle(io_, handle), event);
 }
 

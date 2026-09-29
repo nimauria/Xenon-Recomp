@@ -226,6 +226,104 @@ void test_enter_blocks_and_wakes_across_real_threads() {
   assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 0u);
 }
 
+template <typename Predicate>
+bool wait_until(Predicate&& predicate, std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+  const auto deadline = std::chrono::steady_clock::now() + limit;
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() > deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
+// Regression (AC6 bring-up): a woken waiter used to reset LockCount to 0 when it
+// took the section, dropping every other waiter's registration. With two waiters
+// the first Leave woke one, the second Leave then saw "no waiters" and never
+// signalled the other, which slept forever (the whole test binary hung). NT hands
+// ownership to the woken waiter without touching LockCount.
+void test_lock_count_survives_handoff_with_multiple_waiters() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  const auto lock_count = [&] {
+    return static_cast<std::int32_t>(fixture.address_space->read32_be(cs + kLockCountOffset));
+  };
+
+  cpu::CpuState enter1{};
+  enter1.gpr[3] = cs;
+  assert(fixture.invoke(kOrdEnter, enter1, 1u).success);
+  assert(lock_count() == 0);
+
+  std::atomic<int> acquired{0};
+  std::atomic<int> finished{0};
+  std::atomic<bool> release{false};
+  const auto waiter = [&](std::uint32_t thread_id) {
+    cpu::CpuState enter{};
+    enter.gpr[3] = cs;
+    core::ExportCallContext enter_call{enter, *fixture.address_space, 0, thread_id};
+    assert(fixture.registry.invoke("xboxkrnl", kOrdEnter, enter_call).success);
+    acquired.fetch_add(1);
+    while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    cpu::CpuState leave{};
+    leave.gpr[3] = cs;
+    core::ExportCallContext leave_call{leave, *fixture.address_space, 0, thread_id};
+    assert(fixture.registry.invoke("xboxkrnl", kOrdLeave, leave_call).success);
+    finished.fetch_add(1);
+  };
+  std::thread t2(waiter, 2u);
+  std::thread t3(waiter, 3u);
+  assert(wait_until([&] { return lock_count() == 2; }) && "both waiters must register");
+
+  cpu::CpuState leave1{};
+  leave1.gpr[3] = cs;
+  assert(fixture.invoke(kOrdLeave, leave1, 1u).success);
+  assert(wait_until([&] { return acquired.load() == 1; }));
+  // One waiter owns it now; the other is still registered.
+  assert(lock_count() == 1 && "the remaining waiter's registration must survive the hand-off");
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 1u);
+
+  // While the section is owned and a waiter is registered, TryEnter must fail.
+  cpu::CpuState try_enter{};
+  try_enter.gpr[3] = cs;
+  assert(fixture.invoke(kOrdTryEnter, try_enter, 4u).success);
+  assert(try_enter.gpr[3] == 0u);
+
+  release.store(true);
+  const bool all_done = wait_until([&] { return finished.load() == 2; });
+  if (!all_done) {
+    std::cerr << "a critical-section waiter was never woken (lost wakeup)\n";
+    std::abort();
+  }
+  t2.join();
+  t3.join();
+  assert(lock_count() == -1);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+}
+
+// Between a Leave() and the woken waiter taking over, the section is unowned but
+// still committed to that waiter: TryEnter must not steal it.
+void test_try_enter_does_not_steal_a_pending_handoff() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  // Model "T1 held it, T2 registered as a waiter, T1 left": owner 0, LockCount 0.
+  fixture.address_space->write32_be(cs + kOwningThreadOffset, 0u);
+  fixture.address_space->write32_be(cs + kRecursionCountOffset, 0u);
+  fixture.address_space->write32_be(cs + kLockCountOffset, 0u);
+
+  cpu::CpuState try_enter{};
+  try_enter.gpr[3] = cs;
+  assert(fixture.invoke(kOrdTryEnter, try_enter, 3u).success);
+  assert(try_enter.gpr[3] == 0u && "TryEnter must not take a section that is mid hand-off");
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -237,6 +335,8 @@ int main() {
   test_recursive_enter_leave();
   test_try_enter();
   test_enter_blocks_and_wakes_across_real_threads();
+  test_lock_count_survives_handoff_with_multiple_waiters();
+  test_try_enter_does_not_steal_a_pending_handoff();
 
   std::cout << "All Rtl*CriticalSection export tests passed!\n";
   return 0;

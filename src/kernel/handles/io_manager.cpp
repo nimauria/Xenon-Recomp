@@ -353,7 +353,10 @@ IoStatus from_filesystem_error(filesystem::FsError error,
 KernelIoManager::KernelIoManager(std::shared_ptr<filesystem::VirtualFileSystem> vfs)
     : vfs_(std::move(vfs)), share_state_(std::make_shared<OpenShareState>()) {}
 
-KernelIoManager::~KernelIoManager() { handles_.clear(); }
+KernelIoManager::~KernelIoManager() {
+  // Only the private table is ours to clear; a shared process table outlives us.
+  if (!shared_handles_) handles_.clear();
+}
 
 bool KernelIoManager::access_allowed(std::uint32_t granted,
                                      filesystem::FileAccess required) {
@@ -365,7 +368,7 @@ IoStatus KernelIoManager::lookup_file(
     std::shared_ptr<KernelFileObject>& out_file) const {
   out_view = {};
   out_file.reset();
-  const auto lookup = handles_.lookup(handle, out_view);
+  const auto lookup = table().lookup(handle, out_view);
   if (lookup != KernelIoCode::Success) return {lookup};
   if (!out_view.object || out_view.object->type() != ObjectType::File) {
     return {KernelIoCode::InvalidObjectType};
@@ -495,7 +498,7 @@ IoStatus KernelIoManager::open(std::string_view guest_path,
   auto object = std::make_shared<KernelFileObject>(
       resolved, options.file.access, options.file.share, options.synchronous,
       directory, std::move(file), lease);
-  const auto insert = handles_.insert(object, access_bits(options.file.access),
+  const auto insert = table().insert(object, access_bits(options.file.access),
                                       options.handle_flags, out_handle);
   if (insert != KernelIoCode::Success) {
     lease->release();
@@ -505,7 +508,7 @@ IoStatus KernelIoManager::open(std::string_view guest_path,
   if (options.delete_on_close) {
     const auto pending = object->set_delete_pending(true);
     if (pending != KernelIoCode::Success) {
-      static_cast<void>(handles_.close(out_handle, true));
+      static_cast<void>(table().close(out_handle, true));
       out_handle = kInvalidHandle;
       return {pending};
     }
@@ -532,16 +535,16 @@ IoStatus KernelIoManager::open_at(Handle root_directory,
 
 KernelIoCode KernelIoManager::duplicate(
     Handle source, const DuplicateHandleOptions& options, Handle& out_handle) {
-  return handles_.duplicate(source, options, out_handle);
+  return table().duplicate(source, options, out_handle);
 }
 
 KernelIoCode KernelIoManager::close(Handle handle, bool force) {
-  return handles_.close(handle, force);
+  return table().close(handle, force);
 }
 
 KernelIoCode KernelIoManager::set_handle_flags(Handle handle,
                                                HandleFlags flags) {
-  return handles_.set_flags(handle, flags);
+  return table().set_flags(handle, flags);
 }
 
 IoStatus KernelIoManager::read(Handle handle, std::span<std::byte> destination,
@@ -896,7 +899,7 @@ KernelIoCode KernelIoManager::cancel_request(Handle handle,
 
 KernelIoCode KernelIoManager::create_completion_port(Handle& out_handle) {
   auto port = std::make_shared<IoCompletionPort>();
-  return handles_.insert(port, 0xFFFFFFFFu, HandleFlags::None, out_handle);
+  return table().insert(port, 0xFFFFFFFFu, HandleFlags::None, out_handle);
 }
 
 KernelIoCode KernelIoManager::associate_completion_port(
@@ -907,7 +910,7 @@ KernelIoCode KernelIoManager::associate_completion_port(
   if (!file_status.succeeded()) return file_status.code;
 
   HandleView port_view;
-  const auto lookup = handles_.lookup(port_handle, port_view);
+  const auto lookup = table().lookup(port_handle, port_view);
   if (lookup != KernelIoCode::Success) return lookup;
   if (!port_view.object || port_view.object->type() != ObjectType::IoCompletionPort) {
     return KernelIoCode::InvalidObjectType;
@@ -921,7 +924,7 @@ KernelIoCode KernelIoManager::remove_completion(
     Handle port_handle, CompletionPacket& out_packet,
     std::chrono::milliseconds timeout) {
   HandleView view;
-  const auto lookup = handles_.lookup(port_handle, view);
+  const auto lookup = table().lookup(port_handle, view);
   if (lookup != KernelIoCode::Success) return lookup;
   if (!view.object || view.object->type() != ObjectType::IoCompletionPort) {
     return KernelIoCode::InvalidObjectType;
@@ -937,12 +940,12 @@ KernelIoCode KernelIoManager::create_event(bool manual_reset,
                                             bool initial_state,
                                             Handle& out_handle) {
   auto event = std::make_shared<KernelEvent>(manual_reset, initial_state);
-  return handles_.insert(event, 0xFFFFFFFFu, HandleFlags::None, out_handle);
+  return table().insert(event, 0xFFFFFFFFu, HandleFlags::None, out_handle);
 }
 
 KernelIoCode KernelIoManager::set_event(Handle event_handle) {
   HandleView view;
-  const auto lookup = handles_.lookup(event_handle, view);
+  const auto lookup = table().lookup(event_handle, view);
   if (lookup != KernelIoCode::Success) return lookup;
   if (!view.object || view.object->type() != ObjectType::Event) {
     return KernelIoCode::InvalidObjectType;
@@ -953,7 +956,7 @@ KernelIoCode KernelIoManager::set_event(Handle event_handle) {
 
 KernelIoCode KernelIoManager::reset_event(Handle event_handle) {
   HandleView view;
-  const auto lookup = handles_.lookup(event_handle, view);
+  const auto lookup = table().lookup(event_handle, view);
   if (lookup != KernelIoCode::Success) return lookup;
   if (!view.object || view.object->type() != ObjectType::Event) {
     return KernelIoCode::InvalidObjectType;
@@ -967,7 +970,7 @@ KernelIoCode KernelIoManager::wait_event(Handle event_handle,
                                          bool& out_signaled) {
   out_signaled = false;
   HandleView view;
-  const auto lookup = handles_.lookup(event_handle, view);
+  const auto lookup = table().lookup(event_handle, view);
   if (lookup != KernelIoCode::Success) return lookup;
   if (!view.object || view.object->type() != ObjectType::Event) {
     return KernelIoCode::InvalidObjectType;

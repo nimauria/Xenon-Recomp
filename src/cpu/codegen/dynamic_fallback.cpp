@@ -80,6 +80,26 @@ void write_compare(CpuState& state, unsigned field, std::uint64_t lhs,
   state.set_cr_field(field, nibble);
 }
 
+// The 64-bit rotate mask of the doubleword rotate family (rldicl/rldicr/rldic/
+// rldimi/rldcl/rldcr): ones from architectural bit `mb` through `me` (bit 0 is
+// the MOST significant bit), wrapping when mb > me. Identical to the compiled
+// path's mask64 in the PPC lifter, so the fallback and AOT agree bit for bit.
+[[nodiscard]] std::uint64_t mask64(unsigned mb, unsigned me) noexcept {
+  mb &= 63u;
+  me &= 63u;
+  std::uint64_t mask = 0u;
+  const auto set_arch_bit = [&mask](unsigned bit) {
+    mask |= std::uint64_t{1} << (63u - bit);
+  };
+  if (mb <= me) {
+    for (unsigned bit = mb; bit <= me; ++bit) set_arch_bit(bit);
+  } else {
+    for (unsigned bit = mb; bit < 64u; ++bit) set_arch_bit(bit);
+    for (unsigned bit = 0u; bit <= me; ++bit) set_arch_bit(bit);
+  }
+  return mask;
+}
+
 [[nodiscard]] std::uint32_t mask32(unsigned mb, unsigned me) noexcept {
   mb &= 31u;
   me &= 31u;
@@ -351,7 +371,138 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
     const auto b = state.gpr[i.rb()];
     const auto value = m == "addx" ? a + b : b - a;
     state.gpr[i.rt()] = value;
+    if (i.oe()) {
+      // Same overflow rules as the compiled path (lifter_integer.cpp).
+      state.set_xer_overflow(m == "addx" ? aot::signed_add_overflow(a, b)
+                                         : aot::signed_add_overflow(b, ~a, true));
+    }
     if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  // Carry arithmetic: addc/adde/addme/addze and subfc/subfe/subfme/subfze/subfic.
+  // XER.CA is the 64-bit carry out; the "extended" forms also add the incoming CA.
+  // Identical semantics to lifter_integer.cpp (the compiled path) - this used to
+  // be missing here, so any undiscovered function using them ended the run.
+  if (m == "addcx" || m == "addex" || m == "addmex" || m == "addzex") {
+    const auto a = state.gpr[i.ra()];
+    const bool extended = m != "addcx";
+    const bool carry_in = extended && state.xer_ca();
+    const std::uint64_t b = m == "addcx" || m == "addex" ? state.gpr[i.rb()]
+                            : m == "addmex"               ? ~std::uint64_t{0}
+                                                          : std::uint64_t{0};
+    const auto value = aot::add_carry(a, b, carry_in);
+    state.gpr[i.rt()] = value;
+    state.set_xer_ca(aot::carry_out(a, b, carry_in));
+    if (i.oe()) state.set_xer_overflow(aot::signed_add_overflow(a, b, carry_in));
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  if (m == "subfcx") {
+    const auto ra = state.gpr[i.ra()];
+    const auto rb = state.gpr[i.rb()];
+    const auto value = rb - ra;
+    state.gpr[i.rt()] = value;
+    state.set_xer_ca(rb >= ra);  // no borrow
+    if (i.oe()) state.set_xer_overflow(aot::signed_add_overflow(rb, ~ra, true));
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  if (m == "subfex" || m == "subfmex" || m == "subfzex") {
+    // subfe = rB + ~rA + CA; subfme = -1 + ~rA + CA; subfze = 0 + ~rA + CA.
+    const auto not_ra = ~state.gpr[i.ra()];
+    const bool carry_in = state.xer_ca();
+    const std::uint64_t lhs = m == "subfex"    ? state.gpr[i.rb()]
+                              : m == "subfmex" ? ~std::uint64_t{0}
+                                               : std::uint64_t{0};
+    const auto value = aot::add_carry(lhs, not_ra, carry_in);
+    state.gpr[i.rt()] = value;
+    state.set_xer_ca(aot::carry_out(lhs, not_ra, carry_in));
+    if (i.oe()) state.set_xer_overflow(aot::signed_add_overflow(lhs, not_ra, carry_in));
+    if (i.rc()) state.update_cr0_signed(value);
+    return true;
+  }
+  if (m == "subficx") {
+    const auto imm = static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16()));
+    const auto ra = state.gpr[i.ra()];
+    state.gpr[i.rt()] = imm - ra;
+    state.set_xer_ca(imm >= ra);
+    return true;
+  }
+  // Atomics (load-reserve / store-conditional). The reservation protocol is the
+  // compiled path's exactly (backend_cpp_aot.cpp): a load-reserve replaces any
+  // held reservation and records its token/width/address; a store-conditional
+  // succeeds only if a reservation of the same width is still valid, always
+  // clears it, and reports success in CR0.EQ (with XER.SO copied to CR0.SO).
+  if (m == "lwarx" || m == "ldarx") {
+    const bool word = m == "lwarx";
+    const auto ea = static_cast<GuestAddress>((i.ra() != 0u ? state.gpr[i.ra()] : 0u) +
+                                              state.gpr[i.rb()]);
+    if (state.reservation.valid) mem.cancel_reservation(state.reservation.token);
+    std::uint64_t observed = 0u;
+    if (word) {
+      std::uint32_t value = 0u;
+      state.reservation.token = mem.reserve32(ea, value);
+      observed = value;
+    } else {
+      std::uint64_t value = 0u;
+      state.reservation.token = mem.reserve64(ea, value);
+      observed = value;
+    }
+    state.reservation.valid = state.reservation.token != 0u;
+    state.reservation.width = word ? 4u : 8u;
+    state.reservation.address = ea;
+    state.reservation.observed_value = observed;
+    state.gpr[i.rt()] = observed;
+    return true;
+  }
+  if (m == "stwcx" || m == "stdcx") {
+    const bool word = m == "stwcx";
+    const auto ea = static_cast<GuestAddress>((i.ra() != 0u ? state.gpr[i.ra()] : 0u) +
+                                              state.gpr[i.rb()]);
+    bool stored = false;
+    if (state.reservation.valid) {
+      if (state.reservation.width == (word ? 4u : 8u)) {
+        stored = word ? mem.store_conditional32(ea, state.reservation.token,
+                                                static_cast<std::uint32_t>(state.gpr[i.rs()]))
+                      : mem.store_conditional64(ea, state.reservation.token, state.gpr[i.rs()]);
+      } else {
+        mem.cancel_reservation(state.reservation.token);
+      }
+    }
+    state.reservation.clear();
+    state.set_cr_field(0, static_cast<std::uint8_t>((stored ? 0x2u : 0u) | (state.xer_so() ? 0x1u : 0u)));
+    return true;
+  }
+  // Load/store multiple word: rT..r31 from/to consecutive words at (rA|0) + d.
+  if (m == "lmw" || m == "stmw") {
+    const std::uint64_t base = i.ra() != 0u ? state.gpr[i.ra()] : 0u;
+    for (unsigned r = i.rt(); r < 32u; ++r) {
+      const auto ea = static_cast<GuestAddress>(
+          base + static_cast<std::uint64_t>(static_cast<std::int64_t>(i.simm16())) + (r - i.rt()) * 4u);
+      if (m == "lmw") state.gpr[r] = mem.read32_be(ea);
+      else mem.write32_be(ea, static_cast<std::uint32_t>(state.gpr[r]));
+    }
+    return true;
+  }
+  // Load/store string: a byte count and register wrap defined by the architecture,
+  // shared with the compiled path (aot::string_load/string_store).
+  if (m == "lswi" || m == "lswx" || m == "stswi" || m == "stswx") {
+    const bool indexed = m == "lswx" || m == "stswx";
+    const std::uint64_t base = i.ra() != 0u ? state.gpr[i.ra()] : 0u;
+    const auto ea = static_cast<GuestAddress>(indexed ? base + state.gpr[i.rb()] : base);
+    const std::uint32_t count = indexed ? static_cast<std::uint32_t>(state.xer & 0x7Fu)
+                                        : (i.rb() == 0u ? 32u : i.rb());
+    if (m == "lswi" || m == "lswx") aot::string_load(state, mem, ea, count, i.rt());
+    else aot::string_store(state, mem, ea, count, i.rt());
+    return true;
+  }
+  // Machine state register.
+  if (m == "mfmsr") {
+    state.gpr[i.rt()] = state.msr;
+    return true;
+  }
+  if (m == "mtmsr" || m == "mtmsrd") {
+    aot::write_msr(state, state.gpr[i.rs()], ((i.word >> 16u) & 1u) != 0u, m == "mtmsrd");
     return true;
   }
   if (m == "andx" || m == "andcx" || m == "orx" || m == "orcx" ||
@@ -595,6 +746,35 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
       update_cr1_if_rc();
       return true;
     }
+    // FPSCR writes and the FPSCR-to-CR move use the compiled path's own helpers so
+    // the two can never disagree about what a sticky/exception bit does.
+    if (m == "mcrfs") {
+      aot::move_fpscr_field_to_cr(state, i.crfd(), i.crfs());
+      return true;
+    }
+    if (m == "mtfsb0x" || m == "mtfsb1x") {
+      aot::set_fpscr_bit(state, i.rt(), m == "mtfsb1x");
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "mtfsfix") {
+      aot::write_fpscr_field(state, i.crfd(), static_cast<std::uint8_t>((i.word >> 12u) & 0xFu));
+      update_cr1_if_rc();
+      return true;
+    }
+    if (m == "mtfsfx") {
+      aot::write_fpscr_fields(state, static_cast<std::uint8_t>((i.word >> 17u) & 0xFFu),
+                              static_cast<std::uint32_t>(state.fpr_bits[i.rb()]));
+      update_cr1_if_rc();
+      return true;
+    }
+    // stfiwx: store the low word of FRS, unconverted.
+    if (m == "stfiwx") {
+      const ScalarAccess access{4u, false, false, true, false};
+      mem.write32_be(effective_address(i, state, access),
+                     static_cast<std::uint32_t>(state.fpr_bits[i.frs()]));
+      return true;
+    }
   }
   if (m == "extsbx" || m == "extshx" || m == "extswx") {
     const auto src = state.gpr[i.rs()];
@@ -626,6 +806,31 @@ void store_scalar(MemoryAccessContext& memory, GuestAddress address,
     auto result = rotated & mask;
     if (m == "rlwimix")
       result = (static_cast<std::uint32_t>(state.gpr[i.ra()]) & ~mask) | result;
+    state.gpr[i.ra()] = result;
+    if (i.rc()) state.update_cr0_signed(result);
+    return true;
+  }
+  // Doubleword rotate family (MD/MDS-form). The immediate forms take the shift
+  // from sh64_md(); rldcl/rldcr take it from the low six bits of rB. The mask
+  // field (mb64_md()) is MB for rldicl/rldic/rldimi/rldcl and ME for rldicr; rldic
+  // and rldimi derive ME as 63 - SH.
+  if (m == "rldiclx" || m == "rldicrx" || m == "rldicx" || m == "rldimix" ||
+      m == "rldclx" || m == "rldcrx") {
+    const bool by_register = m == "rldclx" || m == "rldcrx";
+    const auto shift = by_register ? static_cast<unsigned>(state.gpr[i.rb()] & 63u) : i.sh64_md();
+    const auto rotated = std::rotl(state.gpr[i.rs()], static_cast<int>(shift));
+    const unsigned field = i.mb64_md();
+    unsigned mb = field;
+    unsigned me = 63u;
+    if (m == "rldicrx" || m == "rldcrx") {
+      mb = 0u;
+      me = field;
+    } else if (m == "rldicx" || m == "rldimix") {
+      me = 63u - shift;
+    }
+    const auto mask = mask64(mb, me);
+    auto result = rotated & mask;
+    if (m == "rldimix") result = (state.gpr[i.ra()] & ~mask) | result;
     state.gpr[i.ra()] = result;
     if (i.rc()) state.update_cr0_signed(result);
     return true;
@@ -1255,6 +1460,20 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
           out.exit = branch_target;
           out.public_result.result = {FlowReason::Return, branch_target, 0u};
           return out;
+        } else if (mnemonic == "bclrx" &&
+                   !context.memory.executable_page_stamp(branch_target).executable() &&
+                   !context.lookup_compiled(branch_target, CompiledLookupKind::Branch) &&
+                   !context.runtime.is_recognized_import_thunk(branch_target)) {
+          // A return to an address that is not guest code at all (the thread-exit
+          // sentinel, a host-owned return address) cannot be interpreted. This is
+          // reached after an instruction-budget yield re-entered the function as a
+          // Branch, where entry_return no longer identifies the real caller. Hand
+          // the return back to the dispatcher, which owns those sentinels.
+          context.state.nia = branch_target;
+          out.reason = DynamicFallbackStopReason::Returned;
+          out.exit = branch_target;
+          out.public_result.result = {FlowReason::Return, branch_target, 0u};
+          return out;
         } else {
           if (execute_tail_branch(branch_target)) return out;
           next_pc = branch_target;
@@ -1295,9 +1514,43 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
     pc = next_pc;
   }
 
-  trap_result(DynamicFallbackStopReason::InstructionLimit,
-              kFallbackInstructionLimitDetail);
+  // The per-dispatch budget bounds how long one host call runs, it is not a
+  // fault. Real guest code legitimately runs far more than the budget in one
+  // stretch (table initialisers, memcpy-style loops - Ace Combat 6's startup
+  // walks an 80-entry constructor table right after entry), so yield at the
+  // next instruction as an ordinary Branch: all architectural state is already
+  // in CpuState/guest memory, and the dispatcher re-enters here (or in a
+  // compiled function) at `pc`. A truly endless guest loop is still bounded by
+  // the session's top-level dispatch limit.
+  out.reason = DynamicFallbackStopReason::InstructionLimit;
+  out.exit = pc;
+  context.state.cia = pc;
+  context.state.nia = pc;
+  out.public_result.result = {FlowReason::Branch, pc, 0u};
   return out;
+}
+
+bool dynamic_fallback_supports(const DecodedInstruction& insn, MemoryPort& scratch_memory) {
+  if (!insn.valid()) return false;
+  const auto m = insn.mnemonic();
+  // Control flow and traps the block loop handles inline (see the dispatch chain
+  // in DynamicFallbackExecutor::run_block).
+  if (m == "bx" || m == "bcx" || m == "bclrx" || m == "bcctrx" || m == "sc" || m == "td" ||
+      m == "tdi" || m == "tw" || m == "twi") {
+    return true;
+  }
+  NullRuntimeServices runtime;
+  CpuState state{};
+  ExecutionContext context(state, scratch_memory, runtime);
+  state.cia = insn.address;
+  state.nia = insn.address + 4u;
+  try {
+    return execute_simple(insn, context);
+  } catch (...) {
+    // The interpreter recognized the instruction and got as far as touching the
+    // scratch memory / an operand it could not use.
+    return true;
+  }
 }
 
 }  // namespace xenon::cpu

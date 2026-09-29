@@ -36,6 +36,7 @@ constexpr std::uint32_t kPageReadWrite = 0x04u;
 constexpr std::uint32_t kPageNoAccess = 0x01u;
 constexpr std::uint32_t kStatusSuccess = 0x00000000u;
 constexpr std::uint32_t kStatusInvalidParameter = 0xC000000Du;
+constexpr std::uint32_t kStatusBufferTooSmall = 0xC0000023u;
 
 struct NtAllocFixture {
   std::shared_ptr<memory::AddressSpace> address_space;
@@ -316,17 +317,189 @@ void test_mm_free_physical_memory_registered_and_handled() {
   core::ExportRegistry registry;
   assert(xbox::register_xboxkrnl_memory_exports(registry));
 
-  assert(registry.contains("xboxkrnl", 0x0BDu));
-  assert(registry.contains("xboxkrnl", "MmFreePhysicalMemory"));
+  assert(!registry.contains("xboxkrnl", 0x0BDu));
+}
 
-  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
-  assert(memory.initialize());
-  cpu::CpuState cpu{};
-  cpu.gpr[3] = 1u;           // type
-  cpu.gpr[4] = 0xA0001000u;  // an arbitrary physical-alias-looking address
-  core::ExportCallContext call{cpu, memory, 0, 0};
-  const auto result = registry.invoke("xboxkrnl", 0x0BDu, call);
-  assert(result.handled && result.success);
+struct MmFixture {
+  std::shared_ptr<memory::AddressSpace> address_space;
+  std::shared_ptr<kernel::KernelMemory> kernel_memory;
+  std::unique_ptr<kernel::KernelProcess> process;
+  core::ExportRegistry registry;
+
+  MmFixture() {
+    address_space = std::make_shared<memory::AddressSpace>(
+        memory::GuestTranslationMode::Compact);
+    assert(address_space->initialize());
+    kernel_memory = std::make_shared<kernel::KernelMemory>(address_space);
+    process = std::make_unique<kernel::KernelProcess>(kernel_memory);
+    register_one(0x0BAu, "MmAllocatePhysicalMemoryEx",
+                 &xbox::mm_allocate_physical_memory_ex_export);
+    register_one(0x0BDu, "MmFreePhysicalMemory",
+                 &xbox::mm_free_physical_memory_export);
+    register_one(0x0BEu, "MmGetPhysicalAddress",
+                 &xbox::mm_get_physical_address_export);
+    register_one(0x0C4u, "MmQueryAddressProtect",
+                 &xbox::mm_query_address_protect_export);
+    register_one(0x0C5u, "MmQueryAllocationSize",
+                 &xbox::mm_query_allocation_size_export);
+    register_one(0x0C6u, "MmQueryStatistics",
+                 &xbox::mm_query_statistics_export);
+    register_one(0x0C7u, "MmSetAddressProtect",
+                 &xbox::mm_set_address_protect_export);
+  }
+
+  using Handler = bool (*)(kernel::KernelProcess&, core::ExportCallContext&);
+  void register_one(std::uint32_t ordinal, const char* name, Handler handler) {
+    core::ExportDescriptor descriptor{};
+    descriptor.library = "xboxkrnl.exe";
+    descriptor.name = name;
+    descriptor.ordinal = ordinal;
+    auto* raw_process = process.get();
+    descriptor.handler = [raw_process, handler](core::ExportCallContext& context) {
+      return handler(*raw_process, context);
+    };
+    assert(registry.register_export(std::move(descriptor)));
+  }
+
+  core::ExportCallResult invoke(std::uint32_t ordinal, cpu::CpuState& cpu) {
+    core::ExportCallContext context{cpu, *address_space, 0, 11};
+    return registry.invoke("xboxkrnl", ordinal, context);
+  }
+
+  memory::GuestAddress allocate_physical(std::uint32_t size = 0x1000u,
+                                         std::uint32_t protect = kPageReadWrite) {
+    cpu::CpuState cpu{};
+    cpu.gpr[4] = size;
+    cpu.gpr[5] = protect;
+    cpu.gpr[6] = 0u;
+    cpu.gpr[7] = UINT32_MAX;
+    cpu.gpr[8] = 0u;
+    assert(invoke(0x0BAu, cpu).success);
+    return static_cast<memory::GuestAddress>(cpu.gpr[3]);
+  }
+};
+
+void test_mm_physical_query_protect_free_and_reuse() {
+  MmFixture fixture;
+  cpu::CpuState invalid_physical{};
+  invalid_physical.gpr[3] = 0x1000u;
+  assert(fixture.invoke(0x0BEu, invalid_physical).success);
+  assert(invalid_physical.gpr[3] == 0u);
+
+  const auto alias = fixture.allocate_physical();
+  assert(alias != 0u);
+  const auto physical = fixture.address_space->get_physical_address(alias);
+  assert(physical != UINT32_MAX);
+  assert(fixture.address_space->query_physical_allocation(physical).has_value());
+
+  cpu::CpuState get_physical{};
+  get_physical.gpr[3] = alias + 0x100u;
+  assert(fixture.invoke(0x0BEu, get_physical).success);
+  assert(get_physical.gpr[3] == physical + 0x100u);
+
+  cpu::CpuState query_size{};
+  query_size.gpr[3] = alias + 0x800u;
+  assert(fixture.invoke(0x0C5u, query_size).success);
+  assert(query_size.gpr[3] == 0x1000u);
+
+  cpu::CpuState query_protect{};
+  query_protect.gpr[3] = alias;
+  assert(fixture.invoke(0x0C4u, query_protect).success);
+  assert(query_protect.gpr[3] == kPageReadWrite);
+
+  cpu::CpuState set_read_only{};
+  set_read_only.gpr[3] = alias;
+  set_read_only.gpr[4] = 1u;
+  set_read_only.gpr[5] = 0x02u;
+  assert(fixture.invoke(0x0C7u, set_read_only).success);
+  query_protect.gpr[3] = alias;
+  assert(fixture.invoke(0x0C4u, query_protect).success);
+  assert(query_protect.gpr[3] == 0x02u);
+  bool write_faulted = false;
+  try {
+    fixture.address_space->write32_be(alias, 0x12345678u);
+  } catch (const memory::MemoryFault&) {
+    write_faulted = true;
+  }
+  assert(write_faulted);
+
+  cpu::CpuState restore_rw{};
+  restore_rw.gpr[3] = alias;
+  restore_rw.gpr[4] = 0x1000u;
+  restore_rw.gpr[5] = kPageReadWrite;
+  assert(fixture.invoke(0x0C7u, restore_rw).success);
+  fixture.address_space->write32_be(alias, 0x12345678u);
+
+  cpu::CpuState free_cpu{};
+  free_cpu.gpr[4] = alias + 0x100u;  // interior aliases canonicalize via metadata
+  assert(fixture.invoke(0x0BDu, free_cpu).success);
+  assert(!fixture.address_space->query_physical_allocation(physical).has_value());
+  query_size.gpr[3] = alias;
+  assert(fixture.invoke(0x0C5u, query_size).success);
+  assert(query_size.gpr[3] == 0u);
+
+  // The Xbox ABI is void: an invalid/double free is ignored, but it must not
+  // release an unrelated range or corrupt the allocator.
+  assert(fixture.invoke(0x0BDu, free_cpu).success);
+  assert(!fixture.address_space->query_physical_allocation(physical).has_value());
+
+  const auto reused_alias = fixture.allocate_physical();
+  assert(fixture.address_space->get_physical_address(reused_alias) == physical);
+}
+
+void test_mm_query_statistics_validation_and_dynamic_availability() {
+  MmFixture fixture;
+  memory::GuestAddress output{};
+  assert(fixture.address_space->allocate(104u, 4u, memory::kReadWrite, false, output));
+
+  cpu::CpuState null_cpu{};
+  assert(fixture.invoke(0x0C6u, null_cpu).success);
+  assert(null_cpu.gpr[3] == kStatusInvalidParameter);
+
+  fixture.address_space->write32_be(output, 100u);
+  cpu::CpuState short_cpu{};
+  short_cpu.gpr[3] = output;
+  assert(fixture.invoke(0x0C6u, short_cpu).success);
+  assert(short_cpu.gpr[3] == kStatusBufferTooSmall);
+
+  const auto read_available = [&] {
+    fixture.address_space->write32_be(output, 104u);
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = output;
+    assert(fixture.invoke(0x0C6u, cpu).success);
+    assert(cpu.gpr[3] == kStatusSuccess);
+    assert(fixture.address_space->read32_be(output) == 104u);
+    assert(fixture.address_space->read32_be(output + 4u) ==
+           memory::kPhysicalMemorySize / memory::kBasePageSize);
+    return fixture.address_space->read32_be(output + 12u);
+  };
+
+  const auto before = read_available();
+  const auto alias = fixture.allocate_physical();
+  const auto after_allocate = read_available();
+  assert(after_allocate + 1u == before);
+  cpu::CpuState free_cpu{};
+  free_cpu.gpr[4] = alias;
+  assert(fixture.invoke(0x0BDu, free_cpu).success);
+  assert(read_available() == before);
+}
+
+void test_memory_export_overflow_rejected() {
+  NtAllocFixture virtual_fixture;
+  const auto base_ptr = virtual_fixture.alloc32();
+  const auto size_ptr = virtual_fixture.alloc32();
+  virtual_fixture.address_space->write32_be(base_ptr, 0u);
+  virtual_fixture.address_space->write32_be(size_ptr, UINT32_MAX);
+  cpu::CpuState virtual_cpu{};
+  virtual_cpu.gpr[3] = base_ptr;
+  virtual_cpu.gpr[4] = size_ptr;
+  virtual_cpu.gpr[5] = kMemCommit | kMemReserve;
+  virtual_cpu.gpr[6] = kPageReadWrite;
+  assert(virtual_fixture.invoke(virtual_cpu).success);
+  assert(virtual_cpu.gpr[3] == kStatusInvalidParameter);
+
+  MmFixture physical_fixture;
+  assert(physical_fixture.allocate_physical(UINT32_MAX) == 0u);
 }
 
 }  // namespace
@@ -342,6 +515,9 @@ int main() {
   test_nt_allocate_virtual_memory_protection_is_real();
   test_nt_allocate_virtual_memory_rejects_invalid_parameters();
   test_mm_free_physical_memory_registered_and_handled();
+  test_mm_physical_query_protect_free_and_reuse();
+  test_mm_query_statistics_validation_and_dynamic_availability();
+  test_memory_export_overflow_rejected();
 
   std::cout << "All xboxkrnl memory export tests passed!\n";
   return 0;

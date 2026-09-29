@@ -1,7 +1,9 @@
 #include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <mutex>
-#include <unordered_map>
+#include <thread>
 
 #include "xenon/core/export_registry.hpp"
 
@@ -10,27 +12,66 @@ namespace {
 
 using xenon::core::ExportCallContext;
 
-// Real KSPIN_LOCK is just a ULONG_PTR in guest memory (0 = free, nonzero =
-// held), and real hardware busy-waits on it directly. Xenon instead backs
-// each distinct guest lock address with a real host std::mutex, keyed by
-// address - this preserves the one guest-visible contract that matters
-// (mutual exclusion between the real concurrent host threads Xenon runs
-// guest threads as; see docs/runtime/RUNTIME_SESSION.md's guest thread
-// model), without needing to replicate lwarx/stwcx-style busy-waiting by
-// hand. A non-recursive std::mutex matches real KSPIN_LOCK semantics
-// exactly: re-acquiring the same spin lock on the same thread without
-// releasing it first deadlocks/bugchecks on real hardware too, so this is
-// not a Xenon-specific limitation.
-std::mutex& lock_for(cpu::GuestAddress address) {
-  static std::mutex table_mutex;
-  static std::unordered_map<cpu::GuestAddress, std::unique_ptr<std::mutex>> locks;
+// A KSPIN_LOCK is one word of guest memory (0 = free, nonzero = held) and the
+// title may read or write it directly - inlined lock code, KeInitializeSpinLock
+// storing 0, debug checks. So the lock state must live IN that word rather than
+// in a host-side table keyed by address: a host mutex never sees a guest-side
+// store, and unlocking a mutex from a different thread than the one that locked
+// it is undefined behaviour (a title may legally release a lock another thread
+// took). Acquisition is an atomic compare-and-swap on the guest word through the
+// same reservation protocol as lwarx/stwcx., so it is coherent with any guest
+// code touching the word; the holder's thread id is stored as the owner value.
+std::uint32_t owner_value(const ExportCallContext& context) {
+  return context.thread_id != 0u ? context.thread_id : 1u;
+}
 
-  std::scoped_lock guard(table_mutex);
-  auto it = locks.find(address);
-  if (it == locks.end()) {
-    it = locks.emplace(address, std::make_unique<std::mutex>()).first;
+bool try_acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
+  // The reservation monitor is a small shared pool whose commit step waits for all
+  // in-flight load-reserves; several host threads hammering it at once (a contended
+  // lock) degrade to one success per scheduler tick. Serialising just the
+  // reserve+commit attempt - never the time the lock is HELD - keeps each attempt
+  // uncontended. Guest code doing its own lwarx/stwcx. on the word stays coherent
+  // because the attempt still goes through the reservation protocol.
+  static std::mutex attempt_guard;
+  std::scoped_lock attempt_lock(attempt_guard);
+  std::uint32_t current = 0u;
+  const auto token = context.memory.reserve32(lock_address, current);
+  if (current != 0u) {
+    // A load-reserve holds one of the six shared reservation slots until it is
+    // stored to or cancelled; leaking it here would starve every later acquire.
+    context.memory.cancel_reservation(token);
+    return false;
   }
-  return *it->second;
+  return context.memory.store_conditional32(lock_address, token, owner_value(context));
+}
+
+void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
+  // Contention on a real spin lock is a few instructions long. Spin, then yield;
+  // only a lock held across a long host stall (thousands of failed attempts) falls
+  // back to sleeping, so it does not burn a core. (Windows rounds short sleeps up
+  // to a scheduler tick, so sleeping any earlier would make ordinary contention crawl.)
+  for (std::uint32_t attempt = 0;; ++attempt) {
+    // Test-and-test-and-set: only issue the (comparatively heavy) load-reserve/
+    // store-conditional pair when a plain load says the lock looks free, so
+    // waiters do not keep starving the holder's own reservation traffic.
+    if (context.memory.read32_be(lock_address) == 0u && try_acquire(context, lock_address)) return;
+    if (attempt < 64u) continue;
+    // The session is shutting down and the holder may never run again: give up
+    // rather than hang the join of the thread that is waiting here.
+    if ((attempt & 0xFFu) == 0u && context.stopping &&
+        context.stopping->load(std::memory_order_acquire)) {
+      return;
+    }
+    if (attempt < 20000u) {
+      std::this_thread::yield();
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+}
+
+void release(ExportCallContext& context, cpu::GuestAddress lock_address) {
+  context.memory.write32_be(lock_address, 0u);
 }
 
 // KeEnterCriticalRegion / KeLeaveCriticalRegion (ordinals 0x5F / 0x7D)
@@ -63,11 +104,10 @@ bool kf_lower_irql_export(ExportCallContext&) { return true; }
 
 // KfAcquireSpinLock (ordinal 0xB1)
 // Guest ABI: r3 = PKSPIN_LOCK -> r3 = previous IRQL (see KeRaiseIrqlToDpcLevel
-// - always 0 here). Blocks until the real host mutex backing this guest
-// lock address is acquired.
+// - always 0 here). Blocks until the lock word in guest memory is acquired.
 bool kf_acquire_spin_lock_export(ExportCallContext& context) {
   const auto lock_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  lock_for(lock_address).lock();
+  acquire(context, lock_address);
   context.cpu.gpr[3] = 0u;
   return true;
 }
@@ -77,7 +117,7 @@ bool kf_acquire_spin_lock_export(ExportCallContext& context) {
 // void.
 bool kf_release_spin_lock_export(ExportCallContext& context) {
   const auto lock_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  lock_for(lock_address).unlock();
+  release(context, lock_address);
   return true;
 }
 
@@ -87,7 +127,7 @@ bool kf_release_spin_lock_export(ExportCallContext& context) {
 // KfAcquireSpinLock's.
 bool ke_acquire_spin_lock_at_raised_irql_export(ExportCallContext& context) {
   const auto lock_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  lock_for(lock_address).lock();
+  acquire(context, lock_address);
   return true;
 }
 
@@ -95,7 +135,7 @@ bool ke_acquire_spin_lock_at_raised_irql_export(ExportCallContext& context) {
 // Guest ABI: r3 = PKSPIN_LOCK -> void.
 bool ke_release_spin_lock_from_raised_irql_export(ExportCallContext& context) {
   const auto lock_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  lock_for(lock_address).unlock();
+  release(context, lock_address);
   return true;
 }
 
@@ -104,7 +144,7 @@ bool ke_release_spin_lock_from_raised_irql_export(ExportCallContext& context) {
 // held elsewhere).
 bool ke_try_to_acquire_spin_lock_at_raised_irql_export(ExportCallContext& context) {
   const auto lock_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  context.cpu.gpr[3] = lock_for(lock_address).try_lock() ? 1u : 0u;
+  context.cpu.gpr[3] = try_acquire(context, lock_address) ? 1u : 0u;
   return true;
 }
 

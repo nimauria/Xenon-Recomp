@@ -165,6 +165,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
                                       Protect* old_protect = nullptr);
   [[nodiscard]] std::optional<PhysicalAllocationInfo> query_physical_allocation(
       std::uint32_t physical_address) const;
+  [[nodiscard]] MemoryStatistics memory_statistics() const;
   [[nodiscard]] static std::optional<GuestAddress> physical_guest_alias(
       std::uint32_t physical_address,
       PhysicalPageClass page_class) noexcept;

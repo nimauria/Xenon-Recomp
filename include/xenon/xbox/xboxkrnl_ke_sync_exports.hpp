@@ -53,6 +53,10 @@ namespace xenon::xbox {
 // above (see its comment).
 [[nodiscard]] bool ke_set_affinity_thread_export(xenon::kernel::KernelProcess& process,
                                                  xenon::core::ExportCallContext& context);
+// Same guest-KTHREAD-pointer resolution as ke_set_base_priority_thread_export
+// above (see its comment).
+[[nodiscard]] bool ke_resume_thread_export(xenon::kernel::KernelProcess& process,
+                                           xenon::core::ExportCallContext& context);
 
 // Convenience registrar for callers (tests/tools) that already have a
 // constructed KernelProcess. XenonSession::init_exports() instead registers

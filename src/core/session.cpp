@@ -32,11 +32,15 @@
 #include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
+#include "xenon/xbox/xboxkrnl_rtl_string_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
 #include "xenon/xbox/xboxkrnl_misc_exports.hpp"
+#include "xenon/xbox/xboxkrnl_string_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
+#include "xenon/xbox/xboxkrnl_threading_exports.hpp"
 #include "xenon/xbox/xboxkrnl_memory_exports.hpp"
+#include "xenon/xbox/xboxkrnl_pool_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ob_exports.hpp"
 #include "xenon/xbox/xboxkrnl_process_exports.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
@@ -233,6 +237,7 @@ void XenonSession::reach_boot_checkpoint(BootCheckpoint checkpoint) {
 XenonSession::XenonSession() = default;
 XenonSession::~XenonSession() {
   shutdown();
+  stop_memory_watch_poll();
 }
 
 SessionState XenonSession::state() const noexcept {
@@ -296,6 +301,9 @@ SessionResult XenonSession::initialize(const SessionConfig& config) {
 
   set_state(SessionState::Initializing, "Initializing session...");
   config_ = config;
+  export_trace_.clear();
+  export_trace_.set_enabled(config_.enable_export_trace);
+  memory_watch_.configure(config_.memory_watch_addresses, config_.memory_watch_history);
   {
     std::lock_guard<std::mutex> observation_lock(adaptive_observation_mutex_);
     adaptive_observation_seen_.clear();
@@ -354,10 +362,19 @@ void XenonSession::shutdown() {
   // preemption for already-running native compiled code; a caller that needs
   // a hard timeout should terminate the hosting process instead of blocking
   // here indefinitely.
+  const auto shutdown_step = [this](const char* step) {
+    if (!config_.enable_logging) return;
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] shutdown: " << step << std::endl;
+  };
+  shutdown_step("joining the main guest thread");
   stop_requested_.store(true);
   if (main_thread_) {
     static_cast<void>(main_thread_->join());
   }
+  // The poll thread reads guest memory, so it must be gone before memory_ is.
+  stop_memory_watch_poll();
+  shutdown_step("stopping the GPU pump thread");
 
 #if defined(XENON_HAS_AUDIO)
   // Stop the guest-callback pump and join the audio callback's own
@@ -412,6 +429,11 @@ void XenonSession::shutdown() {
     gpu_pump_callback_stack_size_ = 0;
   }
 
+  // KNOWN ISSUE: guest worker threads parked in unbounded kernel waits are still
+  // alive here, so unloading the extension can take the process down on stop.
+  // Terminating them first (ThreadManager::shutdown) currently hangs because such
+  // waits are not interruptible by terminate(); that needs its own fix.
+  shutdown_step("unloading the native extension");
   unload_native_extension();
 
   // Shutdown in reverse order of initialization
@@ -424,6 +446,7 @@ void XenonSession::shutdown() {
   }
 
   gpu_.reset();
+  register_aperture_.reset();  // references graphics_system_'s register file
   // graphics_system_ holds a reference (not ownership) to memory_ and is only
   // ever touched by the GPU pump thread, already stopped/joined above -
   // reset it alongside gpu_ rather than leaving it dangling until the next
@@ -435,7 +458,9 @@ void XenonSession::shutdown() {
   // Tear down the guest process/thread model before the memory it lives in.
   // main_thread_ was already joined above; resetting kernel_process_ (and
   // with it its ThreadManager) is then safe/idempotent.
+  shutdown_step("terminating and joining guest threads");
   main_thread_.reset();
+  if (kernel_io_) kernel_io_->share_handle_table(nullptr);
   kernel_process_.reset();
   kernel_memory_.reset();
   if (memory_) {
@@ -501,6 +526,22 @@ bool XenonSession::init_kernel() {
       std::cout << "[XenonSession] Guest exception 0x" << std::hex
                 << static_cast<std::uint32_t>(record.code) << " at 0x" << record.address
                 << std::dec << std::endl;
+      // What the faulting thread last asked of the kernel is usually the cause.
+      std::uint32_t thread_id = 0;
+      if (kernel_process_) {
+        if (auto current = kernel_process_->thread_manager().current_thread()) {
+          thread_id = current->thread_id();
+        }
+      }
+      for (const auto& trace : export_trace_.recent_for_thread(thread_id, 40u)) {
+        std::cout << "[XenonSession]   recent: " << trace.library_view() << '!'
+                  << (trace.name_view().empty() ? std::string("ord") + std::to_string(trace.ordinal)
+                                                : std::string(trace.name_view()))
+                  << " lr=0x" << std::hex << trace.lr << " r3=0x" << trace.arguments[0]
+                  << " r4=0x" << trace.arguments[1] << " r5=0x" << trace.arguments[2] << " -> 0x"
+                  << trace.result_r3 << std::dec << (trace.handled ? "" : " [UNHANDLED]")
+                  << std::endl;
+      }
     }
     return false;  // Do not suppress: run_execution() still reports failure.
   });
@@ -537,6 +578,57 @@ bool XenonSession::init_gpu() {
   // branch below. init_memory() (called before init_gpu() in initialize())
   // guarantees memory_ is already non-null.
   graphics_system_ = std::make_unique<gpu::GraphicsSystem>(*memory_);
+
+  // Map the Xenos register aperture. Titles talk to the GPU through it directly
+  // (vsync status polling, CP_RB_WPTR writes that publish ring-buffer commands),
+  // so it belongs to the session for every backend, including a Null one. A
+  // CP_RB_WPTR store moves the same write index VdSwap advances, and the GPU
+  // pump thread drains from there.
+  register_aperture_ = std::make_unique<gpu::XenosRegisterAperture>(
+      graphics_system_->registers(), [this](std::uint32_t write_index) {
+        if (kernel_process_) kernel_process_->set_gpu_ring_buffer_write_index(write_index);
+      });
+  if (!register_aperture_->attach(*memory_)) {
+    set_error("Failed to map the Xenos register aperture at 0x7FC80000");
+    return false;
+  }
+
+  // PM4_INTERRUPT packets in the command stream raise the title's graphics
+  // interrupt (source 1). Titles use them as GPU->CPU handshakes - the callback
+  // acknowledges by clearing a scratch word the command stream then waits on - so
+  // dropping them, as an unset callback did, parks the GPU behind that wait
+  // forever. Runs on the GPU pump thread, like the vsync interrupt.
+  graphics_system_->set_interrupt_callback([this](std::uint32_t cpu_index) {
+    if (!kernel_process_) return;
+    const auto interrupt = kernel_process_->gpu_interrupt_callback();
+    if (interrupt.callback_address == 0u) return;
+    if (config_.enable_logging && memory_ && gpu_interrupts_delivered_.load() < 100000u) {
+      // Diagnostic (first few only): what the title's interrupt handler will see.
+      static std::atomic<int> logged{0};
+      if (logged.fetch_add(1) < 4) {
+        try {
+          const auto handler = memory_->read32_be(interrupt.context + 0x2A94u);
+          std::scoped_lock console_log_lock(console_log_mutex());
+          std::cout << "[XenonSession] PM4 interrupt -> callback 0x" << std::hex
+                    << interrupt.callback_address << " ctx=0x" << interrupt.context
+                    << " handler=[ctx+0x2A94]=0x" << handler << " words:";
+          for (std::uint32_t i = 0; i < 8u; ++i) {
+            std::cout << ' ' << memory_->read32_be(handler + i * 4u);
+          }
+          std::cout << " SCRATCH_UMSK=0x" << graphics_system_->registers().read(0x1DCu)
+                    << " SCRATCH_ADDR=0x" << graphics_system_->registers().read(0x1DDu)
+                    << std::dec << std::endl;
+        } catch (const memory::MemoryFault&) {
+        }
+      }
+    }
+    if (invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context, 1u,
+                                     cpu_index)) {
+      gpu_interrupts_delivered_.fetch_add(1u, std::memory_order_relaxed);
+    } else {
+      gpu_interrupts_failed_.fetch_add(1u, std::memory_order_relaxed);
+    }
+  });
 
   // The GPU pump thread's vsync-driven guest interrupt callback executes on
   // its own dedicated PPC stack, exactly like the audio callback thread's
@@ -846,11 +938,32 @@ bool XenonSession::init_xam() {
 bool XenonSession::init_exports() {
   // Register core exports
   export_registry_.clear();
+  if (memory_) {
+    module_registry_ = std::make_unique<xbox::GuestModuleRegistry>(*memory_, export_registry_);
+  }
   
   // Register xboxkrnl RTL exports (RtlImageXexHeaderField, etc.)
   if (!xbox::register_xboxkrnl_rtl_exports(export_registry_)) {
     set_error("Failed to register xboxkrnl RTL exports");
     return false;
+  }
+
+  // Register the Rtl ANSI_STRING/UNICODE_STRING/character family. Conversions
+  // that allocate their destination (and the Free*String exports) reach the
+  // process's kernel pool through hooks that dereference kernel_process_ at CALL
+  // time - the process does not exist yet when exports are registered.
+  {
+    xbox::RtlPoolHooks hooks;
+    hooks.allocate = [this](std::uint32_t size) -> std::uint32_t {
+      return kernel_process_ ? kernel_process_->pool().allocate(size, 0x656E6F4Eu) : 0u;
+    };
+    hooks.free = [this](std::uint32_t address) -> bool {
+      return kernel_process_ && kernel_process_->pool().free(address);
+    };
+    if (!xbox::register_xboxkrnl_rtl_string_exports(export_registry_, std::move(hooks))) {
+      set_error("Failed to register xboxkrnl Rtl string exports");
+      return false;
+    }
   }
 
   // Register xboxkrnl guest timebase/timing exports (Phase 1 of the AC6
@@ -882,6 +995,41 @@ bool XenonSession::init_exports() {
     return false;
   }
 
+  // Register the xboxkrnl formatted-output family (sprintf/_snprintf/vsprintf/...
+  // and their wide variants) and DbgPrint - native host code, no KernelProcess.
+  if (!xbox::register_xboxkrnl_string_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl string/format exports");
+    return false;
+  }
+
+  // Register the process-free threading exports (interlocked SLists,
+  // NtYieldExecution, KfRaiseIrql, KeEnableFpuExceptions).
+  if (!xbox::register_xboxkrnl_threading_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl threading exports");
+    return false;
+  }
+
+  // Register the kernel debug exports (DbgBreakPoint*, DbgPrompt,
+  // KiApcNormalRoutineNop) and KeBugCheck/KeBugCheckEx. A bugcheck is fatal on
+  // real hardware: fail the session with the stop code and request the same
+  // cooperative stop HalReturnToFirmware uses.
+  if (!xbox::register_xboxkrnl_debug_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl debug exports");
+    return false;
+  }
+  if (!xbox::register_xboxkrnl_bugcheck_exports(
+          export_registry_, [this](const xbox::BugCheckInfo& info) {
+            if (config_.enable_logging) {
+              std::scoped_lock console_log_lock(console_log_mutex());
+              std::cout << "[XenonSession] " << info.description << std::endl;
+            }
+            set_error(info.description);
+            stop_requested_.store(true, std::memory_order_relaxed);
+          })) {
+    set_error("Failed to register xboxkrnl bugcheck exports");
+    return false;
+  }
+
   // Register xboxkrnl handle-based (Nt*) synchronization exports (Phase 1/3
   // of the AC6 Runtime Readiness pass): NtCreateEvent, NtCreateSemaphore,
   // NtReleaseSemaphore, NtCreateMutant, NtReleaseMutant,
@@ -902,6 +1050,8 @@ bool XenonSession::init_exports() {
       std::uint32_t ordinal;
       const char* name;
       SyncHandler handler;
+      bool partial{false};
+      const char* partial_note{};
     };
     static constexpr SyncExportBinding kSyncBindings[] = {
         {0x0D1u, "NtCreateEvent", &xbox::nt_create_event_export},
@@ -922,15 +1072,60 @@ bool XenonSession::init_exports() {
         {0x0AFu, "KeWaitForMultipleObjects", &xbox::ke_wait_for_multiple_objects_export},
         {0x0B0u, "KeWaitForSingleObject", &xbox::ke_wait_for_single_object_export},
         {0x0CCu, "NtAllocateVirtualMemory", &xbox::nt_allocate_virtual_memory_export},
+        {0x0DCu, "NtFreeVirtualMemory", &xbox::nt_free_virtual_memory_export},
+        {0x009u, "ExAllocatePool", &xbox::ex_allocate_pool_export},
+        {0x011u, "ExInitializeReadWriteLock", &xbox::ex_initialize_read_write_lock_export},
+        {0x007u, "ExAcquireReadWriteLockExclusive",
+         &xbox::ex_acquire_read_write_lock_exclusive_export},
+        {0x008u, "ExAcquireReadWriteLockShared", &xbox::ex_acquire_read_write_lock_shared_export},
+        {0x2DDu, "ExTryToAcquireReadWriteLockExclusive",
+         &xbox::ex_try_to_acquire_read_write_lock_exclusive_export},
+        {0x2DEu, "ExTryToAcquireReadWriteLockShared",
+         &xbox::ex_try_to_acquire_read_write_lock_shared_export},
+        {0x016u, "ExReleaseReadWriteLock", &xbox::ex_release_read_write_lock_export},
+        {0x07Fu, "KePulseEvent", &xbox::ke_pulse_event_export},
+        {0x0E6u, "NtQueryEvent", &xbox::nt_query_event_export},
+        {0x0A9u, "KeSuspendThread", &xbox::ke_suspend_thread_export},
+        {0x0FCu, "NtSuspendThread", &xbox::nt_suspend_thread_export},
+        {0x09Cu, "KeSetDisableBoostThread", &xbox::ke_set_disable_boost_thread_export},
+        {0x020u, "FscGetCacheElementCount", &xbox::fsc_get_cache_element_count_export},
+        {0x021u, "FscSetCacheElementCount", &xbox::fsc_set_cache_element_count_export},
+        {0x00Au, "ExAllocatePoolWithTag", &xbox::ex_allocate_pool_with_tag_export},
+        {0x00Bu, "ExAllocatePoolTypeWithTag", &xbox::ex_allocate_pool_type_with_tag_export},
+        {0x00Fu, "ExFreePool", &xbox::ex_free_pool_export},
+        {0x013u, "ExQueryPoolBlockSize", &xbox::ex_query_pool_block_size_export},
+        {0x0EEu, "NtQueryVirtualMemory", &xbox::nt_query_virtual_memory_export},
+        {0x0E1u, "NtProtectVirtualMemory", &xbox::nt_protect_virtual_memory_export},
+        {0x0B9u, "MmAllocatePhysicalMemory", &xbox::mm_allocate_physical_memory_export},
+        {0x0C2u, "MmMapIoSpace", &xbox::mm_map_io_space_export},
+        {0x0BFu, "MmIsAddressValid", &xbox::mm_is_address_valid_export},
+        {0x0BBu, "MmCreateKernelStack", &xbox::mm_create_kernel_stack_export},
+        {0x0BCu, "MmDeleteKernelStack", &xbox::mm_delete_kernel_stack_export},
+        {0x2A4u, "KeGetImagePageTableEntry", &xbox::ke_get_image_page_table_entry_export},
+        {0x28Au, "NtAllocateEncryptedMemory", &xbox::nt_allocate_encrypted_memory_export},
+        {0x28Bu, "NtFreeEncryptedMemory", &xbox::nt_free_encrypted_memory_export},
         {0x0BAu, "MmAllocatePhysicalMemoryEx", &xbox::mm_allocate_physical_memory_ex_export},
+        {0x0BDu, "MmFreePhysicalMemory", &xbox::mm_free_physical_memory_export},
+        {0x0BEu, "MmGetPhysicalAddress", &xbox::mm_get_physical_address_export},
+        {0x0C4u, "MmQueryAddressProtect", &xbox::mm_query_address_protect_export},
+        {0x0C5u, "MmQueryAllocationSize", &xbox::mm_query_allocation_size_export},
+        {0x0C6u, "MmQueryStatistics", &xbox::mm_query_statistics_export, true,
+         "returns real total/available/used/image/virtual page counts, but leaves "
+         "pool/stack/heap/page-table/cache subdivisions zero because Memory V2 "
+         "does not attribute allocations to those hardware-specific buckets"},
+        {0x0C7u, "MmSetAddressProtect", &xbox::mm_set_address_protect_export},
         {0x110u, "ObReferenceObjectByHandle", &xbox::ob_reference_object_by_handle_export},
         {0x105u, "ObDereferenceObject", &xbox::ob_dereference_object_export},
+        {0x0DAu, "NtDuplicateObject", &xbox::nt_duplicate_object_export},
         {0x0CEu, "NtClearEvent", &xbox::nt_clear_event_export},
         {0x0F6u, "NtSetEvent", &xbox::nt_set_event_export},
+        {0x0E2u, "NtPulseEvent", &xbox::nt_pulse_event_export},
+        {0x019u, "ExTerminateThread", &xbox::ex_terminate_thread_export},
         {0x0F5u, "NtResumeThread", &xbox::nt_resume_thread_export},
         {0x099u, "KeSetBasePriorityThread", &xbox::ke_set_base_priority_thread_export},
         {0x081u, "KeQueryBasePriorityThread", &xbox::ke_query_base_priority_thread_export},
         {0x097u, "KeSetAffinityThread", &xbox::ke_set_affinity_thread_export},
+        {0x092u, "KeResumeThread", &xbox::ke_resume_thread_export},
         {0x066u, "KeGetCurrentProcessType", &xbox::ke_get_current_process_type_export},
         {0x09Au, "KeSetCurrentProcessType", &xbox::ke_set_current_process_type_export},
         {0x125u, "RtlEnterCriticalSection", &xbox::rtl_enter_critical_section_export},
@@ -984,6 +1179,8 @@ bool XenonSession::init_exports() {
       descriptor.name = binding.name;
       descriptor.ordinal = binding.ordinal;
       descriptor.requirement = ExportRequirement::Required;
+      descriptor.partial = binding.partial;
+      if (binding.partial_note) descriptor.partial_note = binding.partial_note;
       descriptor.handler = [this, fn = binding.handler](ExportCallContext& ctx) -> bool {
         if (!kernel_process_) return false;
         return fn(*kernel_process_, ctx);
@@ -1012,6 +1209,38 @@ bool XenonSession::init_exports() {
     };
     if (!export_registry_.register_export(std::move(descriptor))) {
       set_error("Failed to register xboxkrnl XexCheckExecutablePrivilege export");
+      return false;
+    }
+  }
+
+  // Register XexGetModuleHandle (0x195) / XexGetProcedureAddress (0x197). They
+  // resolve through module_registry_, which is (re)created above with this
+  // registry, so a lookup only ever sees the exports registered here.
+  {
+    core::ExportDescriptor handle_descriptor{};
+    handle_descriptor.library = "xboxkrnl.exe";
+    handle_descriptor.name = "XexGetModuleHandle";
+    handle_descriptor.ordinal = 0x195u;
+    handle_descriptor.requirement = ExportRequirement::Required;
+    handle_descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      if (!module_registry_) return false;
+      return xbox::xex_get_module_handle_export(*module_registry_, ctx);
+    };
+    if (!export_registry_.register_export(std::move(handle_descriptor))) {
+      set_error("Failed to register xboxkrnl XexGetModuleHandle export");
+      return false;
+    }
+    core::ExportDescriptor proc_descriptor{};
+    proc_descriptor.library = "xboxkrnl.exe";
+    proc_descriptor.name = "XexGetProcedureAddress";
+    proc_descriptor.ordinal = 0x197u;
+    proc_descriptor.requirement = ExportRequirement::Required;
+    proc_descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      if (!module_registry_) return false;
+      return xbox::xex_get_procedure_address_export(*module_registry_, ctx);
+    };
+    if (!export_registry_.register_export(std::move(proc_descriptor))) {
+      set_error("Failed to register xboxkrnl XexGetProcedureAddress export");
       return false;
     }
   }
@@ -1404,6 +1633,11 @@ bool XenonSession::refresh_dynamic_kernel_variables() {
       memory_->write_bytes(header_copy, loaded_xex_->image.header_bytes);
       memory_->write32_be(module_record + 0x58u, header_copy);
     }
+    if (module_registry_) {
+      // The title's own module: reachable through XexGetModuleHandle(NULL) and by
+      // its file name, and its exports through XexGetProcedureAddress.
+      module_registry_->set_executable(module_record, loaded_xex_->image, {"default.xex"});
+    }
   } catch (const memory::MemoryFault&) {
     return false;
   }
@@ -1611,6 +1845,8 @@ SessionResult XenonSession::start() {
   write_guest_thread_id(*memory_, main_thread_tls_, main_thread_->thread_id());
   main_thread_->set_guest_kthread_address(main_thread_tls_.kthread_address);
   kernel_process_->set_main_thread(main_thread_);
+  // Take the watch baseline before any guest code runs.
+  start_memory_watch_poll();
   if (!main_thread_->start()) {
     set_error("Failed to start main KernelThread");
     return SessionResult::failure(last_error_);
@@ -1657,6 +1893,242 @@ SessionResult XenonSession::stop() {
     if (main_thread_) static_cast<void>(main_thread_->join());
     set_state(SessionState::Stopped, "Game stopped");
     return SessionResult::ok("Game stopped", SessionState::Stopped);
+  }
+
+  // A stop that finds the guest still executing usually means it is stalled
+  // (blocked in a kernel wait or spinning). Say what each thread last asked the
+  // kernel for, so the stall can be diagnosed from the log alone.
+  if (config_.enable_logging && export_trace_.enabled()) {
+    const auto recent = export_trace_.recent_global(16u);
+    std::scoped_lock console_log_lock(console_log_mutex());
+    {
+      std::scoped_lock lock(in_flight_exports_mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      std::cout << "[XenonSession] Threads currently blocked inside a kernel call: "
+                << in_flight_exports_.size() << std::endl;
+      for (const auto& [thread_id, call] : in_flight_exports_) {
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - call.since).count();
+        std::cout << "[XenonSession]   t" << thread_id << " in ";
+        if (call.descriptor) {
+          std::cout << call.descriptor->library << '!' << call.descriptor->name;
+        } else {
+          std::cout << "ordinal " << call.ordinal;
+        }
+        std::cout << " for " << waited_ms << "ms lr=0x" << std::hex << call.lr << " r3=0x"
+                  << call.arguments[0] << " r4=0x" << call.arguments[1] << " r5=0x"
+                  << call.arguments[2] << " r6=0x" << call.arguments[3] << std::dec
+                  << std::endl;
+        // A thread stuck acquiring a spin lock: the lock word holds the owner's id.
+        if (call.descriptor && call.descriptor->name.find("SpinLock") != std::string::npos &&
+            memory_) {
+          try {
+            std::cout << "[XenonSession]     lock word at 0x" << std::hex << call.arguments[0]
+                      << " = 0x"
+                      << memory_->read32_be(static_cast<cpu::GuestAddress>(call.arguments[0]))
+                      << " (owner thread id)" << std::dec << std::endl;
+          } catch (const memory::MemoryFault&) {
+          }
+          // How did this thread get here? Its own recent kernel calls show whether
+          // it already took (and failed to release) the lock.
+          for (const auto& trace : export_trace_.recent_for_thread(thread_id, 12u)) {
+            std::cout << "[XenonSession]     earlier: " << trace.library_view() << '!'
+                      << (trace.name_view().empty() ? std::string("?")
+                                                    : std::string(trace.name_view()))
+                      << " lr=0x" << std::hex << trace.lr << " r3=0x" << trace.arguments[0]
+                      << " r4=0x" << trace.arguments[1] << " -> 0x" << trace.result_r3
+                      << std::dec << std::endl;
+          }
+        }
+      }
+      const auto interrupt = kernel_process_ ? kernel_process_->gpu_interrupt_callback()
+                                             : kernel::KernelProcess::GpuInterruptCallbackState{};
+      std::cout << "[XenonSession] GPU vsync interrupt: callback=0x" << std::hex
+                << interrupt.callback_address << " context=0x" << interrupt.context << std::dec
+                << " delivered=" << gpu_interrupts_delivered_.load()
+                << " failed=" << gpu_interrupts_failed_.load() << std::endl;
+      if (graphics_system_ && kernel_process_) {
+        // Racy diagnostic read of counters the pump thread updates.
+        const auto& gpu_stats = graphics_system_->command_processor().statistics();
+        const auto ring = kernel_process_->gpu_ring_buffer();
+        const auto front = kernel_process_->gpu_front_buffer();
+        std::cout << "[XenonSession] GPU: packets=" << gpu_stats.packets
+                  << " draws=" << gpu_stats.draws << " events=" << gpu_stats.event_packets
+                  << " interrupts=" << gpu_stats.interrupt_packets
+                  << " wait_stalls=" << gpu_stats.wait_stalls
+                  << " ring(read=" << ring.read_index << " write=" << ring.write_index
+                  << " cap=" << ring.capacity_dwords << ")"
+                  << " front_buffer=0x" << std::hex << front.base_address << std::dec << " "
+                  << front.width << "x" << front.height << std::endl;
+        const auto& stall = graphics_system_->command_processor().last_wait_stall();
+        if (stall.valid) {
+          std::cout << "[XenonSession] GPU parked on WAIT_REG_MEM: "
+                    << (stall.memory ? "memory 0x" : "register 0x") << std::hex << stall.address
+                    << " wait_info=0x" << stall.wait_info << " reference=0x" << stall.reference
+                    << " mask=0x" << stall.mask << " last value=0x" << stall.last_value
+                    << std::dec << std::endl;
+        }
+        // The ring words at the stalled position show what the GPU is waiting behind.
+        if (ring.configured() && memory_) {
+          std::cout << "[XenonSession] GPU ring @read:";
+          for (std::uint32_t i = 0; i < 24u; ++i) {
+            std::array<std::byte, 4> word{};
+            const auto index = (ring.read_index + i) % ring.capacity_dwords;
+            std::uint32_t value = 0;
+            if (memory_->copy_physical_range(ring.base_address + index * 4u, word)) {
+              value = (std::uint32_t(word[0]) << 24) | (std::uint32_t(word[1]) << 16) |
+                      (std::uint32_t(word[2]) << 8) | std::uint32_t(word[3]);
+            }
+            std::cout << ' ' << std::hex << value << std::dec;
+          }
+          std::cout << std::endl;
+          // If the stalled ring packet is an INDIRECT_BUFFER, show the words around
+          // the WAIT_REG_MEM inside it (the fence the GPU is parked on).
+          std::array<std::byte, 12> head{};
+          if (memory_->copy_physical_range(ring.base_address + ring.read_index * 4u, head)) {
+            const auto be = [&](std::size_t i) {
+              return (std::uint32_t(head[i]) << 24) | (std::uint32_t(head[i + 1]) << 16) |
+                     (std::uint32_t(head[i + 2]) << 8) | std::uint32_t(head[i + 3]);
+            };
+            if ((be(0) & 0xFFFF0000u) == 0xC0010000u && ((be(0) >> 8) & 0xFFu) == 0x3Fu) {
+              const std::uint32_t ib_address = be(4) & 0x1FFFFFFFu;
+              const std::uint32_t ib_length = std::min<std::uint32_t>(be(8) & 0xFFFFFu, 8192u);
+              std::vector<std::uint32_t> ib(ib_length);
+              std::vector<std::byte> raw(ib_length * 4u);
+              if (memory_->copy_physical_range(ib_address, raw)) {
+                for (std::uint32_t i = 0; i < ib_length; ++i) {
+                  ib[i] = (std::uint32_t(raw[i * 4]) << 24) | (std::uint32_t(raw[i * 4 + 1]) << 16) |
+                          (std::uint32_t(raw[i * 4 + 2]) << 8) | std::uint32_t(raw[i * 4 + 3]);
+                }
+                for (std::uint32_t i = 0; i < ib_length; ++i) {
+                  if ((ib[i] & 0xFFFFFFFEu) == 0xC0043C00u && i + 3u < ib_length && ib[i + 2u] == stall.address && ib[i + 3u] == stall.reference) {
+                    std::cout << "[XenonSession] GPU IB 0x" << std::hex << ib_address
+                              << " len=" << std::dec << ib_length << " wait at dword " << i
+                              << ", context:" << std::hex;
+                    for (std::uint32_t j = (i > 40u ? i - 40u : 0u);
+                         j < std::min<std::uint32_t>(ib_length, i + 24u); ++j) {
+                      std::cout << (j == i ? " [" : " ") << ib[j];
+                    }
+                    std::cout << std::dec << std::endl;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      std::cout << "[XenonSession] Guest threads running outside a kernel call (cia is the last "
+                   "recorded control-flow point):" << std::endl;
+      for (const auto& [thread_id, guest_state] : guest_thread_states_) {
+        if (in_flight_exports_.contains(thread_id)) continue;
+        std::cout << "[XenonSession]   t" << thread_id << " cia=0x" << std::hex
+                  << guest_state->cia << " nia=0x" << guest_state->nia << " lr=0x"
+                  << guest_state->lr << " ctr=0x" << guest_state->ctr << " r1=0x"
+                  << guest_state->gpr[1] << " r3=0x" << guest_state->gpr[3] << " r4=0x"
+                  << guest_state->gpr[4] << std::dec << std::endl;
+        if (config_.verbose_logging) {
+          // A stopped thread that is spinning entirely in guest code often has
+          // no recent export to identify what it is waiting for. Preserve the
+          // complete architectural register set and bounded snapshots of the
+          // conventional nonvolatile object-pointer registers. This is
+          // diagnostic-only, read-only, and title agnostic; it deliberately
+          // runs only for verbose stop reports so normal logs stay compact.
+          for (std::size_t base = 0; base < guest_state->gpr.size(); base += 4u) {
+            std::cout << "[XenonSession]     gpr:";
+            for (std::size_t index = base;
+                 index < (std::min)(base + 4u, guest_state->gpr.size()); ++index) {
+              std::cout << " r" << std::dec << index << "=0x" << std::hex
+                        << guest_state->gpr[index];
+            }
+            std::cout << std::dec << std::endl;
+          }
+
+          if (memory_) {
+            std::set<cpu::GuestAddress> dumped;
+            for (const std::size_t index : {31u, 30u, 29u}) {
+              const auto address = static_cast<cpu::GuestAddress>(guest_state->gpr[index]);
+              const auto start = address & ~cpu::GuestAddress{0xFu};
+              if (address == 0u || !dumped.insert(start).second) continue;
+              const auto mapping = memory_->query(address);
+              if (!mapping || mapping->state != memory::PageState::Committed ||
+                  !memory::has(mapping->current_protect, memory::Protect::Read)) {
+                continue;
+              }
+              std::cout << "[XenonSession]     r" << index << " pointee=0x" << std::hex
+                        << address << " allocation=0x" << mapping->allocation_base << "+0x"
+                        << mapping->allocation_size << " snapshot:" << std::dec << std::endl;
+              for (std::uint32_t offset = 0u; offset < 0x600u; offset += 16u) {
+                std::cout << "[XenonSession]       0x" << std::hex << (start + offset) << ':';
+                bool readable = true;
+                try {
+                  for (std::uint32_t byte = 0u; byte < 16u; ++byte) {
+                    std::cout << ' ' << std::setw(2) << std::setfill('0')
+                              << static_cast<unsigned>(memory_->read8(start + offset + byte));
+                  }
+                } catch (const memory::MemoryFault&) {
+                  readable = false;
+                }
+                std::cout << std::setfill(' ') << std::dec;
+                if (!readable) std::cout << " <unreadable>";
+                std::cout << std::endl;
+                if (!readable) break;
+              }
+            }
+          }
+        }
+        // The ring is shared and busy, so a spinning thread's own history can be
+        // long gone; whatever is still in it is the best evidence of how it got here.
+        for (const auto& trace : export_trace_.recent_for_thread(thread_id, 60u)) {
+          std::cout << "[XenonSession]     earlier: " << trace.library_view() << '!'
+                    << (trace.name_view().empty() ? std::string("?") : std::string(trace.name_view()))
+                    << " ord=" << trace.ordinal << " lr=0x" << std::hex << trace.lr << " r3=0x"
+                    << trace.arguments[0] << " r4=0x" << trace.arguments[1] << " -> 0x"
+                    << trace.result_r3 << std::dec << std::endl;
+        }
+      }
+    }
+    std::cout << "[XenonSession] Stop requested while the guest was running; last "
+              << recent.size() << " kernel calls (oldest first):" << std::endl;
+    for (const auto& trace : recent) {
+      std::cout << "[XenonSession]   t" << trace.thread_id << ' ' << trace.library_view() << '!';
+      if (!trace.name_view().empty()) {
+        std::cout << trace.name_view();
+      } else {
+        std::cout << trace.ordinal;
+      }
+      std::cout << " lr=0x" << std::hex << trace.lr << " r3=0x" << trace.arguments[0]
+                << " r4=0x" << trace.arguments[1] << " r5=0x" << trace.arguments[2]
+                << " r6=0x" << trace.arguments[3] << " -> 0x" << trace.result_r3 << std::dec
+                << std::endl;
+    }
+  }
+
+  if (config_.enable_logging && memory_watch_.active()) {
+    // One final boundary sample so a change that landed after the last poll shows
+    // up, then the whole retained history (oldest first) and the current words.
+    WatchObserver final_sample{};
+    final_sample.phase = WatchPhase::Poll;
+    final_sample.note = "stop-report";
+    sample_memory_watch(final_sample);
+    const auto history = memory_watch_.history();
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] Memory watch: " << memory_watch_.addresses().size()
+              << " word(s), " << memory_watch_.total_changes() << " change(s), "
+              << history.size() << " retained record(s):" << std::endl;
+    for (const auto& record : history) {
+      std::cout << "[XenonSession]   " << GuestMemoryWatch::format(record) << std::endl;
+    }
+    for (const auto address : memory_watch_.addresses()) {
+      const auto value = memory_watch_.last_value(address);
+      std::cout << "[XenonSession]   0x" << std::hex << std::uppercase << address << " = ";
+      if (value) {
+        std::cout << "0x" << *value;
+      } else {
+        std::cout << "<unreadable>";
+      }
+      std::cout << std::dec << std::endl;
+    }
   }
 
   // Already-running native compiled code cannot be preempted from here. The
@@ -2132,6 +2604,11 @@ bool XenonSession::create_guest_process() {
   // no second Memory V2 instance or mapping set.
   kernel_memory_ = std::make_shared<kernel::KernelMemory>(memory_);
   kernel_process_ = std::make_shared<kernel::KernelProcess>(kernel_memory_);
+  // One handle namespace per process: files, events and completion ports created by
+  // the I/O manager live in the same table as threads, events and semaphores from
+  // the sync exports. Two private tables let handle values collide and made
+  // NtReadFile reject the event handle a title got from NtCreateEvent.
+  if (kernel_io_) kernel_io_->share_handle_table(&kernel_process_->handle_table());
 
   const auto& image = loaded_xex_->image;
   const std::string module_name =
@@ -2150,6 +2627,23 @@ bool XenonSession::create_guest_process() {
   if (image.tls) {
     module->set_tls_info(image.tls->raw_data_start, image.tls->data_size,
                          image.tls->slot);
+  }
+  if (config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] XEX TLS descriptor: ";
+    if (!image.tls) {
+      std::cout << "absent";
+    } else {
+      std::cout << "present raw_data_start=0x" << std::hex
+                << image.tls->raw_data_start
+                << " raw_data_size=0x" << image.tls->raw_data_size
+                << " data_size=0x" << image.tls->data_size
+                << " slot=0x" << image.tls->slot
+                << " index_address=0x" << image.tls->index_address
+                << " callback_address=0x" << image.tls->callback_address
+                << std::dec;
+    }
+    std::cout << std::endl;
   }
 
   // TLS: allocate this thread's KPCR + compiler-emitted static TLS block
@@ -2209,6 +2703,7 @@ void XenonSession::release_partial_guest_process() noexcept {
   // success after this function returns true), so resetting it here is
   // enough to release its ModuleManager/ThreadManager and whatever module it
   // had registered - nothing else can be holding a reference to it.
+  if (kernel_io_) kernel_io_->share_handle_table(nullptr);
   kernel_process_.reset();
   kernel_memory_.reset();
   if (memory_ && stack_base_) {
@@ -2344,8 +2839,26 @@ void XenonSession::unload_native_extension() noexcept {
 
 XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     cpu::CpuState& state, cpu::GuestAddress entry,
-    const std::shared_ptr<kernel::KernelThread>& thread) {
+    const std::shared_ptr<kernel::KernelThread>& thread,
+    bool trace_dispatches) {
   GuestDispatchOutcome outcome{};
+
+  // Publish this thread's register file for the stall report in stop(). Reads
+  // there are deliberately racy and diagnostic-only.
+  const auto tracked_thread_id = thread ? thread->thread_id() : 0u;
+  if (tracked_thread_id != 0u) {
+    std::scoped_lock lock(in_flight_exports_mutex_);
+    guest_thread_states_[tracked_thread_id] = &state;
+  }
+  struct StateRegistration {
+    XenonSession* session;
+    std::uint32_t thread_id;
+    ~StateRegistration() {
+      if (thread_id == 0u) return;
+      std::scoped_lock lock(session->in_flight_exports_mutex_);
+      session->guest_thread_states_.erase(thread_id);
+    }
+  } state_registration{this, tracked_thread_id};
 
   cpu::ExecutionContext context(state, *memory_, *this);
   if (dynamic_fallback_) dynamic_fallback_->bind(context);
@@ -2394,7 +2907,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
         result = fallback.result;
       }
     }
-    if (!crashed && config_.enable_logging) {
+    if (!crashed && trace_dispatches && config_.enable_logging) {
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest entry returned: reason="
                 << cpu::flow_reason_name(result.reason)
@@ -2424,6 +2937,18 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
           thread_terminated_mid_dispatch = true;
           break;
         }
+      }
+      if (memory_watch_.active()) {
+        WatchObserver observer{};
+        observer.phase = WatchPhase::DispatchBoundary;
+        observer.thread_id = tracked_thread_id;
+        observer.cia = static_cast<cpu::GuestAddress>(state.cia);
+        observer.nia = static_cast<cpu::GuestAddress>(state.nia);
+        observer.lr = state.lr;
+        observer.describe = [this, tracked_thread_id] {
+          return describe_recent_exports(tracked_thread_id, 6u);
+        };
+        sample_memory_watch(observer);
       }
       switch (result.reason) {
         case cpu::FlowReason::Return:
@@ -2481,7 +3006,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
             ++dispatch_count;
             result = next_fn(context);
           }
-          if (config_.enable_logging) {
+          if (trace_dispatches && config_.enable_logging) {
             std::scoped_lock console_log_lock(console_log_mutex());
             std::cout << "[XenonSession] Guest dispatch returned: reason="
                       << cpu::flow_reason_name(result.reason)
@@ -2527,8 +3052,30 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     // when only Branch/Fallthrough ever re-entered the loop.
     if (!crashed && !stop_requested_.load() && !(thread && thread->is_terminated()) &&
         dispatch_count >= kMaxTopLevelDispatches) {
-      fail_execution("Guest execution exceeded the top-level dispatch limit",
-                     0xC000001Du);
+      // A guest that spins without ever leaving compiled/fallback code is almost
+      // always retrying a kernel call that keeps failing, so name the last calls.
+      std::ostringstream spin;
+      spin << "Guest execution exceeded the top-level dispatch limit [cia=0x" << std::hex
+           << std::uppercase << state.cia << " lr=0x" << state.lr << std::dec
+           << " last_exports=[";
+      const auto recent =
+          export_trace_.recent_for_thread(thread ? thread->thread_id() : 0u, 12u);
+      for (std::size_t i = 0; i < recent.size(); ++i) {
+        const auto& trace = recent[i];
+        if (i != 0u) spin << ' ';
+        spin << trace.library_view() << '!';
+        if (!trace.name_view().empty()) {
+          spin << trace.name_view();
+        } else {
+          spin << trace.ordinal;
+        }
+        spin << "(ord=" << trace.ordinal << ",lr=0x" << std::hex << trace.lr << ",r3in=0x"
+             << trace.arguments[0] << ",r4=0x" << trace.arguments[1] << ",r5=0x"
+             << trace.arguments[2] << ",r6=0x" << trace.arguments[3] << ",ret=0x"
+             << trace.result_r3 << std::dec << ")";
+      }
+      spin << "]]";
+      fail_execution(spin.str(), 0xC000001Du);
     }
     if (!crashed && thread && thread->is_terminated()) {
       thread_terminated_mid_dispatch = true;
@@ -2617,57 +3164,36 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
                << " r9=0x" << state.gpr[9]
                << " r10=0x" << state.gpr[10]
                << " r13=0x" << state.gpr[13] << ']';
-    // Diagnostic-only globals probe (read-only): live investigation of a
-    // specific AC6 boot-path crash traced (via static analysis of the
-    // generated code + the stack walk below) to a pair of fixed-address
-    // global singleton pointers the game checks before taking a slow/
-    // lazy-init path that eventually reads a null object. Prints their
-    // live values (and one level of dereference where non-null) so this
-    // can be confirmed/refuted with real data instead of more static
-    // tracing. Safe to remove once the root cause is confirmed.
-    {
-      diagnostic << " globals=[";
-      for (const auto addr : {0x82000634u, 0x820006E0u}) {
-        std::uint32_t value = 0u;
-        std::uint32_t deref = 0u;
-        bool ok = false;
-        bool deref_ok = false;
-        try {
-          value = memory_->read32_be(static_cast<memory::GuestAddress>(addr));
-          ok = true;
-          if (value != 0u) {
-            deref = memory_->read32_be(static_cast<memory::GuestAddress>(value));
-            deref_ok = true;
-          }
-        } catch (const memory::MemoryFault&) {
-        }
-        diagnostic << "0x" << std::hex << addr << "=";
-        if (ok) {
-          diagnostic << "0x" << value;
-          if (deref_ok) diagnostic << "->0x" << deref;
-        } else {
-          diagnostic << "FAULT";
-        }
-        diagnostic << ' ';
-        // 0x820006E0's target had a zero first field on a prior run - dump
-        // its first 16 fields (64 bytes) to identify the struct shape.
-        if (addr == 0x820006E0u && deref_ok) {
-          diagnostic << "fields=[";
-          for (int i = 0; i < 16; ++i) {
-            std::uint32_t field = 0u;
-            try {
-              field = memory_->read32_be(static_cast<memory::GuestAddress>(value + i * 4u));
-              diagnostic << "0x" << field << ",";
-            } catch (const memory::MemoryFault&) {
-              diagnostic << "FAULT,";
-              break;
-            }
-          }
-          diagnostic << "] ";
-        }
+    // The XEX loader already parsed the title's runtime-function directory.
+    // Report coverage from that source of truth; coverage alone is not
+    // evidence that a language/exception handler exists.
+    const auto append_function_metadata = [&](std::string_view label,
+                                              cpu::GuestAddress address) {
+      diagnostic << ' ' << label << "_function=";
+      if (!loaded_xex_) {
+        diagnostic << "no-module";
+        return;
       }
-      diagnostic << ']';
-    }
+      const auto& functions = loaded_xex_->image.function_metadata;
+      const auto it = std::find_if(functions.begin(), functions.end(),
+                                   [address](const xbox::XexFunctionMetadata& fn) {
+                                     return address >= fn.begin && address < fn.end;
+                                   });
+      if (it == functions.end()) {
+        diagnostic << "none";
+        return;
+      }
+      diagnostic << "{module="
+                 << (loaded_xex_->image.original_pe_name.empty()
+                         ? "title"
+                         : loaded_xex_->image.original_pe_name)
+                 << ",begin=0x" << std::hex << it->begin
+                 << ",end=0x" << it->end
+                 << ",unwind=0x" << it->unwind_data
+                 << std::dec << ",valid=" << (it->valid ? "yes" : "no") << '}';
+    };
+    append_function_metadata("cia", state.cia);
+    append_function_metadata("lr", static_cast<cpu::GuestAddress>(state.lr));
     // Diagnostic-only guest stack walk (read-only, never changes execution):
     // standard PPC back-chain convention - [r1] = caller's saved r1, [r1+8] =
     // caller's saved LR (the return address into this frame). Best-effort:
@@ -2689,10 +3215,42 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
         if (!first) diagnostic << ',';
         first = false;
         diagnostic << "0x" << std::hex << saved_lr;
+        append_function_metadata("stack", saved_lr);
         if (next_frame <= frame) break;  // frame chain must strictly ascend
         frame = static_cast<memory::GuestAddress>(next_frame);
       }
       diagnostic << ']' << std::dec;
+    }
+    const auto append_export_records = [&](std::string_view label,
+                                           const std::vector<ExportTraceRecord>& records) {
+      diagnostic << ' ' << label << "=[";
+      bool first = true;
+      for (const auto& trace : records) {
+        if (!first) diagnostic << ';';
+        first = false;
+        diagnostic << '#' << trace.sequence << " tid=" << trace.thread_id << ' '
+                   << trace.library_view() << '!';
+        if (!trace.name_view().empty()) {
+          diagnostic << trace.name_view();
+        } else {
+          diagnostic << trace.ordinal;
+        }
+        diagnostic << "(ord=" << trace.ordinal << ",cia=0x" << std::hex
+                   << trace.call_address << ",lr=0x" << trace.lr << ",ctr=0x"
+                   << trace.ctr << ",args=";
+        for (const auto argument : trace.arguments) diagnostic << "0x" << argument << ',';
+        diagnostic << "r3=0x" << trace.result_r3 << std::dec
+                   << ",found=" << trace.handler_found
+                   << ",handled=" << trace.handled
+                   << ",success=" << trace.success << ')';
+      }
+      diagnostic << ']';
+    };
+    if (export_trace_.enabled()) {
+      append_export_records(
+          "export_trace_thread",
+          export_trace_.recent_for_thread(thread ? thread->thread_id() : 0u, 64u));
+      append_export_records("export_trace_global", export_trace_.recent_global(64u));
     }
     crash_message = diagnostic.str();
   } catch (const std::exception& ex) {
@@ -2897,7 +3455,8 @@ std::uint32_t XenonSession::run_created_guest_thread(
 // Xenon calls start_address directly; it has no XAPI bootstrap trampoline to
 // reproduce), r7 = start address, r8 = start context (the single argument
 // passed to the thread function, matching PPC ABI gpr[3]), r9 = creation
-// flags (bit 0x4 = CREATE_SUSPENDED) -> r3 = NTSTATUS.
+// flags (bit 0 = suspended; bits 24..31 = processor affinity, informational)
+// -> r3 = NTSTATUS.
 bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   if (!kernel_process_ || !memory_ || !loaded_xex_) {
     // No title loaded - this export cannot possibly succeed; report a
@@ -2943,8 +3502,13 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   kernel::ThreadCreationParams params{};
   params.stack_size = stack_size;
   params.name = "GuestThread";
-  // CREATE_SUSPENDED = 0x4, the real Win32/Xbox 360 creation-flag bit.
-  params.create_suspended = (creation_flags & 0x4u) != 0u;
+  // ExCreateThread's own creation-flag word is NOT the Win32 CreateThread one:
+  // the XAPI CreateThread wrapper folds Win32 CREATE_SUSPENDED (0x4) into bit 0
+  // and puts the requested processor in the top byte (ExCreateThread flags =
+  // suspended | cpu << 24; xenia: X_CREATE_SUSPENDED = 1). Reading Win32's 0x4
+  // here made every suspended thread start immediately - Ace Combat 6's worker
+  // pool then read event handles it had not stored yet and spun forever.
+  params.create_suspended = (creation_flags & 0x1u) != 0u;
 
   // The ThreadEntry closure needs to know its own KernelThread's id (to
   // resolve the shared_ptr again via ThreadManager::get_thread() and
@@ -3101,26 +3665,7 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
   // ThreadManager::current_thread(), set once in run_audio_callback_thread().
   state.gpr[13] = audio_thread_tls_.kpcr_address;
 
-  cpu::ExecutionContext context(state, *memory_, *this);
-  if (dynamic_fallback_) dynamic_fallback_->bind(context);
-  compiled_registry_binder_(context);
-  if (!context.compiled_lookup) return false;
-  auto* fn = context.lookup_compiled(callback, cpu::CompiledLookupKind::Call);
-
-  try {
-    cpu::ExecutionResult result{};
-    if (fn) {
-      result = fn(context);
-    } else {
-      const auto fallback = context.try_dynamic_fallback(
-          callback, cpu::CompiledLookupKind::Call);
-      if (!fallback.handled) return false;
-      result = fallback.result;
-    }
-    return result.reason != cpu::FlowReason::Trap;
-  } catch (...) {
-    return false;
-  }
+  return run_guest_callback(state, callback, audio_thread_);
 }
 #endif
 
@@ -3216,8 +3761,20 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         // Real Xenos read-pointer write-back hardware semantics
         // (VdEnableRingBufferRPtrWriteBack): mirror the freshly-consumed
         // read index into guest memory so the guest can poll its own copy.
+        // VdEnableRingBufferRPtrWriteBack hands the kernel a PHYSICAL address (as
+        // does VdInitializeRingBuffer), so write it as physical memory: treating
+        // it as a guest virtual address faulted on the free page every drain and
+        // the title never saw the read pointer advance.
         if (ring.rptr_writeback_address != 0 && memory_) {
-          memory_->write32_be(ring.rptr_writeback_address, new_read_index);
+          const std::array<std::byte, 4> big_endian{
+              static_cast<std::byte>(new_read_index >> 24), static_cast<std::byte>(new_read_index >> 16),
+              static_cast<std::byte>(new_read_index >> 8), static_cast<std::byte>(new_read_index)};
+          if (!memory_->write_physical(ring.rptr_writeback_address, big_endian) &&
+              config_.enable_logging) {
+            std::scoped_lock console_log_lock(console_log_mutex());
+            std::cout << "[XenonSession] GPU pump: read-pointer writeback to physical 0x" << std::hex
+                      << ring.rptr_writeback_address << std::dec << " has no RAM backing" << std::endl;
+          }
         }
       } catch (const std::exception& ex) {
         // Malformed/guest-corrupted ring content must not kill the pump
@@ -3271,15 +3828,39 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
 
     const auto interrupt = kernel_process_->gpu_interrupt_callback();
     if (interrupt.callback_address != 0) {
-      static_cast<void>(invoke_gpu_interrupt_callback(interrupt.callback_address,
-                                                       interrupt.context));
+      if (invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context)) {
+        gpu_interrupts_delivered_.fetch_add(1u, std::memory_order_relaxed);
+      } else if (gpu_interrupts_failed_.fetch_add(1u, std::memory_order_relaxed) == 0u &&
+                 config_.enable_logging) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] GPU vsync interrupt callback 0x" << std::hex
+                  << interrupt.callback_address << std::dec
+                  << " failed to run (first failure; later ones are only counted)" << std::endl;
+      }
     }
   }
   return 0;
 }
 
+bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,
+                                    const std::shared_ptr<kernel::KernelThread>& thread) {
+  // Callbacks fire tens of times a second; per-dispatch tracing would drown the log.
+  const auto outcome = dispatch_guest_thread(state, entry, thread, /*trace_dispatches=*/false);
+  if (outcome.crashed) {
+    if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
+      std::cout << "[XenonSession] Guest callback 0x" << std::hex << entry << std::dec
+                << " crashed: " << outcome.crash_message << std::endl;
+    }
+    return false;
+  }
+  return outcome.final_result.reason != cpu::FlowReason::Trap;
+}
+
 bool XenonSession::invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
-                                                 cpu::GuestAddress context) {
+                                                 cpu::GuestAddress context,
+                                                 std::uint32_t source,
+                                                 std::uint32_t cpu) {
   if (!callback || !memory_ || !compiled_registry_binder_ || !kernel_process_ ||
       !gpu_pump_callback_stack_base_ || !gpu_pump_callback_stack_size_) {
     return false;
@@ -3297,30 +3878,20 @@ bool XenonSession::invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
   // fires the normal vsync interrupt, so r3 is always 0 here. r4 is the
   // guest-supplied context pointer from the registration call
   // (VdSetGraphicsInterruptCallback's own second argument).
-  state.gpr[3] = 0;
+  state.gpr[3] = source;
   state.gpr[4] = context;
   state.gpr[13] = gpu_pump_thread_tls_.kpcr_address;
-
-  cpu::ExecutionContext exec_context(state, *memory_, *this);
-  if (dynamic_fallback_) dynamic_fallback_->bind(exec_context);
-  compiled_registry_binder_(exec_context);
-  if (!exec_context.compiled_lookup) return false;
-  auto* fn = exec_context.lookup_compiled(callback, cpu::CompiledLookupKind::Call);
-
+  // The title reads its current hardware-thread number from r13+0x10C (its interrupt
+  // handler clears this CPU's bit in the GPU fence word). Xenia runs the callback with
+  // the thread's active CPU set to the interrupt's target, defaulting to CPU 2.
   try {
-    cpu::ExecutionResult result{};
-    if (fn) {
-      result = fn(exec_context);
-    } else {
-      const auto fallback = exec_context.try_dynamic_fallback(
-          callback, cpu::CompiledLookupKind::Call);
-      if (!fallback.handled) return false;
-      result = fallback.result;
-    }
-    return result.reason != cpu::FlowReason::Trap;
-  } catch (...) {
+    memory_->write8(gpu_pump_thread_tls_.kpcr_address + GuestKpcrLayout::kCurrentCpuOffset,
+                    static_cast<std::uint8_t>(cpu));
+  } catch (const memory::MemoryFault&) {
     return false;
   }
+
+  return run_guest_callback(state, callback, gpu_pump_thread_);
 }
 
 // RuntimeServices implementation
@@ -3374,6 +3945,23 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
     }
   }
 
+  // A thunk minted by XexGetProcedureAddress for a system export: dispatch it
+  // through the ExportRegistry exactly like a XEX import thunk.
+  if (module_registry_) {
+    if (const auto thunk = module_registry_->thunk_target(target)) {
+      if (external_call(thunk->library, thunk->ordinal, state, memory)) {
+        return {cpu::FlowReason::Fallthrough, state.cia, 0u};
+      }
+      if (config_.enable_export_diagnostics) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] Unresolved dynamic import call: " << thunk->library << "!"
+                  << thunk->ordinal << " at 0x" << std::hex << target << std::dec << std::endl;
+      }
+      return {cpu::FlowReason::Trap, target,
+              static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
+    }
+  }
+
   // The target is neither a locally compiled function (already checked by
   // Op::Call/CallIndirect's context.lookup_compiled() before ever reaching
   // here - see backend_cpp_aot.cpp) nor a recognized XEX import call site.
@@ -3391,6 +3979,7 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
 }
 
 bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
+  if (module_registry_ && module_registry_->is_thunk(target)) return true;
   if (!loaded_xex_) return false;
   for (const auto& import : loaded_xex_->image.imports) {
     if (import.callable() && import.guest_thunk == target) return true;
@@ -3516,6 +4105,94 @@ void XenonSession::observe_boot_checkpoint_from_export_call(
   }
 }
 
+void XenonSession::sample_memory_watch(const WatchObserver& observer) {
+  if (!memory_watch_.active() || !memory_) return;
+  auto* address_space = memory_.get();
+  const auto added = memory_watch_.sample(
+      [address_space](cpu::GuestAddress address) -> std::optional<std::uint32_t> {
+        try {
+          return address_space->read32_be(address);
+        } catch (const memory::MemoryFault&) {
+          return std::nullopt;
+        }
+      },
+      observer);
+  if (added.empty() || !config_.enable_logging) return;
+  // Logged after sample() released the watch lock so console and watch locks are
+  // never held together.
+  std::scoped_lock console_log_lock(console_log_mutex());
+  for (const auto& record : added) {
+    std::cout << "[XenonSession] " << GuestMemoryWatch::format(record) << std::endl;
+  }
+}
+
+std::string XenonSession::describe_running_guest_threads() const {
+  std::ostringstream out;
+  out << "running=[";
+  {
+    std::scoped_lock lock(in_flight_exports_mutex_);
+    bool first = true;
+    for (const auto& [thread_id, guest_state] : guest_thread_states_) {
+      if (in_flight_exports_.contains(thread_id)) continue;
+      if (!first) out << ' ';
+      first = false;
+      out << 't' << thread_id << "@0x" << std::hex << std::uppercase << guest_state->cia
+          << std::dec;
+    }
+  }
+  out << ']';
+  return out.str();
+}
+
+std::string XenonSession::describe_recent_exports(std::uint32_t thread_id,
+                                                  std::size_t limit) const {
+  if (thread_id == 0u || !export_trace_.enabled()) return {};
+  const auto recent = export_trace_.recent_for_thread(thread_id, limit);
+  std::ostringstream out;
+  out << "recent=[";
+  for (std::size_t i = 0; i < recent.size(); ++i) {
+    if (i != 0u) out << ' ';
+    const auto& trace = recent[i];
+    if (!trace.name_view().empty()) {
+      out << trace.name_view();
+    } else {
+      out << trace.ordinal;
+    }
+    out << "(lr=0x" << std::hex << std::uppercase << trace.lr << ",in_r3=0x" << trace.arguments[0]
+        << ",in_r4=0x" << trace.arguments[1] << ",out_r3=0x" << trace.result_r3 << std::dec
+        << ')';
+  }
+  out << ']';
+  return out.str();
+}
+
+void XenonSession::start_memory_watch_poll() {
+  stop_memory_watch_poll();
+  if (!memory_watch_.active()) return;
+  WatchObserver baseline{};
+  baseline.phase = WatchPhase::Poll;
+  baseline.note = "baseline";
+  sample_memory_watch(baseline);
+  if (config_.memory_watch_poll_ms == 0u) return;
+
+  memory_watch_poll_running_.store(true);
+  const auto period = std::chrono::milliseconds(config_.memory_watch_poll_ms);
+  memory_watch_thread_ = std::thread([this, period] {
+    while (memory_watch_poll_running_.load(std::memory_order_relaxed)) {
+      WatchObserver observer{};
+      observer.phase = WatchPhase::Poll;
+      observer.describe = [this] { return describe_running_guest_threads(); };
+      sample_memory_watch(observer);
+      std::this_thread::sleep_for(period);
+    }
+  });
+}
+
+void XenonSession::stop_memory_watch_poll() noexcept {
+  memory_watch_poll_running_.store(false);
+  if (memory_watch_thread_.joinable()) memory_watch_thread_.join();
+}
+
 bool XenonSession::external_call(std::string_view module,
                                  std::uint32_t ordinal,
                                  cpu::CpuState& state,
@@ -3541,35 +4218,48 @@ bool XenonSession::external_call(std::string_view module,
   }
 
   // Try the export registry first
-  ExportCallContext context{state, memory, state.cia, calling_thread_id};
-  const std::uint32_t r3_before = static_cast<std::uint32_t>(state.gpr[3]);
-  const std::uint32_t r4_before = static_cast<std::uint32_t>(state.gpr[4]);
-  const std::uint32_t r5_before = static_cast<std::uint32_t>(state.gpr[5]);
-  const std::uint32_t r6_before = static_cast<std::uint32_t>(state.gpr[6]);
-  if (config_.enable_export_diagnostics) {
-    std::scoped_lock console_log_lock(console_log_mutex());
-    std::cout << "[XenonSession] BEGIN " << module << "!" << ordinal
-              << " thread=" << calling_thread_id << std::endl;
+  ExportCallContext context{state, memory, state.cia, calling_thread_id, &stop_requested_};
+  std::array<std::uint64_t, 8> arguments{};
+  std::copy_n(state.gpr.begin() + 3, arguments.size(), arguments.begin());
+  const auto call_address = context.call_address;
+  const auto call_lr = state.lr;
+  const auto call_ctr = state.ctr;
+  const auto* descriptor = export_registry_.resolve(module, ordinal);
+  const bool track_in_flight = export_trace_.enabled() && calling_thread_id != 0u;
+  if (track_in_flight) {
+    std::scoped_lock lock(in_flight_exports_mutex_);
+    in_flight_exports_[calling_thread_id] = InFlightExport{
+        ordinal, descriptor, call_lr, {arguments[0], arguments[1], arguments[2], arguments[3]},
+        std::chrono::steady_clock::now()};
   }
+  const bool watch_active = memory_watch_.active();
+  const auto watch_observer = [&](WatchPhase phase) {
+    WatchObserver observer{};
+    observer.phase = phase;
+    observer.thread_id = calling_thread_id;
+    observer.cia = static_cast<cpu::GuestAddress>(call_address);
+    observer.nia = static_cast<cpu::GuestAddress>(state.nia);
+    observer.lr = call_lr;
+    observer.note = std::string(module) + '!' +
+                    (descriptor ? descriptor->name : std::to_string(ordinal));
+    observer.describe = [this, calling_thread_id] {
+      return describe_recent_exports(calling_thread_id, 6u);
+    };
+    return observer;
+  };
+  if (watch_active) sample_memory_watch(watch_observer(WatchPhase::BeforeKernelCall));
   auto result = export_registry_.invoke(module, ordinal, context);
+  if (watch_active) sample_memory_watch(watch_observer(WatchPhase::AfterKernelCall));
+  if (track_in_flight) {
+    std::scoped_lock lock(in_flight_exports_mutex_);
+    in_flight_exports_.erase(calling_thread_id);
+  }
+  export_trace_.record(calling_thread_id, module,
+                       descriptor ? std::string_view(descriptor->name) : std::string_view{},
+                       ordinal, call_address, call_lr, call_ctr, arguments,
+                       state.gpr[3], descriptor != nullptr, result.handled, result.success);
 
   if (result.handled) {
-    // TEMPORARY (AC6 boot-path investigation): full resolved-call trace,
-    // every successful export call, not just unresolved ones - see the
-    // "unresolved import" trace a few lines below, which only ever fires
-    // for a MISSING export and therefore cannot show what a game's own
-    // startup logic actually did with an ALREADY-implemented export's
-    // return value.
-    if (config_.enable_export_diagnostics) {
-      const auto* desc = export_registry_.resolve(module, ordinal);
-      std::scoped_lock console_log_lock(console_log_mutex());
-      std::cout << "[XenonSession] call " << module << "!"
-                << (desc ? desc->name : std::to_string(ordinal)) << "(ordinal=" << ordinal
-                << ") at 0x" << std::hex << state.cia << " args(r3-r6)=0x" << r3_before << ",0x"
-                << r4_before << ",0x" << r5_before << ",0x" << r6_before
-                << " -> success=" << std::dec << result.success << " r3=0x" << std::hex
-                << static_cast<std::uint32_t>(state.gpr[3]) << std::dec << std::endl;
-    }
     observe_boot_checkpoint_from_export_call(module, ordinal, state);
     return true;
   }

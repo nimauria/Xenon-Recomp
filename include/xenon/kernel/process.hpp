@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <bitset>
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,7 @@
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/module.hpp"
+#include "xenon/kernel/pool.hpp"
 #include "xenon/kernel/object.hpp"
 #include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/timer_manager.hpp"
@@ -34,6 +36,17 @@ class KernelProcess final : public KernelObject {
 
   [[nodiscard]] GuestHeapManager& guest_heap() noexcept { return guest_heap_; }
   [[nodiscard]] const GuestHeapManager& guest_heap() const noexcept { return guest_heap_; }
+
+  // Kernel pool backing ExAllocatePool*/ExFreePool (see pool.hpp).
+  [[nodiscard]] KernelPool& pool() noexcept { return pool_; }
+
+  // FscGet/SetCacheElementCount: the file-system cache element count a title has
+  // configured. Xenon's filesystem has no element-based cache to resize, so the
+  // value is stored and read back (which is the whole guest-visible contract).
+  [[nodiscard]] std::atomic<std::uint32_t>& fsc_cache_element_count() noexcept {
+    return fsc_cache_element_count_;
+  }
+  [[nodiscard]] const KernelPool& pool() const noexcept { return pool_; }
 
   // Shared dispatcher-object handle table: threads, events, semaphores,
   // mutants and timers created via the xboxkrnl thread/sync/timer exports
@@ -172,6 +185,8 @@ class KernelProcess final : public KernelObject {
   std::bitset<64> tls_free_slots_{~static_cast<unsigned long long>(0)};
   std::shared_ptr<KernelMemory> memory_;
   GuestHeapManager guest_heap_;
+  KernelPool pool_;
+  std::atomic<std::uint32_t> fsc_cache_element_count_{0};
   ThreadManager thread_manager_;
   ModuleManager module_manager_;
   std::shared_ptr<KernelThread> main_thread_;

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "xenon/kernel/wait_util.hpp"
+
 namespace xenon::kernel {
 
 KernelSemaphore::KernelSemaphore(std::int32_t initial_count, std::int32_t maximum_count)
@@ -39,7 +41,7 @@ bool KernelSemaphore::release(std::int32_t release_count, std::int32_t* previous
 
 bool KernelSemaphore::wait_for(std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
-  if (!condition_.wait_for(lock, timeout, [&] { return count_ > 0; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return count_ > 0; })) {
     return false;
   }
   --count_;

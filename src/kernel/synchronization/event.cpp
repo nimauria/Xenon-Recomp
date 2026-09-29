@@ -1,5 +1,7 @@
 #include "xenon/kernel/event.hpp"
 
+#include "xenon/kernel/wait_util.hpp"
+
 namespace xenon::kernel {
 
 KernelEvent::KernelEvent(bool manual_reset, bool initial_state)
@@ -31,7 +33,7 @@ bool KernelEvent::signaled() const {
 
 bool KernelEvent::wait_for(std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
-  if (!condition_.wait_for(lock, timeout, [&] { return signaled_; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return signaled_; })) {
     return false;
   }
   if (!manual_reset_) signaled_ = false;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -36,6 +37,10 @@ struct ExportCallContext {
   cpu::MemoryPort& memory;
   cpu::GuestAddress call_address{};
   std::uint32_t thread_id{};
+  // Set while the owning session is stopping. Handlers that can wait without bound
+  // (spin locks) poll it so shutdown cannot hang behind a lock whose holder will
+  // never run again. Null (tests, tools) means "never stopping".
+  const std::atomic<bool>* stopping{nullptr};
 };
 
 // Export handler function type
@@ -126,6 +131,11 @@ class ExportRegistry {
 
   // Enumerate all registered exports
   [[nodiscard]] std::vector<ExportDescriptor> enumerate(
+      std::string_view library = {}) const;
+
+  // Enumerate all registered guest-backed variable exports (the separate
+  // variable namespace - see register_variable()).
+  [[nodiscard]] std::vector<VariableExportDescriptor> enumerate_variables(
       std::string_view library = {}) const;
 
   // Clear all registered exports

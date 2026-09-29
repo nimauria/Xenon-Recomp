@@ -87,4 +87,61 @@ bool ob_dereference_object_export(kernel::KernelProcess&, ExportCallContext& con
   return true;
 }
 
+namespace {
+
+std::uint32_t to_status(KernelIoCode code) {
+  switch (code) {
+    case KernelIoCode::Success: return status::Success;
+    case KernelIoCode::InvalidHandle: return status::InvalidHandle;
+    case KernelIoCode::InvalidObjectType: return status::ObjectTypeMismatch;
+    case KernelIoCode::InvalidParameter: return status::InvalidParameter;
+    case KernelIoCode::AccessDenied: return status::AccessDenied;
+    case KernelIoCode::ProtectedHandle: return status::AccessDenied;
+    default: return status::Unsuccessful;
+  }
+}
+
+}  // namespace
+
+bool nt_duplicate_object_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  constexpr std::uint32_t kDuplicateCloseSource = 1u;
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto new_handle_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto options_bits = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+
+  kernel::Handle new_handle{};
+  KernelIoCode result_code;
+  const bool is_pseudo_handle = handle == kCurrentThreadPseudoHandle;
+  if (is_pseudo_handle) {
+    auto object = process.thread_manager().current_thread();
+    if (!object) {
+      context.cpu.gpr[3] = status::InvalidHandle;
+      return true;
+    }
+    // A pseudo-handle has no existing handle-table entry to duplicate from
+    // (see kCurrentThreadPseudoHandle's comment) - materialize a real one
+    // for the resolved object instead.
+    result_code = process.handle_table().insert(
+        std::move(object), /*granted_access=*/0u, kernel::HandleFlags::None, new_handle);
+  } else {
+    kernel::DuplicateHandleOptions dup_options{};
+    result_code = process.handle_table().duplicate(handle, dup_options, new_handle);
+  }
+  if (result_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(result_code);
+    return true;
+  }
+
+  if (new_handle_ptr != 0u) {
+    context.memory.write32_be(new_handle_ptr, new_handle);
+  }
+  // DUPLICATE_CLOSE_SOURCE never applies to the pseudo-handle case above -
+  // there is no real source handle-table entry to close.
+  if (options_bits == kDuplicateCloseSource && !is_pseudo_handle) {
+    static_cast<void>(process.handle_table().close(handle));
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 }  // namespace xenon::xbox

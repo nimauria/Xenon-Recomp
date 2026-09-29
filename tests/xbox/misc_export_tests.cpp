@@ -117,26 +117,90 @@ void test_xe_crypt_sha_multiple_inputs_concatenate() {
             << std::endl;
 }
 
-void test_ex_get_xconfig_setting_reports_not_found() {
-  std::cout << "[TEST] ExGetXConfigSetting reports STATUS_NOT_FOUND honestly..." << std::endl;
+void test_ex_get_xconfig_setting_values_and_validation() {
+  std::cout << "[TEST] ExGetXConfigSetting values and validation..." << std::endl;
   Fixture fx;
 
+  memory::GuestAddress buffer{};
   memory::GuestAddress required_size_ptr{};
+  assert(fx.address_space.allocate(4u, 4u, memory::kReadWrite, false, buffer));
   assert(fx.address_space.allocate(4u, 4u, memory::kReadWrite, false, required_size_ptr));
-  fx.address_space.write16_be(required_size_ptr, 0xFFFFu);
 
+  // Query the English language default.
   cpu::CpuState cpu{};
-  cpu.gpr[3] = 1u;  // category
-  cpu.gpr[4] = 1u;  // setting
-  cpu.gpr[5] = 0u;
-  cpu.gpr[6] = 0u;
+  cpu.gpr[3] = 3u;
+  cpu.gpr[4] = 9u;
+  cpu.gpr[5] = buffer;
+  cpu.gpr[6] = 4u;
   cpu.gpr[7] = required_size_ptr;
-  const auto result = fx.invoke(0x10u, cpu);
-  assert(result.handled && result.success);
-  assert(cpu.gpr[3] == 0xC0000225u);
-  assert(fx.address_space.read16_be(required_size_ptr) == 0u);
+  assert(fx.invoke(0x10u, cpu).success);
+  assert(cpu.gpr[3] == 0u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 4u);
+  assert(fx.address_space.read32_be(buffer) == 1u);
 
-  std::cout << "  \xE2\x9C\x93 ExGetXConfigSetting reports STATUS_NOT_FOUND" << std::endl;
+  // Country is the one-byte setting.
+  cpu = {};
+  cpu.gpr[3] = 3u;
+  cpu.gpr[4] = 0xEu;
+  cpu.gpr[5] = buffer;
+  cpu.gpr[6] = 1u;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success && cpu.gpr[3] == 0u);
+  assert(fx.address_space.read8(buffer) == 103u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 1u);
+
+  // An undersized buffer reports BUFFER_TOO_SMALL. Real hardware does not
+  // report the needed size on this path (only a call that would otherwise
+  // succeed writes *required_size_ptr), so a stale sentinel must survive.
+  fx.address_space.write16_be(required_size_ptr, 0xBEEFu);
+  cpu = {};
+  cpu.gpr[3] = 2u;
+  cpu.gpr[4] = 2u;
+  cpu.gpr[5] = buffer;
+  cpu.gpr[6] = 3u;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success);
+  assert(cpu.gpr[3] == 0xC0000023u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 0xBEEFu);
+
+  // A null buffer is valid only for a zero-sized size query; a nonzero size
+  // with a null buffer is STATUS_INVALID_PARAMETER_3 and also leaves
+  // *required_size_ptr untouched.
+  fx.address_space.write16_be(required_size_ptr, 0xBEEFu);
+  cpu = {};
+  cpu.gpr[3] = 3u;
+  cpu.gpr[4] = 9u;
+  cpu.gpr[6] = 1u;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success);
+  assert(cpu.gpr[3] == 0xC00000F1u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 0xBEEFu);
+
+  cpu = {};
+  cpu.gpr[3] = 3u;
+  cpu.gpr[4] = 9u;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success && cpu.gpr[3] == 0u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 4u);
+
+  // An unrecognized category/setting also leaves *required_size_ptr
+  // untouched, since real hardware never resolves a setting_size for it.
+  fx.address_space.write16_be(required_size_ptr, 0xBEEFu);
+  cpu = {};
+  cpu.gpr[3] = 0xFFFFu;
+  cpu.gpr[4] = 1u;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success && cpu.gpr[3] == 0xC00000EFu);
+  assert(fx.address_space.read16_be(required_size_ptr) == 0xBEEFu);
+  cpu = {};
+  cpu.gpr[3] = 3u;
+  cpu.gpr[4] = 0xFFFFu;
+  cpu.gpr[7] = required_size_ptr;
+  assert(fx.invoke(0x10u, cpu).success && cpu.gpr[3] == 0xC00000F0u);
+  assert(fx.address_space.read16_be(required_size_ptr) == 0xBEEFu);
+
+  std::cout << "  \xE2\x9C\x93 ExGetXConfigSetting returns researched defaults and statuses"
+            << std::endl;
 }
 
 void test_ex_register_title_terminate_notification_succeeds() {
@@ -165,7 +229,7 @@ int main() {
 
   test_xe_crypt_sha_deterministic_and_sensitive();
   test_xe_crypt_sha_multiple_inputs_concatenate();
-  test_ex_get_xconfig_setting_reports_not_found();
+  test_ex_get_xconfig_setting_values_and_validation();
   test_ex_register_title_terminate_notification_succeeds();
 
   std::cout << "\n\xE2\x9C\x85 All tests passed!" << std::endl;

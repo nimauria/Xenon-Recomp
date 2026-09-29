@@ -37,4 +37,17 @@ namespace xenon::xbox {
 [[nodiscard]] bool ob_dereference_object_export(kernel::KernelProcess& process,
                                                 core::ExportCallContext& context);
 
+// NtDuplicateObject (ordinal 0xDA)
+// Guest ABI: r3 = source handle, r4 = optional guest pointer to receive the
+// new handle, r5 = options (1 = DUPLICATE_CLOSE_SOURCE, close the source
+// handle after duplicating) -> r3 = NTSTATUS. Xbox 360's version of this API
+// takes only these 3 parameters (unlike desktop Windows' 7-parameter
+// cross-process form) since a title is always a single process - verified
+// against the xenia-project/xenia reference. Its most common real use is
+// turning NtCurrentThread()'s pseudo-handle (0xFFFFFFFE, see
+// kCurrentThreadPseudoHandle above) into a real, closeable handle-table
+// entry, which this resolves the same way ObReferenceObjectByHandle does.
+[[nodiscard]] bool nt_duplicate_object_export(kernel::KernelProcess& process,
+                                              core::ExportCallContext& context);
+
 }  // namespace xenon::xbox

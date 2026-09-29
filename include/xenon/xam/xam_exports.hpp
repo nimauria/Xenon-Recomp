@@ -157,6 +157,7 @@ constexpr std::uint32_t XamGetExecutionId = 0x0280;
 // System information (xam_table.inc 0x282)
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamGetSystemVersion = 0x0282;
+constexpr std::uint32_t XGetGameRegion = 0x03CC;
 
 // ---------------------------------------------------------------------------
 // NetDll_* (XNet/Winsock guest ABI, xam_table.inc 0x33-0x34). The generic
@@ -167,6 +168,22 @@ constexpr std::uint32_t XamGetSystemVersion = 0x0282;
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t NetDll_WSAStartup = 0x0001;
 constexpr std::uint32_t NetDll_WSACleanup = 0x0002;
+constexpr std::uint32_t NetDll_socket = 0x0003;
+constexpr std::uint32_t NetDll_closesocket = 0x0004;
+constexpr std::uint32_t NetDll_shutdown = 0x0005;
+constexpr std::uint32_t NetDll_ioctlsocket = 0x0006;
+constexpr std::uint32_t NetDll_setsockopt = 0x0007;
+constexpr std::uint32_t NetDll_getsockopt = 0x0008;
+constexpr std::uint32_t NetDll_bind = 0x000B;
+constexpr std::uint32_t NetDll_connect = 0x000C;
+constexpr std::uint32_t NetDll_select = 0x000F;
+constexpr std::uint32_t NetDll_recv = 0x0012;
+constexpr std::uint32_t NetDll_recvfrom = 0x0014;
+constexpr std::uint32_t NetDll_send = 0x0016;
+constexpr std::uint32_t NetDll_sendto = 0x0018;
+constexpr std::uint32_t NetDll_inet_addr = 0x001A;
+constexpr std::uint32_t NetDll_WSAGetLastError = 0x001B;
+constexpr std::uint32_t NetDll_WSASetLastError = 0x001C;
 constexpr std::uint32_t NetDll_XNetStartup = 0x0033;
 constexpr std::uint32_t NetDll_XNetCleanup = 0x0034;
 

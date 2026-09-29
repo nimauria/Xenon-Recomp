@@ -84,6 +84,12 @@ struct LaunchConfig {
   // Mirrors the launcher's live "developer/verboseLogging" preference.
   bool log_verbose{false};
 
+  // Diagnostic guest-word watch (SessionConfig::memory_watch_*). "memoryWatch" is
+  // an array of guest addresses, each a JSON number or a "0x..." / decimal string.
+  std::vector<std::uint32_t> memory_watch_addresses{};
+  std::uint32_t memory_watch_history{4096};
+  std::uint32_t memory_watch_poll_ms{1};
+
   std::string title_update_path;
   std::string dlc_root_path;
   std::vector<DlcEntry> dlc;

@@ -213,8 +213,10 @@ int main() {
   assert(recursion.handled);
   assert(recursion.result.reason == FlowReason::Trap);
 
-  // Hard instruction budgets prevent a corrupted/self-looping executable edge
-  // from converting the safety net into an unbounded emulator loop.
+  // The instruction budget bounds one host dispatch; it must not fault legitimate
+  // long-running guest code (AC6's startup constructor loop ran past 4096
+  // instructions and was killed by a Trap). Exhausting it yields a resumable
+  // Branch to the next instruction, and the dispatcher keeps going.
   DynamicFallbackConfig tight{};
   tight.max_instructions_per_dispatch = 8u;
   DynamicFallbackExecutor bounded(tight);
@@ -226,8 +228,56 @@ int main() {
   const auto loop =
       bounded_context.try_dynamic_fallback(kCode, CompiledLookupKind::Call);
   assert(loop.handled);
-  assert(loop.result.reason == FlowReason::Trap);
+  assert(loop.result.reason == FlowReason::Branch && "budget exhaustion yields, it does not trap");
+  assert(loop.result.next_address == kCode && "resumes exactly at the looping instruction");
   assert(bounded.executed_instructions() == 8u);
+
+  // A finite loop longer than the budget completes across several yields with
+  // the same final state as one uninterrupted run:
+  //   li r4,30; L: addi r3,r3,1; addic. r4,r4,-1 ; bne L ; blr   (30 iterations)
+  write_instruction(memory, kCode + 0x00u, 0x3880001Eu);  // li r4,30
+  write_instruction(memory, kCode + 0x04u, 0x38630001u);  // addi r3,r3,1
+  write_instruction(memory, kCode + 0x08u, 0x3484FFFFu);  // addic. r4,r4,-1
+  write_instruction(memory, kCode + 0x0Cu, 0x4082FFF8u);  // bne -8
+  write_instruction(memory, kCode + 0x10u, 0x4E800020u);  // blr
+  state = {};
+  state.lr = kReturn;
+  state.gpr[3] = 0u;
+  auto step = bounded_context.try_dynamic_fallback(kCode, CompiledLookupKind::Call);
+  int yields = 0;
+  while (step.handled && step.result.reason == FlowReason::Branch && yields < 100) {
+    ++yields;
+    step = bounded_context.try_dynamic_fallback(step.result.next_address, CompiledLookupKind::Branch);
+  }
+  assert(step.handled && step.result.reason == FlowReason::Return);
+  assert(step.result.next_address == kReturn);
+  assert(state.gpr[3] == 30u && state.gpr[4] == 0u && "all 30 iterations ran");
+  assert(yields >= 10 && "91 instructions at 8 per dispatch needed many yields");
+
+  // AC6's stream state machine uses this exact CR field sequence at
+  // 0x821CCC24: cmpwi cr6,r3,0; bne cr6,... .  Keep a focused regression so
+  // an indirect target interpreted by the dynamic fallback cannot read CR0
+  // (or the wrong bit within CR6) and take the opposite state transition.
+  write_instruction(memory, kCode + 0x00u, 0x2F030000u);  // cmpwi cr6,r3,0
+  write_instruction(memory, kCode + 0x04u, 0x409A0008u);  // bne cr6,+8
+  write_instruction(memory, kCode + 0x08u, 0x38800022u);  // li r4,0x22
+  write_instruction(memory, kCode + 0x0Cu, 0x4E800020u);  // blr
+
+  state = {};
+  state.lr = kReturn;
+  state.gpr[3] = 1u;
+  const auto cr6_taken = context.try_dynamic_fallback(kCode, CompiledLookupKind::Call);
+  assert(cr6_taken.handled && cr6_taken.result.reason == FlowReason::Return);
+  assert(state.gpr[4] == 0u && "bne cr6 must take the nonzero branch");
+
+  state = {};
+  state.lr = kReturn;
+  state.gpr[3] = 0u;
+  const auto cr6_fallthrough =
+      context.try_dynamic_fallback(kCode, CompiledLookupKind::Call);
+  assert(cr6_fallthrough.handled &&
+         cr6_fallthrough.result.reason == FlowReason::Return);
+  assert(state.gpr[4] == 0x22u && "bne cr6 must fall through for zero");
 
   // Reviewer feedback on the AC6 Runtime Readiness pass's Part 14 fallback
   // accounting: fallback_unique_pc_count()/fallback_hot_pcs() must

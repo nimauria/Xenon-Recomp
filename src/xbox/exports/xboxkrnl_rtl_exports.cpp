@@ -166,27 +166,9 @@ bool rtl_init_ansi_string_export(ExportCallContext& context) {
   return true;
 }
 
-// RtlFreeAnsiString (ordinal 0x127 / 295)
-// Guest ABI: r3 = PSTRING String -> void.
-//
-// Real hardware frees String->Buffer through the pool allocator (only
-// meaningful for a string that RtlUnicodeStringToAnsiString(...,
-// AllocateDestinationString=TRUE) allocated) and then zeroes the struct.
-// Xenon does not implement RtlUnicodeStringToAnsiString's allocating path
-// yet (see the "not implemented yet" note in xboxkrnl_rtl_exports.hpp/this
-// file's export table), so there is never a pool allocation to release here
-// - the only real caller pattern reachable today is RtlInitAnsiString's
-// non-allocating alias, for which zeroing the struct (without touching the
-// buffer memory itself) is the complete, correct action.
-bool rtl_free_ansi_string_export(ExportCallContext& context) {
-  const auto string_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
-  if (string_ptr == 0u) return true;
-
-  context.memory.write16_be(string_ptr + 0u, 0u);
-  context.memory.write16_be(string_ptr + 2u, 0u);
-  context.memory.write32_be(string_ptr + 4u, 0u);
-  return true;
-}
+// RtlFreeAnsiString (ordinal 0x127) now lives with the rest of the ANSI_STRING/
+// UNICODE_STRING family in xboxkrnl_rtl_string_exports.cpp, where it can release
+// a pool-allocated buffer (see RtlPoolHooks).
 
 // RtlInitUnicodeString (ordinal 0x12D / 301)
 // Guest ABI: r3 = PUNICODE_STRING DestinationString, r4 = PCWSTR
@@ -347,22 +329,74 @@ bool rtl_time_fields_to_time_export(ExportCallContext& context) {
   return true;
 }
 
+// RtlCaptureContext (ordinal 0x119)
+// Guest ABI: r3 = guest CONTEXT* to fill -> void (real hardware never
+// returns a status here).
+//
+// Deliberately does not touch guest memory at all: the real Xbox 360/Win32
+// CONTEXT record's guest-visible field layout could not be verified against
+// any available reference (xenia never implements this function's body
+// either - only declares the ordinal - and hedge-dev/UnleashedRecomp, a
+// real shipped Xbox 360 static-recompilation PC port, stubs it identically:
+// log and return with no memory writes at all). Writing a guessed-size or
+// guessed-layout buffer would risk corrupting whatever real guest data
+// follows it on the stack, or feeding a real consumer plausible-looking
+// garbage instead of the honest "we did not fill this" signal a no-op
+// preserves. RtlCaptureContext only ever feeds RtlUnwind/exception dispatch
+// (also not implemented - see RtlRaiseException/RtlUnwind), so there is no
+// currently-reachable consumer of this buffer's contents to get right or
+// wrong yet.
+bool rtl_capture_context_export(ExportCallContext&) { return true; }
+
+// __C_specific_handler (ordinal 0x1A5)
+// Guest ABI: MSVC SEH personality-routine convention (exception record,
+// establisher frame, context, dispatcher context) -> exception disposition.
+//
+// Only ever invoked BY a real unwind engine walking a function's exception
+// scope table during dispatch - never called directly by ordinary guest
+// code. Xenon has no such engine (see RtlUnwind), so this is currently
+// unreachable dead code in practice; implemented as the honest, spec-correct
+// response for a personality routine asked to evaluate a scope table it
+// cannot process: report ExceptionContinueSearch (1) rather than fabricating
+// a handled/continue-execution disposition it did not earn. Matches hedge-
+// dev/UnleashedRecomp's identical no-op-and-return-cleanly precedent for
+// this function in a real, shipped Xbox 360 static-recomp title.
+bool c_specific_handler_export(ExportCallContext& context) {
+  constexpr std::uint32_t kExceptionContinueSearch = 1u;
+  context.cpu.gpr[3] = kExceptionContinueSearch;
+  return true;
+}
+
 // Xbox 360 RTL export descriptors
 struct RtlExportSpec {
   std::uint32_t ordinal;
   const char* name;
   core::ExportHandler handler;
+  bool partial{false};
+  const char* partial_note{};
 };
 
 // RtlImageXexHeaderField is the immediate blocker for AC6.
 // Additional RTL functions can be implemented as needed.
 const RtlExportSpec kRtlExports[] = {
+    {0x0119u, "RtlCaptureContext", &rtl_capture_context_export, true,
+     "does not fill the guest CONTEXT record - real Xbox 360 field layout "
+     "could not be verified against any available reference, and this "
+     "buffer currently has no reachable real consumer (RtlUnwind/exception "
+     "dispatch are not implemented either); matches xenia (never implements "
+     "this function's body) and hedge-dev/UnleashedRecomp (identical no-op "
+     "stub in a real shipped title)"},
+    {0x01A5u, "__C_specific_handler", &c_specific_handler_export, true,
+     "always reports ExceptionContinueSearch - only reachable from a real "
+     "unwind engine Xenon does not implement (RtlUnwind is not implemented "
+     "either), so this is currently unreachable dead code; matches hedge-"
+     "dev/UnleashedRecomp's identical no-op precedent in a real shipped "
+     "title"},
     {0x012Bu, "RtlImageXexHeaderField", &rtl_image_xex_header_field},
     {0x0135u, "RtlNtStatusToDosError", &rtl_nt_status_to_dos_error_export},
     {0x011Bu, "RtlCompareMemoryUlong", &rtl_compare_memory_ulong_export},
     {0x0126u, "RtlFillMemoryUlong", &rtl_fill_memory_ulong_export},
     {0x012Cu, "RtlInitAnsiString", &rtl_init_ansi_string_export},
-    {0x0127u, "RtlFreeAnsiString", &rtl_free_ansi_string_export},
     {0x012Du, "RtlInitUnicodeString", &rtl_init_unicode_string_export},
     {0x013Fu, "RtlTimeFieldsToTime", &rtl_time_fields_to_time_export},
     {0x0140u, "RtlTimeToTimeFields", &rtl_time_to_time_fields_export},
@@ -379,6 +413,8 @@ bool register_xboxkrnl_rtl_exports(core::ExportRegistry& registry) {
     descriptor.ordinal = spec.ordinal;
     descriptor.handler = spec.handler;
     descriptor.requirement = core::ExportRequirement::Required;
+    descriptor.partial = spec.partial;
+    if (spec.partial_note) descriptor.partial_note = spec.partial_note;
 
     if (!registry.register_export(std::move(descriptor))) {
       return false;

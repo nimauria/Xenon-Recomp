@@ -199,6 +199,19 @@ void test_system_exports_use_real_ordinals() {
   assert(result.success);
   assert(cpu.gpr[3] == 0u);
 
+  // XGetGameRegion (0x03CC, decimal 972) - real AC6 repro: called directly during
+  // boot (guest address 0x821BABDC) and trapped the whole session
+  // (STATUS_PROCEDURE_NOT_FOUND) before this export existed.
+  expect_export(registry, 0x03CCu, "XGetGameRegion");
+  cpu::CpuState region_cpu{};
+  core::ExportCallContext region_ctx{region_cpu, address_space};
+  const auto region_result = registry.invoke("xam", 0x03CCu, region_ctx);
+  assert(region_result.handled);
+  assert(region_result.success);
+  assert(region_cpu.gpr[3] == 0xFFFFu &&
+         "XGetGameRegion must report every region bit set (region-free), matching "
+         "xenia's verified xeXGetGameRegion() reference");
+
   std::cout << "  \xE2\x9C\x93 System exports match the real xam.xex ordinal table" << std::endl;
 }
 

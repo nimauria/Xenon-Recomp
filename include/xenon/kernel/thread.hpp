@@ -101,6 +101,13 @@ class KernelThread final : public KernelObject {
     return terminated_.load(std::memory_order_acquire);
   }
 
+  // KeSetDisableBoostThread: whether scheduler priority boosts are disabled for
+  // this thread. Returns the previous value. Xenon runs guest threads as host
+  // threads and applies no dynamic boost, so the flag is pure guest-visible state.
+  bool exchange_boost_disabled(bool disabled) noexcept {
+    return boost_disabled_.exchange(disabled, std::memory_order_acq_rel);
+  }
+
   // True when called from this KernelThread's own host thread. This is the
   // load-bearing safety check for ThreadManager::reap_finished_threads():
   // is_terminated() alone is NOT sufficient to prove "not currently
@@ -179,6 +186,7 @@ class KernelThread final : public KernelObject {
   // alongside every state_ = ThreadState::Terminated transition (terminate()
   // and thread_main()'s natural-completion path).
   std::atomic<bool> terminated_{false};
+  std::atomic<bool> boost_disabled_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned
   // naturally, or the thread was terminated before ever running entry_()),

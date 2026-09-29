@@ -286,6 +286,46 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   return true;
 }
 
+// NtPulseEvent (ordinal 0xE2)
+// Guest ABI: r3 = handle, r4 = optional guest pointer to receive the
+// PREVIOUS signal state (BOOLEAN, nullable) -> r3 = NTSTATUS. Same
+// signature as NtSetEvent; signals the event and releases current waiters,
+// then immediately resets it (verified against the xenia-project/xenia
+// reference: XEvent::Pulse()).
+//
+// Real hardware's PulseEvent is documented by Microsoft as inherently
+// unreliable: a thread that has not yet reached the wait when the pulse
+// happens will never observe it, and this implementation's plain set()-
+// then-reset() has the same property for a thread that is mid-wakeup but
+// has not yet reacquired KernelEvent's internal lock to recheck its
+// predicate - that is real, spec-documented behavior to preserve, not a
+// race to engineer away with a generation counter no guest code relies on.
+bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const auto previous_state_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+
+  HandleView view{};
+  const auto lookup_code = process.handle_table().lookup(handle, view);
+  if (lookup_code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(lookup_code);
+    return true;
+  }
+  if (view.object->type() != ObjectType::Event) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
+  }
+
+  auto& event = static_cast<kernel::KernelEvent&>(*view.object);
+  const std::uint32_t previous = event.signaled() ? 1u : 0u;
+  event.set();
+  event.reset();
+  if (previous_state_ptr != 0u) {
+    context.memory.write32_be(previous_state_ptr, previous);
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 // NtResumeThread (ordinal 0xF5)
 // Guest ABI: r3 = thread handle, r4 = optional guest pointer to receive the
 // PREVIOUS suspend count -> r3 = NTSTATUS.
@@ -313,6 +353,33 @@ bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& 
     context.memory.write32_be(previous_count_ptr, previous);
   }
   context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+// ExTerminateThread (ordinal 0x19)
+// Guest ABI: r3 = exit code -> does not return (verified against the
+// xenia-project/xenia reference: XThread::GetCurrentThread()->Exit(exit_
+// code), which the caller never returns from).
+//
+// dispatch_guest_thread()'s outcome handling (session.cpp) already has a
+// dedicated thread_terminated branch that treats thread->exit_code() as
+// authoritative over any in-flight register state, and already runs whether
+// termination happened via a preemptive safepoint OR (this export's own
+// case) the thread calling into a kernel export that terminates itself -
+// this only needs to flip that state; the dispatch loop and thread
+// trampoline that observe it, unwind cleanly, and report exit_code already
+// exist and need no changes. Xenon's dispatch loop observes termination at
+// its own safepoints rather than truly never returning to this call's own
+// C++ frame (documented latency, not a bug - see KernelThread::terminate()'s
+// comment) - guest code after this call may still execute a few more
+// instructions before the loop notices, matching how any other external
+// termination request already behaves.
+bool ex_terminate_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto exit_code = static_cast<std::uint32_t>(context.cpu.gpr[3]);
+  auto thread = process.thread_manager().current_thread();
+  if (thread) {
+    static_cast<void>(thread->terminate(exit_code));
+  }
   return true;
 }
 
@@ -612,6 +679,8 @@ constexpr SyncExportSpec kSyncExports[] = {
     {0x0FAu, "NtSetTimerEx"},
     {0x0CEu, "NtClearEvent"},
     {0x0F6u, "NtSetEvent"},
+    {0x0E2u, "NtPulseEvent"},
+    {0x019u, "ExTerminateThread"},
     {0x0F5u, "NtResumeThread"},
     {0x0CFu, "NtClose"},
     {0x0FBu, "NtSignalAndWaitForSingleObjectEx"},
@@ -663,6 +732,12 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   }
   if (name == "NtSetEvent") {
     return [&process](ExportCallContext& ctx) { return nt_set_event_export(process, ctx); };
+  }
+  if (name == "NtPulseEvent") {
+    return [&process](ExportCallContext& ctx) { return nt_pulse_event_export(process, ctx); };
+  }
+  if (name == "ExTerminateThread") {
+    return [&process](ExportCallContext& ctx) { return ex_terminate_thread_export(process, ctx); };
   }
   if (name == "NtResumeThread") {
     return [&process](ExportCallContext& ctx) { return nt_resume_thread_export(process, ctx); };

@@ -566,6 +566,159 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// Regression (Ace Combat 6): a WAIT_REG_MEM in the ring whose memory value is
+// produced by CPU code used to spin the one host thread that also delivers vsync
+// interrupts, so the CPU code that would satisfy it never ran. At ring level an
+// unsatisfied wait must SUSPEND: earlier packets stay applied, the read position
+// is the wait packet, and a later drain resumes exactly there without replaying.
+void test_ring_wait_stall_resumes(AddressSpace& memory, CommandProcessor& cp,
+                                  RegisterFile& regs) {
+  constexpr std::uint32_t ring = 0x01006800;
+  constexpr std::uint32_t capacity = 16;
+  constexpr std::uint32_t poll_memory = 0x01213100;
+  store_be32(memory, poll_memory, 0u);
+  regs.write(0x340, 0u);
+  regs.write(0x342, 0u);
+  write_words(memory, ring,
+              {make_packet_type1(0x340, 0x341), 0xAAAA0001u, 0xAAAA0002u,
+               make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u,
+               poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32),
+               0x12345678u, 0xFFFFFFFFu, 0u,
+               make_packet_type1(0x342, 0x343), 0xBBBB0001u, 0xBBBB0002u});
+
+  const auto stalls_before = cp.statistics().wait_stalls;
+  const auto read = cp.execute_ring(ring, capacity, 0, 12);
+  assert(read == 3 && "the ring must stop AT the unsatisfied wait packet");
+  assert(cp.statistics().wait_stalls == stalls_before + 1u);
+  assert(regs.read(0x340) == 0xAAAA0001u && regs.read(0x341) == 0xAAAA0002u &&
+         "packets before the wait are applied");
+  assert(regs.read(0x342) == 0u && "packets after the wait must not run yet");
+
+  // Still not satisfied: a second drain stalls at the same place, cheaply.
+  assert(cp.execute_ring(ring, capacity, read, 12) == 3);
+
+  // The CPU produces the value; the next drain resumes at the wait and finishes.
+  store_be32(memory, poll_memory, 0x12345678u);
+  regs.write(0x340, 0u);  // would be rewritten if earlier packets were replayed
+  const auto finished = cp.execute_ring(ring, capacity, read, 12);
+  assert(finished == 12);
+  assert(regs.read(0x340) == 0u && "earlier packets are not replayed on resume");
+  assert(regs.read(0x342) == 0xBBBB0001u && regs.read(0x343) == 0xBBBB0002u);
+}
+
+// Regression (Ace Combat 6 rendered nothing): before its first draw the title queues
+// a host-memory coherency request by writing COHER_STATUS_HOST (0x0A31) and then
+// WAIT_REG_MEMs for the pending bit (0x80000000) to read 0. The command processor
+// must arm the bit on the write and complete the request when it is polled; with
+// nothing clearing it the whole frame stayed parked behind that wait.
+void test_coher_status_host_wait_completes(AddressSpace& memory, CommandProcessor& cp,
+                                           RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01006E00;
+  // Type-0: write COHER_SIZE_HOST, COHER_BASE_HOST, COHER_STATUS_HOST (0xA2F..0xA31).
+  write_words(memory, commands,
+              {make_packet_type0(0x0A2F, 3), 0x00200000u, 0x19535000u, 0x03000000u,
+               make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x3u, 0x0A31u, 0x0u,
+               0x80000000u, 0x8u,
+               make_packet_type1(0x360, 0x361), 0xC0DE0001u, 0xC0DE0002u});
+  regs.write(0x360, 0u);
+  const auto syncs_before = cp.statistics().coherency_syncs;
+  cp.execute_buffer(commands, 13);  // must not spin to the safety limit and throw
+  assert((regs.read(0x0A31) & 0x80000000u) == 0u && "the request is complete");
+  assert(cp.statistics().coherency_syncs == syncs_before + 1u);
+  assert(regs.read(0x0A2F) == 0x00200000u && regs.read(0x0A30) == 0x19535000u);
+  assert(regs.read(0x360) == 0xC0DE0001u && "execution continues past the wait");
+
+  // Polling with no request pending is simply satisfied, and counts nothing.
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x3u, 0x0A31u, 0x0u,
+               0x80000000u, 0x8u});
+  cp.execute_buffer(commands, 6);
+  assert(cp.statistics().coherency_syncs == syncs_before + 1u);
+}
+
+// Regression (Ace Combat 6): the title writes SCRATCH_REG1 from the command stream and
+// WAIT_REG_MEMs for SCRATCH_ADDR+4 to equal it. Xenos mirrors enabled scratch
+// registers into memory; without that the fence never resolves.
+void test_scratch_register_writeback_satisfies_memory_wait(AddressSpace& memory,
+                                                          CommandProcessor& cp,
+                                                          RegisterFile& regs) {
+  constexpr std::uint32_t commands = 0x01007E00;
+  constexpr std::uint32_t scratch_base = 0x01214000;
+  store_be32(memory, scratch_base, 0u);
+  store_be32(memory, scratch_base + 4u, 0u);
+  store_be32(memory, scratch_base + 8u, 0u);
+  write_words(memory, commands,
+              {make_packet_type0(0x01DC, 2), 0x00000006u /* regs 1 and 2 enabled */, scratch_base,
+               make_packet_type0(0x0578, 1), 4u,   // SCRATCH_REG0: NOT enabled
+               make_packet_type0(0x0579, 1), 1u,   // SCRATCH_REG1: enabled
+               make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u,
+               (scratch_base + 4u) | static_cast<std::uint32_t>(Endian::Swap8In32), 1u,
+               0xFFFFFFFFu, 0x100u,
+               make_packet_type0(0x057A, 1), 0xABCD1234u});  // SCRATCH_REG2: enabled
+  const auto before = cp.statistics().scratch_writebacks;
+  try {
+    cp.execute_buffer(commands, 15);  // the wait must be satisfied by the write-through
+  } catch (const std::exception& error) {
+    std::cerr << "scratch write-back test: " << error.what() << "\n";
+    assert(false && "the memory wait must be satisfied by the scratch write-through");
+  }
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + scratch_base + 4u) == 1u);
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + scratch_base) == 0u &&
+         "a scratch register whose UMSK bit is clear is not mirrored");
+  assert(memory.read32_be(xenon::memory::kPhysical64KBase + scratch_base + 8u) == 0xABCD1234u);
+  assert(regs.read(0x0578) == 4u && "the register itself still latches");
+  assert(cp.statistics().scratch_writebacks == before + 2u);
+}
+
+// The same, with the wait inside an indirect buffer - how real D3D command streams
+// place their fences. The drain must resume INSIDE the buffer at the wait, not at
+// its start, and must not announce the buffer to the IR stream a second time.
+void test_ring_wait_stall_inside_indirect_buffer_resumes(AddressSpace& memory,
+                                                        CommandProcessor& cp,
+                                                        RegisterFile& regs,
+                                                        xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t ring = 0x01006A00;
+  constexpr std::uint32_t capacity = 16;
+  constexpr std::uint32_t indirect = 0x01006C00;
+  constexpr std::uint32_t poll_memory = 0x01213200;
+  store_be32(memory, poll_memory, 0u);
+  regs.write(0x350, 0u);
+  regs.write(0x352, 0u);
+  regs.write(0x354, 0u);
+  // Indirect buffer: set regs, wait, set more regs (13 dwords).
+  write_words(memory, indirect,
+              {make_packet_type1(0x350, 0x351), 0x11110001u, 0x11110002u,
+               make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u,
+               poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32),
+               0x0BADF00Du, 0xFFFFFFFFu, 0u,
+               make_packet_type1(0x352, 0x353), 0x22220001u, 0x22220002u});
+  // Ring: an indirect-buffer packet (3 dwords), then a register write after it.
+  write_words(memory, ring,
+              {make_packet_type3(Type3Opcode::IndirectBuffer, 2), indirect, 12,
+               make_packet_type1(0x354, 0x355), 0x33330001u, 0x33330002u});
+
+  const auto buffers_before = cp.statistics().indirect_buffers;
+  const auto stalls_before = cp.statistics().wait_stalls;
+  const auto read = cp.execute_ring(ring, capacity, 0, 6);
+  assert(read == 0 && "suspended at the ring packet that holds the indirect buffer");
+  assert(cp.statistics().wait_stalls == stalls_before + 1u);
+  assert(regs.read(0x350) == 0x11110001u && "buffer packets before the wait ran");
+  assert(regs.read(0x352) == 0u && regs.read(0x354) == 0u);
+
+  store_be32(memory, poll_memory, 0x0BADF00Du);
+  regs.write(0x350, 0u);  // would be rewritten if the buffer restarted from its top
+  const auto buffers_mid = cp.statistics().indirect_buffers;
+  const auto ir_before = stream.size();
+  assert(cp.execute_ring(ring, capacity, read, 6) == 6);
+  assert(regs.read(0x350) == 0u && "the indirect buffer must resume, not restart");
+  assert(regs.read(0x352) == 0x22220001u && regs.read(0x353) == 0x22220002u);
+  assert(regs.read(0x354) == 0x33330001u && "the ring continues after the buffer");
+  assert(cp.statistics().indirect_buffers == buffers_mid &&
+         "a resumed buffer is not counted or announced again");
+  assert(buffers_mid == buffers_before + 1u);
+  (void)ir_before;
+}
+
 void test_draw_ir(AddressSpace& memory, CommandProcessor& cp,
                   RegisterFile& regs, xenon::gpu::ir::Stream& stream) {
   constexpr std::uint32_t base = 0x01007000;
@@ -1175,6 +1328,10 @@ int main() {
   test_mem_write(memory, cp);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_ring_wait_stall_resumes(memory, cp, regs);
+  test_coher_status_host_wait_completes(memory, cp, regs);
+  test_scratch_register_writeback_satisfies_memory_wait(memory, cp, regs);
+  test_ring_wait_stall_inside_indirect_buffer_resumes(memory, cp, regs, stream);
   test_draw_ir(memory, cp, regs, stream);
   test_dma_draw_ir(memory, cp, regs, stream);
   test_binned_draw_ir(memory, cp, regs, stream);

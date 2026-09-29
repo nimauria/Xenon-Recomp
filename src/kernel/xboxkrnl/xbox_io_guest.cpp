@@ -143,8 +143,21 @@ bool GuestIoBridge::read_optional_offset(
   if (!address) return true;
   if (!readable_range(address, 8)) return false;
   try {
+    // ByteOffset is a guest LARGE_INTEGER, but Xbox 360 file systems (STFS,
+    // XISO/GDFX, host content) address files with 32-bit offsets and the kernel
+    // takes only the low dword. Titles routinely build it from an OVERLAPPED whose
+    // OffsetHigh they never initialised (AC6 fills the whole structure with 0x2A
+    // bytes and sets only Offset), so honouring the high dword turns every read
+    // into a ~3e18-byte offset that fails at EOF.
+    //
+    // The NT "use the file pointer" sentinels are recognised first:
+    // {0xFFFFFFFF,0xFFFFFFFF} and FILE_USE_FILE_POINTER_POSITION
+    // {0xFFFFFFFE,0xFFFFFFFF} both mean the current position.
     const auto value = memory_.read64_be(address);
-    if (value != std::numeric_limits<std::uint64_t>::max()) out = value;
+    const auto high = static_cast<std::uint32_t>(value >> 32);
+    const auto low = static_cast<std::uint32_t>(value);
+    const bool use_file_pointer = high == 0xFFFFFFFFu && (low == 0xFFFFFFFFu || low == 0xFFFFFFFEu);
+    if (!use_file_pointer) out = static_cast<std::uint64_t>(low);
     return true;
   } catch (const memory::MemoryFault&) {
     return false;

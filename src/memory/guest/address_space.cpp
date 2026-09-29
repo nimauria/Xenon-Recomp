@@ -2048,6 +2048,52 @@ std::optional<PhysicalAllocationInfo> AddressSpace::query_physical_allocation(
       metadata.current_protect};
 }
 
+MemoryStatistics AddressSpace::memory_statistics() const {
+  std::lock_guard lock(mutex_);
+  MemoryStatistics result{};
+  result.total_physical_pages = kPhysicalPageCount;
+  for (const auto ownership : physical_page_used_) {
+    switch (ownership) {
+      case kPhysicalFree:
+        ++result.available_physical_pages;
+        break;
+      case kPhysicalSystem:
+        ++result.system_physical_pages;
+        break;
+      case kPhysicalAnonymous:
+      case kPhysicalAnonymousPendingFree:
+        ++result.anonymous_physical_pages;
+        break;
+      case kPhysicalExplicit:
+        ++result.explicit_physical_pages;
+        break;
+      case kPhysicalRetired:
+        // Retirement is a host-side quiescence delay, not guest-owned
+        // memory. The allocator reclaims these before its next allocation,
+        // so Xbox-visible available capacity includes them.
+        ++result.available_physical_pages;
+        ++result.retired_physical_pages;
+        break;
+      default:
+        break;
+    }
+  }
+  for (const auto& page : pages_) {
+    if (page.state == PageState::Free) continue;
+    if (page.kind == RegionKind::Xex) {
+      if (page.state == PageState::Committed) ++result.image_pages;
+      continue;
+    }
+    if (page.kind != RegionKind::Virtual &&
+        page.kind != RegionKind::GpuWriteback) {
+      continue;
+    }
+    ++result.reserved_virtual_pages;
+    if (page.state == PageState::Committed) ++result.committed_virtual_pages;
+  }
+  return result;
+}
+
 std::optional<GuestAddress> AddressSpace::physical_guest_alias(
     std::uint32_t physical_address,
     PhysicalPageClass page_class) noexcept {

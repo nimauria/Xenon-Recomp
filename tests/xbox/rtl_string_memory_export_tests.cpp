@@ -16,6 +16,7 @@
 namespace xenon::xbox {
 bool register_xboxkrnl_rtl_exports(core::ExportRegistry& registry);
 }  // namespace xenon::xbox
+#include "xenon/xbox/xboxkrnl_rtl_string_exports.hpp"
 
 namespace {
 constexpr std::int64_t kFiletimeUnixEpoch100ns = 116444736000000000LL;
@@ -32,6 +33,8 @@ struct Fixture {
   Fixture() {
     assert(address_space.initialize());
     assert(xbox::register_xboxkrnl_rtl_exports(registry));
+    // RtlFreeAnsiString lives with the rest of the string family.
+    assert(xbox::register_xboxkrnl_rtl_string_exports(registry));
   }
 
   core::ExportCallResult invoke(std::uint32_t ordinal, cpu::CpuState& cpu) {
@@ -281,6 +284,47 @@ void test_rtl_time_fields_to_time_rejects_invalid() {
   std::cout << "  \xE2\x9C\x93 RtlTimeFieldsToTime returns FALSE for an invalid date" << std::endl;
 }
 
+void test_rtl_capture_context_is_a_documented_no_op() {
+  std::cout << "[TEST] RtlCaptureContext (documented no-op)..." << std::endl;
+  Fixture fx;
+  assert(fx.registry.contains("xboxkrnl.exe", 0x0119u));
+  assert(fx.registry.contains("xboxkrnl.exe", "RtlCaptureContext"));
+
+  // Fill the guest "CONTEXT" buffer with a sentinel first: the whole point
+  // of not implementing this is that it must NOT touch guest memory (see
+  // xboxkrnl_rtl_exports.cpp's comment) rather than writing a guessed-size/
+  // guessed-layout buffer - the sentinel must survive the call untouched.
+  memory::GuestAddress context_buffer{};
+  assert(fx.address_space.allocate(0x200u, 16u, memory::kReadWrite, false, context_buffer));
+  for (std::uint32_t i = 0; i < 0x200u; i += 4u) {
+    fx.address_space.write32_be(context_buffer + i, 0xDEADBEEFu);
+  }
+
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = context_buffer;
+  const auto result = fx.invoke(0x0119u, cpu);
+  assert(result.handled && result.success);
+  for (std::uint32_t i = 0; i < 0x200u; i += 4u) {
+    assert(fx.address_space.read32_be(context_buffer + i) == 0xDEADBEEFu);
+  }
+
+  std::cout << "  \xE2\x9C\x93 RtlCaptureContext does not touch guest memory" << std::endl;
+}
+
+void test_c_specific_handler_reports_continue_search() {
+  std::cout << "[TEST] __C_specific_handler (documented no-op)..." << std::endl;
+  Fixture fx;
+  assert(fx.registry.contains("xboxkrnl.exe", 0x01A5u));
+  assert(fx.registry.contains("xboxkrnl.exe", "__C_specific_handler"));
+
+  cpu::CpuState cpu{};
+  const auto result = fx.invoke(0x01A5u, cpu);
+  assert(result.handled && result.success);
+  assert(cpu.gpr[3] == 1u);  // ExceptionContinueSearch
+
+  std::cout << "  \xE2\x9C\x93 __C_specific_handler reports ExceptionContinueSearch" << std::endl;
+}
+
 }  // namespace
 
 int main() {
@@ -295,6 +339,8 @@ int main() {
   test_rtl_time_to_time_fields_known_date();
   test_rtl_time_fields_to_time_round_trip();
   test_rtl_time_fields_to_time_rejects_invalid();
+  test_rtl_capture_context_is_a_documented_no_op();
+  test_c_specific_handler_reports_continue_search();
 
   std::cout << "\n\xE2\x9C\x85 All tests passed!" << std::endl;
   return 0;

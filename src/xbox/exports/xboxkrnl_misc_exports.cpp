@@ -4,10 +4,13 @@
 #include <cstdint>
 #include <vector>
 
+#include "xenon/kernel/xbox_io.hpp"
+
 namespace xenon::xbox {
 namespace {
 
 using xenon::core::ExportCallContext;
+namespace status = xenon::kernel::xbox::status;
 
 // Standard SHA-1 (FIPS 180-4), implemented directly since this is a pure,
 // fully-specified algorithm with no hardware/security-key dependency -
@@ -144,22 +147,93 @@ bool xe_crypt_sha_export(ExportCallContext& context) {
 // Guest ABI: r3 = category (WORD), r4 = setting (WORD), r5 = buffer ptr,
 // r6 = buffer size (WORD), r7 = out required-size ptr (optional) ->
 // r3 = NTSTATUS. Real hardware reads from an on-console XConfig settings
-// store (region, language, AV pack, parental controls, etc. - see
-// rexglue-sdk's xeExGetXConfigSetting) Xenon does not model. Rather than
-// fabricate plausible-looking configuration data, this honestly reports
-// STATUS_NOT_FOUND for every category/setting - the same answer real
-// hardware gives for an unrecognized setting - and always writes a
-// required-size of 0. A title that treats this failure as "use my own
-// built-in default" (the documented/common pattern) behaves correctly;
-// one that requires a specific real XConfig value to boot would need that
-// value modeled for real, which this deliberately does not guess at.
+// store. Xenon implements the stable retail defaults supported by Xenia's
+// researched compatibility path, including its exact category/setting and
+// buffer-parameter validation. Multi-byte values are written in guest big
+// endian through MemoryPort rather than copied in host byte order.
 bool ex_get_xconfig_setting_export(ExportCallContext& context) {
+  constexpr std::uint32_t kStatusInvalidParameter1 = 0xC00000EFu;
+  constexpr std::uint32_t kStatusInvalidParameter2 = 0xC00000F0u;
+  constexpr std::uint32_t kStatusInvalidParameter3 = 0xC00000F1u;
+  const auto category = static_cast<std::uint16_t>(context.cpu.gpr[3]);
+  const auto setting = static_cast<std::uint16_t>(context.cpu.gpr[4]);
+  const auto buffer = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto buffer_size = static_cast<std::uint16_t>(context.cpu.gpr[6]);
   const auto required_size_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
-  if (required_size_ptr != 0u) {
-    context.memory.write16_be(required_size_ptr, 0u);
+  std::uint16_t setting_size = 0u;
+  std::uint32_t value = 0u;
+  bool byte_value = false;
+
+  if (category == 0x0002u) {  // XCONFIG_SECURED_CATEGORY
+    if (setting != 0x0002u) {  // XCONFIG_SECURED_AV_REGION
+      // Real hardware leaves *required_size_ptr untouched for an
+      // unrecognized category/setting - only a request that resolves to a
+      // real setting reports a size, on any outcome of that request.
+      context.cpu.gpr[3] = kStatusInvalidParameter2;
+      return true;
+    }
+    setting_size = 4u;
+    value = 0x00001000u;  // USA/Canada AV region.
+  } else if (category == 0x0003u) {  // XCONFIG_USER_CATEGORY
+    switch (setting) {
+      case 0x0001u:  // TIME_ZONE_BIAS
+      case 0x0002u:  // TIME_ZONE_STD_NAME compatibility value
+      case 0x0003u:  // TIME_ZONE_DLT_NAME compatibility value
+      case 0x0004u:  // TIME_ZONE_STD_DATE compatibility value
+      case 0x0005u:  // TIME_ZONE_DLT_DATE compatibility value
+      case 0x0006u:  // TIME_ZONE_STD_BIAS
+      case 0x0007u:  // TIME_ZONE_DLT_BIAS
+      case 0x000Cu:  // RETAIL_FLAGS
+        setting_size = 4u;
+        value = 0u;
+        break;
+      case 0x0009u:  // LANGUAGE (English)
+        setting_size = 4u;
+        value = 1u;
+        break;
+      case 0x000Au:  // VIDEO_FLAGS
+        setting_size = 4u;
+        value = 0x00040000u;
+        break;
+      case 0x000Eu:  // COUNTRY (United States)
+        setting_size = 1u;
+        value = 103u;
+        byte_value = true;
+        break;
+      default:
+        context.cpu.gpr[3] = kStatusInvalidParameter2;
+        return true;
+    }
+  } else {
+    context.cpu.gpr[3] = kStatusInvalidParameter1;
+    return true;
   }
-  constexpr std::uint32_t kStatusNotFound = 0xC0000225u;
-  context.cpu.gpr[3] = kStatusNotFound;
+
+  // Real hardware only reports *required_size_ptr on a path that would
+  // otherwise return success (including the buffer==NULL/buffer_size==0
+  // size-query pattern) - not on STATUS_BUFFER_TOO_SMALL or
+  // STATUS_INVALID_PARAMETER_3, so a caller cannot use it to retry with a
+  // resized buffer after either of those failures.
+  if (buffer == 0u) {
+    if (buffer_size != 0u) {
+      context.cpu.gpr[3] = kStatusInvalidParameter3;
+      return true;
+    }
+    if (required_size_ptr) context.memory.write16_be(required_size_ptr, setting_size);
+    context.cpu.gpr[3] = status::Success;
+    return true;
+  }
+  if (buffer_size < setting_size) {
+    context.cpu.gpr[3] = status::BufferTooSmall;
+    return true;
+  }
+  if (byte_value) {
+    context.memory.write8(buffer, static_cast<std::uint8_t>(value));
+  } else {
+    context.memory.write32_be(buffer, value);
+  }
+  if (required_size_ptr) context.memory.write16_be(required_size_ptr, setting_size);
+  context.cpu.gpr[3] = status::Success;
   return true;
 }
 
@@ -200,12 +274,6 @@ bool register_xboxkrnl_misc_exports(core::ExportRegistry& registry) {
     desc.name = "ExGetXConfigSetting";
     desc.ordinal = 0x10u;
     desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note =
-        "always reports STATUS_NOT_FOUND rather than modeling a real "
-        "XConfig settings store - correct for titles that fall back to "
-        "their own defaults on failure, wrong for one that requires a "
-        "specific real setting value to boot";
     desc.handler = &ex_get_xconfig_setting_export;
     ok = registry.register_export(std::move(desc)) && ok;
   }

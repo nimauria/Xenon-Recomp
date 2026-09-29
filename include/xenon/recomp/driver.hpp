@@ -1,4 +1,5 @@
 #pragma once
+#include "xenon/recomp/cpu_coverage.hpp"
 #include "xenon/recomp/compilation_graph.hpp"
 
 #include <cstdint>
@@ -432,6 +433,7 @@ struct AnalysisDiagnostics {
                                                       // renamed/suppressed/worked around)
   std::size_t codegen_shards{};                      // functions/shard_*.cpp files written
   std::size_t codegen_max_functions_per_shard{};     // largest function count in any one shard
+  std::size_t codegen_max_shard_bytes{};             // largest generated-source size in any one shard
 
   // Region + Entry / adaptive-analysis diagnostics.
   std::size_t pointer_tables_discovered{};
@@ -457,6 +459,10 @@ struct AnalysisDiagnostics {
 
 struct AnalysisReport {
   xbox::XexImage image;
+  // Which of this image's instructions the native backend / the dynamic fallback
+  // cannot execute (see cpu_coverage.hpp). A fallback gap is a run-ending crash
+  // waiting for the title to reach code the recompiler did not discover.
+  CpuCoverageReport cpu_coverage;
   std::vector<DiscoveredFunction> functions;
   // Complete dispatch map. Canonical function starts and alternate entry
   // blocks live in one address-indexed model, while semantic function
@@ -502,6 +508,21 @@ struct DriverOptions {
   std::optional<analysis::AnalysisHintSetV2> hint_set_v2;
   const ModuleHintProviderV2* hint_provider_v2{nullptr};
   std::size_t shard_function_count{128};
+  // Byte-size shard budget, an alternative to shard_function_count. When set,
+  // shard boundaries are decided by accumulated generated-source size instead
+  // of a fixed function count, and shard_function_count is ignored. A single
+  // function larger than the budget still gets its own shard rather than
+  // being split or producing an empty one. Generated function size varies by
+  // orders of magnitude - a handful of functions with large jump-table-driven
+  // indirect-branch dispatches can be 100x the size of a typical function -
+  // so a fixed function count produces wildly uneven shards (a few
+  // multi-hour-to-compile outliers alongside many near-instant ones), while a
+  // byte budget keeps every shard's own compile cost roughly bounded and lets
+  // the build schedule far more of them in parallel. Unset preserves the
+  // existing shard_function_count behavior exactly (no default: a byte
+  // budget changes on-disk shard layout, so callers opt in deliberately
+  // rather than being silently repartitioned by an upstream default change).
+  std::optional<std::size_t> shard_max_bytes;
   bool allow_partial{false};
 
   // Worker-count configuration (Part 3/16 of the Recomp Analysis V2 pass).

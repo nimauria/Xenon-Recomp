@@ -36,6 +36,31 @@ bool register_system_exports(core::ExportRegistry& registry) {
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
+  // XGetGameRegion (0x03CC) - no arguments, returns the console's configured
+  // game-region flags (XC_GAME_REGION_*) in r3.
+  //
+  // Real hardware reports the region(s) the running kernel/console are
+  // configured to allow; xenia-project/xenia's xeXGetGameRegion() (verified
+  // reference) returns 0xFFFF unconditionally - every region bit set, i.e.
+  // "region-free" - rather than modeling a specific retail console's region
+  // lock. Xenon matches that: AC6 (and any other title) calls this purely to
+  // decide whether to show a region-mismatch warning, and a real dev/debug
+  // kit (which is exactly the kind of hardware most emulation targets, and
+  // the only kind that never needs to reject a disc) also reports every
+  // region allowed.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XGetGameRegion";
+    desc.ordinal = ordinal::XGetGameRegion;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [](core::ExportCallContext& ctx) -> bool {
+      ctx.cpu.gpr[3] = 0xFFFFu;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
   return ok;
 }
 

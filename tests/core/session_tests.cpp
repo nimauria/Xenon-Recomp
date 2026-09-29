@@ -632,6 +632,91 @@ int main() {
     session.shutdown();
   }
 
+  // Test: the guest-memory watch attributes a store made by (or during) a kernel
+  // call to that call, never reports an unchanged word, and is off by default.
+  {
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    assert(session.initialize(config).success);
+    assert(!session.memory_watch().active() && "no addresses configured -> watch is off");
+
+    xenon::memory::GuestAddress word{};
+    assert(session.memory()->allocate(16, 16, xenon::memory::kReadWrite, false, word));
+    session.memory()->write32_be(word, 0u);
+    session.configure_memory_watch({word}, 32u);
+    assert(session.memory_watch().active());
+
+    xenon::core::ExportDescriptor writer{};
+    writer.library = "test";
+    writer.name = "StoreWatched";
+    writer.ordinal = 901u;
+    writer.handler = [word](xenon::core::ExportCallContext& ctx) -> bool {
+      ctx.memory.write32_be(word, 1u);
+      ctx.cpu.gpr[3] = 0;
+      return true;
+    };
+    assert(session.exports()->register_export(std::move(writer)));
+    xenon::core::ExportDescriptor reader{};
+    reader.library = "test";
+    reader.name = "LoadWatched";
+    reader.ordinal = 902u;
+    reader.handler = [](xenon::core::ExportCallContext& ctx) -> bool {
+      ctx.cpu.gpr[3] = 0;
+      return true;
+    };
+    assert(session.exports()->register_export(std::move(reader)));
+
+    xenon::cpu::CpuState state{};
+    state.cia = 0x821CD7F0u;
+    assert(session.external_call("test", 902u, state, *session.memory()));
+    auto history = session.memory_watch().history();
+    assert(history.size() == 1u && history[0].initial && *history[0].new_value == 0u);
+    assert(session.memory_watch().total_changes() == 0u);
+
+    assert(session.external_call("test", 901u, state, *session.memory()));
+    history = session.memory_watch().history();
+    assert(history.size() == 2u);
+    const auto& change = history.back();
+    assert(!change.initial && *change.old_value == 0u && *change.new_value == 1u);
+    assert(change.observer.phase == xenon::core::WatchPhase::AfterKernelCall);
+    assert(change.observer.cia == 0x821CD7F0u);
+    assert(change.observer.note == "test!StoreWatched");
+    assert(session.memory_watch().total_changes() == 1u);
+
+    // A later call that does not touch the word records nothing further.
+    assert(session.external_call("test", 902u, state, *session.memory()));
+    assert(session.memory_watch().history().size() == 2u);
+
+    // A change made between calls (another thread's store) is observed at the next
+    // boundary and blamed on that boundary, not on the earlier call.
+    session.memory()->write32_be(word, 2u);
+    assert(session.external_call("test", 902u, state, *session.memory()));
+    history = session.memory_watch().history();
+    assert(history.size() == 3u);
+    assert(history.back().observer.phase == xenon::core::WatchPhase::BeforeKernelCall);
+    assert(*history.back().old_value == 1u && *history.back().new_value == 2u);
+    session.shutdown();
+  }
+
+  // Test: configuring the watch through SessionConfig arms it from initialize().
+  {
+    xenon::core::XenonSession session;
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = false;
+    config.enable_input = false;
+    config.memory_watch_addresses = {0x40000000u, 0x40000004u, 0x40000000u};
+    config.memory_watch_history = 8u;
+    assert(session.initialize(config).success);
+    assert(session.memory_watch().active());
+    assert((session.memory_watch().addresses() ==
+            std::vector<std::uint32_t>{0x40000000u, 0x40000004u}));
+    session.shutdown();
+  }
+
   // Test 2: Export registry
   {
     xenon::core::ExportRegistry registry;

@@ -1,5 +1,7 @@
 #include "xenon/xbox/xex_dispatcher_header.hpp"
 
+#include <mutex>
+
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
@@ -26,6 +28,18 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     if (error) *error = "null X_DISPATCH_HEADER pointer";
     return nullptr;
   }
+
+  // Resolution is check-then-create-then-stash. Two guest threads that first touch
+  // the same embedded KEVENT/KSEMAPHORE at the same moment (a waiter and the
+  // thread that signals it - the normal case for a lock or a work queue) would
+  // each see "not stashed yet" and each create their own host object, so the
+  // signal lands on a different object than the one being waited on and the
+  // wakeup is lost. The stash is also two guest words (signature, then handle),
+  // which a concurrent reader could observe half-written. One process-wide mutex
+  // makes the whole resolution atomic; it is held only for this short section
+  // (no wait ever happens under it).
+  static std::mutex resolve_mutex;
+  std::scoped_lock resolve_lock(resolve_mutex);
 
   const auto flink = memory.read32_be(header_address + DispatchHeaderLayout::kWaitListFlinkOffset);
   if (flink == kDispatcherStashSignature) {

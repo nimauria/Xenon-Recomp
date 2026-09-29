@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -260,6 +261,10 @@ void CommandProcessor::reset() {
   swap_counter_ = 0;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
+  stall_frames_.clear();
+  resume_frames_.clear();
+  resume_pending_ = false;
+  resuming_ = false;
 }
 
 void CommandProcessor::execute_buffer(std::uint32_t physical_address,
@@ -281,14 +286,54 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
                                       : capacity_dwords - read_index + write_index;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
+
+  // Resuming a suspended wait: only valid when the drain restarts at exactly the
+  // packet that was suspended; anything else (the ring was reset, the guest
+  // rewound it) discards the saved position.
+  stall_frames_.clear();
+  resuming_ = resume_pending_ && resume_ring_index_ == read_index;
+  resume_cursor_ = 0;
+  if (!resuming_) {
+    resume_pending_ = false;
+    resume_frames_.clear();
+  }
+
+  struct StallScope {
+    bool& flag;
+    explicit StallScope(bool& f) : flag(f) { flag = true; }
+    ~StallScope() { flag = false; }
+  } stall_scope{stall_on_unsatisfied_wait_};
+
   Reader reader(memory_, physical_address, capacity_dwords, read_index, available);
-  while (reader.remaining()) execute_packet(reader, 0);
+  while (reader.remaining()) {
+    const std::uint32_t packet_start = reader.index();
+    try {
+      execute_packet(reader, 0);
+    } catch (const WaitStalled&) {
+      // A wait that is not satisfied yet. Everything before it has been applied.
+      // Report the top-level packet holding the wait as the new read position and
+      // remember where inside any indirect buffers it sits (innermost frame was
+      // recorded first while the signal unwound), so the next drain re-enters
+      // those buffers at the wait instead of replaying them from their start.
+      ++stats_.wait_stalls;
+      resume_frames_.assign(stall_frames_.rbegin(), stall_frames_.rend());
+      stall_frames_.clear();
+      resume_ring_index_ = packet_start;
+      resume_pending_ = true;
+      resuming_ = false;
+      return packet_start;
+    }
+  }
+  resume_pending_ = false;
+  resume_frames_.clear();
+  resuming_ = false;
   return reader.index();
 }
 
 void CommandProcessor::execute_buffer_internal(std::uint32_t physical_address,
                                                std::uint32_t dword_count,
-                                               std::uint32_t depth) {
+                                               std::uint32_t depth,
+                                               std::uint32_t start_offset) {
   if (depth > kMaximumIndirectDepth) {
     throw std::runtime_error("Xenos indirect-buffer recursion limit exceeded");
   }
@@ -297,8 +342,20 @@ void CommandProcessor::execute_buffer_internal(std::uint32_t physical_address,
     throw std::runtime_error("Xenos command submission exceeds safety limit");
   }
   submission_dwords_ += dword_count;
-  Reader reader(memory_, physical_address, dword_count, 0, dword_count);
-  while (reader.remaining()) execute_packet(reader, depth);
+  start_offset = std::min(start_offset, dword_count);
+  Reader reader(memory_, physical_address, dword_count, start_offset,
+                dword_count - start_offset);
+  while (reader.remaining()) {
+    const std::uint32_t packet_start = reader.index();
+    try {
+      execute_packet(reader, depth);
+    } catch (const WaitStalled&) {
+      if (depth > 0) {
+        stall_frames_.push_back(ResumeFrame{physical_address, dword_count, packet_start});
+      }
+      throw;
+    }
+  }
 }
 
 void CommandProcessor::execute_packet(Reader& reader, std::uint32_t depth) {
@@ -354,6 +411,34 @@ void CommandProcessor::emit_register_write(std::uint32_t index,
   if (!registers_.write(index, value)) {
     ++stats_.unknown_register_writes;
     throw std::out_of_range("Xenos register index outside register file");
+  }
+  // Scratch registers SCRATCH_REG0..7 (0x578..0x57F) write through to memory at
+  // SCRATCH_ADDR + n*4 when the matching SCRATCH_UMSK bit is set. Titles use this
+  // as a GPU->memory fence: they write a register from the command stream and then
+  // WAIT_REG_MEM on the memory word. Without the write-through that wait can never
+  // be satisfied (Ace Combat 6 parked forever on SCRATCH_ADDR+4 == 1).
+  if (index >= kScratchRegisterFirst && index <= kScratchRegisterLast) {
+    const std::uint32_t scratch_reg = index - kScratchRegisterFirst;
+    if ((registers_.read(kScratchUmskRegister) & (1u << scratch_reg)) != 0u) {
+      const std::uint32_t destination =
+          cpu_to_gpu_address(registers_.read(kScratchAddrRegister) + scratch_reg * 4u);
+      if (std::uint64_t(destination) + 4u > memory::kPhysicalMemorySize) {
+        throw std::out_of_range("Xenos scratch register write-back outside RAM");
+      }
+      // Stored as the guest sees it (big-endian), like the CPU-visible fence value.
+      const std::array<std::byte, 4> bytes{
+          static_cast<std::byte>(value >> 24), static_cast<std::byte>(value >> 16),
+          static_cast<std::byte>(value >> 8), static_cast<std::byte>(value)};
+      if (!memory_.write_physical(destination, bytes)) {
+        throw std::runtime_error("Xenos scratch register write-back has no backing");
+      }
+      ++stats_.scratch_writebacks;
+    }
+  }
+  // Any write to COHER_STATUS_HOST arms a host-coherency request; the next
+  // WAIT_REG_MEM on it performs the sync and clears it (see execute_wait_reg_mem).
+  if (index == kCoherStatusHostRegister) {
+    static_cast<void>(registers_.write(index, value | kCoherStatusPending));
   }
   stream_.emit(ir::RegisterWrite{index, value});
 }
@@ -564,10 +649,25 @@ void CommandProcessor::execute_wait_reg_mem(
   }
 
   ++stats_.wait_reg_mem_packets;
-  for (std::uint32_t poll = 0; poll < kMaximumWaitPollIterations; ++poll) {
+  // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
+  // request it queued (texture/vertex cache invalidation over a range). The
+  // command processor completes the request itself as part of the poll and the
+  // wait is satisfied. Xenon's GPU reads guest RAM directly through the shared
+  // physical mapping, so there is no separate cached copy to flush here; the
+  // state transition (pending -> clear) is what the title observes.
+  if (!memory_source && payload[1] == kCoherStatusHostRegister) {
+    if ((registers_.read(kCoherStatusHostRegister) & kCoherStatusPending) != 0u) {
+      static_cast<void>(registers_.write(kCoherStatusHostRegister, 0u));
+      ++stats_.coherency_syncs;
+    }
+    return;
+  }
+  std::uint32_t last_value = 0u;
+  for (std::uint32_t poll = 0; poll < (stall_on_unsatisfied_wait_ ? kStallableWaitPollIterations : kMaximumWaitPollIterations); ++poll) {
     const std::uint32_t value =
         memory_source ? read_physical_dword(payload[1])
                       : registers_.read(payload[1]);
+    last_value = value;
     ++stats_.wait_reg_mem_polls;
     if (wait_condition_matches(wait_info, value, payload[2], payload[3])) {
       return;
@@ -579,7 +679,19 @@ void CommandProcessor::execute_wait_reg_mem(
     // not deadlock the host process forever.
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
   }
-  throw std::runtime_error("PM4_WAIT_REG_MEM exceeded host safety poll limit");
+  if (stall_on_unsatisfied_wait_) {
+    last_wait_stall_ = {true, memory_source, payload[1], wait_info, payload[2], payload[3], last_value};
+    throw WaitStalled{};
+  }
+  // Say exactly what never became true: a title stuck here is waiting on hardware
+  // state (or a memory location) that nothing in the host model ever updates.
+  char detail[160];
+  std::snprintf(detail, sizeof(detail),
+                "PM4_WAIT_REG_MEM exceeded host safety poll limit (%s 0x%08X, wait_info=0x%X, "
+                "reference=0x%08X, mask=0x%08X, last value=0x%08X)",
+                memory_source ? "memory" : "register", payload[1], wait_info, payload[2],
+                payload[3], last_value);
+  throw std::runtime_error(detail);
 }
 
 void CommandProcessor::execute_wait_register(
@@ -599,7 +711,7 @@ void CommandProcessor::execute_wait_register(
   }
 
   ++stats_.wait_register_packets;
-  for (std::uint32_t poll = 0; poll < kMaximumWaitPollIterations; ++poll) {
+  for (std::uint32_t poll = 0; poll < (stall_on_unsatisfied_wait_ ? kStallableWaitPollIterations : kMaximumWaitPollIterations); ++poll) {
     const std::uint32_t value = registers_.read(register_index) & payload[2];
     ++stats_.wait_register_polls;
     if (greater_or_equal ? value >= payload[1] : value == payload[1]) {
@@ -607,6 +719,7 @@ void CommandProcessor::execute_wait_register(
     }
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
   }
+  if (stall_on_unsatisfied_wait_) throw WaitStalled{};
   throw std::runtime_error(
       "PM4_WAIT_REG_EQ/GTE exceeded host safety poll limit");
 }
@@ -1033,9 +1146,26 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     const std::uint32_t address = cpu_to_gpu_address(payload[0]);
     const std::uint32_t length = payload[1] & 0xFFFFFu;
     const bool prefetch = header.opcode == Type3Opcode::IndirectBufferPfd;
-    stream_.emit(ir::IndirectBuffer{address, length, prefetch});
-    ++stats_.indirect_buffers;
-    if (length) execute_buffer_internal(address, length, depth + 1u);
+    // Re-entering a buffer whose wait was suspended: pick up at the saved packet
+    // and do not announce the buffer a second time.
+    std::uint32_t start_offset = 0;
+    bool resumed_here = false;
+    if (resuming_) {
+      if (resume_cursor_ < resume_frames_.size() &&
+          resume_frames_[resume_cursor_].address == address &&
+          resume_frames_[resume_cursor_].length == length) {
+        start_offset = resume_frames_[resume_cursor_].offset;
+        resumed_here = true;
+        if (++resume_cursor_ == resume_frames_.size()) resuming_ = false;
+      } else {
+        resuming_ = false;  // the buffer changed under us: start it afresh
+      }
+    }
+    if (!resumed_here) {
+      stream_.emit(ir::IndirectBuffer{address, length, prefetch});
+      ++stats_.indirect_buffers;
+    }
+    if (length) execute_buffer_internal(address, length, depth + 1u, start_offset);
     return;
   }
 
