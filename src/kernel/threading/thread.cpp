@@ -2,11 +2,74 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace xenon::kernel {
 namespace {
 
 std::atomic<std::uint32_t> g_next_thread_id{1};
+
+#if defined(_WIN32)
+// Real Xbox 360 hardware is 3 physical cores x 2 hardware threads = 6
+// logical processors, and guest code (job-pool workers in particular - see
+// e.g. Ace Combat 6's JobPoolA/JobPoolB) routinely relies on the resulting
+// deterministic scheduling for correctness, not just throughput: a submitter
+// that writes a job's parameters and only then publishes it to a worker is
+// safe on real hardware because the fixed core assignment and guest thread
+// priorities mean the two never truly race. A host that runs every guest
+// thread as an ordinary, unprioritized, unpinned OS thread turns that into a
+// real, host-timing-dependent race. Honoring the guest's own priority/
+// affinity requests - which Xenon already tracks but previously discarded -
+// restores enough of that scheduling determinism to close such races instead
+// of only reproducing them.
+int windows_thread_priority(ThreadPriority priority) noexcept {
+  switch (priority) {
+    case ThreadPriority::Idle: return THREAD_PRIORITY_IDLE;
+    case ThreadPriority::Lowest: return THREAD_PRIORITY_LOWEST;
+    case ThreadPriority::BelowNormal: return THREAD_PRIORITY_BELOW_NORMAL;
+    case ThreadPriority::Normal: return THREAD_PRIORITY_NORMAL;
+    case ThreadPriority::AboveNormal: return THREAD_PRIORITY_ABOVE_NORMAL;
+    case ThreadPriority::Highest: return THREAD_PRIORITY_HIGHEST;
+    case ThreadPriority::TimeCritical: return THREAD_PRIORITY_TIME_CRITICAL;
+  }
+  return THREAD_PRIORITY_NORMAL;
+}
+
+void apply_host_priority(std::thread& host_thread, ThreadPriority priority) noexcept {
+  const auto handle = static_cast<HANDLE>(host_thread.native_handle());
+  if (!handle) return;
+  SetThreadPriority(handle, windows_thread_priority(priority));
+}
+
+void apply_host_affinity(std::thread& host_thread, std::uint32_t affinity) noexcept {
+  // 0xFFFFFFFF is ThreadCreationParams's "no restriction requested" sentinel
+  // (see thread.hpp) - leave the host's own default affinity untouched
+  // rather than pinning every unrestricted thread to the low bits of
+  // whatever the host happens to have.
+  if (affinity == 0xFFFFFFFFu) return;
+  const auto handle = static_cast<HANDLE>(host_thread.native_handle());
+  if (!handle) return;
+  // Xbox 360 hardware-thread bit N maps directly to host logical-processor
+  // bit N; every realistic host has at least the 6 bits real hardware could
+  // ever set, so no renumbering is needed - just mask to what the host
+  // actually reports, in case a guest affinity bit falls outside a very
+  // small host's processor count.
+  SYSTEM_INFO system_info{};
+  GetSystemInfo(&system_info);
+  const DWORD_PTR host_mask =
+      system_info.dwNumberOfProcessors >= 32
+          ? 0xFFFFFFFFu
+          : ((DWORD_PTR{1} << system_info.dwNumberOfProcessors) - 1);
+  const DWORD_PTR requested = static_cast<DWORD_PTR>(affinity) & host_mask;
+  if (requested == 0) return;
+  SetThreadAffinityMask(handle, requested);
+}
+#endif
 
 }  // namespace
 
@@ -67,13 +130,17 @@ std::uint32_t KernelThread::processor_affinity() const noexcept {
 void KernelThread::set_priority(ThreadPriority priority) noexcept {
   std::scoped_lock lock(mutex_);
   priority_ = priority;
-  // TODO: Map to host thread priority if needed
+#if defined(_WIN32)
+  if (host_thread_) apply_host_priority(*host_thread_, priority_);
+#endif
 }
 
 void KernelThread::set_processor_affinity(std::uint32_t affinity) noexcept {
   std::scoped_lock lock(mutex_);
   processor_affinity_ = affinity;
-  // TODO: Map to host thread affinity if needed
+#if defined(_WIN32)
+  if (host_thread_) apply_host_affinity(*host_thread_, processor_affinity_);
+#endif
 }
 
 void KernelThread::set_name(std::string name) {
@@ -89,6 +156,10 @@ bool KernelThread::start() {
 
   try {
     host_thread_ = std::make_unique<std::thread>(&KernelThread::thread_main, this);
+#if defined(_WIN32)
+    apply_host_priority(*host_thread_, priority_);
+    apply_host_affinity(*host_thread_, processor_affinity_);
+#endif
     // create_suspended_ threads report Suspended (not Ready) as soon as the
     // host thread is spawned - matching real CREATE_SUSPENDED semantics,
     // where the thread exists and is queryable/resumable immediately, even
@@ -120,6 +191,13 @@ bool KernelThread::resume() {
   }
 
   const auto old_count = suspend_count_.load(std::memory_order_acquire);
+  {
+    if (FILE* _d = std::fopen("thread_resume_diag.log", "a")) {
+      std::fprintf(_d, "resume() called: thread_id=%u old_suspend_count=%d\n",
+                   thread_id_, (int)old_count);
+      std::fclose(_d);
+    }
+  }
   if (old_count == 0) {
     return false;  // Not suspended
   }
@@ -255,6 +333,13 @@ void KernelThread::thread_main() {
     }
   }
 
+  {
+    if (FILE* _d = std::fopen("thread_main_entry_diag.log", "a")) {
+      std::fprintf(_d, "thread_main: thread_id=%u should_run_entry=%d has_entry=%d\n",
+                   thread_id_, should_run_entry ? 1 : 0, entry_ ? 1 : 0);
+      std::fclose(_d);
+    }
+  }
   std::uint32_t result = 0;
   if (should_run_entry && entry_) {
     result = entry_();
