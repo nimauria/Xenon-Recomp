@@ -137,3 +137,63 @@ this mapping for ownership transfer.
 Depth caches now use height-independent EDRAM identity. Because exact packed
 depth/stencil preservation is not yet available, growth is a visible backend
 error instead of silently allocating an unrelated depth authority.
+
+## GpuUnsupportedCounters catalog — capability/silent-fallback observability
+
+`GpuUnsupportedCounters` (`include/xenon/gpu/backend.hpp`) is a plain counter
+struct, one field per audited "unsupported GPU operation" category, plus
+`total()`. It is queryable via `Backend::unsupported_counters()` (default `{}`
+for a backend that does not override it, e.g. `NullBackend`) and is published
+as `XenonSession::capability_report()`'s `"gpu"` section whenever a GPU
+backend exists — the section is omitted entirely, not reported as zero, when
+no backend exists, so "not measured" stays distinguishable from "measured and
+clean". Both `d3d12::Backend` and `vulkan::Backend` implement
+`unsupported_counters()` identically, incrementing the shared counters at the
+exact point each category is detected:
+
+- **`unknownPackets`** — a guard at the top of `consume()` counts and logs
+  (category `"gpu"`, `Logger::Level::Warning`) any `ir::Command` variant other
+  than `RegisterWrite`/`DrawPacket`/`ShaderLoad` instead of silently dropping
+  it.
+- **`unknownRegisters`** — `CommandProcessor::Statistics::unknown_register_writes`
+  (`include/xenon/gpu/command_processor.hpp`) increments in
+  `emit_register_write()` immediately before it throws for a register index
+  outside `RegisterFile::kRegisterCount`; this lives on the PM4 frontend's own
+  `CommandProcessor::Statistics`, not on `Backend::unsupported_counters()`.
+- **`unsupportedFetchFormats` / `unsupportedShaderInstructions` /
+  `unsupportedShaderFeatures`** — `LoweredShader` carries matching counts,
+  incremented by `HlslShaderLowerer::lower()` at a reserved ALU opcode, an
+  unmapped vertex-fetch format, a non-fetch texture opcode, an over-limit
+  temporary-register count, or an incomplete decoded shader.
+- **`unsupportedTextureFormats`** — `TextureImage::initialize()` sets an
+  `unsupported_format()` signal exactly when `host_texture_format()` returns
+  Unknown/Undefined; the texture-bind path in `consume()` increments the
+  counter when set.
+- **`unsupportedSamplerBehaviors`** — both backends' `address_mode()`
+  increments a counter on the `default:` case where a guest clamp value
+  outside Xenos's real 0-3 range previously mapped silently to
+  `BORDER`/`CLAMP_TO_BORDER`.
+- **`unhandledResolveModes`** — incremented alongside the existing distinct
+  `error()` string for an unsupported Xenos copy command or unsupported MSAA
+  sample-set selection during resolve.
+- **`unexpectedOwnershipTransitions`** — incremented alongside the existing
+  rejection when `acquire_color_ownership()`/`acquire_depth_ownership()`'s
+  `EdramOwnershipTracker::commit()` call returns false for a stale ownership
+  plan.
+- **`fallbackShaderUses`** — incremented on every draw that actually uses the
+  host-only RectangleList geometry-shader fallback, not only on that
+  fallback's rare compile failure.
+- **`unhandledDepthStencilPaths`** — tracked for completeness/future-proofing;
+  Xenos depth/stencil format space is currently closed (`D24S8`/`D24FS8` only,
+  both fully handled), so nothing increments this field today. This is an
+  honest zero, not a wired-up placeholder.
+- **`failedResourceBarriers`** — also currently always zero:
+  `ResourceBarrierPlanner`'s `request()`/`alias()`/`memory_dependency()` only
+  return `false` for genuine no-ops (null resource, `before == usage`, a
+  duplicate dependency), never for a barrier that could not be satisfied, so
+  there is no real failure condition to hook this counter into yet.
+
+`GpuPerformanceCounters` (`submissions`, `draws`, `shaderCacheMisses`,
+`resolveOperations`, `texture_cache_invalidations` — see
+`docs/graphics/TEXTURES.md`) is also surfaced alongside
+`GpuUnsupportedCounters` in the same `capability_report()` `"gpu"` section.

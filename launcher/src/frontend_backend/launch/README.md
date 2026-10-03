@@ -22,15 +22,18 @@ LaunchFeature -> LaunchService -> IRuntimeBridge -> Xenon Core
 
 ## Current runtime boundary
 
-`RuntimeBridge::prepareLaunch()` is real and validates the configuration/runtime connection. Xenon
-Core does not yet expose a generic executable/session start API, so `RuntimeBridge::launch()` still
-returns `Runtime session API pending` after successful preparation. `SessionController` therefore
-reaches `Starting` and then honestly enters `Failed` today; it never reports a fake Running state.
-When Xenon Core implements the session API, the same controller will enter `Running` automatically
-when the bridge returns success.
+The runtime boundary is process-separated and real, not simulated in-process. `RuntimeBridge`
+validates the configuration in `prepareLaunch()`, writes the versioned launch contract, and starts
+`xenon_runtime_host` as a separate process. From there it supervises that process's `status.json`
+and reports the runtime's actual state back to `SessionController`. A session does not reach
+`Running` merely because the host process was created: `SessionController` waits until the runtime
+reports `stateName: "running"` in `status.json`, and runtime failure/crash/stop transitions are
+propagated back into launcher state as typed `Failed`/`Stopping` outcomes rather than silently
+dropping back to `Idle`.
 
 Fixture/test content follows the same rule. A fixture can pass launcher-side validation, but test
-content is never reported as an executable game session.
+content is never reported as an executable game session; test-mode runs use a separate history key
+so they do not pollute production session history.
 
 ## Cancellation and stop
 

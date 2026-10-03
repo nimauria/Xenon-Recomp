@@ -254,3 +254,29 @@ Project Gracemeria testing. Remaining work belongs to adjacent runtime layers:
   semantics demonstrated by the title;
 - later optional coverage: SVOD, FATX/system-storage policy, deeper STFS
   cryptographic verification and uncommon filesystem IOCTLs.
+
+## Async I/O diagnostics — AC6 runtime readiness pass
+
+`KernelFileObject::begin_request()` and `complete_request()` now each emit one
+`"io"`-category `xenon::logging::Logger` entry at `Level::Debug`, carrying the
+request's sequence number (`IoRequest::id()`), its operation
+(`Read`/`Write`/`Flush`/...), and a stable tag for the *host* thread that
+submitted or completed it. This closes the same logging-coverage gap that an
+earlier pass found and fixed in `src/graphics/**`: `src/kernel/**` previously
+had zero `Logger` call sites. The tag is a host thread id, not a guest thread
+id — `KernelFileObject` has no guest execution context of its own — but it is
+enough to notice a request completing on a different host thread than the one
+that submitted it. `xenon_kernel` now links `xenon_logging` to support this.
+
+**Known, tracked gap:** guest event signalling (logging when a guest-visible
+event object tied to an async request is actually signalled) is not covered.
+That signalling happens at the `xbox_io`/`KernelEvent` layer, one level above
+`KernelFileObject`, and was not part of this pass. Correlating I/O-manager
+submit/completion timing with guest event-signal timing requires a second log
+site at that higher layer.
+
+Regression coverage: `tests/kernel/kernel_io_tests.cpp`
+`test_async_request_submit_and_completion_are_logged` installs a `Logger` sink
+and asserts both a submit and a completion entry are emitted, tagged with the
+exact request sequence number, for a real `KernelIoManager`-driven async
+request.

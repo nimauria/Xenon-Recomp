@@ -297,7 +297,7 @@ Content Services V1 provides:
 ## References
 
 - [Filesystem V1](../filesystem/FILESYSTEM_V1.md) - VFS foundation
-- [XEX Loader](../xbox/XEX_LOADER.md) - Title update application
+- [XEX Loader V2](../xbox/XEX_LOADER_V2.md) - Title update application
 - [STFS Package Format](https://free60project.github.io/wiki/STFS.html)
 - [XContent Format](https://free60project.github.io/wiki/XContent.html)
 

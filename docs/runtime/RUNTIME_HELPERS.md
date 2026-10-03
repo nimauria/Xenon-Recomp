@@ -1,11 +1,11 @@
 # Runtime helpers: register-spill/restore families and instruction-pattern hints
 
 Covers two generic Analysis Hint Schema V2 / Recomp Driver capabilities added
-to close the two gaps Project Gaia's Sonic Unleashed (UnleashedRecomp/SWA.toml)
-bring-up surfaced against Xenon core - see `GENERIC_XENON_BLOCKERS.md` for the
-original evidence. Both gaps were genuinely generic (any XenonRecomp-toolchain
-title can hit them), not Sonic-specific, and neither is implemented with any
-title address or title-specific logic anywhere in this repository.
+to close two gaps Project Gaia's Sonic Unleashed (UnleashedRecomp/SWA.toml)
+bring-up surfaced against Xenon core. Both gaps were genuinely generic (any
+XenonRecomp-toolchain title can hit them), not Sonic-specific, and neither is
+implemented with any title address or title-specific logic anywhere in this
+repository.
 
 ## 1. Register-range `RuntimeHelperKind` families
 
@@ -214,6 +214,5 @@ including a legacy fixture with neither `registerStart` nor
 all 8 register-helper addresses to a real `RuntimeHelper` (kind +
 `register_start`) apiece, and all 5 real `invalid_instructions` entries to a
 real `InstructionPatternHint` apiece - both categories previously reported as
-unsupported/downgraded are now `0` in the migration report. See Project
-Gaia's own `GENERIC_XENON_BLOCKERS.md` entry and `docs/UNLEASHED_RECOMP_AUDIT.md`
-for the before/after counts against the real public `SWA.toml`.
+unsupported/downgraded are now `0` in the migration report, per Project
+Gaia's own before/after counts against the real public `SWA.toml`.

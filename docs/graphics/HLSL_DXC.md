@@ -60,3 +60,31 @@ link `Xenon::GraphicsDXC` must deploy the matching DXC runtime in the same way.
 
 GPU 08 consumes the reflection and compiled blobs through this boundary. Later
 texture realization and draw submission must not duplicate or bypass it.
+
+## GpuShaderCoverage counters
+
+`GpuShaderCoverage` (`include/xenon/gpu/backend.hpp`) is queryable via
+`Backend::shader_coverage()` and published as `capability_report()`'s
+`"shader"` section (omitted, like the `"gpu"` section in
+`docs/graphics/NATIVE_BACKENDS.md`, when no GPU backend exists):
+
+- **`shadersDiscovered`** — distinct `ir::ShaderLoad` programs seen
+  (`Impl::decoded_shaders.size()` on both backends). This is a live count:
+  shaders are discovered dynamically as a title streams them, not a
+  requirement that every shader be known before boot.
+- **`shadersTranslated` / `translationFailures`** — `HlslShaderLowerer::lower()`
+  outcomes on the primary `ir::ShaderLoad` path specifically, not the
+  float20-depth/writable-guest-memory re-lowerings of an already-discovered
+  shader (which would double-count). `translationFailures` increments at the
+  exact point `!lowered.complete` is observed — the same site that increments
+  `unsupportedShaderInstructions`/`unsupportedShaderFeatures`/
+  `unsupportedFetchFormats` in `GpuUnsupportedCounters`, so a translation
+  failure and its specific reason are always counted together.
+- **`cacheHits` / `cacheMisses`** — `ShaderCache::hits()`/`misses()`.
+
+`shadersTranslated = shadersDiscovered - translationFailures` (floored at 0)
+is a derived approximation, not a per-shader ledger: if the same guest shader
+hash is reloaded and fails translation more than once, `translationFailures`
+increments each time but `shadersDiscovered` does not (it is keyed by hash).
+The two counters that matter operationally — `shadersDiscovered` and
+`translationFailures` — both stay accurate on their own terms regardless.

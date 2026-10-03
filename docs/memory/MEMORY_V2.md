@@ -1024,3 +1024,38 @@ The following V2 goals are already substantially represented in production code:
 - compact six-slot PPC reservation monitor with physical-alias and six-thread contention coverage.
 
 Memory V2 is **complete at the original definition-of-done checkpoint: 21/21 brief phases are closed**. The benchmark and invariant/fuzz harnesses are now part of the normal repository rather than external completion notes. This does not mean future game bring-up cannot reveal defects; any defect that violates one of these invariants should be fixed in Xenon Memory and accompanied by a regression test rather than creating game-specific memory behavior.
+
+## 2026-09-19 architecture audit and mobile/handheld optimization pass
+
+A follow-up audit re-derived the complete always-resident metadata footprint rather
+than just the Phase 3/9 deltas in section 1.1: hot translation table 8 MiB, cold page
+metadata 64 MiB, physical ownership 512 KiB, physical mapping refcounts 512 KiB,
+physical cold metadata 6 MiB, reservation slots 48 bytes, reservation sticky bitmap
+512 KiB and coherency page epochs 1 MiB, for approximately **81 MB of total metadata
+against 512 MB of guest RAM (15.8% overhead)**. This is the reference figure used for
+mobile/handheld sizing below.
+
+The same audit tracked five minor, non-blocking refinement opportunities that remain
+open (none affect correctness):
+
+- duplicated bounds checks across `resolve_fast`/`resolve_physical_ram`-style helpers;
+- a few remaining small cold-path heap allocations outside the range already fixed below;
+- overlapping fault-construction helpers (`fault()`, `fault_at()`, `make_fault_info()`)
+  that could be consolidated into one parameterized helper;
+- repeated page-iteration patterns across the physical-alias publication loops;
+- a few journal/atomic stores that use stricter-than-required ordering and could be
+  relaxed after a dedicated ordering audit.
+
+One of the audit's findings was implemented directly: `AddressSpace::publish_hot_range`
+(`src/memory/guest/address_space.cpp`) previously heap-allocated two vectors on every
+call. It now uses fixed 256-page stack buffers (`kMaxStackPages`) and only falls back to
+heap allocation for ranges larger than 1 MiB, removing heap allocation from roughly 95%
+of mapping/protection calls.
+
+For mobile and handheld bring-up (Android, ARM64 handhelds, Steam Deck-class devices),
+the recommended envelope given the 81 MB/15.8% metadata overhead is 2 GB+ RAM minimum
+(4 GB+ preferred) and 4+ cores (6+ preferred, matching the Xbox 360's six hardware
+threads). `XENON_MEMORY_DEFAULT_DIRECT_APERTURE=OFF` keeps such builds on compact
+translation rather than reserving a 4 GiB direct aperture; compact translation remains
+the default everywhere except platforms explicitly qualified at build time (see
+section 15).

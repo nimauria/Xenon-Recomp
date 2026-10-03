@@ -4,10 +4,13 @@
 
 The project is designed so multiple game recompilation projects can share one implementation of the Xbox 360 execution environment instead of rebuilding CPU, memory, graphics, filesystem, input, kernel services, content handling, and launcher infrastructure for every title.
 
-Xenon is being developed as a **shared runtime plus multi-game launcher**, with individual games supplied through separate modules. The first intended real-title integration and validation target is **Project Gracemeria / Ace Combat 6**.
+Xenon is being developed as a **shared runtime plus multi-game launcher**, with individual games supplied through separate modules. The current operational bring-up target is **Project Gracemeria / Ace Combat 6**; **Gears of War 2** is the next planned target afterward, chosen due to the lack of an official PC port.
 
 > [!IMPORTANT]
 > Xenon is under active development and is not yet a finished end-user compatibility layer. Interfaces, module contracts, and runtime behaviour may change while real-title bring-up continues.
+
+> [!WARNING]
+> Game titles can currently be launched and will execute, but due to outstanding bugs no graphics or audio output is produced yet. This is under active investigation.
 
 > [!NOTE]
 > Xenon does not distribute Xbox 360 firmware, games, executables, title updates, DLC, encryption keys, or other proprietary content. Users and game-module projects must provide content from lawful sources.
@@ -188,7 +191,7 @@ The CPU subsystem currently contains:
 
 The current production focus is **x86-64 first**. Direct x86-64 and future ARM64 backend directories exist as architectural boundaries, but the current native AOT path is C++-based.
 
-See [`docs/cpu/CPU_V2_DESIGN.md`](docs/cpu/CPU_V2_DESIGN.md) and [`docs/cpu/VALIDATION.md`](docs/cpu/VALIDATION.md).
+See [`docs/cpu/CPU_V2_DESIGN.md`](docs/cpu/CPU_V2_DESIGN.md).
 
 ---
 

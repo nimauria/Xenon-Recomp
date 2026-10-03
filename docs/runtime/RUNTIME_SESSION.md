@@ -535,5 +535,5 @@ proven, and two real defects this work surfaced were fixed.
 - [Runtime Host](RUNTIME_HOST.md)
 - [CPU V2 Design](../cpu/CPU_V2_DESIGN.md)
 - [Memory V2](../memory/MEMORY_V2.md)
-- [XEX Loader](../xbox/XEX_LOADER.md)
+- [XEX Loader V2](../xbox/XEX_LOADER_V2.md)
 - [GPU V1](../graphics/GPU_V1.md)
