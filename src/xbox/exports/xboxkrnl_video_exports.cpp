@@ -19,11 +19,14 @@
 
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/gpu/types.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
 
@@ -293,6 +296,11 @@ bool vd_set_graphics_interrupt_callback_export(kernel::KernelProcess& process,
                                                ExportCallContext& context) {
   const auto callback_address = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto callback_context = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  if (FILE* _d = std::fopen("vsync_callback_diag.log", "a")) {
+    std::fprintf(_d, "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
+                 callback_address, callback_context);
+    std::fclose(_d);
+  }
   process.set_gpu_interrupt_callback(callback_address, callback_context);
   context.cpu.gpr[3] = 0u;
   return true;
@@ -379,6 +387,19 @@ bool vd_shutdown_engines_export(kernel::KernelProcess& /*process*/,
 // execute_ring() call has real progress to drain, without claiming a false,
 // byte-exact PM4_XE_SWAP encoding this codebase does not actually produce.
 bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  {
+    static std::atomic<int> _vd_swap_call_count{0};
+    const int _n = _vd_swap_call_count.fetch_add(1) + 1;
+    if (_n <= 20) {
+      if (FILE* _d = std::fopen("vdswap_calls_diag.log", "a")) {
+        std::fprintf(_d, "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
+                     _n, context.thread_id, (unsigned long long)context.cpu.lr,
+                     (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
+                     (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
+        std::fclose(_d);
+      }
+    }
+  }
   const auto buffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   const auto frontbuffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
   const auto texture_format_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
@@ -406,6 +427,27 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
       const auto pitch = width * kFrontBufferBytesPerPixel;
       process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
                                    static_cast<std::uint8_t>(format));
+    }
+  }
+
+  // The caller reserves 64 dwords (256 bytes) at buffer_ptr for this call to
+  // fill in (matching real XDK VdSwap usage - a scratch region inside the
+  // primary ring the driver writes a texture-fetch-constant register packet
+  // plus its own swap signal into). This implementation does not replay a
+  // byte-exact packet encoding there (see the ring-cursor-advance comment
+  // below), but leaving the region as whatever stale/uninitialized guest
+  // memory happened to precede it is worse than that omission: once the
+  // write cursor advances past it below, the GPU command decoder treats
+  // these bytes as real ring content and will try to parse them as PM4
+  // packets. Fill the whole reserved region with PM4 type-2 (NOP) packets -
+  // the one encoding every PM4 decoder, real or emulated, is guaranteed to
+  // skip harmlessly - so there is never genuinely random data sitting in the
+  // ring's "valid" window.
+  if (buffer_ptr != 0u) {
+    constexpr std::uint32_t kReservedDwords = 64u;
+    constexpr std::uint32_t kNopPacket = gpu::make_packet_type2();
+    for (std::uint32_t i = 0; i < kReservedDwords; ++i) {
+      context.memory.write32_be(buffer_ptr + i * 4u, kNopPacket);
     }
   }
 
