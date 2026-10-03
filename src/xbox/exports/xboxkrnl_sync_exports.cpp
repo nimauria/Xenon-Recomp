@@ -1,6 +1,7 @@
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -268,10 +269,20 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   HandleView view{};
   const auto lookup_code = process.handle_table().lookup(handle, view);
   if (lookup_code != KernelIoCode::Success) {
+    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
+      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X LOOKUP FAILED code=%d\n",
+                   (unsigned)context.thread_id, (unsigned)handle, (int)lookup_code);
+      std::fclose(_d);
+    }
     context.cpu.gpr[3] = to_status(lookup_code);
     return true;
   }
   if (view.object->type() != ObjectType::Event) {
+    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
+      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X TYPE MISMATCH type=%d\n",
+                   (unsigned)context.thread_id, (unsigned)handle, (int)view.object->type());
+      std::fclose(_d);
+    }
     context.cpu.gpr[3] = status::ObjectTypeMismatch;
     return true;
   }
@@ -281,6 +292,11 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   event.set();
   if (previous_state_ptr != 0u) {
     context.memory.write32_be(previous_state_ptr, previous);
+  }
+  if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
+    std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X SUCCESS previous=%u event_ptr=%p\n",
+                 (unsigned)context.thread_id, (unsigned)handle, previous, (void*)&event);
+    std::fclose(_d);
   }
   context.cpu.gpr[3] = status::Success;
   return true;
@@ -554,6 +570,11 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
           "(DPC/APC timer callbacks are not modeled) - the timer object itself "
           "still fires for NtWaitForSingleObjectEx-style waiters");
     });
+  }
+  if (FILE* _d = std::fopen("nt_set_timer_ex_diag.log", "a")) {
+    std::fprintf(_d, "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
+                 (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
+    std::fclose(_d);
   }
 
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));

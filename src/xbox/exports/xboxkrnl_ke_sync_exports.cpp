@@ -1,6 +1,7 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -110,6 +111,12 @@ bool ke_initialize_semaphore_export(kernel::KernelProcess&, ExportCallContext& c
 bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
+  if (FILE* _d = std::fopen("set_event_all_diag.log", "a")) {
+    std::fprintf(_d, "KeSetEvent: thread_id=%u header=0x%08X\n",
+                 (unsigned)context.thread_id, (unsigned)header_address);
+    std::fclose(_d);
+  }
+
   std::string error;
   auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
   if (!object || object->type() != ObjectType::Event) {
@@ -192,9 +199,22 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
     return true;
   }
 
+  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
+    std::fprintf(_d, "KeWaitForSingleObject ENTER: thread_id=%u header=0x%08X type=%d timeout_ptr=0x%08X object_ptr=%p\n",
+                 (unsigned)context.thread_id, (unsigned)header_address, (int)object->type(),
+                 (unsigned)timeout_ptr, (void*)object.get());
+    std::fclose(_d);
+  }
+
   const auto timeout = read_timeout(context, timeout_ptr);
   const auto result = kernel::wait_for_single_object(object, timeout, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+
+  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
+    std::fprintf(_d, "KeWaitForSingleObject RETURNED: thread_id=%u header=0x%08X result=%d\n",
+                 (unsigned)context.thread_id, (unsigned)header_address, (int)result);
+    std::fclose(_d);
+  }
   return true;
 }
 

@@ -1,7 +1,9 @@
 #include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <thread>
 
@@ -50,11 +52,41 @@ void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
   // only a lock held across a long host stall (thousands of failed attempts) falls
   // back to sleeping, so it does not burn a core. (Windows rounds short sleeps up
   // to a scheduler tick, so sleeping any earlier would make ordinary contention crawl.)
+  const auto _acquire_start = std::chrono::steady_clock::now();
+  if (lock_address == 0x641B8u) {
+    if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
+      std::fprintf(_d, "ACQUIRE ATTEMPT START by thread_id=%u\n", context.thread_id);
+      std::fclose(_d);
+    }
+  }
   for (std::uint32_t attempt = 0;; ++attempt) {
     // Test-and-test-and-set: only issue the (comparatively heavy) load-reserve/
     // store-conditional pair when a plain load says the lock looks free, so
     // waiters do not keep starving the holder's own reservation traffic.
-    if (context.memory.read32_be(lock_address) == 0u && try_acquire(context, lock_address)) return;
+    if (context.memory.read32_be(lock_address) == 0u && try_acquire(context, lock_address)) {
+      const auto _elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - _acquire_start)
+                                    .count();
+      if (lock_address == 0x641B8u) {
+        if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
+          std::fprintf(_d, "ACQUIRED by thread_id=%u after %lldms (%u attempts)\n",
+                       context.thread_id, (long long)_elapsed_ms, attempt);
+          std::fclose(_d);
+        }
+      }
+      if (_elapsed_ms >= 20) {
+        static std::atomic<int> _slow_acquire_diag_count{0};
+        if (_slow_acquire_diag_count.fetch_add(1) < 20) {
+          if (FILE* _d = std::fopen("spinlock_contention_diag.log", "a")) {
+            std::fprintf(_d, "acquire(0x%08llX) by thread_id=%u took %lldms (%u attempts)\n",
+                         (unsigned long long)lock_address, context.thread_id,
+                         (long long)_elapsed_ms, attempt);
+            std::fclose(_d);
+          }
+        }
+      }
+      return;
+    }
     if (attempt < 64u) continue;
     // The session is shutting down and the holder may never run again: give up
     // rather than hang the join of the thread that is waiting here.
@@ -71,6 +103,13 @@ void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
 }
 
 void release(ExportCallContext& context, cpu::GuestAddress lock_address) {
+  if (lock_address == 0x641B8u) {
+    if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
+      std::fprintf(_d, "RELEASE by thread_id=%u (previous holder was 0x%08X)\n",
+                   context.thread_id, context.memory.read32_be(lock_address));
+      std::fclose(_d);
+    }
+  }
   context.memory.write32_be(lock_address, 0u);
 }
 

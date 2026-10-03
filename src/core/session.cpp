@@ -19,18 +19,24 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
+#include <set>
 #include <sstream>
+#include <thread>
 
 #include "xenon/core/import_classification.hpp"
 #include "xenon/kernel/time.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
+#include "xenon/xam/xam_exports.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_exports.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_string_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
@@ -46,6 +52,7 @@
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 #include "xenon/xbox/xboxkrnl_time_exports.hpp"
 #include "xenon/xbox/xboxkrnl_tls_exports.hpp"
+#include "xenon/xbox/xboxkrnl_device_io_exports.hpp"
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 #include "xenon/xbox/xboxkrnl_xex_module_exports.hpp"
 
@@ -1172,6 +1179,28 @@ bool XenonSession::init_exports() {
         {0x1C7u, "VdPersistDisplay", &xbox::vd_persist_display_export},
         {0x269u, "VdRetrainEDRAM", &xbox::vd_retrain_edram_export},
         {0x26Au, "VdRetrainEDRAMWorker", &xbox::vd_retrain_edram_worker_export},
+        // Low-level block-device IOCTL exports - see
+        // xboxkrnl_device_io_exports.cpp for the real behavior each
+        // implements; none need KernelProcess state, but match this table's
+        // shared SyncHandler signature.
+        {0xD9u, "NtDeviceIoControlFile", &xbox::nt_device_io_control_file_export, true,
+         "only the two real IOCTLs AC6's XMountUtilityDrive cache-mounting "
+         "path issues (DISK_GET_DRIVE_GEOMETRY, DISK_GET_PARTITION_INFO) are "
+         "handled; any other IOCTL reports InvalidParameter"},
+        {0x3Bu, "IoDismountVolume", &xbox::io_dismount_volume_export, true,
+         "no dynamic per-volume mount-table entry exists to actually "
+         "dismount - matches rexglue-sdk's identical precedent"},
+        {0x3Cu, "IoDismountVolumeByFileHandle", &xbox::io_dismount_volume_export, true,
+         "no dynamic per-volume mount-table entry exists to actually "
+         "dismount - matches rexglue-sdk's identical precedent"},
+        {0x259u, "StfsCreateDevice", &xbox::stfs_device_export, true,
+         "the low-level STFS NT device path is not backed by a real device "
+         "object - modern content access goes through XamContent*/"
+         "ContentManager instead"},
+        {0x25Au, "StfsControlDevice", &xbox::stfs_device_export, true,
+         "the low-level STFS NT device path is not backed by a real device "
+         "object - modern content access goes through XamContent*/"
+         "ContentManager instead"},
     };
     for (const auto& binding : kSyncBindings) {
       core::ExportDescriptor descriptor{};
@@ -1381,9 +1410,29 @@ bool XenonSession::init_exports() {
   }
 
   // Register XAM exports
-  if (xam_ && !xam_->register_exports(export_registry_)) {
+  if (xam_ && !xam_->register_exports(export_registry_, *this)) {
     set_error("Failed to register XAM exports");
     return false;
+  }
+
+  // Register XamTaskSchedule (xam.xex ordinal 0x01AF). Like ExCreateThread
+  // above, spawning a real guest-executing thread needs
+  // compiled_registry_binder_/dynamic_fallback_/memory_/the XEX's TLS
+  // template - private XenonSession state a free xam/ export file cannot
+  // reach - so this is registered inline here, not in xam_session.cpp.
+  {
+    core::ExportDescriptor descriptor{};
+    descriptor.library = "xam";
+    descriptor.name = "XamTaskSchedule";
+    descriptor.ordinal = xam::ordinal::XamTaskSchedule;
+    descriptor.requirement = ExportRequirement::Required;
+    descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      return export_xam_task_schedule(ctx);
+    };
+    if (!export_registry_.register_export(std::move(descriptor))) {
+      set_error("Failed to register xam XamTaskSchedule export");
+      return false;
+    }
   }
 
 #if defined(XENON_HAS_AUDIO)
@@ -1845,6 +1894,10 @@ SessionResult XenonSession::start() {
   write_guest_thread_id(*memory_, main_thread_tls_, main_thread_->thread_id());
   main_thread_->set_guest_kthread_address(main_thread_tls_.kthread_address);
   kernel_process_->set_main_thread(main_thread_);
+  if (FILE* _d = std::fopen("thread_identity_diag.log", "a")) {
+    std::fprintf(_d, "main_thread_ assigned thread_id=%u\n", main_thread_->thread_id());
+    std::fclose(_d);
+  }
   // Take the watch baseline before any guest code runs.
   start_memory_watch_poll();
   if (!main_thread_->start()) {
@@ -2879,6 +2932,13 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   }
 
   auto* entry_fn = context.lookup_compiled(entry, cpu::CompiledLookupKind::Call);
+  {
+    if (FILE* _d = std::fopen("dispatch_lookup_diag.log", "a")) {
+      std::fprintf(_d, "dispatch_guest_thread lookup: thread_id=%u entry=0x%08llX entry_fn=%p\n",
+                   tracked_thread_id, (unsigned long long)entry, (void*)entry_fn);
+      std::fclose(_d);
+    }
+  }
 
   cpu::ExecutionResult result{};
   bool crashed = false;
@@ -2892,7 +2952,18 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   };
   try {
     if (entry_fn) {
+      if (FILE* _d = std::fopen("dispatch_lookup_diag.log", "a")) {
+        std::fprintf(_d, "dispatch_guest_thread: thread_id=%u ABOUT TO CALL entry_fn=%p for entry=0x%08llX\n",
+                     tracked_thread_id, (void*)entry_fn, (unsigned long long)entry);
+        std::fclose(_d);
+      }
       result = entry_fn(context);
+      if (FILE* _d = std::fopen("dispatch_lookup_diag.log", "a")) {
+        std::fprintf(_d, "dispatch_guest_thread: thread_id=%u entry_fn RETURNED reason=%s next=0x%08llX\n",
+                     tracked_thread_id, std::string(cpu::flow_reason_name(result.reason)).c_str(),
+                     (unsigned long long)result.next_address);
+        std::fclose(_d);
+      }
     } else {
       const auto fallback =
           context.try_dynamic_fallback(entry, cpu::CompiledLookupKind::Call);
@@ -3017,8 +3088,31 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
                       << " lr=0x" << state.lr
                       << " ctr=0x" << state.ctr
                       << " r1=0x" << state.gpr[1]
-                      << " r3=0x" << state.gpr[3] << std::dec
-                      << std::endl;
+                      << " r3=0x" << state.gpr[3];
+            if (result.next_address == 0x82379AC4u) {
+              cpu::MemoryAccessContext::PhysicalResolution _probe{};
+              const auto obj = static_cast<std::uint32_t>(state.gpr[27]);
+              std::cout << " r27(obj)=0x" << obj;
+              if (context.memory_access.resolve_physical_ram(
+                      static_cast<cpu::GuestAddress>(obj) + 8u, 4, false, 4, _probe)) {
+                std::cout << " obj+8=0x"
+                          << context.memory_access.read32_be(
+                                 static_cast<cpu::GuestAddress>(obj) + 8u);
+              } else {
+                std::cout << " obj+8=<unresolvable>";
+              }
+              const auto gbase = static_cast<std::uint32_t>(state.gpr[29]);
+              std::cout << " r29(gbase)=0x" << gbase;
+              if (context.memory_access.resolve_physical_ram(
+                      static_cast<cpu::GuestAddress>(gbase) + 0x3B38u, 4, false, 4, _probe)) {
+                std::cout << " gbase+3B38=0x"
+                          << context.memory_access.read32_be(
+                                 static_cast<cpu::GuestAddress>(gbase) + 0x3B38u);
+              } else {
+                std::cout << " gbase+3B38=<unresolvable>";
+              }
+            }
+            std::cout << std::dec << std::endl;
           }
           continue;
         }
@@ -3343,8 +3437,39 @@ std::uint32_t XenonSession::run_created_guest_thread(
     std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
     std::uint64_t start_context, memory::GuestAddress stack_base,
     std::uint32_t stack_size, GuestThreadTlsContext tls) {
+  {
+    static std::atomic<int> _thread_start_diag_count{0};
+    const int _n = _thread_start_diag_count.fetch_add(1) + 1;
+    if (_n <= 100) {
+      if (FILE* _d = std::fopen("thread_start_diag.log", "a")) {
+#ifdef _WIN32
+        const unsigned long _os_tid = GetCurrentThreadId();
+#else
+        const unsigned long _os_tid = 0;
+#endif
+        std::fprintf(_d, "thread start #%d: id=%u start_address=0x%08llX start_context=0x%08llX os_tid=%lu\n",
+                     _n, thread ? thread->thread_id() : 0u,
+                     (unsigned long long)start_address, (unsigned long long)start_context, _os_tid);
+        std::fclose(_d);
+      }
+    }
+  }
   if (kernel_process_ && thread) {
     kernel_process_->thread_manager().set_current_thread(thread);
+  }
+  {
+    std::ostringstream tid_oss;
+    tid_oss << std::this_thread::get_id();
+    auto readback = kernel_process_ ? kernel_process_->thread_manager().current_thread() : nullptr;
+    if (FILE* _d = std::fopen("set_current_thread_diag.log", "a")) {
+      std::fprintf(_d,
+                   "run_created_guest_thread: set thread_id=%u os_thread=%s readback_id=%u "
+                   "readback_ptr=%p set_ptr=%p\n",
+                   thread ? thread->thread_id() : 0u, tid_oss.str().c_str(),
+                   readback ? readback->thread_id() : 0xFFFFFFFFu, (void*)readback.get(),
+                   (void*)thread.get());
+      std::fclose(_d);
+    }
   }
 
   cpu::CpuState state{};
@@ -3357,6 +3482,21 @@ std::uint32_t XenonSession::run_created_guest_thread(
   state.gpr[13] = tls.kpcr_address;
 
   const auto outcome = dispatch_guest_thread(state, start_address, thread);
+  {
+    if (FILE* _d = std::fopen("dispatch_outcome_diag.log", "a")) {
+      std::fprintf(_d,
+                   "dispatch_guest_thread returned: thread_id=%u start_address=0x%08llX "
+                   "crashed=%d crash_message=\"%s\" thread_terminated=%d stop_requested=%d "
+                   "final_reason=%s final_next=0x%08llX final_detail=0x%X\n",
+                   thread ? thread->thread_id() : 0u, (unsigned long long)start_address,
+                   outcome.crashed ? 1 : 0, outcome.crash_message.c_str(),
+                   outcome.thread_terminated ? 1 : 0, outcome.stop_requested ? 1 : 0,
+                   std::string(cpu::flow_reason_name(outcome.final_result.reason)).c_str(),
+                   (unsigned long long)outcome.final_result.next_address,
+                   outcome.final_result.detail);
+      std::fclose(_d);
+    }
+  }
 
   std::uint32_t exit_code = 0;
   if (outcome.crashed) {
@@ -3472,6 +3612,17 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   const auto start_context = context.cpu.gpr[8];
   const auto creation_flags = static_cast<std::uint32_t>(context.cpu.gpr[9]);
 
+  if (start_address == 0x821EEDE0u) {
+    if (FILE* _d = std::fopen("ex_create_thread_caller_diag.log", "a")) {
+      std::fprintf(_d,
+                   "ExCreateThread(821EEDE0): caller_lr=0x%08llX start_context=0x%08llX "
+                   "creation_flags=0x%08X\n",
+                   (unsigned long long)context.cpu.lr, (unsigned long long)start_context,
+                   creation_flags);
+      std::fclose(_d);
+    }
+  }
+
   if (handle_out == 0u || start_address == 0u) {
     context.cpu.gpr[3] = kernel::xbox::status::InvalidParameter;
     return true;
@@ -3509,6 +3660,7 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   // here made every suspended thread start immediately - Ace Combat 6's worker
   // pool then read event handles it had not stored yet and spun forever.
   params.create_suspended = (creation_flags & 0x1u) != 0u;
+  const std::uint32_t _diag_creation_flags = creation_flags;
 
   // The ThreadEntry closure needs to know its own KernelThread's id (to
   // resolve the shared_ptr again via ThreadManager::get_thread() and
@@ -3538,6 +3690,14 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
   write_guest_thread_id(*memory_, tls, thread->thread_id());
   thread->set_guest_kthread_address(tls.kthread_address);
+  {
+    if (FILE* _d = std::fopen("thread_create_flags_diag.log", "a")) {
+      std::fprintf(_d, "ExCreateThread: thread_id=%u start_address=0x%08llX creation_flags=0x%08X create_suspended=%d\n",
+                   thread->thread_id(), (unsigned long long)start_address, _diag_creation_flags,
+                   params.create_suspended ? 1 : 0);
+      std::fclose(_d);
+    }
+  }
 
   kernel::Handle handle{};
   const auto insert_code = kernel_process_->handle_table().insert(
@@ -3566,6 +3726,91 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   }
   context.cpu.gpr[3] = kernel::xbox::status::Success;
   reach_boot_checkpoint(BootCheckpoint::FirstGuestThread);
+  return true;
+}
+
+bool XenonSession::export_xam_task_schedule(ExportCallContext& context) {
+  if (!kernel_process_ || !memory_ || !loaded_xex_) {
+    return false;
+  }
+
+  const auto callback = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto message_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
+
+  if (callback == 0u || handle_out == 0u) {
+    context.cpu.gpr[3] = kernel::xbox::status::InvalidParameter;
+    return true;
+  }
+
+  // XamTaskSchedule's real ABI has no stack-size argument - real hardware
+  // sizes the task thread's stack the same way the title's own main thread
+  // is sized (rounded up to a 16 KiB page, minimum one page), so this reuses
+  // the session's own default guest thread stack size rather than inventing
+  // a second, separate constant.
+  auto stack_size = stack_size_;
+  constexpr std::uint32_t kTaskStackPage = 0x4000u;
+  stack_size = (std::max)(kTaskStackPage, (stack_size + (kTaskStackPage - 1u)) & ~(kTaskStackPage - 1u));
+
+  memory::GuestAddress stack_base{};
+  if (!memory_->allocate(stack_size, 16, memory::kReadWrite, /*top_down=*/true, stack_base)) {
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  GuestThreadTlsContext tls{};
+  std::string tls_error;
+  if (!setup_guest_thread_tls_context(*memory_, loaded_xex_->image.tls, stack_base, stack_size, tls,
+                                      &tls_error)) {
+    static_cast<void>(memory_->release(stack_base));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  kernel::ThreadCreationParams params{};
+  params.stack_size = stack_size;
+  params.name = "XamTask";
+  params.create_suspended = false;
+
+  // Same chicken-and-egg resolution as export_ex_create_thread() above - see
+  // its comment for why this slot exists.
+  auto thread_id_slot = std::make_shared<std::atomic<std::uint32_t>>(0u);
+  auto thread = kernel_process_->thread_manager().create_thread(
+      [this, callback, message_ptr, stack_base, stack_size, tls, thread_id_slot]() -> std::uint32_t {
+        auto self =
+            kernel_process_->thread_manager().get_thread(thread_id_slot->load(std::memory_order_acquire));
+        return run_created_guest_thread(std::move(self), callback,
+                                        static_cast<std::uint64_t>(message_ptr), stack_base,
+                                        stack_size, tls);
+      },
+      params);
+  if (!thread) {
+    release_guest_thread_tls_context(*memory_, tls);
+    static_cast<void>(memory_->release(stack_base));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+  thread_id_slot->store(thread->thread_id(), std::memory_order_release);
+  write_guest_thread_id(*memory_, tls, thread->thread_id());
+  thread->set_guest_kthread_address(tls.kthread_address);
+
+  kernel::Handle handle{};
+  const auto insert_code = kernel_process_->handle_table().insert(
+      thread, /*granted_access=*/0xFFFFFFFFu, kernel::HandleFlags::None, handle);
+  if (insert_code != kernel::KernelIoCode::Success) {
+    static_cast<void>(thread->terminate(0));
+    context.cpu.gpr[3] = kernel::xbox::status::InsufficientResources;
+    return true;
+  }
+
+  if (!thread->start()) {
+    static_cast<void>(thread->terminate(0));
+    context.cpu.gpr[3] = kernel::xbox::status::Unsuccessful;
+    return true;
+  }
+
+  context.memory.write32_be(handle_out, handle);
+  context.cpu.gpr[3] = kernel::xbox::status::Success;
   return true;
 }
 
@@ -3665,7 +3910,25 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
   // ThreadManager::current_thread(), set once in run_audio_callback_thread().
   state.gpr[13] = audio_thread_tls_.kpcr_address;
 
-  return run_guest_callback(state, callback, audio_thread_);
+  {
+    static std::atomic<int> _n{0};
+    const int _en = _n.fetch_add(1) + 1;
+    if (_en <= 20 || (_en % 500) == 0) {
+      if (FILE* _d = std::fopen("audio_callback_diag.log", "a")) {
+        std::fprintf(_d, "invoke_audio_callback #%d ENTER: callback=0x%08X argument=0x%08X\n",
+                     _en, (unsigned)callback, (unsigned)argument);
+        std::fclose(_d);
+      }
+    }
+    const bool _ok = run_guest_callback(state, callback, audio_thread_);
+    if (_en <= 20 || (_en % 500) == 0) {
+      if (FILE* _d = std::fopen("audio_callback_diag.log", "a")) {
+        std::fprintf(_d, "invoke_audio_callback #%d RETURNED: ok=%d\n", _en, (int)_ok);
+        std::fclose(_d);
+      }
+    }
+    return _ok;
+  }
 }
 #endif
 
@@ -3703,6 +3966,22 @@ bool XenonSession::start_gpu_pump_thread() {
   }
   write_guest_thread_id(*memory_, gpu_pump_thread_tls_, gpu_pump_thread_->thread_id());
   gpu_pump_thread_->set_guest_kthread_address(gpu_pump_thread_tls_.kthread_address);
+  if (FILE* _d = std::fopen("thread_identity_diag.log", "a")) {
+    std::fprintf(_d, "gpu_pump_thread_ assigned thread_id=%u\n", gpu_pump_thread_->thread_id());
+    std::fclose(_d);
+  }
+  if (main_thread_) {
+    if (FILE* _d = std::fopen("thread_identity_diag.log", "a")) {
+      std::fprintf(_d, "main_thread_ thread_id=%u\n", main_thread_->thread_id());
+      std::fclose(_d);
+    }
+  }
+  if (audio_thread_) {
+    if (FILE* _d = std::fopen("thread_identity_diag.log", "a")) {
+      std::fprintf(_d, "audio_thread_ thread_id=%u\n", audio_thread_->thread_id());
+      std::fclose(_d);
+    }
+  }
 
   // Mark the pump active before starting the thread, so there is no window
   // where the thread is running but gpu_pump_running_ has not been observed
@@ -3751,6 +4030,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
     if (!graphics_system_ || !gpu_ || !kernel_process_) continue;
 
+    const auto _tick_phase_start = Clock::now();
     const auto ring = kernel_process_->gpu_ring_buffer();
     if (ring.configured() && ring.write_index != ring.read_index) {
       try {
@@ -3789,6 +4069,8 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       }
     }
 
+    const auto _after_submit_ring = Clock::now();
+
     // Drain whatever graphics IR is now pending every tick, even when
     // submit_ring() above produced nothing new this time - IR decoded by a
     // previous tick's partial submission can still be waiting to be played
@@ -3800,6 +4082,26 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         std::scoped_lock console_log_lock(console_log_mutex());
         std::cout << "[XenonSession] GPU pump: IR execution failed: " << ex.what()
                   << std::endl;
+      }
+    }
+
+    {
+      const auto _after_execute_ir = Clock::now();
+      const auto _submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   _after_submit_ring - _tick_phase_start)
+                                   .count();
+      const auto _ir_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               _after_execute_ir - _after_submit_ring)
+                               .count();
+      if (_submit_ms >= 20 || _ir_ms >= 20) {
+        static std::atomic<int> _tick_phase_diag_count{0};
+        if (_tick_phase_diag_count.fetch_add(1) < 40) {
+          if (FILE* _d = std::fopen("tick_phase_diag.log", "a")) {
+            std::fprintf(_d, "slow tick phase: submit_ring=%lldms execute_ir=%lldms\n",
+                         (long long)_submit_ms, (long long)_ir_ms);
+            std::fclose(_d);
+          }
+        }
       }
     }
 
@@ -3823,12 +4125,230 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       frame.texture = texture;
       frame.visible_width = front_buffer.width;
       frame.visible_height = front_buffer.height;
+      const auto _present_start = Clock::now();
       static_cast<void>(graphics_system_->present(*gpu_, frame));
+      const auto _present_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    Clock::now() - _present_start)
+                                    .count();
+      if (_present_ms >= 20) {
+        static std::atomic<int> _present_diag_count{0};
+        if (_present_diag_count.fetch_add(1) < 40) {
+          if (FILE* _d = std::fopen("tick_phase_diag.log", "a")) {
+            std::fprintf(_d, "slow present: %lldms\n", (long long)_present_ms);
+            std::fclose(_d);
+          }
+        }
+      }
     }
 
     const auto interrupt = kernel_process_->gpu_interrupt_callback();
+    {
+      static std::atomic<int> _vsync_diag_count{0};
+      const int _n = _vsync_diag_count.fetch_add(1) + 1;
+      if (_n <= 5 || (_n % 300) == 0) {
+        if (FILE* _d = std::fopen("vsync_tick_diag.log", "a")) {
+          std::fprintf(_d, "vsync tick #%d: interrupt_callback_address=0x%08X front_buffer_base=0x%08X\n",
+                       _n, interrupt.callback_address, kernel_process_->gpu_front_buffer().base_address);
+          std::fclose(_d);
+        }
+      }
+    }
+
+    // Event-dispatcher probe (0x823AD848 family): a global pointer at
+    // 0x82916E4C leads to a per-subsystem struct whose +0x12C field looked,
+    // from static reading, like a pending-event bitmask and +0x130 like a
+    // tick counter guarding which handler branch runs. Sampled here (host
+    // side, every vsync) rather than inside the generated shard itself,
+    // since that shard's custom incremental-build cache was not picking up
+    // edits reliably. Logged on change only, uncapped, to catch a rare
+    // transition without flooding when the value is static.
+    {
+      static std::atomic<std::uint32_t> _last_bitmask{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_counter{0xFFFFFFFFu};
+      try {
+        const auto ctx_ptr = memory_->read32_be(static_cast<cpu::GuestAddress>(0x82916E4Cu));
+        if (ctx_ptr != 0u) {
+          const auto bitmask = memory_->read32_be(static_cast<cpu::GuestAddress>(ctx_ptr + 0x12Cu));
+          const auto counter = memory_->read32_be(static_cast<cpu::GuestAddress>(ctx_ptr + 0x130u));
+          if (bitmask != _last_bitmask.load() || counter != _last_counter.load()) {
+            _last_bitmask.store(bitmask);
+            _last_counter.store(counter);
+            if (FILE* _d = std::fopen("event_dispatch_823AD848_diag.log", "a")) {
+              std::fprintf(_d, "823AD848 probe CHANGED: ctx_ptr=0x%08X bitmask=0x%08X counter=0x%08X\n",
+                           ctx_ptr, bitmask, counter);
+              std::fclose(_d);
+            }
+          }
+        }
+      } catch (const std::exception&) {
+        // Guest memory not mapped yet (early boot) - ignore, next tick retries.
+      }
+    }
+
+    // One-time read of the guest C-string at 0x82067EC8, the label argument
+    // the subsystem-registration call (xenon_fn_821E4AD0 -> 0x821DD028)
+    // passes alongside the object that owns the two stuck handshake events -
+    // to identify semantically what this subsystem actually is.
+    {
+      static std::atomic<bool> _label_dumped{false};
+      if (!_label_dumped.load()) {
+        try {
+          std::string label;
+          for (std::uint32_t i = 0; i < 64u; ++i) {
+            const auto c = memory_->read8(static_cast<cpu::GuestAddress>(0x82067EC8u + i));
+            if (c == 0) break;
+            label.push_back(static_cast<char>(c));
+          }
+          if (!label.empty()) {
+            _label_dumped.store(true);
+            if (FILE* _d = std::fopen("subsystem_label_diag.log", "a")) {
+              std::fprintf(_d, "label at 0x82067EC8: \"%s\"\n", label.c_str());
+              std::fclose(_d);
+            }
+          }
+        } catch (const std::exception&) {
+        }
+      }
+    }
+
+    // Raw guest-memory probe on the two xenon_fn_821EEDE0 render-setup
+    // threads' own per-thread handshake events (X_DISPATCH_HEADER SignalState
+    // field, header+0x4) at 0x62D74 and 0x62DC4. Both threads are confirmed
+    // (live debugger) permanently blocked in KeWaitForSingleObject on these
+    // exact headers, and KeSetEvent is confirmed (full-run log) to never be
+    // called for either. This probe tests whether the GUEST's own memory at
+    // the SignalState offset ever flips to nonzero anyway (i.e. the game
+    // signals via a direct memory write, bypassing the KeSetEvent export
+    // entirely - a legitimate real-hardware "fast path" pattern) while
+    // Xenon's host-side KernelEvent, which only reads this field once at
+    // first resolution, never finds out. Logged on change only.
+    {
+      static std::atomic<std::uint32_t> _last_sig1{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_sig2{0xFFFFFFFFu};
+      try {
+        const auto sig1 = memory_->read32_be(static_cast<cpu::GuestAddress>(0x00062D78u));
+        const auto sig2 = memory_->read32_be(static_cast<cpu::GuestAddress>(0x00062DC8u));
+        if (sig1 != _last_sig1.load() || sig2 != _last_sig2.load()) {
+          _last_sig1.store(sig1);
+          _last_sig2.store(sig2);
+          if (FILE* _d = std::fopen("handshake_event_raw_memory_diag.log", "a")) {
+            std::fprintf(_d, "raw SignalState CHANGED: addr62D74+4(0x62D78)=0x%08X addr62DC4+4(0x62DC8)=0x%08X\n",
+                         sig1, sig2);
+            std::fclose(_d);
+          }
+        }
+      } catch (const std::exception&) {
+        // Guest memory not mapped yet (early boot) - ignore, next tick retries.
+      }
+    }
+
+    // Probe the vsync ISR's own per-tick dispatch-target chain: the guest ISR
+    // (0x821E63F0, via its real per-tick callee 0x821EFBE0) resolves
+    // obj = read32(ctx + 0x2A94) and then conditionally writes into
+    // obj + 0x4 (the X_DISPATCH_HEADER SignalState offset) once an internal
+    // counter wraps. ctx here is the exact same guest address as
+    // interrupt.context. Logged on change only.
+    {
+      static std::atomic<std::uint32_t> _last_cur{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_target{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_tickcount{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_gate1{0xFFFFFFFFu};
+      static std::atomic<std::uint32_t> _last_gate2{0xFFFFFFFFu};
+      try {
+        if (interrupt.context != 0) {
+          // ctx+0x412C = "current processed" counter, ctx+0x4130 = "target/pending"
+          // counter inside the guest ISR's real per-tick handler (0x821EFBE0). When
+          // equal, the ISR skips its entire processing chain (including the write at
+          // obj+0x4) and does nothing but bump ctx+0x4094 (a plain call counter).
+          // ctx+0x4130 is only ever incremented by the producer at xenon_fn_821EFCE0,
+          // which itself early-outs unless ctx+0x409C != ctx+0x4094 (gate1) and
+          // ctx+0x40A4 != 1 (gate2).
+          const auto cur = memory_->read32_be(static_cast<cpu::GuestAddress>(interrupt.context + 0x412Cu));
+          const auto target = memory_->read32_be(static_cast<cpu::GuestAddress>(interrupt.context + 0x4130u));
+          const auto tickcount = memory_->read32_be(static_cast<cpu::GuestAddress>(interrupt.context + 0x4094u));
+          const auto gate1 = memory_->read32_be(static_cast<cpu::GuestAddress>(interrupt.context + 0x409Cu));
+          const auto gate2 = memory_->read32_be(static_cast<cpu::GuestAddress>(interrupt.context + 0x40A4u));
+          if (cur != _last_cur.load() || target != _last_target.load() || tickcount != _last_tickcount.load() ||
+              gate1 != _last_gate1.load() || gate2 != _last_gate2.load()) {
+            _last_cur.store(cur);
+            _last_target.store(target);
+            _last_tickcount.store(tickcount);
+            _last_gate1.store(gate1);
+            _last_gate2.store(gate2);
+            if (FILE* _d = std::fopen("vsync_isr_obj_chain_diag.log", "a")) {
+              std::fprintf(_d,
+                           "vsync ISR counters CHANGED: ctx=0x%08X cur[+0x412C]=0x%08X target[+0x4130]=0x%08X tickcount[+0x4094]=0x%08X gate1[+0x409C]=0x%08X gate2[+0x40A4]=0x%08X\n",
+                           (unsigned)interrupt.context, cur, target, tickcount, gate1, gate2);
+              std::fclose(_d);
+            }
+          }
+        }
+      } catch (const std::exception&) {
+        // Guest memory not mapped yet (early boot) - ignore, next tick retries.
+      }
+    }
+
+    // Periodic dump (every ~30s) of EVERY known thread's recent kernel-call
+    // history, to get a holistic picture of what the whole system is doing
+    // over time - not just the two known-stuck render-setup threads - in
+    // case some other thread (asset/content loader, async I/O) stalls
+    // partway through and is the real upstream blocker.
+    {
+      static std::atomic<int> _all_threads_dump_count{0};
+      static const auto _all_threads_trace_start = Clock::now();
+      const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                                 Clock::now() - _all_threads_trace_start)
+                                 .count();
+      const int expected_dumps = static_cast<int>(elapsed_s / 30) + 1;
+      if (elapsed_s >= 8 && _all_threads_dump_count.load() < expected_dumps) {
+        _all_threads_dump_count.fetch_add(1);
+        if (FILE* _d = std::fopen("all_threads_export_trace_diag.log", "a")) {
+          std::fprintf(_d, "=== snapshot at t=%llds ===\n", (long long)elapsed_s);
+          for (std::uint32_t tid = 0; tid <= 30u; ++tid) {
+            const auto recent = export_trace_.recent_for_thread(tid, 8u);
+            if (recent.empty()) continue;
+            std::fprintf(_d, "--- thread_id=%u (last %zu calls) ---\n", tid, recent.size());
+            for (const auto& trace : recent) {
+              std::fprintf(_d, "  %s!%s lr=0x%08llX r3=0x%08llX r4=0x%08llX -> 0x%08llX\n",
+                           std::string(trace.library_view()).c_str(),
+                           trace.name_view().empty() ? "?" : std::string(trace.name_view()).c_str(),
+                           (unsigned long long)trace.lr, (unsigned long long)trace.arguments[0],
+                           (unsigned long long)trace.arguments[1], (unsigned long long)trace.result_r3);
+            }
+          }
+          std::fclose(_d);
+        }
+      }
+    }
     if (interrupt.callback_address != 0) {
-      if (invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context)) {
+      {
+        static std::atomic<int> _vsync_cb_diag_count{0};
+        const int _n = _vsync_cb_diag_count.fetch_add(1) + 1;
+        if (_n <= 10) {
+          if (FILE* _d = std::fopen("vsync_cb_diag.log", "a")) {
+            std::fprintf(_d, "vsync callback dispatch #%d: BEFORE invoke_gpu_interrupt_callback(0x%08X)\n",
+                         _n, interrupt.callback_address);
+            std::fclose(_d);
+          }
+        }
+      }
+      const auto _vsync_cb_start = Clock::now();
+      const bool _vsync_cb_ok = invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context);
+      const auto _vsync_cb_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     Clock::now() - _vsync_cb_start)
+                                     .count();
+      {
+        static std::atomic<int> _vsync_cb_after_diag_count{0};
+        const int _n = _vsync_cb_after_diag_count.fetch_add(1) + 1;
+        if (_n <= 10 || _vsync_cb_ms >= 20) {
+          if (FILE* _d = std::fopen("vsync_cb_diag.log", "a")) {
+            std::fprintf(_d, "vsync callback dispatch #%d: AFTER invoke_gpu_interrupt_callback ok=%d elapsed=%lldms\n",
+                         _n, _vsync_cb_ok ? 1 : 0, (long long)_vsync_cb_ms);
+            std::fclose(_d);
+          }
+        }
+      }
+      if (_vsync_cb_ok) {
         gpu_interrupts_delivered_.fetch_add(1u, std::memory_order_relaxed);
       } else if (gpu_interrupts_failed_.fetch_add(1u, std::memory_order_relaxed) == 0u &&
                  config_.enable_logging) {
@@ -4258,6 +4778,24 @@ bool XenonSession::external_call(std::string_view module,
                        descriptor ? std::string_view(descriptor->name) : std::string_view{},
                        ordinal, call_address, call_lr, call_ctr, arguments,
                        state.gpr[3], descriptor != nullptr, result.handled, result.success);
+
+  {
+    static std::mutex _seen_exports_mutex;
+    static std::set<std::string> _seen_exports;
+    const std::string _name = descriptor ? std::string(descriptor->name)
+                                          : (std::string(module) + "!ordinal_" + std::to_string(ordinal));
+    bool _is_new = false;
+    {
+      std::scoped_lock _lock(_seen_exports_mutex);
+      _is_new = _seen_exports.insert(_name).second;
+    }
+    if (_is_new) {
+      if (FILE* _d = std::fopen("unique_exports_seen_diag.log", "a")) {
+        std::fprintf(_d, "%s\n", _name.c_str());
+        std::fclose(_d);
+      }
+    }
+  }
 
   if (result.handled) {
     observe_boot_checkpoint_from_export_call(module, ordinal, state);
