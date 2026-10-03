@@ -18,6 +18,15 @@ namespace xenon::cpu {
 
 class MemoryPort;
 
+// Temporary investigation hook (AC6 render-stall diagnosis): logs a host
+// stack trace whenever a write targets one of two watched guest addresses
+// (the X_DISPATCH_HEADER SignalState fields of the two handshake events the
+// render-setup threads are permanently blocked on). Defined out-of-line in
+// address_space.cpp to keep <cstdio>/<windows.h> out of this hot header.
+// Checked unconditionally at the top of the fast inline write path below;
+// the two-address compare is the only cost on the hot path.
+void debug_signal_write_trap(GuestAddress address, std::uint64_t value);
+
 // Stable executable-page identity consumed by the native translation cache.
 // The physical page prevents an unmap/remap ABA from validating merely because
 // a replacement page happens to have the same generation value. A zero
@@ -61,6 +70,46 @@ inline constexpr std::uint64_t kDirectAperture = 1ull << 24u;
 }
 }  // namespace fast_memory
 
+// store_conditional32/64's commit step is serialized process-wide through
+// this gate - one commit at a time, regardless of which physical address
+// each caller's store targets (see claim_store_conditional). A plain
+// CAS-and-yield spin here is unfair: a guest thread issuing stwcx./stdcx. in
+// a tight retry loop (a legitimate, common pattern - e.g. a timed wait
+// polled with no backoff) can keep winning the race against a thread that
+// only needs the gate once, starving it indefinitely. That starvation is
+// exactly what turned out to be stalling AC6's GPU pump thread: a real
+// livelock in this gate, not a guest logic bug. A ticket lock gives every
+// waiter strict FIFO service - no matter how hot one caller spins, it
+// cannot be served twice while another ticket holder is still waiting.
+class ReservationCommitGate {
+ public:
+  void acquire() noexcept {
+    const auto my_ticket = next_ticket_.fetch_add(1u, std::memory_order_relaxed);
+    while (now_serving_.load(std::memory_order_acquire) != my_ticket) {
+      std::this_thread::yield();
+    }
+  }
+  void release() noexcept {
+    now_serving_.fetch_add(1u, std::memory_order_release);
+  }
+  // True while any ticket is outstanding - i.e. someone holds the gate or is
+  // actively waiting to be served. Used by callers that only need to wait
+  // for the gate to go quiet (e.g. draining readers before a commit) rather
+  // than take it themselves.
+  [[nodiscard]] bool held() const noexcept {
+    return now_serving_.load(std::memory_order_acquire) !=
+           next_ticket_.load(std::memory_order_acquire);
+  }
+  void reset() noexcept {
+    next_ticket_.store(0u, std::memory_order_relaxed);
+    now_serving_.store(0u, std::memory_order_relaxed);
+  }
+
+ private:
+  std::atomic<std::uint64_t> next_ticket_{0u};
+  std::atomic<std::uint64_t> now_serving_{0u};
+};
+
 // Data needed by the generated-memory fast path. All pointers refer to storage
 // whose lifetime is owned by the concrete MemoryPort implementation.
 struct FastMemoryView {
@@ -82,7 +131,7 @@ struct FastMemoryView {
   std::uint32_t reservation_seen_word_count{};
   std::uint32_t reservation_granule_size{};
   std::uint32_t reservation_granule_count{};
-  std::atomic<std::uint32_t>* reservation_commit_gate{};
+  ReservationCommitGate* reservation_commit_gate{};
   std::atomic<std::uint32_t>* active_reservation_ops{};
   std::atomic<std::uint32_t>* reservation_next_generation{};
 
@@ -110,6 +159,18 @@ struct FastMemoryView {
   // immediately, but physical pages retired by that change are not recycled
   // until no context that could have observed the old entry remains alive.
   std::atomic<std::uint32_t>* active_fast_readers{};
+  // Grace-period latch for physical-page reclaim. Under sustained concurrent
+  // guest memory traffic, active_fast_readers above can be legitimately
+  // non-zero essentially continuously (many short-lived accesses overlapping
+  // in time), so a reclaim that simply waits for it to hit zero can starve
+  // forever even though every individual access is brief. When reclaim needs
+  // to run, it sets this flag first; resolve_fast() then declines the fast
+  // path for every NEW access (falling back to the always-available slow
+  // port) until reclaim clears it, so active_fast_readers is guaranteed to
+  // drain within the time it takes already-in-flight (bounded, brief)
+  // accesses to finish - not whenever the guest's access pattern happens to
+  // produce a natural lull. See AddressSpace::reclaim_retired_physical_pages().
+  std::atomic<bool>* reclaim_pending{};
 };
 
 // Concrete, compiler-inlinable access facade used by generated PPC. Common RAM
@@ -213,6 +274,41 @@ class MemoryAccessContext {
     out = {resolved.ptr, resolved.physical_address};
     return true;
   }
+
+  // Releases the constructor-acquired standing guard immediately, for a
+  // context whose own object lifetime outlives any single memory access (see
+  // ExecutionContext, which holds one MemoryAccessContext for an entire guest
+  // thread's run). Physical-page reclamation waits for the guard count to
+  // reach zero; a guard held for a whole thread's lifetime - rather than one
+  // resolve-and-touch - means it may never do so under sustained
+  // multi-threaded guest execution, permanently starving reclaim even though
+  // the guest has genuinely freed the memory. Each accessor below instead
+  // takes its own ScopedReadGuard around just its resolve-and-touch, so
+  // correctness is preserved while the standing guard is dropped.
+  void detach_standing_guard() noexcept { release_read_guard(); }
+
+  // RAII helper scoping a guard to exactly one resolve-and-touch operation.
+  // Deliberately self-contained (does not touch read_guard_active_, which
+  // exists only to make the constructor/destructor/move guard correct) so it
+  // can be taken and released many times over a context's lifetime, nested or
+  // sequential, without disturbing that separate bookkeeping.
+  class ScopedReadGuard {
+   public:
+    explicit ScopedReadGuard(const MemoryAccessContext& owner) noexcept {
+      if (owner.fast_.active_fast_readers && owner.has_fast_path()) {
+        counter_ = owner.fast_.active_fast_readers;
+        counter_->fetch_add(1u, std::memory_order_acq_rel);
+      }
+    }
+    ~ScopedReadGuard() noexcept {
+      if (counter_) counter_->fetch_sub(1u, std::memory_order_release);
+    }
+    ScopedReadGuard(const ScopedReadGuard&) = delete;
+    ScopedReadGuard& operator=(const ScopedReadGuard&) = delete;
+
+   private:
+    std::atomic<std::uint32_t>* counter_{};
+  };
 
  private:
   struct Resolved {
@@ -485,6 +581,13 @@ inline bool MemoryAccessContext::resolve_fast(GuestAddress address,
                                               std::size_t alignment,
                                               Resolved& out) const noexcept {
   if (!has_fast_path() || !width) return false;
+  // Decline the fast path while a reclaim is draining readers - see
+  // FastMemoryView::reclaim_pending's comment. The caller's existing
+  // fallback (slow_->...) handles this exactly like any other "fast path
+  // unavailable" case; no accessor-specific change is needed.
+  if (fast_.reclaim_pending && fast_.reclaim_pending->load(std::memory_order_acquire)) {
+    return false;
+  }
   const auto last64 = std::uint64_t{address} + width - 1u;
   if (last64 > (std::numeric_limits<GuestAddress>::max)()) return false;
   const auto last = static_cast<GuestAddress>(last64);
@@ -708,10 +811,9 @@ inline void invalidate_range(const FastMemoryView& fast,
 
 inline void begin_reservation_operation(const FastMemoryView& fast) noexcept {
   for (;;) {
-    while (fast.reservation_commit_gate->load(std::memory_order_acquire) != 0u)
-      std::this_thread::yield();
+    while (fast.reservation_commit_gate->held()) std::this_thread::yield();
     fast.active_reservation_ops->fetch_add(1u, std::memory_order_acq_rel);
-    if (fast.reservation_commit_gate->load(std::memory_order_acquire) == 0u) return;
+    if (!fast.reservation_commit_gate->held()) return;
     fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
   }
 }
@@ -830,14 +932,12 @@ inline void cancel_reservation(const FastMemoryView& fast,
   if (reservation_participant) {
     for (;;) {
       if (fast.reservation_commit_gate) {
-        while (fast.reservation_commit_gate->load(std::memory_order_acquire) !=
-               0u) {
+        while (fast.reservation_commit_gate->held()) {
           std::this_thread::yield();
         }
       }
       fast.active_reservation_ops->fetch_add(1u, std::memory_order_acq_rel);
-      if (!fast.reservation_commit_gate ||
-          fast.reservation_commit_gate->load(std::memory_order_acquire) == 0u) {
+      if (!fast.reservation_commit_gate || !fast.reservation_commit_gate->held()) {
         break;
       }
       fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
@@ -966,6 +1066,7 @@ inline T MemoryAccessContext::byteswap_if(T value, bool swap) noexcept {
 template <typename T>
 inline T MemoryAccessContext::read_integer(GuestAddress address,
                                            bool little_endian) {
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, sizeof(T), false, alignof(T), resolved)) {
     if constexpr (sizeof(T) == 2u) {
@@ -988,6 +1089,12 @@ inline T MemoryAccessContext::read_integer(GuestAddress address,
 template <typename T>
 inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
                                                bool little_endian) {
+  if constexpr (sizeof(T) == 4u) {
+    if (address == 0x62D78u || address == 0x62DC8u) {
+      debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
+    }
+  }
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, sizeof(T), true, alignof(T), resolved)) {
     if constexpr (sizeof(T) == 2u) {
@@ -1012,6 +1119,7 @@ inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
 }
 
 inline std::uint8_t MemoryAccessContext::read8(GuestAddress address) {
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 1, false, 1, resolved)) return slow_->read8(address);
   return detail::atomic_load_relaxed<std::uint8_t>(resolved.ptr);
@@ -1026,6 +1134,7 @@ inline std::uint64_t MemoryAccessContext::read64_be(GuestAddress address) {
   return read_integer<std::uint64_t>(address, false);
 }
 inline Vector128 MemoryAccessContext::read128(GuestAddress address) {
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 16, false, alignof(std::uint64_t), resolved)) {
     return slow_->read128(address);
@@ -1040,6 +1149,7 @@ inline Vector128 MemoryAccessContext::read128(GuestAddress address) {
 
 inline void MemoryAccessContext::write8(GuestAddress address,
                                         std::uint8_t value) {
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 1, true, 1, resolved)) {
     slow_->write8(address, value);
@@ -1064,6 +1174,7 @@ inline void MemoryAccessContext::write64_be(GuestAddress address,
 }
 inline void MemoryAccessContext::write128(GuestAddress address,
                                           const Vector128& value) {
+  ScopedReadGuard guard(*this);
   Resolved resolved{};
   if (!resolve_fast(address, 16, true, alignof(std::uint64_t), resolved)) {
     slow_->write128(address, value);
@@ -1103,6 +1214,7 @@ inline void MemoryAccessContext::write64_le(GuestAddress address,
 
 inline void MemoryAccessContext::read_bytes(
     GuestAddress address, std::span<std::byte> destination) {
+  ScopedReadGuard guard(*this);
   auto cursor = address;
   auto remaining = destination;
   while (!remaining.empty()) {
@@ -1124,6 +1236,7 @@ inline void MemoryAccessContext::read_bytes(
 
 inline void MemoryAccessContext::write_bytes(
     GuestAddress address, std::span<const std::byte> source) {
+  ScopedReadGuard guard(*this);
   auto cursor = address;
   auto remaining = source;
   while (!remaining.empty()) {
@@ -1150,6 +1263,7 @@ inline void MemoryAccessContext::write_bytes(
 inline void MemoryAccessContext::fill_bytes(GuestAddress address,
                                             std::uint32_t size,
                                             std::uint8_t value) {
+  ScopedReadGuard guard(*this);
   auto cursor = address;
   auto remaining = size;
   while (remaining) {
@@ -1187,12 +1301,30 @@ inline void MemoryAccessContext::zero_cache_block(GuestAddress address,
 inline std::uint64_t MemoryAccessContext::reserve32(
     GuestAddress address, std::uint32_t& value) {
   Resolved resolved{};
-  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
-      !resolve_fast(address, sizeof(value), false, alignof(std::uint32_t), resolved)) {
-    return slow_->reserve32(address, value);
+  {
+    // Guard only the fallback-eligibility check; begin_reservation_operation()
+    // below is an unbounded spin against other threads' reservation traffic,
+    // not a memory touch, and must not hold a read-guard for its whole
+    // duration - see the extended comment at store_conditional32's matching
+    // guard split for why that previously starved physical-page reclaim.
+    ScopedReadGuard guard(*this);
+    if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+        !resolve_fast(address, sizeof(value), false, alignof(std::uint32_t), resolved)) {
+      return slow_->reserve32(address, value);
+    }
   }
 
   reservation_monitor_detail::begin_reservation_operation(fast_);
+  // Re-guard and re-resolve now that we are past the (unguarded) contention
+  // wait: a physical-page reclaim could have run in that window and recycled
+  // the page `resolved` describes, so the pre-wait resolution cannot be
+  // trusted - only a fresh resolve taken under the guard that now protects
+  // it is safe to dereference below.
+  ScopedReadGuard guard(*this);
+  if (!resolve_fast(address, sizeof(value), false, alignof(std::uint32_t), resolved)) {
+    reservation_monitor_detail::end_reservation_operation(fast_);
+    return slow_->reserve32(address, value);
+  }
   const auto epoch_before =
       fast_.global_write_epoch->load(std::memory_order_acquire);
   auto token = reservation_monitor_detail::claim_reservation(
@@ -1214,12 +1346,20 @@ inline std::uint64_t MemoryAccessContext::reserve32(
 inline std::uint64_t MemoryAccessContext::reserve64(
     GuestAddress address, std::uint64_t& value) {
   Resolved resolved{};
-  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
-      !resolve_fast(address, sizeof(value), false, alignof(std::uint64_t), resolved)) {
-    return slow_->reserve64(address, value);
+  {
+    ScopedReadGuard guard(*this);
+    if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+        !resolve_fast(address, sizeof(value), false, alignof(std::uint64_t), resolved)) {
+      return slow_->reserve64(address, value);
+    }
   }
 
   reservation_monitor_detail::begin_reservation_operation(fast_);
+  ScopedReadGuard guard(*this);
+  if (!resolve_fast(address, sizeof(value), false, alignof(std::uint64_t), resolved)) {
+    reservation_monitor_detail::end_reservation_operation(fast_);
+    return slow_->reserve64(address, value);
+  }
   const auto epoch_before =
       fast_.global_write_epoch->load(std::memory_order_acquire);
   auto token = reservation_monitor_detail::claim_reservation(
@@ -1250,21 +1390,36 @@ inline void MemoryAccessContext::cancel_reservation(std::uint64_t token) noexcep
 inline bool MemoryAccessContext::store_conditional32(
     GuestAddress address, std::uint64_t token, std::uint32_t value) {
   Resolved resolved{};
-  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
-      !resolve_fast(address, sizeof(value), true, alignof(std::uint32_t), resolved)) {
-    return slow_->store_conditional32(address, token, value);
+  {
+    ScopedReadGuard guard(*this);
+    if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+        !resolve_fast(address, sizeof(value), true, alignof(std::uint32_t), resolved)) {
+      return slow_->store_conditional32(address, token, value);
+    }
   }
   if (!token) return false;
 
-  std::uint32_t expected_gate = 0u;
-  while (!fast_.reservation_commit_gate->compare_exchange_weak(
-      expected_gate, 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
-    expected_gate = 0u;
-    std::this_thread::yield();
-  }
+  // The commit-gate acquisition and the coherency/reservation drain below are
+  // an unbounded wait against OTHER threads' in-flight traffic, not a memory
+  // touch - holding a read-guard for this whole wait (the previous
+  // implementation) meant physical-page reclaim's "wait for all readers to
+  // drain" check could see a permanently non-zero reader count under
+  // sustained reservation contention from a multi-threaded title, even though
+  // no one was actually touching the pages reclaim wanted to free. Dropping
+  // the guard here, then re-acquiring it and re-resolving the address fresh
+  // (below) before the actual dereference, fixes that without weakening the
+  // guarantee the guard exists for: the dereferenced resolution is always one
+  // taken while a guard protecting it is held, just not for longer than that.
+  fast_.reservation_commit_gate->acquire();
   while (fast_.active_coherency_writers->load(std::memory_order_acquire) != 0u ||
          fast_.active_reservation_ops->load(std::memory_order_acquire) != 0u) {
     std::this_thread::yield();
+  }
+
+  ScopedReadGuard guard(*this);
+  if (!resolve_fast(address, sizeof(value), true, alignof(std::uint32_t), resolved)) {
+    fast_.reservation_commit_gate->release();
+    return slow_->store_conditional32(address, token, value);
   }
 
   std::uint32_t slot_index = 0u;
@@ -1272,7 +1427,7 @@ inline bool MemoryAccessContext::store_conditional32(
   if (!reservation_monitor_detail::claim_store_conditional(
           fast_, resolved.physical_address, sizeof(value), token,
           slot_index, committing)) {
-    fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+    fast_.reservation_commit_gate->release();
     return false;
   }
 
@@ -1284,28 +1439,36 @@ inline bool MemoryAccessContext::store_conditional32(
   reservation_monitor_detail::publish_write_metadata(
       fast_, resolved.physical_address, sizeof(value), resolved.ordering_domain);
   fast_.reservation_slots[slot_index].store(0u, std::memory_order_release);
-  fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+  fast_.reservation_commit_gate->release();
   return true;
 }
 
 inline bool MemoryAccessContext::store_conditional64(
     GuestAddress address, std::uint64_t token, std::uint64_t value) {
   Resolved resolved{};
-  if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
-      !resolve_fast(address, sizeof(value), true, alignof(std::uint64_t), resolved)) {
-    return slow_->store_conditional64(address, token, value);
+  {
+    ScopedReadGuard guard(*this);
+    if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
+        !resolve_fast(address, sizeof(value), true, alignof(std::uint64_t), resolved)) {
+      return slow_->store_conditional64(address, token, value);
+    }
   }
   if (!token) return false;
 
-  std::uint32_t expected_gate = 0u;
-  while (!fast_.reservation_commit_gate->compare_exchange_weak(
-      expected_gate, 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
-    expected_gate = 0u;
-    std::this_thread::yield();
-  }
+  // See store_conditional32's matching comment: this wait must not hold a
+  // read-guard, and the resolution must be re-taken fresh under a new guard
+  // once the wait ends, since a physical-page reclaim could have run while
+  // unguarded.
+  fast_.reservation_commit_gate->acquire();
   while (fast_.active_coherency_writers->load(std::memory_order_acquire) != 0u ||
          fast_.active_reservation_ops->load(std::memory_order_acquire) != 0u) {
     std::this_thread::yield();
+  }
+
+  ScopedReadGuard guard(*this);
+  if (!resolve_fast(address, sizeof(value), true, alignof(std::uint64_t), resolved)) {
+    fast_.reservation_commit_gate->release();
+    return slow_->store_conditional64(address, token, value);
   }
 
   std::uint32_t slot_index = 0u;
@@ -1313,7 +1476,7 @@ inline bool MemoryAccessContext::store_conditional64(
   if (!reservation_monitor_detail::claim_store_conditional(
           fast_, resolved.physical_address, sizeof(value), token,
           slot_index, committing)) {
-    fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+    fast_.reservation_commit_gate->release();
     return false;
   }
 
@@ -1325,7 +1488,7 @@ inline bool MemoryAccessContext::store_conditional64(
   reservation_monitor_detail::publish_write_metadata(
       fast_, resolved.physical_address, sizeof(value), resolved.ordering_domain);
   fast_.reservation_slots[slot_index].store(0u, std::memory_order_release);
-  fast_.reservation_commit_gate->store(0u, std::memory_order_release);
+  fast_.reservation_commit_gate->release();
   return true;
 }
 

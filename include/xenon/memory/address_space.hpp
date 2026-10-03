@@ -450,12 +450,29 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
       reservation_slots_{};
   std::vector<std::atomic<std::uint64_t>> reservation_seen_bitmap_{};
   std::atomic<std::uint32_t> reservation_next_generation_{1u};
-  std::atomic<std::uint32_t> reservation_commit_gate_{0u};
+  // See xenon::cpu::ReservationCommitGate's comment (memory_port.hpp) - a
+  // fair ticket-based gate shared with the fast inline reservation path via
+  // FastMemoryView::reservation_commit_gate, replacing a plain CAS-and-yield
+  // flag that a sufficiently hot competing thread could starve forever.
+  // Heap-allocated (not an inline member) so swapping in the larger gate
+  // type does not shift every AddressSpace member declared after it to a
+  // new offset - this class has a long history of latent out-of-bounds
+  // writes from elsewhere in the engine landing on whatever happens to sit
+  // at a given offset (see AddressSpace::allocate's page_index_in_bounds
+  // comment), and an unrelated layout shift is not an acceptable way to
+  // find the next one.
+  std::unique_ptr<xenon::cpu::ReservationCommitGate> reservation_commit_gate_{
+      std::make_unique<xenon::cpu::ReservationCommitGate>()};
   std::atomic<std::uint32_t> active_reservation_ops_{0u};
   std::atomic<std::uint32_t> coherency_commit_gate_{0u};
   GuestMemoryCoherency coherency_{};
   std::vector<std::atomic<std::uint32_t>> executable_page_generations_{};
   std::atomic<std::uint32_t> active_fast_readers_{0};
+  // Grace-period latch set by reclaim_retired_physical_pages() while it waits
+  // for active_fast_readers_ to drain - see FastMemoryView::reclaim_pending's
+  // comment for why this is needed (sustained concurrent access can keep
+  // active_fast_readers_ non-zero indefinitely without it).
+  std::atomic<bool> reclaim_pending_{false};
 
   mutable std::recursive_mutex mutex_{};
   std::vector<MmioRangeRef> mmio_ranges_{};

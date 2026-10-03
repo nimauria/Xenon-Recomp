@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -16,6 +17,18 @@
 
 #if defined(_WIN32) && defined(_DEBUG)
 #include <crtdbg.h>
+#endif
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
 #endif
 
 namespace xenon::memory {
@@ -444,16 +457,18 @@ class AddressSpace::PhysicalRangeAllocator {
 
   [[nodiscard]] bool allocate(std::uint32_t page_count,
                               std::uint32_t alignment_pages, bool top_down,
-                              std::uint32_t& out_first_page) {
+                              std::uint32_t& out_first_page,
+                              std::uint32_t readers_snapshot = 0u) {
     return allocate(page_count, alignment_pages, top_down, 0u,
-                    kPhysicalPageCount, out_first_page);
+                    kPhysicalPageCount, out_first_page, readers_snapshot);
   }
 
   [[nodiscard]] bool allocate(std::uint32_t page_count,
                               std::uint32_t alignment_pages, bool top_down,
                               std::uint32_t minimum_page,
                               std::uint32_t maximum_page_exclusive,
-                              std::uint32_t& out_first_page) {
+                              std::uint32_t& out_first_page,
+                              std::uint32_t readers_snapshot = 0u) {
     if (!page_count || !alignment_pages ||
         !std::has_single_bit(alignment_pages) ||
         minimum_page >= maximum_page_exclusive ||
@@ -474,6 +489,7 @@ class AddressSpace::PhysicalRangeAllocator {
         out_first_page = candidate;
         return true;
       }
+      diag_log_exhaustion(page_count, readers_snapshot);
       return false;
     }
 
@@ -493,7 +509,25 @@ class AddressSpace::PhysicalRangeAllocator {
       out_first_page = candidate;
       return true;
     }
+    diag_log_exhaustion(page_count, readers_snapshot);
     return false;
+  }
+
+  void diag_log_exhaustion(std::uint32_t requested_page_count,
+                           std::uint32_t readers_snapshot) const {
+    std::uint64_t free_total = 0;
+    for (const auto& [first, count] : free_ranges_) free_total += count;
+    std::uint64_t retired_total = 0;
+    for (const auto& [first, count] : retired_ranges_) retired_total += count;
+    if (std::FILE* diag = std::fopen("phys_alloc_fail_diag.log", "a")) {
+      std::fprintf(diag,
+                   "PHYS_ALLOC_FAIL requested=%u free_total=%llu free_ranges=%zu "
+                   "retired_total=%llu retired_ranges=%zu active_fast_readers=%u\n",
+                   requested_page_count, static_cast<unsigned long long>(free_total),
+                   free_ranges_.size(), static_cast<unsigned long long>(retired_total),
+                   retired_ranges_.size(), readers_snapshot);
+      std::fclose(diag);
+    }
   }
 
   [[nodiscard]] bool contains_free(std::uint32_t first_page,
@@ -523,6 +557,13 @@ class AddressSpace::PhysicalRangeAllocator {
   [[nodiscard]] bool retire(std::uint32_t first_page,
                             std::uint32_t page_count) {
     return insert_coalesced(retired_ranges_, first_page, page_count);
+  }
+
+  // Cheap peek used to skip the reclaim grace-period latch entirely when
+  // there is nothing retired to reclaim - the overwhelmingly common case,
+  // since this is checked at the start of every physical page allocation.
+  [[nodiscard]] bool has_retired_ranges() const noexcept {
+    return !retired_ranges_.empty();
   }
 
   [[nodiscard]] std::vector<std::pair<std::uint32_t, std::uint32_t>>
@@ -808,7 +849,7 @@ xenon::cpu::FastMemoryView AddressSpace::make_fast_memory_view() noexcept {
     view.reservation_seen_word_count = kReservationBitmapWordCount;
     view.reservation_granule_size = kReservationGranuleSize;
     view.reservation_granule_count = kReservationGranuleCount;
-    view.reservation_commit_gate = &reservation_commit_gate_;
+    view.reservation_commit_gate = reservation_commit_gate_.get();
     view.active_reservation_ops = &active_reservation_ops_;
     view.reservation_next_generation = &reservation_next_generation_;
     view.physical_page_epochs = coherency_.page_epochs_data();
@@ -822,6 +863,7 @@ xenon::cpu::FastMemoryView AddressSpace::make_fast_memory_view() noexcept {
     view.coherency_journal_capacity = GuestMemoryCoherency::kWriteJournalCapacity;
     view.executable_page_generations = executable_page_generations_.data();
     view.active_fast_readers = &active_fast_readers_;
+    view.reclaim_pending = &reclaim_pending_;
   }
   return view;
 }
@@ -881,7 +923,7 @@ void AddressSpace::reset() {
     word.store(0u, std::memory_order_relaxed);
   }
   reservation_next_generation_.store(1u, std::memory_order_relaxed);
-  reservation_commit_gate_.store(0u, std::memory_order_relaxed);
+  reservation_commit_gate_->reset();
   active_reservation_ops_.store(0u, std::memory_order_relaxed);
   for (auto& entry : hot_pages_) entry.store(0u, std::memory_order_relaxed);
   if (guest_aperture_ && guest_aperture_->active() &&
@@ -1360,7 +1402,14 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
                             std::optional<std::uint32_t> requested_page_size,
                             VirtualAllocationOptions options) {
   std::lock_guard lock(mutex_);
-  if (!initialized_ || !size) return false;
+  const std::uint32_t _orig_size = size, _orig_alignment = alignment;
+  if (!initialized_ || !size) {
+    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+      std::fprintf(_d, "EARLY FAIL: initialized_=%d size=%u\n", initialized_ ? 1 : 0, size);
+      std::fclose(_d);
+    }
+    return false;
+  }
   const std::uint32_t page_size = requested_page_size.value_or(kBasePageSize);
   const RegionDescriptor* region = nullptr;
   for (const auto& candidate : kRegions) {
@@ -1369,10 +1418,36 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       break;
     }
   }
-  if (!region) return false;
+  if (!region) {
+    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+      std::fprintf(_d, "NO REGION FAIL: page_size=%u\n", page_size);
+      std::fclose(_d);
+    }
+    return false;
+  }
   alignment = std::max(alignment ? alignment : page_size, page_size);
-  if (!std::has_single_bit(alignment)) return false;
+  if (!std::has_single_bit(alignment)) {
+    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+      std::fprintf(_d, "BAD ALIGNMENT FAIL: alignment=%u (orig=%u)\n", alignment, _orig_alignment);
+      std::fclose(_d);
+    }
+    return false;
+  }
   size = align_up(size, page_size);
+  {
+    static std::atomic<int> _alloc_entry_count{0};
+    if (_alloc_entry_count.fetch_add(1) < 5 ||
+        (_alloc_entry_count.load() % 1000) == 0) {
+      if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+        std::fprintf(_d,
+                     "ALLOCATE ENTRY #%d: region=[0x%08X-0x%08X] page_size=%u "
+                     "orig_size=%u rounded_size=%u alignment=%u top_down=%d\n",
+                     _alloc_entry_count.load(), region->base, region->end, page_size,
+                     _orig_size, size, alignment, top_down ? 1 : 0);
+        std::fclose(_d);
+      }
+    }
+  }
 
   // Defensive bound: first+count must never exceed pages_.size() before any
   // pages_[...] index below runs. This is not a "this can't happen" belt -
@@ -1416,10 +1491,25 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       }
       if (free) {
         out_address = static_cast<GuestAddress>(candidate);
-        if (!reserve_pages(out_address, size, protect, false)) return false;
-        return !options.commit ||
-               commit_pages(out_address, size, protect,
-                            options.zero_initialize);
+        if (!reserve_pages(out_address, size, protect, false)) {
+          if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+            std::fprintf(_d, "RESERVE_PAGES FAIL: addr=0x%08X size=%u\n",
+                         (unsigned)out_address, size);
+            std::fclose(_d);
+          }
+          return false;
+        }
+        if (!options.commit) return true;
+        const bool committed = commit_pages(out_address, size, protect,
+                                            options.zero_initialize);
+        if (!committed) {
+          if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
+            std::fprintf(_d, "COMMIT_PAGES FAIL: addr=0x%08X size=%u\n",
+                         (unsigned)out_address, size);
+            std::fclose(_d);
+          }
+        }
+        return committed;
       }
     }
   } else {
@@ -1443,6 +1533,11 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       }
       if (candidate < region->base + alignment) break;
     }
+  }
+  if (std::FILE* diag = std::fopen("virt_alloc_fail_diag.log", "a")) {
+    std::fprintf(diag, "VIRT_ALLOC_FAIL size=%u alignment=%u top_down=%d\n", size,
+                 alignment, top_down ? 1 : 0);
+    std::fclose(diag);
   }
   return false;
 }
@@ -1733,7 +1828,8 @@ std::optional<MappingInfo> AddressSpace::query(GuestAddress address) const {
 std::uint32_t AddressSpace::allocate_physical_page(bool top_down) {
   reclaim_retired_physical_pages();
   std::uint32_t page = kInvalidPhysicalPage;
-  if (!physical_allocator_->allocate(1u, 1u, top_down, page)) {
+  if (!physical_allocator_->allocate(1u, 1u, top_down, page,
+                                     active_fast_readers_.load(std::memory_order_acquire))) {
     return kInvalidPhysicalPage;
   }
   physical_page_used_[page] = kPhysicalAnonymous;
@@ -1765,7 +1861,46 @@ void AddressSpace::free_physical_page(std::uint32_t page) {
 }
 
 void AddressSpace::reclaim_retired_physical_pages() {
-  if (active_fast_readers_.load(std::memory_order_acquire) != 0u) return;
+  // Skip the grace-period latch entirely when there is nothing retired -
+  // this function runs at the start of every physical page allocation, and
+  // must not add a stall to the overwhelmingly common case where reclaim has
+  // no work to do.
+  if (!physical_allocator_->has_retired_ranges()) return;
+
+  // Request a grace period before touching active_fast_readers_: once this
+  // flag is visible, resolve_fast() declines the fast path for every NEW
+  // access (falling back to the slow port), so active_fast_readers_ only has
+  // to drain whatever accesses were already in flight, rather than depending
+  // on the guest's own access pattern happening to produce a moment with
+  // zero readers anywhere in the whole address space.
+  //
+  // This wait is deliberately BOUNDED, not indefinite: active_fast_readers_
+  // can also be held by a genuinely long-lived standing reader by design
+  // (see access_context()'s own doc comment and
+  // memory_tests.cpp's read-side quiescence test, which keeps a
+  // MemoryAccessContext alive across multiple calls on purpose, specifically
+  // to prove retired pages are NOT recycled out from under it) - waiting
+  // forever for such a reader to disappear would hang permanently instead of
+  // correctly skipping reclaim this round, which is what the pre-existing
+  // contract promises. A short bounded spin drains ordinary brief, transient
+  // overlapping accesses (the actual problem under sustained multi-threaded
+  // guest traffic) without breaking that contract: if the count is still
+  // non-zero once the bound is reached, this falls back to the original
+  // "skip reclaim, try again on the next allocation" behavior.
+  reclaim_pending_.store(true, std::memory_order_release);
+  constexpr int kMaxDrainSpins = 10000;
+  bool drained = false;
+  for (int spin = 0; spin < kMaxDrainSpins; ++spin) {
+    if (active_fast_readers_.load(std::memory_order_acquire) == 0u) {
+      drained = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  if (!drained) {
+    reclaim_pending_.store(false, std::memory_order_release);
+    return;
+  }
 
   auto retired = physical_allocator_->take_retired_ranges();
   for (const auto& [first, count] : retired) {
@@ -1782,6 +1917,8 @@ void AddressSpace::reclaim_retired_physical_pages() {
       throw std::logic_error("physical free-range allocator ownership mismatch");
     }
   }
+
+  reclaim_pending_.store(false, std::memory_order_release);
 }
 
 void AddressSpace::add_physical_mapping_ref(std::uint32_t physical_page,
@@ -1825,7 +1962,8 @@ bool AddressSpace::reserve_physical_run(std::uint32_t count,
   reclaim_retired_physical_pages();
   if (!physical_allocator_->allocate(count, alignment_pages, top_down,
                                      minimum_page, maximum_page_exclusive,
-                                     out_first_page)) {
+                                     out_first_page,
+                                     active_fast_readers_.load(std::memory_order_acquire))) {
     return false;
   }
   std::fill_n(physical_page_used_.begin() + out_first_page, count,
@@ -2546,12 +2684,7 @@ PhysicalWriteWindow AddressSpace::physical_write_window() noexcept {
   // Store-conditionals use a separate short commit gate and don't otherwise
   // participate in the normal writer entry protocol. Acquire it after normal
   // writers have drained so the final readback ownership point is stable.
-  expected = 0u;
-  while (!reservation_commit_gate_.compare_exchange_weak(
-      expected, 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
-    expected = 0u;
-    std::this_thread::yield();
-  }
+  reservation_commit_gate_->acquire();
   while (coherency_.active_writers_data()->load(std::memory_order_acquire) !=
              0u ||
          active_reservation_ops_.load(std::memory_order_acquire) != 0u) {
@@ -2568,7 +2701,7 @@ bool AddressSpace::write_physical_exclusive(
       physical_address >= kPhysicalMemorySize ||
       std::uint64_t{physical_address} + source.size() > kPhysicalMemorySize ||
       coherency_commit_gate_.load(std::memory_order_acquire) == 0u ||
-      reservation_commit_gate_.load(std::memory_order_acquire) == 0u) {
+      !reservation_commit_gate_->held()) {
     return source.empty() && initialized_;
   }
 
@@ -2588,7 +2721,7 @@ bool AddressSpace::write_physical_exclusive(
 }
 
 void AddressSpace::release_physical_write_window() noexcept {
-  reservation_commit_gate_.store(0u, std::memory_order_release);
+  reservation_commit_gate_->release();
   coherency_commit_gate_.store(0u, std::memory_order_release);
 }
 
@@ -2908,6 +3041,11 @@ T AddressSpace::read_integer(GuestAddress address, bool little_endian) {
 
 template <typename T>
 void AddressSpace::write_integer(GuestAddress address, T value, bool little_endian) {
+  if constexpr (sizeof(T) == 4u) {
+    if (address == 0x62D78u || address == 0x62DC8u) {
+      xenon::cpu::debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
+    }
+  }
   validate_guest_range(address, sizeof(T), AccessKind::Write);
   {
     auto access = access_context();
@@ -3268,11 +3406,11 @@ std::uint64_t AddressSpace::complete_physical_write(
 
 void AddressSpace::begin_reservation_operation() noexcept {
   for (;;) {
-    while (reservation_commit_gate_.load(std::memory_order_acquire) != 0u) {
+    while (reservation_commit_gate_->held()) {
       std::this_thread::yield();
     }
     active_reservation_ops_.fetch_add(1u, std::memory_order_acq_rel);
-    if (reservation_commit_gate_.load(std::memory_order_acquire) == 0u) return;
+    if (!reservation_commit_gate_->held()) return;
     active_reservation_ops_.fetch_sub(1u, std::memory_order_release);
   }
 }
@@ -3488,13 +3626,7 @@ bool AddressSpace::store_conditional32(GuestAddress address,
   }
   if (!token) return false;
 
-  std::uint32_t expected_gate = 0u;
-  while (!reservation_commit_gate_.compare_exchange_weak(
-      expected_gate, 1u, std::memory_order_acq_rel,
-      std::memory_order_acquire)) {
-    expected_gate = 0u;
-    std::this_thread::yield();
-  }
+  reservation_commit_gate_->acquire();
   while (coherency_.active_writers_data()->load(std::memory_order_acquire) !=
              0u ||
          active_reservation_ops_.load(std::memory_order_acquire) != 0u) {
@@ -3506,7 +3638,7 @@ bool AddressSpace::store_conditional32(GuestAddress address,
   const auto claimed = claim_store_conditional(
       physical_address, sizeof(value), token, slot_index, committing);
   if (!claimed) {
-    reservation_commit_gate_.store(0u, std::memory_order_release);
+    reservation_commit_gate_->release();
     return false;
   }
 
@@ -3514,7 +3646,7 @@ bool AddressSpace::store_conditional32(GuestAddress address,
   atomic_store_guest_be<std::uint32_t>(ptr, value);
   coherency_.mark_write(physical_address, sizeof(value));
   reservation_slots_[slot_index].store(0u, std::memory_order_release);
-  reservation_commit_gate_.store(0u, std::memory_order_release);
+  reservation_commit_gate_->release();
   return true;
 }
 
@@ -3542,13 +3674,7 @@ bool AddressSpace::store_conditional64(GuestAddress address,
   }
   if (!token) return false;
 
-  std::uint32_t expected_gate = 0u;
-  while (!reservation_commit_gate_.compare_exchange_weak(
-      expected_gate, 1u, std::memory_order_acq_rel,
-      std::memory_order_acquire)) {
-    expected_gate = 0u;
-    std::this_thread::yield();
-  }
+  reservation_commit_gate_->acquire();
   while (coherency_.active_writers_data()->load(std::memory_order_acquire) !=
              0u ||
          active_reservation_ops_.load(std::memory_order_acquire) != 0u) {
@@ -3560,7 +3686,7 @@ bool AddressSpace::store_conditional64(GuestAddress address,
   const auto claimed = claim_store_conditional(
       physical_address, sizeof(value), token, slot_index, committing);
   if (!claimed) {
-    reservation_commit_gate_.store(0u, std::memory_order_release);
+    reservation_commit_gate_->release();
     return false;
   }
 
@@ -3568,7 +3694,7 @@ bool AddressSpace::store_conditional64(GuestAddress address,
   atomic_store_guest_be<std::uint64_t>(ptr, value);
   coherency_.mark_write(physical_address, sizeof(value));
   reservation_slots_[slot_index].store(0u, std::memory_order_release);
-  reservation_commit_gate_.store(0u, std::memory_order_release);
+  reservation_commit_gate_->release();
   return true;
 }
 
@@ -3576,7 +3702,7 @@ std::size_t AddressSpace::reservation_monitor_storage_bytes() const noexcept {
   return reservation_slots_.size() * sizeof(reservation_slots_[0]) +
          reservation_seen_bitmap_.size() * sizeof(reservation_seen_bitmap_[0]) +
          sizeof(reservation_next_generation_) +
-         sizeof(reservation_commit_gate_) + sizeof(active_reservation_ops_);
+         sizeof(*reservation_commit_gate_) + sizeof(active_reservation_ops_);
 }
 
 void AddressSpace::advance_executable_generation(
@@ -4016,3 +4142,56 @@ void AddressSpace::validate_guest_range(GuestAddress address,
 }
 
 }  // namespace xenon::memory
+
+namespace xenon::cpu {
+
+void debug_signal_write_trap(GuestAddress address, std::uint64_t value) {
+#if defined(_WIN32)
+  void* frames[24] = {};
+  const USHORT captured = CaptureStackBackTrace(0, 24, frames, nullptr);
+
+  static std::mutex trap_mutex;
+  std::lock_guard<std::mutex> lock(trap_mutex);
+
+  static bool sym_initialized = false;
+  const HANDLE process = GetCurrentProcess();
+  if (!sym_initialized) {
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(process, nullptr, TRUE);
+    sym_initialized = true;
+  }
+
+  if (FILE* d = std::fopen("signal_write_trap_diag.log", "a")) {
+    std::fprintf(d, "WRITE to guest 0x%08X value=0x%08X (thread os_tid=%lu):\n",
+                 (unsigned)address, (unsigned)value, GetCurrentThreadId());
+    char symbol_buffer[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_buffer);
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = 255;
+    for (USHORT i = 0; i < captured; ++i) {
+      const auto addr = reinterpret_cast<DWORD64>(frames[i]);
+      DWORD64 displacement = 0;
+      if (SymFromAddr(process, addr, &displacement, symbol)) {
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        DWORD line_disp = 0;
+        if (SymGetLineFromAddr64(process, addr, &line_disp, &line)) {
+          std::fprintf(d, "  [%u] %s+0x%llX (%s:%lu)\n", i, symbol->Name,
+                       (unsigned long long)displacement, line.FileName, line.LineNumber);
+        } else {
+          std::fprintf(d, "  [%u] %s+0x%llX\n", i, symbol->Name,
+                       (unsigned long long)displacement);
+        }
+      } else {
+        std::fprintf(d, "  [%u] 0x%p (unresolved)\n", i, frames[i]);
+      }
+    }
+    std::fclose(d);
+  }
+#else
+  (void)address;
+  (void)value;
+#endif
+}
+
+}  // namespace xenon::cpu
