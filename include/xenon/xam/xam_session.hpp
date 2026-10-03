@@ -10,6 +10,7 @@
 
 namespace xenon::core {
 class ExportRegistry;
+class XenonSession;
 }
 
 namespace xenon::xam {
@@ -28,8 +29,13 @@ class XamSession {
   // Initialize XAM subsystem with default offline user
   [[nodiscard]] bool initialize();
 
-  // Register all XAM exports into the export registry
-  [[nodiscard]] bool register_exports(core::ExportRegistry& registry);
+  // Register all XAM exports into the export registry. `session` backs the
+  // handful of exports that need the owning session's state (loaded XEX
+  // execution-id header, guest virtual-memory allocator, title stop/relaunch)
+  // - see xam_system_exports.cpp. Only read at call time (inside each export's
+  // handler), never during this registration call itself, so it is safe to
+  // call before a title is loaded.
+  [[nodiscard]] bool register_exports(core::ExportRegistry& registry, core::XenonSession& session);
 
   // Subsystem access
   [[nodiscard]] UserManager& users() { return *user_manager_; }

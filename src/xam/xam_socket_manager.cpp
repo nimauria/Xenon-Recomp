@@ -63,6 +63,13 @@ XamSocketManager::GuestHandle XamSocketManager::create(std::uint32_t af, std::ui
 #endif
 }
 
+XamSocketManager::GuestHandle XamSocketManager::adopt(std::uintptr_t native_socket) {
+  std::scoped_lock lock(mutex_);
+  GuestHandle handle = next_handle_++;
+  sockets_.emplace(handle, native_socket);
+  return handle;
+}
+
 bool XamSocketManager::close(GuestHandle handle, std::uint32_t thread_id) {
   std::uintptr_t native = 0;
   {

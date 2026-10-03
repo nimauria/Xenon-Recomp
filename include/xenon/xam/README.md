@@ -6,9 +6,20 @@ This directory contains the public interface for Xenon's XAM (Xbox Application M
 
 - `types.hpp` - Common XAM types (XUID, XResult, enums, constants)
 - `user_manager.hpp` - User management interface
+- `locale_manager.hpp` - Locale/language state interface
+- `content_manager.hpp` - Storage/content device management interface
+- `content_graph.hpp` - Content/DLC/title-update dependency graph interface
+- `dlc_manager.hpp` - DLC catalogue and installed-state interface
+- `save_manager.hpp` - Save data management interface
+- `title_update_manager.hpp` - Title update management interface
+- `notification_manager.hpp` - System notification queueing interface
+- `achievement_manager.hpp` - Achievements and per-title statistics interface
 - `xam_session.hpp` - XAM subsystem coordinator
 - `xam_exports.hpp` - XAM export ordinal definitions
 - `xam_user_exports.hpp` - User export registration interface
+- `xam_net_exports.hpp` - Networking-related export registration interface
+- `xam_socket_manager.hpp` - Socket management interface used by the networking exports
+- `xam_system_exports.hpp` - System export registration interface
 
 ## Usage
 

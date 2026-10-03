@@ -41,6 +41,28 @@ bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& loca
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
+  // XGetLanguage (0x03CD) - a real, separate, non-"Xam"-prefixed xam.xex
+  // export (verified against rexglue-sdk's XGetLanguage_entry, itself
+  // crediting xenia) that titles use interchangeably with XamGetLanguage
+  // (0x03D2, just above) to pick localized voice/text assets. Deliberately
+  // reads the exact same LocaleManager::language() value rather than a
+  // second, independently-tracked language setting - the two calls must
+  // agree, or a title that mixes them (checking one, loading assets keyed by
+  // the other) would load mismatched localization.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XGetLanguage";
+    desc.ordinal = ordinal::XGetLanguage;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&locale_manager](core::ExportCallContext& ctx) -> bool {
+      const auto language = locale_manager.language();
+      ctx.cpu.gpr[3] = static_cast<std::uint32_t>(language);
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
   // XamGetLocale (0x04A9)
   {
     core::ExportDescriptor desc{};

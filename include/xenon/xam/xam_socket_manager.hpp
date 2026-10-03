@@ -38,6 +38,11 @@ class XamSocketManager {
   // and records a WSA error for `thread_id` on failure.
   [[nodiscard]] GuestHandle create(std::uint32_t af, std::uint32_t type,
                                    std::uint32_t protocol, std::uint32_t thread_id);
+  // Registers an already-open native socket descriptor (e.g. accept()'s
+  // return value, which is a real, distinct, already-connected socket - not
+  // a duplicate of the listening socket) under a new guest handle, the same
+  // handle namespace create() allocates from.
+  [[nodiscard]] GuestHandle adopt(std::uintptr_t native_socket);
   // Real hardware's closesocket() semantics: returns false (guest should see -1) if
   // `handle` is not a currently-open socket of this manager's.
   [[nodiscard]] bool close(GuestHandle handle, std::uint32_t thread_id);

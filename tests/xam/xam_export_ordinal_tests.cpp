@@ -21,6 +21,7 @@
 #include <iostream>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/session.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/xam_exports.hpp"
 
@@ -51,7 +52,8 @@ void test_user_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x020Au, "XamUserGetXUID");
   expect_export(registry, 0x0210u, "XamUserGetSigninState");
@@ -76,7 +78,8 @@ void test_locale_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x03D2u, "XamGetLanguage");
   expect_export(registry, 0x04A9u, "XamGetLocale");
@@ -98,7 +101,8 @@ void test_content_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   // XamShowDeviceSelectorUI is part of the XamShow* system-UI family, not
   // content storage, despite being implemented alongside ContentManager.
@@ -108,7 +112,12 @@ void test_content_exports_use_real_ordinals() {
   expect_export(registry, 0x025Eu, "XamContentGetDeviceData");
   expect_export(registry, 0x025Fu, "XamContentGetDeviceName");
 
-  assert(!registry.contains("xam", 0x0250u));
+  // 0x0250 used to be an unimplemented placeholder this test guarded against
+  // a fabricated registration at; it is now the real XamEnumerate export
+  // (xam_enum_exports.cpp), registered at its real xam.xex ordinal - this
+  // replaces the old "must not resolve" guard with a check of the correct,
+  // now-real invariant instead of silently dropping coverage of this ordinal.
+  expect_export(registry, 0x0250u, "XamEnumerate");
   assert(!registry.contains("xam", 0x0234u));
   assert(!registry.contains("xam", 0x0237u));
   assert(!registry.contains("xam", 0x0238u));
@@ -123,7 +132,8 @@ void test_notification_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x028Au, "XamNotifyCreateListener");
   // Real xam.xex identities have no "Xam" prefix at all.
@@ -149,7 +159,8 @@ void test_achievement_exports_use_real_ordinals_and_drop_fabricated_ones() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x02EEu, "XamUserCreateAchievementEnumerator");
   expect_export(registry, 0x02F7u, "XamUserCreateStatsEnumerator");
@@ -181,7 +192,8 @@ void test_system_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x0282u, "XamGetSystemVersion");
 
@@ -221,7 +233,8 @@ void test_net_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x0001u, "NetDll_WSAStartup");
   expect_export(registry, 0x0002u, "NetDll_WSACleanup");
