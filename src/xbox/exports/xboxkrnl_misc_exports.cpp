@@ -15,9 +15,11 @@ namespace status = xenon::kernel::xbox::status;
 // Standard SHA-1 (FIPS 180-4), implemented directly since this is a pure,
 // fully-specified algorithm with no hardware/security-key dependency -
 // XeCryptSha is a plain hash function real titles use for content
-// checksums, not console DRM/signing (that is XeKeysConsole*, explicitly
-// NOT implemented - see xboxkrnl_rtl_exports.cpp's neighboring exports for
-// the project's general crypto-scope policy).
+// checksums, not console DRM/signing. XeKeysConsole* (below) is the
+// console-private-key DRM/signing family that genuinely cannot be
+// implemented correctly (no real key can exist here) - registered as an
+// honest always-succeeds stub rather than left unimplemented, since AC6's
+// own import table references it; see that pair's own comment for why.
 class Sha1 {
  public:
   void update(const std::uint8_t* data, std::size_t length) {
@@ -254,10 +256,67 @@ bool ex_register_title_terminate_notification_export(ExportCallContext& context)
   return true;
 }
 
+// XeKeysConsolePrivateKeySign/XeKeysConsoleSignatureVerification (ordinals
+// 0x256/0x257) - sign/verify a hash with the console's fused hardware
+// private key. That key is a real per-console secret burned into retail
+// silicon; it cannot exist in this (or any) software recompilation, so
+// byte-correct real signing/verification is permanently impossible here -
+// not a gap more research or effort closes. Every available reference
+// (xenia, rexglue-sdk's XeKeysConsolePrivateKeySign_entry/
+// XeKeysConsoleSignatureVerification_entry) independently arrives at the
+// same answer: report success unconditionally, without writing a
+// plausible-looking fake signature. That is the one behavior that is both
+// implementable and does not actively mislead a caller - a title that signs
+// then immediately verifies its own data via these two calls observes a
+// self-consistent "it worked," and nothing else in this codebase (no real
+// Xbox Live/disc-authentication consumer) ever checks the signature bytes
+// XeKeysConsolePrivateKeySign would have produced, so there is no later
+// consumer to actively deceive either. Registered (rather than left
+// unresolved) because AC6's own import table references both ordinals - an
+// unhandled-import fault if either is actually called would be strictly
+// worse than this honest, reference-matched stub.
+bool xe_keys_console_private_key_sign_export(ExportCallContext& context) {
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+bool xe_keys_console_signature_verification_export(ExportCallContext& context) {
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 }  // namespace
 
 bool register_xboxkrnl_misc_exports(core::ExportRegistry& registry) {
   bool ok = true;
+
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xboxkrnl.exe";
+    desc.name = "XeKeysConsolePrivateKeySign";
+    desc.ordinal = 0x256u;
+    desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "no real console hardware private key can exist in a software "
+        "recomp - always reports success without producing a real "
+        "signature, matching xenia/rexglue-sdk's identical precedent";
+    desc.handler = &xe_keys_console_private_key_sign_export;
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xboxkrnl.exe";
+    desc.name = "XeKeysConsoleSignatureVerification";
+    desc.ordinal = 0x257u;
+    desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "no real console hardware private key can exist in a software "
+        "recomp - always reports the signature as valid, matching xenia/"
+        "rexglue-sdk's identical precedent";
+    desc.handler = &xe_keys_console_signature_verification_export;
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
 
   {
     core::ExportDescriptor desc{};
