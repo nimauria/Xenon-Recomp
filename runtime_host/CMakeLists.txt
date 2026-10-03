@@ -27,6 +27,13 @@ target_compile_definitions(xenon_runtime_host PRIVATE
   XENON_HOST_ARCH_NAME="${XENON_HOST_ARCH}"
   XENON_RUNTIME_HAS_MEMORY=$<BOOL:${XENON_ENABLE_MEMORY}>)
 xenon_enable_warnings(xenon_runtime_host)
+if(MSVC)
+  # Diagnostic-only: emit real debug info (PDB) and a MAP file so a live
+  # debugger (cdb/windbg) can resolve this binary's own stack frames to
+  # function names even in this Release build. Safe to remove once no
+  # longer needed; does not affect optimization/codegen.
+  target_link_options(xenon_runtime_host PRIVATE /DEBUG /MAP:launcher/xenon_runtime_host.map)
+endif()
 
 # The game window belongs to this process (see presentation_host.hpp), reusing
 # the same SDL2 dependency xenon_input/xenon_audio already resolve rather than

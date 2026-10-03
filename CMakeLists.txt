@@ -95,6 +95,8 @@ add_library(xenon_core STATIC
   src/core/capability_report.cpp
   src/core/import_classification.cpp
   src/core/boot_checkpoints.cpp
+  src/core/export_trace.cpp
+  src/core/guest_memory_watch.cpp
   src/xam/user_manager.cpp
   src/xam/locale_manager.cpp
   src/xam/content_manager.cpp
@@ -104,6 +106,7 @@ add_library(xenon_core STATIC
   src/xam/save_manager.cpp
   src/xam/notification_manager.cpp
   src/xam/achievement_manager.cpp
+  src/xam/guest_enumerator.cpp
   src/xam/xam_session.cpp
   src/xam/xam_user_exports.cpp
   src/xam/xam_locale_exports.cpp
@@ -112,6 +115,18 @@ add_library(xenon_core STATIC
   src/xam/xam_achievement_exports.cpp
   src/xam/xam_system_exports.cpp
   src/xam/xam_net_exports.cpp
+  # xam_socket_manager.cpp backs XamSocketManager (used by xam_net_exports.cpp
+  # since that file's std::make_shared<XamSocketManager>() call), but was
+  # missing from this source list - any executable linking xenon_core that
+  # actually instantiates a session (and therefore register_net_exports())
+  # would fail to link without it.
+  src/xam/xam_socket_manager.cpp
+  src/xam/xam_voice_exports.cpp
+  src/xam/xam_task_exports.cpp
+  src/xam/xam_msg_exports.cpp
+  src/xam/xam_enum_exports.cpp
+  src/xam/xam_session_handle_exports.cpp
+  src/xam/xam_ui_exports.cpp
 )
 target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(xenon_core PUBLIC cxx_std_20)
@@ -209,6 +224,7 @@ if(XENON_ENABLE_KERNEL)
     target_sources(xenon_kernel PRIVATE
       src/kernel/memory/memory.cpp
       src/kernel/memory/heap.cpp
+      src/kernel/memory/pool.cpp
       src/kernel/process/process.cpp
     )
     target_link_libraries(xenon_kernel PUBLIC xenon_memory)
@@ -275,6 +291,7 @@ find_package(Threads REQUIRED)
 
 add_library(xenon_recomp STATIC
   src/recomp/driver.cpp
+  src/recomp/cpu_coverage.cpp
   src/recomp/ppc_value_analysis.cpp
   src/recomp/knowledge_base.cpp
   src/recomp/compilation_graph.cpp
@@ -513,6 +530,7 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_xex_module_exports.cpp
     src/xbox/exports/xboxkrnl_tls_exports.cpp
     src/xbox/exports/xboxkrnl_video_exports.cpp
+    src/xbox/exports/xboxkrnl_device_io_exports.cpp
     src/xbox/exports/xboxkrnl_rtl_exports.cpp
     src/xbox/exports/xboxkrnl_time_exports.cpp
     src/xbox/exports/xboxkrnl_sync_exports.cpp
@@ -520,6 +538,12 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     src/xbox/exports/xboxkrnl_ke_irql_exports.cpp
     src/xbox/exports/xboxkrnl_misc_exports.cpp
     src/xbox/exports/xboxkrnl_ob_exports.cpp
+    src/xbox/exports/xboxkrnl_string_exports.cpp
+    src/xbox/exports/xboxkrnl_rtl_string_exports.cpp
+    src/xbox/exports/xboxkrnl_threading_exports.cpp
+    src/xbox/exports/xboxkrnl_pool_exports.cpp
+    src/xbox/module_registry.cpp
+    src/xbox/string_format.cpp
     src/xbox/xbox_time_convert.cpp
     src/xbox/xex_dispatcher_header.cpp
     src/xbox/rtl.cpp
@@ -560,6 +584,7 @@ endif()
 if(XENON_ENABLE_GRAPHICS)
   add_library(xenon_graphics STATIC
     src/graphics/xenos/register_file.cpp
+    src/graphics/xenos/register_aperture.cpp
     src/graphics/xenos/shader.cpp
     src/graphics/xenos/shader_decoder.cpp
     src/graphics/xenos/shader_translation.cpp
@@ -1424,6 +1449,11 @@ if(XENON_BUILD_TESTS)
   target_link_libraries(xenon_xam_export_ordinal_tests PRIVATE xenon_core)
   xenon_enable_test_asserts(xenon_xam_export_ordinal_tests)
   add_test(NAME xenon_xam_export_ordinal_tests COMMAND xenon_xam_export_ordinal_tests)
+
+  add_executable(xenon_guest_enumerator_tests tests/xam/guest_enumerator_tests.cpp)
+  target_link_libraries(xenon_guest_enumerator_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_guest_enumerator_tests)
+  add_test(NAME xenon_guest_enumerator_tests COMMAND xenon_guest_enumerator_tests)
 
   if(XENON_ENABLE_INPUT)
     add_executable(xenon_input_tests tests/input/input_tests.cpp)
