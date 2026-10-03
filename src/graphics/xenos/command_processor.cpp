@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdio>
@@ -1121,6 +1122,18 @@ void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
 
 void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
                                      std::uint32_t depth) {
+  if (reader.remaining() < header.count) {
+    static std::atomic<int> _trunc_diag_count{0};
+    const int _n = _trunc_diag_count.fetch_add(1) + 1;
+    if (_n <= 10) {
+      if (FILE* _d = std::fopen("truncation_diag.log", "a")) {
+        std::fprintf(_d, "truncation #%d: opcode=%u raw=0x%08X requested_count=%u remaining=%u depth=%u predicate=%d\n",
+                     _n, static_cast<unsigned>(header.opcode), header.raw, header.count,
+                     reader.remaining(), depth, header.predicate ? 1 : 0);
+        std::fclose(_d);
+      }
+    }
+  }
   auto payload = read_payload(reader, header.count);
 
   // Type-3 predication is command-processor state, not draw/backend state.

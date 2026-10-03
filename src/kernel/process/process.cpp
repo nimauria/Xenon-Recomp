@@ -1,6 +1,7 @@
 #include "xenon/kernel/process.hpp"
 
 #include <atomic>
+#include <cstdio>
 
 namespace xenon::kernel {
 namespace {
@@ -76,6 +77,16 @@ KernelProcess::GpuRingBufferState KernelProcess::gpu_ring_buffer() const noexcep
 void KernelProcess::configure_gpu_ring_buffer(std::uint32_t base_address,
                                               std::uint32_t capacity_dwords) noexcept {
   std::scoped_lock lock(gpu_mutex_);
+  {
+    static std::atomic<int> _ring_init_diag_count{0};
+    const int _n = _ring_init_diag_count.fetch_add(1) + 1;
+    if (FILE* _d = std::fopen("ring_init_diag.log", "a")) {
+      std::fprintf(_d, "configure_gpu_ring_buffer call #%d: base=0x%08X capacity_dwords=%u (prev base=0x%08X prev capacity=%u prev write=%u prev read=%u)\n",
+                   _n, base_address, capacity_dwords, gpu_ring_buffer_.base_address,
+                   gpu_ring_buffer_.capacity_dwords, gpu_ring_buffer_.write_index, gpu_ring_buffer_.read_index);
+      std::fclose(_d);
+    }
+  }
   gpu_ring_buffer_.base_address = base_address;
   gpu_ring_buffer_.capacity_dwords = capacity_dwords;
   gpu_ring_buffer_.write_index = 0;
@@ -84,11 +95,33 @@ void KernelProcess::configure_gpu_ring_buffer(std::uint32_t base_address,
 
 void KernelProcess::set_gpu_ring_buffer_write_index(std::uint32_t write_index) noexcept {
   std::scoped_lock lock(gpu_mutex_);
+  {
+    static std::atomic<int> _wptr_diag_count{0};
+    const int _n = _wptr_diag_count.fetch_add(1) + 1;
+    if (_n <= 80) {
+      if (FILE* _d = std::fopen("wptr_diag.log", "a")) {
+        std::fprintf(_d, "set_write_index call #%d: new=%u (prev=%u read=%u)\n",
+                     _n, write_index, gpu_ring_buffer_.write_index, gpu_ring_buffer_.read_index);
+        std::fclose(_d);
+      }
+    }
+  }
   gpu_ring_buffer_.write_index = write_index;
 }
 
 void KernelProcess::set_gpu_ring_buffer_read_index(std::uint32_t read_index) noexcept {
   std::scoped_lock lock(gpu_mutex_);
+  {
+    static std::atomic<int> _rptr_diag_count{0};
+    const int _n = _rptr_diag_count.fetch_add(1) + 1;
+    if (_n <= 80) {
+      if (FILE* _d = std::fopen("rptr_diag.log", "a")) {
+        std::fprintf(_d, "set_read_index call #%d: new=%u (prev=%u write=%u)\n",
+                     _n, read_index, gpu_ring_buffer_.read_index, gpu_ring_buffer_.write_index);
+        std::fclose(_d);
+      }
+    }
+  }
   gpu_ring_buffer_.read_index = read_index;
 }
 

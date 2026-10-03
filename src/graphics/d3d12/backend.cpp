@@ -2,7 +2,9 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cmath>
 #include <deque>
@@ -477,6 +479,18 @@ void Backend::consume(const ir::Command& command) {
   if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) {
     ++impl_->draw_count;
     ++impl_->performance.draws;
+    {
+      static std::atomic<int> _draw_diag_count{0};
+      const int _n = _draw_diag_count.fetch_add(1) + 1;
+      if (_n <= 10) {
+        if (FILE* _d = std::fopen("draw_calls_diag.log", "a")) {
+          std::fprintf(_d, "D3D12 draw #%d: index_count=%u primitive=%d source=%d vs_valid=%d ps_valid=%d\n",
+                       _n, draw->index_count, static_cast<int>(draw->primitive_type),
+                       static_cast<int>(draw->source), draw->vertex_shader.valid, draw->pixel_shader.valid);
+          std::fclose(_d);
+        }
+      }
+    }
     const auto state = impl_->resource_state.snapshot();
     if (state.edram_mode == EdramMode::Copy) {
       if (!impl_->memory) {
