@@ -484,6 +484,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // NtWaitForSingleObjectEx et al. already use, so a thread handle is
   // waitable like any other kernel object), and starts it.
   [[nodiscard]] bool export_ex_create_thread(ExportCallContext& context);
+  // XamTaskSchedule (xam.xex ordinal 0x01AF): spawns a real guest-executing
+  // thread running the given callback with the given XTASK_MESSAGE* as its
+  // argument - the same create_thread()/run_created_guest_thread() primitive
+  // export_ex_create_thread() above uses, with this session's own default
+  // guest thread stack size (stack_size_) rather than a caller-supplied one,
+  // since XamTaskSchedule's real ABI has no stack-size argument.
+  [[nodiscard]] bool export_xam_task_schedule(ExportCallContext& context);
   static void record_compiled_lookup_miss(void* observer,
                                           cpu::ExecutionContext& context,
                                           cpu::GuestAddress target,

@@ -22,6 +22,7 @@ enum class ObjectType : std::uint8_t {
   Timer,
   Process,
   Module,
+  Enumerator,
 };
 
 enum class HandleFlags : std::uint8_t {
