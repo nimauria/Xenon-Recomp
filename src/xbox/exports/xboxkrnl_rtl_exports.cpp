@@ -367,6 +367,27 @@ bool c_specific_handler_export(ExportCallContext& context) {
   return true;
 }
 
+// RtlRaiseException (ordinal 0x136) - void RtlRaiseException(EXCEPTION_RECORD*).
+// Real hardware dispatches the exception through the function-table-driven
+// SEH engine __C_specific_handler above would be invoked by - which Xenon
+// does not implement (see that function's comment and RtlUnwind below).
+// Without a real unwind engine, there is no structurally honest alternative
+// to a no-op return: Xenon cannot locate or transfer control to a real
+// handler frame, and fabricating success/failure would claim dispatch work
+// that never happened. Matches this exact gap's already-established
+// treatment in this file (RtlCaptureContext/__C_specific_handler) rather
+// than introducing a second, inconsistent response to the same missing
+// prerequisite.
+bool rtl_raise_exception_export(ExportCallContext&) { return true; }
+
+// RtlUnwind (ordinal 0x147) - void RtlUnwind(void* TargetFrame, void*
+// TargetIp, EXCEPTION_RECORD*, void* ReturnValue). Real hardware walks the
+// function-table scope chain and performs a non-local jump to TargetFrame/
+// TargetIp - again, only ever reachable through the same unimplemented
+// unwind engine. A no-op return is the only response that does not
+// fabricate a stack transfer Xenon cannot actually perform.
+bool rtl_unwind_export(ExportCallContext&) { return true; }
+
 // Xbox 360 RTL export descriptors
 struct RtlExportSpec {
   std::uint32_t ordinal;
@@ -392,6 +413,13 @@ const RtlExportSpec kRtlExports[] = {
      "either), so this is currently unreachable dead code; matches hedge-"
      "dev/UnleashedRecomp's identical no-op precedent in a real shipped "
      "title"},
+    {0x0136u, "RtlRaiseException", &rtl_raise_exception_export, true,
+     "no-op - real dispatch needs the same unimplemented unwind engine "
+     "RtlUnwind/__C_specific_handler do not have either; rexglue-sdk has no "
+     "real implementation of this export either"},
+    {0x0147u, "RtlUnwind", &rtl_unwind_export, true,
+     "no-op - no real unwind engine exists to walk the scope chain or "
+     "perform the real non-local jump to the target frame"},
     {0x012Bu, "RtlImageXexHeaderField", &rtl_image_xex_header_field},
     {0x0135u, "RtlNtStatusToDosError", &rtl_nt_status_to_dos_error_export},
     {0x011Bu, "RtlCompareMemoryUlong", &rtl_compare_memory_ulong_export},
