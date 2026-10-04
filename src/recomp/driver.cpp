@@ -3212,6 +3212,22 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
   // already-deterministic (guest-address-sorted) list, decided up front -
   // never by which worker happens to finish which item first (Part 16's
   // "stable sorted function addresses determine shard membership").
+  // Direct-call symbols: exactly the compiled-function and alternate-entry
+  // cases registry.cpp's lookup_compiled() returns below (runtime helpers and
+  // native replacements keep the registry lookup). The generated registry is
+  // a static switch bound as ExecutionContext::compiled_lookup, so calling the
+  // symbol directly reaches the same code without a runtime lookup per call.
+  std::unordered_map<GuestAddress, std::string> direct_call_symbols;
+  for (const auto* function : codegen_items)
+    direct_call_symbols.emplace(function->guest_start, function->name + "_v2");
+  for (const auto& [owner, entries] : alternate_entries_by_owner) {
+    const auto owner_it = std::find_if(codegen_items.begin(), codegen_items.end(),
+                                       [&](const auto* function) { return function->guest_start == owner; });
+    if (owner_it == codegen_items.end()) continue;
+    for (const auto entry : entries)
+      direct_call_symbols.emplace(entry, cpu::backend::alternate_entry_symbol((*owner_it)->name, entry));
+  }
+
   const auto worker_count = resolve_worker_count(options.codegen_jobs);
   const WorkerPool pool(worker_count);
   std::vector<std::string> function_sources(codegen_items.size());
@@ -3231,11 +3247,20 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
             : std::span<const GuestAddress>(aliases_it->second);
     std::string aliases;
     for (auto entry : alternate_entries) aliases += std::to_string(entry) + ";";
+    std::vector<cpu::backend::DirectCallBinding> direct_calls;
+    std::string direct_call_key;
+    for (const auto target : cpu::backend::CppAotBackend::static_call_targets(function.ir)) {
+      const auto symbol_it = direct_call_symbols.find(target);
+      if (symbol_it == direct_call_symbols.end()) continue;
+      direct_calls.push_back({target, symbol_it->second});
+      direct_call_key += std::to_string(target) + "=" + symbol_it->second + ";";
+    }
     // Exact canonical IR, emitted symbol and aliases are all backend inputs.
     // Whole-image configuration/knowledge identity is intentionally absent.
     graph::Node node{"source", options.graph_versions.codegen,
         {{"ir", graph::digest(graph::serialize_ir(function.ir))},
          {"symbol", function.name}, {"aliases", aliases},
+         {"direct_calls", direct_call_key},
          {"producer_build", graph::producer_identity("source")},
          {"cpu_semantics", options.graph_versions.semantics}}, {}};
     // Output-based dependency permits cutoff when analysis changes but IR does not.
@@ -3245,7 +3270,8 @@ bool generate_project(const DriverOptions& options, AnalysisReport& report, std:
     std::string function_source;
     if (cached) { function_source = std::move(cached->bytes); source_hits[i] = 1; }
     else {
-      function_source = backend.emit_translation_unit(function.ir, function.name, {}, alternate_entries);
+      function_source = backend.emit_translation_unit(function.ir, function.name, direct_calls,
+                                                      alternate_entries);
       (void)graph_store.publish(node, function_source);
     }
     function_sources[i] = std::move(function_source);

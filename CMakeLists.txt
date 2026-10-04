@@ -1439,6 +1439,8 @@ if(XENON_BUILD_TESTS)
   xenon_add_generated_cpu_test(indirect_branch codegen_indirect_branch.cpp indirect_branch.cpp)
   xenon_add_generated_cpu_test(scalar_memory codegen_scalar_memory.cpp scalar_memory.cpp)
   xenon_add_generated_cpu_test(integer_edges codegen_integer_edges.cpp integer_edges.cpp)
+  xenon_add_generated_cpu_test(local_indirect codegen_local_indirect.cpp local_indirect.cpp)
+  xenon_add_generated_cpu_test(direct_call codegen_direct_call.cpp direct_call.cpp)
 
   # XAM tests
   add_executable(xenon_xam_user_manager_tests tests/xam/user_manager_tests.cpp)
