@@ -138,11 +138,11 @@ bool register_system_exports(core::ExportRegistry& registry, core::XenonSession&
   }
 
   // XamAlloc/XamFree (0x01EA/0x01EC) - the XAM-owned heap, kept separate from
-  // the title's own CRT heap on real hardware. Backed by KernelMemory's
-  // ordinary guest virtual allocator (the same one every other guest
-  // allocation in this codebase goes through) rather than a second, fake
-  // heap implementation - a real, size-tracked allocation a later XamFree
-  // can actually release, not a placeholder.
+  // the title's own CRT heap on real hardware. Backed by the process guest
+  // heap under its own XAM heap identity, so small XAM blocks are
+  // sub-allocated from shared segments (a dedicated 64 KiB virtual region per
+  // call exhausted the guest address space) and a later XamFree releases
+  // exactly the block it was given. Blocks are always returned zeroed.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -157,9 +157,10 @@ bool register_system_exports(core::ExportRegistry& registry, core::XenonSession&
         ctx.cpu.gpr[3] = result::InvalidParameter;
         return true;
       }
-      std::uint32_t address = 0u;
-      if (!process->memory().allocate_virtual(address, size, memory::kReadWrite,
-                                              /*top_down=*/false, /*zero_initialize=*/true)) {
+      const auto address = process->guest_heap().allocate(
+          kernel::GuestHeapManager::kXamHeapHandle, kernel::GuestHeapManager::kHeapZeroMemory,
+          size);
+      if (address == 0u) {
         ctx.cpu.gpr[3] = result::FunctionFailed;
         return true;
       }
@@ -182,7 +183,8 @@ bool register_system_exports(core::ExportRegistry& registry, core::XenonSession&
         ctx.cpu.gpr[3] = result::Success;
         return true;
       }
-      process->memory().free_virtual(address);
+      static_cast<void>(
+          process->guest_heap().free(kernel::GuestHeapManager::kXamHeapHandle, 0u, address));
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
