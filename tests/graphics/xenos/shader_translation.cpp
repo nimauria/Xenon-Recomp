@@ -151,12 +151,22 @@ void test_control_flow_state_machine_and_explicit_rejection() {
   spirv.format = ShaderBinaryFormat::Spirv;
   assert(compiler.compile(lowered, spirv).succeeded);
 
+  // getTextureBorderColorFrac has no lowering (Xenia/rexglue lack one too):
+  // it must be rejected explicitly, never silently produce a value.
   auto unsupported = make_shader(ShaderStage::Pixel);
   unsupported.instructions[0].kind = ShaderInstructionKind::TextureFetch;
   unsupported.instructions[0].texture_fetch.address = 1;
-  unsupported.instructions[0].texture_fetch.opcode = 17;
+  unsupported.instructions[0].texture_fetch.opcode = 16;
   const auto rejected = HlslShaderLowerer::lower(unsupported);
   assert(!rejected.complete && !rejected.diagnostics.empty());
+  // Derivative-based queries are undefined outside pixel shaders.
+  auto vertex_query = make_shader(ShaderStage::Vertex);
+  vertex_query.instructions[0].kind = ShaderInstructionKind::TextureFetch;
+  vertex_query.instructions[0].texture_fetch.address = 1;
+  vertex_query.instructions[0].texture_fetch.opcode = 17;
+  assert(!HlslShaderLowerer::lower(vertex_query).complete);
+  vertex_query.instructions[0].texture_fetch.opcode = 18;
+  assert(!HlslShaderLowerer::lower(vertex_query).complete);
 }
 
 void test_texture_lod_and_gradient_lowering() {
@@ -178,7 +188,12 @@ void test_texture_lod_and_gradient_lowering() {
   const auto lowered = HlslShaderLowerer::lower(shader);
   assert(lowered.complete);
   assert(lowered.hlsl.find("SampleGrad") != std::string::npos);
-  assert(lowered.hlsl.find("true, grad_h, grad_v, true") != std::string::npos);
+  // Register gradients come from setTextureGradientsHorz/Vert state, not
+  // from whatever happens to sit in the temporaries after the coordinate.
+  assert(lowered.hlsl.find(
+             "true, xenon_grad_h, xenon_grad_v, xenon_register_lod, true") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("float4 grad_h = r[") == std::string::npos);
   assert(lowered.hlsl.find("xenon_apply_texture_exp_adjust(3, fetched)") !=
          std::string::npos);
   assert(lowered.hlsl.find(
@@ -186,6 +201,152 @@ void test_texture_lod_and_gradient_lowering() {
          std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+}
+
+// Regressions: vertex fetches ignored const_index_sel (two of the three
+// vertex fetch constants in each slot were unreachable), used the raw word 0
+// (type bits included) as the byte address, and never applied the fetch
+// constant's endian swap to big-endian guest vertex data. 10_11_11/11_11_10
+// were rejected outright.
+void test_vertex_fetch_select_endian_and_packed_formats() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Vertex);
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::VertexFetch;
+  fetch.vertex_fetch.address = 1;
+  fetch.vertex_fetch.fetch_constant = 5;
+  fetch.vertex_fetch.fetch_constant_select = 2;
+  fetch.vertex_fetch.destination_register = 0;
+  fetch.vertex_fetch.destination_swizzle = 0x688;
+  fetch.vertex_fetch.stride_dwords = 3;
+  fetch.vertex_fetch.data_format = 16;  // 10_11_11
+  fetch.vertex_fetch.normalized = true;
+  fetch.vertex_fetch.signed_data = true;
+  shader.instructions.insert(shader.instructions.begin(), fetch);
+  shader.instructions[1].alu.address = 2;
+  shader.control_flow[0].count = 2;
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  if (!lowered.complete) {
+    for (const auto& diagnostic : lowered.diagnostics) std::cerr << diagnostic << '\n';
+  }
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("xenon_vertex_fetch(5, 2, source_index") != std::string::npos);
+  assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("(packed & ~3u)") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u)") !=
+         std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+
+  shader.instructions[0].vertex_fetch.data_format = 17;  // 11_11_10
+  assert(HlslShaderLowerer::lower(shader).complete);
+  shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
+  assert(!HlslShaderLowerer::lower(shader).complete);
+}
+
+// Every Xenos texture fetch opcode with defined semantics lowers and compiles
+// for both DXIL and SPIR-V: the LOD/gradient setters feed per-invocation state
+// read by later fetches, and the queries return LOD, derivatives and bilinear
+// weights.
+void test_texture_state_and_query_opcodes() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Pixel);
+  const auto export_alu = shader.instructions[0];
+  shader.instructions.clear();
+  const auto texture = [&](std::uint32_t address, std::uint8_t opcode) {
+    DecodedInstruction instruction{};
+    instruction.kind = ShaderInstructionKind::TextureFetch;
+    instruction.texture_fetch.address = address;
+    instruction.texture_fetch.opcode = opcode;
+    instruction.texture_fetch.fetch_constant = 2;
+    instruction.texture_fetch.dimension = 1;
+    instruction.texture_fetch.source_register = 1;
+    instruction.texture_fetch.destination_register = 2;
+    instruction.texture_fetch.destination_swizzle = 0x688;
+    instruction.texture_fetch.source_swizzle = 0xE4 & 0x3F;
+    return instruction;
+  };
+  shader.instructions.push_back(texture(1, 24));  // setTextureLod
+  shader.instructions.push_back(texture(2, 25));  // setTextureGradientsHorz
+  shader.instructions.push_back(texture(3, 26));  // setTextureGradientsVert
+  auto fetch_lod = texture(4, 1);
+  fetch_lod.texture_fetch.use_register_lod = true;
+  shader.instructions.push_back(fetch_lod);
+  auto fetch_grad = texture(5, 1);
+  fetch_grad.texture_fetch.use_computed_lod = true;
+  fetch_grad.texture_fetch.use_register_gradients = true;
+  shader.instructions.push_back(fetch_grad);
+  shader.instructions.push_back(texture(6, 17));  // getTextureComputedLod
+  shader.instructions.push_back(texture(7, 18));  // getTextureGradients
+  shader.instructions.push_back(texture(8, 19));  // getTextureWeights
+  auto alu = export_alu;
+  alu.alu.address = 9;
+  shader.instructions.push_back(alu);
+  shader.control_flow[0].target = 1;
+  shader.control_flow[0].count = 9;
+  shader.reflection.texture_fetch_constants = {2};
+  shader.reflection.temporary_register_count = 3;
+
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  if (!lowered.complete) {
+    for (const auto& diagnostic : lowered.diagnostics) std::cerr << diagnostic << '\n';
+  }
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("xenon_register_lod = coord.x;") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_grad_h = float4(coord.xyz, 0.0);") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_grad_v = float4(coord.xyz, 0.0);") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_texture_computed_lod(2, 1, coord") != std::string::npos);
+  assert(lowered.hlsl.find("ddx_coarse(coord.x), ddy_coarse(coord.x)") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_texture_weights(2, 1, coord") != std::string::npos);
+  // The fetch-constant LOD bias is part of every explicit LOD.
+  assert(lowered.hlsl.find("xenon_texture_constant_lod_bias(fetch_constant) + instruction_lod_bias") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("#define XENON_PIXEL_SHADER 1") != std::string::npos);
+  DxcShaderCompiler compiler;
+  const auto dxil = compiler.compile(lowered, {});
+  if (!dxil.succeeded) {
+    for (const auto& diagnostic : dxil.diagnostics) std::cerr << diagnostic << '\n';
+  }
+  assert(dxil.succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+}
+
+// Regression: a vertex shader tfetch with use_computed_lod (common - the
+// compiler sets it by default) emitted SampleBias, which needs implicit
+// derivatives that vertex shaders do not have. It must use an explicit LOD.
+void test_vertex_shader_texture_fetch_uses_explicit_lod() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Vertex);
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::TextureFetch;
+  fetch.texture_fetch.address = 1;
+  fetch.texture_fetch.opcode = 1;
+  fetch.texture_fetch.fetch_constant = 4;
+  fetch.texture_fetch.dimension = 1;
+  fetch.texture_fetch.use_computed_lod = true;
+  fetch.texture_fetch.destination_swizzle = 0x688;
+  shader.instructions.insert(shader.instructions.begin(), fetch);
+  shader.instructions[1].alu.address = 2;
+  shader.control_flow[0].count = 2;
+  shader.reflection.texture_fetch_constants = {4};
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("#define XENON_PIXEL_SHADER") == std::string::npos);
+  DxcShaderCompiler compiler;
+  const auto dxil = compiler.compile(lowered, {});
+  if (!dxil.succeeded) {
+    for (const auto& diagnostic : dxil.diagnostics) std::cerr << diagnostic << '\n';
+  }
+  assert(dxil.succeeded);
   ShaderCompileOptions spirv{};
   spirv.format = ShaderBinaryFormat::Spirv;
   assert(compiler.compile(lowered, spirv).succeeded);
@@ -280,6 +441,9 @@ int main() {
   test_pixel_target_and_incomplete_rejection();
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
+  test_vertex_fetch_select_endian_and_packed_formats();
+  test_texture_state_and_query_opcodes();
+  test_vertex_shader_texture_fetch_uses_explicit_lod();
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
   test_memexport_translation_targets();
