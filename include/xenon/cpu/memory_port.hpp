@@ -83,15 +83,16 @@ inline constexpr std::uint64_t kDirectAperture = 1ull << 24u;
 // cannot be served twice while another ticket holder is still waiting.
 class ReservationCommitGate {
  public:
-  void acquire() noexcept {
-    const auto my_ticket = next_ticket_.fetch_add(1u, std::memory_order_relaxed);
-    while (now_serving_.load(std::memory_order_acquire) != my_ticket) {
-      std::this_thread::yield();
-    }
-  }
-  void release() noexcept {
-    now_serving_.fetch_add(1u, std::memory_order_release);
-  }
+  // Deliberately NOT defined inline (see memory_port.cpp): this header is
+  // transitively included by every one of a static-recompilation project's
+  // generated-function translation units, each already enormous and under
+  // heavy /Ob2 inlining pressure. An inline acquire()/release() here was
+  // measured to blow up MSVC's per-TU optimization time by well over an
+  // order of magnitude (minutes becoming 30+ and still climbing) on the
+  // largest generated shards - the actual gate logic is a handful of
+  // instructions, so a real call is runtime-free compared to that cost.
+  void acquire() noexcept;
+  void release() noexcept;
   // True while any ticket is outstanding - i.e. someone holds the gate or is
   // actively waiting to be served. Used by callers that only need to wait
   // for the gate to go quiet (e.g. draining readers before a commit) rather

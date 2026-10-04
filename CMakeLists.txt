@@ -234,6 +234,7 @@ endif()
 # -----------------------------------------------------------------------------
 # CPU: Xenon PPC/VMX128 frontend -> Xenon IR -> optimizer -> native C++ AOT.
 add_library(xenon_cpu STATIC
+  src/cpu/memory_port.cpp
   src/cpu/ppc/state.cpp
   src/cpu/external_calls.cpp
   src/cpu/ppc/decoder.cpp
