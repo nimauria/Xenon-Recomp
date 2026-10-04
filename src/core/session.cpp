@@ -27,6 +27,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <map>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -4734,6 +4735,28 @@ bool XenonSession::external_call(std::string_view module,
   if (kernel_process_) {
     if (auto current = kernel_process_->thread_manager().current_thread()) {
       calling_thread_id = current->thread_id();
+    }
+  }
+  if (calling_thread_id == 0u) {
+    // Diagnostic: a guest-executing host thread with no registered
+    // KernelThread breaks every thread_id-keyed export (mutant ownership,
+    // waits). Log each such host thread's first few export calls.
+    static std::mutex _anon_mutex;
+    static std::map<std::thread::id, int> _anon_counts;
+    int _count = 0;
+    {
+      std::scoped_lock _lock(_anon_mutex);
+      _count = ++_anon_counts[std::this_thread::get_id()];
+    }
+    if (_count <= 5) {
+      if (FILE* _d = std::fopen("anonymous_thread_export_diag.log", "a")) {
+        std::fprintf(_d, "export %s ordinal=0x%X with thread_id=0: host_thread=%zu call #%d cia=0x%08X lr=0x%08X r13=0x%08X\n",
+                     std::string(module).c_str(), ordinal,
+                     std::hash<std::thread::id>{}(std::this_thread::get_id()), _count,
+                     static_cast<unsigned>(state.cia), static_cast<unsigned>(state.lr),
+                     static_cast<unsigned>(state.gpr[13]));
+        std::fclose(_d);
+      }
     }
   }
 

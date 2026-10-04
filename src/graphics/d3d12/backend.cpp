@@ -482,7 +482,8 @@ void Backend::consume(const ir::Command& command) {
     {
       static std::atomic<int> _draw_diag_count{0};
       const int _n = _draw_diag_count.fetch_add(1) + 1;
-      if (_n <= 10) {
+      // First 10 in full, then a running total every 1000 draws.
+      if (_n <= 10 || _n % 1000 == 0) {
         if (FILE* _d = std::fopen("draw_calls_diag.log", "a")) {
           std::fprintf(_d, "D3D12 draw #%d: index_count=%u primitive=%d source=%d vs_valid=%d ps_valid=%d\n",
                        _n, draw->index_count, static_cast<int>(draw->primitive_type),

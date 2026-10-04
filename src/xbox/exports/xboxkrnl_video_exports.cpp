@@ -390,7 +390,8 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
   {
     static std::atomic<int> _vd_swap_call_count{0};
     const int _n = _vd_swap_call_count.fetch_add(1) + 1;
-    if (_n <= 20) {
+    // First 20 in full, then a running total every 60 swaps (~1 s at 60 Hz).
+    if (_n <= 20 || _n % 60 == 0) {
       if (FILE* _d = std::fopen("vdswap_calls_diag.log", "a")) {
         std::fprintf(_d, "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
                      _n, context.thread_id, (unsigned long long)context.cpu.lr,
