@@ -108,6 +108,10 @@ std::string StatusWriter::status_path() const {
   return (std::filesystem::path(session_dir_) / "status.json").string();
 }
 
+std::string StatusWriter::capability_report_path() const {
+  return (std::filesystem::path(session_dir_) / "capability-report.json").string();
+}
+
 std::string StatusWriter::stop_signal_path() const {
   return (std::filesystem::path(session_dir_) / "stop.signal").string();
 }
@@ -206,6 +210,19 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
   }
   if (!publish_status_file(temp_path, final_path)) {
     std::cerr << "[runtime_host] Failed to publish status file: "
+              << final_path.string() << std::endl;
+  }
+}
+
+void StatusWriter::write_capability_report(core::XenonSession& session) {
+  const auto final_path = std::filesystem::path(capability_report_path());
+  const auto temp_path = final_path.string() + ".tmp";
+  {
+    std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+    out << session.capability_report().dump(2);
+  }
+  if (!publish_status_file(temp_path, final_path)) {
+    std::cerr << "[runtime_host] Failed to publish capability report: "
               << final_path.string() << std::endl;
   }
 }

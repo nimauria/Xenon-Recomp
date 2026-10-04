@@ -471,23 +471,21 @@ int main(int argc, char** argv) {
   bool stop_sent = false;
   std::optional<std::chrono::steady_clock::time_point> stop_deadline;
   auto next_status_write = std::chrono::steady_clock::now();
+  // The capability report (GPU backend counters, CPU fallback) is heavier to
+  // build than status.json, so it is published less often.
+  constexpr auto kCapabilityReportInterval = std::chrono::seconds(5);
+  auto next_capability_report = std::chrono::steady_clock::now() + kCapabilityReportInterval;
 
-  auto next_diag_tick = std::chrono::steady_clock::now();  // TEMP-DIAG (remove)
   while (true) {
     const bool active = session.is_running() || session.execution_active();
     const auto now = std::chrono::steady_clock::now();
-    if (now >= next_diag_tick) {  // TEMP-DIAG (remove)
-      std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
-      std::cout << "[TEMP-DIAG] supervise tick active=" << active
-                << " stop_sent=" << stop_sent
-                << " stop_signal_exists=" << status.stop_requested() << std::endl;
-      next_diag_tick = now + std::chrono::seconds(1);
-    }
     if (now >= next_status_write) {
-      { std::scoped_lock l(xenon::core::XenonSession::console_log_mutex()); std::cout << "[TEMP-DIAG] before status.write" << std::endl; }
       status.write(session);
-      { std::scoped_lock l(xenon::core::XenonSession::console_log_mutex()); std::cout << "[TEMP-DIAG] after status.write" << std::endl; }
       next_status_write = now + kStatusInterval;
+    }
+    if (now >= next_capability_report) {
+      status.write_capability_report(session);
+      next_capability_report = now + kCapabilityReportInterval;
     }
 
     if (!active) break;
@@ -495,9 +493,7 @@ int main(int argc, char** argv) {
 #if defined(XENON_HAS_PRESENTATION_HOST)
     if (presentation_active) {
       xenon::runtime_host::PresentationEvents events{};
-      { std::scoped_lock l(xenon::core::XenonSession::console_log_mutex()); std::cout << "[TEMP-DIAG] before pump_events" << std::endl; }
       presentation.pump_events(events);
-      { std::scoped_lock l(xenon::core::XenonSession::console_log_mutex()); std::cout << "[TEMP-DIAG] after pump_events resized=" << events.resized << std::endl; }
       if (events.close_requested && !stop_sent) {
         // Window close requests an orderly session shutdown, matching
         // real Xbox 360 dashboard/game-close behavior - it does not
@@ -557,6 +553,7 @@ int main(int argc, char** argv) {
 #endif
 
   status.write(session, "Session ended");
+  status.write_capability_report(session);
   {
     // Same reasoning as the "Start failed" write above: the audio/GPU-pump/
     // timer threads are process-lifetime (stopped only in shutdown(), which
