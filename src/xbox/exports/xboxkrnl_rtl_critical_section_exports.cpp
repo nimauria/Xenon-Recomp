@@ -39,20 +39,33 @@ constexpr std::uint32_t kOwningThreadOffset = 0x18u;
 // own critical section's spin count back sees the real, expected value.
 constexpr std::uint32_t kSpinCountByteOffset = 0x1u;
 
-// Xenon's chosen "owning thread" identity for a critical section:
-// ExportCallContext::thread_id, the same real, stable, nonzero-for-every-
-// real-guest-thread identifier KeWaitForSingleObject/mutant ownership
-// already use (kernel::KernelThread's thread_id_ counter starts at 1, so 0
-// is never a real thread's id and unambiguously means "unlocked" here).
-// This is Xenon's own internal thread identity, not literally the real
-// hardware's guest PKTHREAD pointer (xenia's XThread::GetCurrentThread()->
-// guest_object()) - no evidence any title inspects this field's exact bit
-// pattern (it is real kernel-internal Windows CRITICAL_SECTION-equivalent
-// bookkeeping on real hardware too), and using a value already proven
-// unique-and-stable per guest thread elsewhere in this codebase is more
-// robust than fabricating a synthetic guest-visible thread-object address
-// with no real backing structure.
+// X_KPCR.prcb_data.current_thread - see core::GuestKpcrLayout::kCurrentThreadOffset
+// (xenon_core's KPCR layout; this library cannot depend on xenon_core).
+constexpr std::uint32_t kKpcrCurrentThreadOffset = 0x100u;
+
+// The "owning thread" identity written to a critical section, matching the
+// real kernel: the calling thread's guest KTHREAD pointer, read through r13
+// (KPCR) -> current_thread exactly as compiled guest code does (xenia's
+// XThread::GetCurrentThread()->guest_object()). Every Xenon guest thread
+// (main, ExCreateThread, audio callback, GPU interrupt) runs with r13 at its
+// own KPCR whose current_thread is a distinct, never-zero KTHREAD, so the
+// marker is unique per thread and equal to what guest code compares
+// OwningThread against when checking its own ownership.
+//
+// Previously this was ExportCallContext::thread_id, which is 0 whenever the
+// calling host thread has no registered KernelThread. A free critical
+// section also has OwningThread 0, so such a caller matched the
+// `owner == self` recursive-acquire branch on a FREE lock: it bumped the
+// counts without taking ownership, and the next contending thread waited
+// forever on an owner that did not exist (AC6: thread 22 blocked on
+// "owner_thread=0"). thread_id remains only as the fallback for a caller
+// with no KPCR at all (host-side unit-test contexts).
 std::uint32_t owning_thread_marker(const ExportCallContext& context) {
+  const auto kpcr = static_cast<cpu::GuestAddress>(context.cpu.gpr[13]);
+  if (kpcr != 0u) {
+    const auto kthread = context.memory.read32_be(kpcr + kKpcrCurrentThreadOffset);
+    if (kthread != 0u) return kthread;
+  }
   return context.thread_id;
 }
 

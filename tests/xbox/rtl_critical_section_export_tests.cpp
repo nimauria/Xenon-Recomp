@@ -326,8 +326,73 @@ void test_try_enter_does_not_steal_a_pending_handoff() {
 
 }  // namespace
 
+// Regression (AC6): ownership must be keyed on the caller's guest KTHREAD
+// (r13 -> KPCR+0x100), exactly as the real kernel stores it. Two guest
+// threads that both lack a registered host KernelThread (thread_id 0) used to
+// share the marker 0 - which is also a free lock's OwningThread - so the
+// first Enter on a free lock took the "recursive" branch without becoming the
+// owner, and the other thread then waited forever on owner 0.
+void test_owner_is_guest_kthread_not_host_thread_id() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  // Two guest threads, each with its own KPCR whose current_thread points at
+  // its own KTHREAD - and neither with a host thread id.
+  memory::GuestAddress kpcr_a{}, kpcr_b{};
+  assert(fixture.address_space->allocate(0x2D8u, 16u, memory::kReadWrite, false, kpcr_a));
+  assert(fixture.address_space->allocate(0x2D8u, 16u, memory::kReadWrite, false, kpcr_b));
+  constexpr std::uint32_t kKthreadA = 0x80070000u;
+  constexpr std::uint32_t kKthreadB = 0x80071000u;
+  fixture.address_space->write32_be(kpcr_a + 0x100u, kKthreadA);
+  fixture.address_space->write32_be(kpcr_b + 0x100u, kKthreadB);
+
+  cpu::CpuState enter_a{};
+  enter_a.gpr[3] = cs;
+  enter_a.gpr[13] = kpcr_a;
+  assert(fixture.invoke(kOrdEnter, enter_a, /*thread_id=*/0u).success);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadA);
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 1u);
+  assert(static_cast<std::int32_t>(fixture.address_space->read32_be(cs + kLockCountOffset)) == 0);
+
+  // Thread B (also thread_id 0) must see the lock as held by someone else.
+  cpu::CpuState try_b{};
+  try_b.gpr[3] = cs;
+  try_b.gpr[13] = kpcr_b;
+  assert(fixture.invoke(kOrdTryEnter, try_b, /*thread_id=*/0u).success);
+  assert(try_b.gpr[3] == 0u && "a different guest thread must not acquire a held lock");
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadA);
+
+  // Thread A re-entering is a genuine recursive acquire.
+  cpu::CpuState try_a{};
+  try_a.gpr[3] = cs;
+  try_a.gpr[13] = kpcr_a;
+  assert(fixture.invoke(kOrdTryEnter, try_a, /*thread_id=*/0u).success);
+  assert(try_a.gpr[3] == 1u);
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 2u);
+
+  for (int i = 0; i < 2; ++i) {
+    cpu::CpuState leave{};
+    leave.gpr[3] = cs;
+    leave.gpr[13] = kpcr_a;
+    assert(fixture.invoke(kOrdLeave, leave, /*thread_id=*/0u).success);
+  }
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+
+  // Now free, thread B acquires it under its own KTHREAD.
+  cpu::CpuState try_b2{};
+  try_b2.gpr[3] = cs;
+  try_b2.gpr[13] = kpcr_b;
+  assert(fixture.invoke(kOrdTryEnter, try_b2, /*thread_id=*/0u).success);
+  assert(try_b2.gpr[3] == 1u);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadB);
+}
+
 int main() {
   std::cout << "Testing xboxkrnl Rtl*CriticalSection exports...\n";
+  test_owner_is_guest_kthread_not_host_thread_id();
 
   test_ordinals_are_registered();
   test_initialize_sets_real_initial_state();
