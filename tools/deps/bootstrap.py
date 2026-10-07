@@ -368,9 +368,16 @@ def _build_vulkan_loader(source: Path, build: Path, prefix: Path, headers_prefix
         f"-DVULKAN_HEADERS_INSTALL_DIR={headers_prefix}",
         "-DBUILD_TESTS=OFF", "-DLOADER_CODEGEN=OFF",
     ]
-    # Keep the Linux loader feature-complete. These may require the normal X11/
-    # Wayland development packages on the RELEASE BUILD MACHINE only; they are
-    # not end-user installer prerequisites.
+    if sys.platform.startswith("linux"):
+        # The loader can still serve XCB/Xlib without optional Xrandr or
+        # Wayland headers. Keep each WSI integration enabled when its package
+        # is available on the build host.
+        for package, option in (
+            ("xrandr", "BUILD_WSI_XLIB_XRANDR_SUPPORT"),
+            ("wayland-client", "BUILD_WSI_WAYLAND_SUPPORT"),
+        ):
+            if subprocess.run(["pkg-config", "--exists", package], check=False).returncode != 0:
+                cmd.append(f"-D{option}=OFF")
     _run(cmd, quiet=quiet)
     _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
@@ -517,7 +524,9 @@ def _ffmpeg_configure_args(prefix: Path, *, windows: bool, have_nasm: bool) -> l
     if not windows:
         args.append("--enable-pic")
     if not have_nasm:
-        args.append("--disable-x86asm")
+        # This fork's old inline x86 assembly also fails with current GNU
+        # assemblers. Disabling only the external NASM sources is insufficient.
+        args.append("--disable-asm")
     if windows:
         args.extend(["--toolchain=msvc", "--target-os=win64", "--arch=x86_64"])
     return args
@@ -530,12 +539,22 @@ def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, jobs: int, quie
     if not configure.is_file():
         raise BootstrapError(f"FFmpeg configure script missing: {configure}")
     have_nasm = bool(shutil.which("nasm") or shutil.which("yasm"))
-    _run([str(configure), *_ffmpeg_configure_args(prefix, windows=False, have_nasm=have_nasm)], cwd=build, quiet=quiet)
-    make = _which_any(["gmake", "make"])
-    if not make:
-        raise BootstrapError("Building xenia-project FFmpeg requires make or gmake")
-    _run([make, f"-j{jobs}"], cwd=build, quiet=quiet)
-    _run([make, "install"], cwd=build, quiet=quiet)
+    # The pinned fork commits a platform-dispatch config.h in its source tree.
+    # FFmpeg's configure rejects out-of-tree builds while that file exists.
+    source_config = source / "config.h"
+    saved_config = build / "source-config.h"
+    if source_config.is_file():
+        source_config.replace(saved_config)
+    try:
+        _run([str(configure), *_ffmpeg_configure_args(prefix, windows=False, have_nasm=have_nasm)], cwd=build, quiet=quiet)
+        make = _which_any(["gmake", "make"])
+        if not make:
+            raise BootstrapError("Building xenia-project FFmpeg requires make or gmake")
+        _run([make, f"-j{jobs}"], cwd=build, quiet=quiet)
+        _run([make, "install"], cwd=build, quiet=quiet)
+    finally:
+        if saved_config.is_file():
+            saved_config.replace(source_config)
 
 
 def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:

@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "deps" / "bootstrap.py"
@@ -85,6 +86,23 @@ class DependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.normalize_arch("x86_64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("AMD64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("aarch64"), "arm64")
+
+    def test_ffmpeg_without_nasm_disables_inline_assembly(self):
+        args = bootstrap._ffmpeg_configure_args(Path("/tmp/ffmpeg"), windows=False, have_nasm=False)
+        self.assertIn("--disable-asm", args)
+
+    def test_ffmpeg_build_restores_source_config_after_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            source.mkdir()
+            (source / "configure").write_text("#!/bin/sh\n")
+            config = source / "config.h"
+            config.write_text("pinned fork config\n")
+            with mock.patch.object(bootstrap, "_run", side_effect=bootstrap.BootstrapError("configure failed")):
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "configure failed"):
+                    bootstrap._build_ffmpeg_posix(source, root / "build", root / "prefix", 1, True)
+            self.assertEqual(config.read_text(), "pinned fork config\n")
 
     def test_visual_studio_generator_detection_prefers_newest(self):
         help_text = """
