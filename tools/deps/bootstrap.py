@@ -40,6 +40,11 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 MANIFEST_PATH = SCRIPT_DIR / "manifest.json"
 DEFAULT_MANAGED_BASE = REPO_ROOT / ".xenon" / "deps"
 STAMP_NAME = ".xenon-dependency.json"
+DXC_WIN_ADAPTER_URL = (
+    "https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/"
+    "v1.9.2607/include/dxc/WinAdapter.h"
+)
+DXC_WIN_ADAPTER_SHA256 = "f5688a1408a8de8c0c35176bc900f21d7679d492215da94da4ab643cb66867f4"
 
 
 class BootstrapError(RuntimeError):
@@ -722,6 +727,8 @@ def verify_dependency(key: str, entry: dict, root: Path, triplet: str) -> tuple[
     if key == "dxc":
         if not (prefix / "include" / "dxc" / "dxcapi.h").is_file():
             return False, "dxcapi.h not installed"
+        if triplet.startswith("linux-") and not (prefix / "include" / "dxc" / "WinAdapter.h").is_file():
+            return False, "WinAdapter.h not installed"
         runtime = prefix / "runtime"
         if triplet.startswith("windows-"):
             if not (prefix / "lib" / "dxcompiler.lib").is_file():
@@ -778,6 +785,18 @@ def ensure_dependency(key: str, entry: dict, *, root: Path, cache_base: Path, tr
         _safe_extract_archive(archive, extracted)
         if key == "dxc":
             _install_dxc_archive(extracted, prefix, triplet)
+            if triplet.startswith("linux-"):
+                # The official Linux archive omits this header even though its
+                # dxcapi.h includes it. Fetch the matching tagged source file.
+                header = _download_archive(
+                    "dxc-WinAdapter",
+                    {"version": entry["version"], "assets": {triplet: {
+                        "url": DXC_WIN_ADAPTER_URL,
+                        "sha256": DXC_WIN_ADAPTER_SHA256,
+                    }}},
+                    cache_base, triplet, offline=offline, quiet=quiet,
+                )
+                _copy_file(header, prefix / "include" / "dxc" / "WinAdapter.h")
         else:
             raise BootstrapError(f"No archive installer implemented for dependency {key}")
     else:

@@ -54,6 +54,7 @@ class DependencyBootstrapTests(unittest.TestCase):
         elif key == "dxc":
             (prefix / "include" / "dxc").mkdir(parents=True)
             (prefix / "include" / "dxc" / "dxcapi.h").write_text("/* DXC */\n")
+            (prefix / "include" / "dxc" / "WinAdapter.h").write_text("/* DXC Linux adapter */\n")
             (prefix / "lib" / "libdxcompiler.so").write_bytes(b"")
             (prefix / "runtime").mkdir(parents=True)
             (prefix / "runtime" / "libdxcompiler.so").write_bytes(b"")
@@ -163,6 +164,16 @@ class DependencyBootstrapTests(unittest.TestCase):
             ok, detail = bootstrap.verify_dependency("xenia-ffmpeg", entry, root, self.triplet)
             self.assertFalse(ok)
             self.assertIn("avutil", detail)
+
+    def test_verify_requires_linux_dxc_adapter_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prefix = self._fake_ready_dependency(root, "dxc")
+            (prefix / "include" / "dxc" / "WinAdapter.h").unlink()
+            entry = self.manifest["dependencies"]["dxc"]
+            ok, detail = bootstrap.verify_dependency("dxc", entry, root, self.triplet)
+            self.assertFalse(ok)
+            self.assertIn("WinAdapter.h", detail)
 
     def test_stale_manifest_stamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:

@@ -4,18 +4,27 @@
 #include <stdexcept>
 #include <utility>
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 #include <ObjIdl.h>
 #include <OleAuto.h>
 #include <Unknwn.h>
+#endif
 #include <dxc/dxcapi.h>
+#if defined(_WIN32)
 #include <wrl/client.h>
+#endif
 
 namespace xenon::gpu {
 namespace {
+#if defined(_WIN32)
 using Microsoft::WRL::ComPtr;
+#else
+template <typename T>
+using ComPtr = CComPtr<T>;
+#endif
 
 std::uint64_t mix(std::uint64_t hash, std::uint64_t value) noexcept {
   for (unsigned i = 0; i < 8; ++i) {
@@ -54,7 +63,7 @@ class DxcShaderCompiler::Impl {
     hr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler));
     if (FAILED(hr)) {
       error = "DxcCreateInstance(CLSID_DxcCompiler) failed";
-      utils.Reset();
+      utils = nullptr;
     }
   }
 
