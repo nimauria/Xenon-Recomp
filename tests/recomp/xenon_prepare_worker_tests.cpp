@@ -28,6 +28,7 @@
 #include "xenon/recomp/compilation_graph.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
+#include "../support/source_snapshot.hpp"
 
 using namespace xenon::recomp;
 using namespace xenon::recomp::analysis;
@@ -156,28 +157,6 @@ std::string default_target_arch() {
 #endif
 }
 
-// xenon-prepare folds include/, src/, cmake/, CMakeLists.txt and
-// tools/compilation_cache.py into the preparation identity, and this test
-// asserts that a second preparation finds that identity unchanged. It runs
-// for minutes, so hand xenon-prepare a private copy of the Xenon tree: edits
-// to the working tree while the test runs cannot then invalidate the cache
-// under test. The generated project builds Xenon with SYSTEM dependencies and
-// no graphics, audio or input, so the managed .xenon/deps tree is not needed.
-std::filesystem::path snapshot_source_tree(const std::filesystem::path& destination) {
-  const std::filesystem::path source(XENON_SOURCE_ROOT);
-  std::filesystem::remove_all(destination);
-  std::filesystem::create_directories(destination);
-  for (const auto& entry : std::filesystem::directory_iterator(source)) {
-    const auto name = entry.path().filename().string();
-    if (name == ".git" || name == ".xenon" || name == "out" || name == "generated" ||
-        name.starts_with("build"))
-      continue;
-    std::filesystem::copy(entry.path(), destination / name,
-                          std::filesystem::copy_options::recursive);
-  }
-  return destination;
-}
-
 ArtifactCacheKey expected_key(const std::filesystem::path& source_root,
                              const xbox::XexEffectiveIdentity& identity,
                              const AnalysisHintSetV2& hints) {
@@ -208,8 +187,9 @@ int main() {
   const auto root = std::filesystem::temp_directory_path() / "xenon_prepare_worker_test";
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
-  const auto source_root = snapshot_source_tree(
-      std::filesystem::temp_directory_path() / "xenon_prepare_worker_source");
+  // xenon-prepare folds the tree into the preparation identity, and the
+  // second preparation below must find it unchanged.
+  const auto source_root = xenon::test::snapshot_source_tree("prepare_worker");
 
   const auto content_dir = root / "content";
   std::filesystem::create_directories(content_dir);

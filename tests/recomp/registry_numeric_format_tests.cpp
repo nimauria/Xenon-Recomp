@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "xenon/recomp/driver.hpp"
+#include "../support/source_snapshot.hpp"
 
 using namespace xenon::recomp;
 
@@ -393,7 +394,7 @@ int main() {
       return std::string("\"") + value.string() + "\"";
     };
     const auto configure = "cmake -S " + quote(project.fixture.output) + " -B " + quote(build) +
-                           " -DXENON_RECOMP_ROOT=" + quote(XENON_SOURCE_ROOT);
+                           " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("registry_numeric_format"));
     assert(std::system(configure.c_str()) == 0);
     const auto compile = "cmake --build " + quote(build) + " --target xenon_game";
     assert(std::system(compile.c_str()) == 0);
