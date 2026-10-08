@@ -58,7 +58,7 @@ neighbouring file leaves the key stable while changing the compiler changes
 it.
 
 **`xenon_backend_capability_tests` could not pass on Linux.**
-`discover_backend_capabilities()` (`src/graphics/windows/backend_capabilities.cpp`)
+`discover_backend_capabilities()` (now `src/graphics/common/backend_capabilities.cpp`)
 set `runtime_available` only on the `_WIN32` path, so the test aborted on
 Linux even with a working Vulkan device. Linux now loads `libvulkan.so.1` and
 queries `vkEnumerateInstanceVersion`, as Windows does with `vulkan-1.dll`.

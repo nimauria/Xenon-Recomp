@@ -19,7 +19,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/command_processor.cpp
     xenos/capture.cpp
     xenos/graphics_system.cpp
-    windows/backend_capabilities.cpp
+    common/backend_capabilities.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)
