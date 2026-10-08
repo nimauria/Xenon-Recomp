@@ -63,4 +63,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           XENON_CI_EVENT: ${{ github.event_name }}
           XENON_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          XENON_CI_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: python3 tools/coverage/check_ci_platforms.py --wait-seconds 10200

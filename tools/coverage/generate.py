@@ -94,10 +94,15 @@ def kernel_registration_rows() -> dict[str, tuple[int, str]]:
             rows[name] = (ordinal, path)
         by_ordinal[ordinal] = name
 
-    spec = re.compile(r'\{\s*(0x[0-9A-Fa-f]+)u?\s*,\s*"([A-Za-z_]\w*)"\s*,')
+    spec = re.compile(r'\{\s*(0x[0-9A-Fa-f]+)u?\s*,\s*"([A-Za-z_]\w*)"\s*[,}]')
     for file in paths:
         path = str(file.relative_to(ROOT))
-        for ordinal, name in spec.findall(source(path)):
+        contents = source(path)
+        matches = spec.findall(contents)
+        candidates = len(re.findall(r'\{\s*0x[0-9A-Fa-f]+u?\s*,\s*"', contents))
+        if candidates != len(matches):
+            raise CoverageError(f"unparseable xboxkrnl export rows in {path}")
+        for ordinal, name in matches:
             add(name, int(ordinal, 16), path)
     direct = re.compile(
         r'(?P<var>\w+)\.library\s*=\s*"xboxkrnl(?:\.exe)?"\s*;\s*'
@@ -119,8 +124,8 @@ def kernel_registration_rows() -> dict[str, tuple[int, str]]:
         if name != symbol or symbol not in constants:
             raise CoverageError(f"audio export name/ordinal symbol mismatch: {name}")
         add(name, constants[symbol], audio_path)
-    if len(rows) < 240:
-        raise CoverageError("xboxkrnl static registration extraction unexpectedly small")
+    if not rows:
+        raise CoverageError("xboxkrnl static registration extraction found no rows")
 
     # The independent diagnostic lookup table is only a sample. Every sampled
     # name/ordinal must agree with the registered source inventory.

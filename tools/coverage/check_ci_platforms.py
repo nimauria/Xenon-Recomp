@@ -26,8 +26,9 @@ def get_json(path: str, token: str) -> dict:
 
 
 def workflow_result(repository: str, workflow: str, job_name: str,
-                    sha: str, event: str, token: str) -> str:
-    query = urllib.parse.urlencode({"head_sha": sha, "event": event, "per_page": 20})
+                    sha: str, event: str, branch: str, token: str) -> str:
+    query = urllib.parse.urlencode({"head_sha": sha, "event": event,
+                                    "branch": branch, "per_page": 20})
     base = f"/repos/{repository}/actions"
     try:
         runs = get_json(f"{base}/workflows/{workflow}/runs?{query}", token).get("workflow_runs", [])
@@ -35,7 +36,8 @@ def workflow_result(repository: str, workflow: str, job_name: str,
         if exc.code == 404:
             return "pending: workflow has not appeared in Actions yet"
         raise
-    runs = [run for run in runs if run.get("head_sha") == sha and run.get("event") == event]
+    runs = [run for run in runs if run.get("head_sha") == sha and
+            run.get("event") == event and run.get("head_branch") == branch]
     if not runs:
         return "pending: no same-commit run"
     run = max(runs, key=lambda row: row["id"])
@@ -58,12 +60,13 @@ def main() -> int:
     token = os.environ["GITHUB_TOKEN"]
     sha = os.environ["XENON_CI_SHA"]
     event = os.environ["XENON_CI_EVENT"]
+    branch = os.environ["XENON_CI_BRANCH"]
     if event not in {"push", "pull_request", "workflow_dispatch"}:
         parser.error(f"unsupported event: {event}")
     deadline = time.monotonic() + args.wait_seconds
     while True:
         try:
-            results = {workflow: workflow_result(repository, workflow, job, sha, event, token)
+            results = {workflow: workflow_result(repository, workflow, job, sha, event, branch, token)
                        for workflow, job in WORKFLOWS.items()}
         except (OSError, ValueError, KeyError) as exc:
             print(f"Could not inspect platform workflow results: {exc}", file=sys.stderr)

@@ -83,6 +83,29 @@ class CoverageTests(unittest.TestCase):
             with self.assertRaisesRegex(generate.CoverageError, "audio export name/ordinal symbol mismatch"):
                 generate.kernel_inventory()
 
+    def test_two_field_kernel_rows_and_extraction_drift(self):
+        original = generate.source
+
+        def added(path):
+            data = original(path)
+            if path == "src/xbox/exports/xboxkrnl_sync_exports.cpp":
+                return data + '\n{0x0FFFu, "AuditNewExport"},\n'
+            return data
+
+        with patch.object(generate, "source", side_effect=added):
+            self.assertEqual(len(generate.kernel_inventory()),
+                             len([item for item in self.items if item.category == "kernel"]) + 1)
+
+        def malformed(path):
+            data = original(path)
+            if path == "src/xbox/exports/xboxkrnl_sync_exports.cpp":
+                return data.replace('{0x0D1u, "NtCreateEvent"}', '{0x0D1u, "NtCreateEvent";')
+            return data
+
+        with patch.object(generate, "source", side_effect=malformed):
+            with self.assertRaisesRegex(generate.CoverageError, "unparseable xboxkrnl export rows"):
+                generate.kernel_inventory()
+
     def test_pinned_kernel_reference_reconciliation(self):
         provenance, rows = generate.load_kernel_reference()
         self.assertEqual(provenance["commit"], "997d0555dbd6358dffd2950097424993763051af")
@@ -270,20 +293,20 @@ class CoverageTests(unittest.TestCase):
             path.write_text('<testsuite/>')
             with self.assertRaisesRegex(ValueError, "no test cases"):
                 check_ctest.check(path)
-        run = {"workflow_runs": [{"id": 42, "head_sha": "abc", "event": "push",
+        run = {"workflow_runs": [{"id": 42, "head_sha": "abc", "head_branch": "dev", "event": "push",
                                   "status": "completed", "conclusion": "success"}]}
         jobs = {"jobs": [{"name": "windows", "conclusion": "success"}]}
         with patch.object(check_ci_platforms, "get_json", side_effect=[run, jobs]):
-            self.assertEqual(check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"), "success")
+            self.assertEqual(check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "dev", "token"), "success")
         with patch.object(check_ci_platforms, "get_json", return_value={"workflow_runs": []}):
-            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
+            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "dev", "token"))
         run["workflow_runs"][0]["status"] = "in_progress"
         with patch.object(check_ci_platforms, "get_json", return_value=run):
-            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
+            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "dev", "token"))
         run["workflow_runs"][0]["status"] = "completed"
         jobs["jobs"][0]["conclusion"] = "skipped"
         with patch.object(check_ci_platforms, "get_json", side_effect=[run, jobs]):
-            self.assertIn("failed:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
+            self.assertIn("failed:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "dev", "token"))
 
 
 if __name__ == "__main__":

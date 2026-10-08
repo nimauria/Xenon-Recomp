@@ -10,4 +10,4 @@ This file records observed CI results separately from the [kernel export metadat
   - `xenon_backend_capability_tests`: a Direct3D 12 pipeline initialization assertion failed. The log also stated there was no Vulkan device on that runner; that statement is separate from the D3D12 assertion.
   - `xenon_compilation_graph_tests`, `xenon_prepare_worker_tests`, and `xenon_xbox_threading_exports_tests`: CTest timed out each at 900 seconds. The threading output reached `slist_concurrent`, consistent with the previously documented intermittent SList hang. The other two timeout causes remain unconfirmed.
 
-The Phase 1 workflow split retains all these tests and the 900-second per-test timeout. It does not suppress or reclassify failures. New workflow badges have no result until their first branch run completes after the changes are pushed.
+The Phase 1 workflow split retains all these tests and the 900-second per-test timeout. It does not suppress or reclassify failures. The first separate Windows, Linux, and overall workflow runs were created for commit `9919f19`; their conclusions must be read from Actions after they finish.
