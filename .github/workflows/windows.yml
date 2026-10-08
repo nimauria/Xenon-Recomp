@@ -1,0 +1,76 @@
+name: Xenon Windows MSVC
+
+on:
+  push:
+    branches:
+      - dev
+      - development-restructure
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Require MSVC CL
+        shell: pwsh
+        run: |
+          where.exe cl.exe
+          if ($LASTEXITCODE -ne 0) { throw "MSVC cl.exe is not on PATH" }
+      - name: Install build tools
+        shell: pwsh
+        run: choco install ninja nasm -y --no-progress
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          update: true
+          install: make
+      - uses: actions/cache@v4
+        with:
+          path: .xenon/deps
+          key: xenon-deps-windows-x64-${{ hashFiles('tools/deps/manifest.json', 'tools/deps/bootstrap.py', 'tools/deps/patches/**') }}
+      - name: Provision pinned dependencies
+        shell: pwsh
+        run: |
+          $env:XENON_MSYS2_BASH = Join-Path '${{ steps.msys2.outputs.msys2-location }}' 'usr\bin\bash.exe'
+          if (-not (Test-Path $env:XENON_MSYS2_BASH)) { throw "MSYS2 bash not found: $env:XENON_MSYS2_BASH" }
+          python tools/deps/bootstrap.py ensure --triplet windows-x64 --jobs 4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/deps/bootstrap.py verify --triplet windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure
+        shell: pwsh
+        run: |
+          python tools/development/build_accountability.py prepare --build-dir build/windows-x64-debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --preset windows-x64-debug -DXENON_BUILD_LAUNCHER=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compilerFiles = Get-ChildItem build/windows-x64-debug/CMakeFiles -Filter CMakeCXXCompiler.cmake -Recurse
+          if (-not ($compilerFiles | ForEach-Object { Select-String -Path $_.FullName -Pattern 'set\(CMAKE_CXX_COMPILER_ID "MSVC"\)' })) {
+            throw "CMake did not select the MSVC C++ compiler"
+          }
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/windows-x64-debug --parallel 4
+      - name: Require D3D12 and runtime host targets
+        shell: pwsh
+        run: cmake --build build/windows-x64-debug --target xenon_graphics_d3d12 xenon_runtime_host
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build/windows-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
+      - name: Require every registered test to run
+        shell: pwsh
+        run: python tools/coverage/check_ctest.py build/windows-x64-debug/ctest-results.xml
+      - name: Audit source ownership
+        shell: pwsh
+        run: python tools/development/build_accountability.py check --build-dir build/windows-x64-debug
