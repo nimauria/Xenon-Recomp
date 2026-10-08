@@ -16,6 +16,11 @@ builds and works. Documentation does not override those sources of truth.
   across targets. Implementation helpers belong beside their source files.
   Some current Vulkan and D3D12 helper headers still live in the public tree;
   that placement is technical debt, not a reason to add more there.
+- When one subsystem spans several translation units, its private declarations
+  live in a `*_internal.hpp` beside them (for example
+  `src/core/session/session_internal.hpp`) and are included through the
+  target's private `src/` include directory, as
+  `"core/session/session_internal.hpp"`.
 - Source files need an owning CMake target. Standalone C++ tests need a target
   and CTest registration, except build generators and benchmarks.
 
@@ -31,7 +36,7 @@ builds and works. Documentation does not override those sources of truth.
 | Xbox exports, imports, XEX support | `include/xenon/xbox/` | `src/xbox/` | `xenon_xbox_kernel_io` |
 | XAM services and exports | `include/xenon/xam/` | `src/xam/` | `xenon_core` |
 | Filesystem and content | `include/xenon/filesystem/` | `src/filesystem/` | `xenon_filesystem` |
-| Graphics frontend and common data | `include/xenon/gpu/` | `src/graphics/xenos/` | `xenon_graphics` |
+| Graphics frontend and common data | `include/xenon/gpu/` | `src/graphics/xenos/`, `src/graphics/common/` | `xenon_graphics` |
 | Vulkan host renderer | `include/xenon/gpu/vulkan/` | `src/graphics/vulkan/` | `xenon_graphics_vulkan` |
 | D3D12 host renderer | `include/xenon/gpu/d3d12/` | `src/graphics/d3d12/` | `xenon_graphics_d3d12` |
 | DXC shader compiler | `include/xenon/gpu/dxc_shader_compiler.hpp` | `src/graphics/dxc/` | `xenon_graphics_dxc` |
@@ -48,11 +53,14 @@ working subsystem.
 
 ### CPU and memory
 
-`src/cpu/ppc/` decodes and lifts the guest ISA; `ir/` and `optimizer/` own
-intermediate representation and transformations; `codegen/` emits native C++
-ahead of time. The dynamic fallback is CPU-owned. CPU memory access goes through
+`src/cpu/ppc/` decodes (`decoder/`) and lifts (`lifter/`) the guest ISA; `ir/`
+and `optimizer/` (with `optimizer/passes/`) own the intermediate representation
+and its transformations; `codegen/` emits native C++ ahead of time
+(`emission/`, `aot/`) and holds the dynamic fallback interpreter
+(`fallback/`); `execution/` runs compiled and fallback code. CPU memory access goes through
 `cpu::MemoryPort`; `src/memory/guest/` owns guest mapping, permissions, aliases,
-reservations, physical backing, and coherency. `src/memory/mapping/` selects the
+reservations, physical backing, and coherency, one directory per concern
+(`virtual/`, `physical/`, `access/`, `reservations/`, `coherency/`, ...). `src/memory/mapping/` selects the
 platform host-VM implementation. Neither CPU nor GPU should create a separate
 copy of guest RAM.
 
@@ -60,7 +68,9 @@ copy of guest RAM.
 
 `src/kernel/` owns host-side handles, threads, synchronization, timers, memory
 integration, and I/O mechanisms. `src/xbox/` owns guest-facing Xbox exports,
-import resolution, and XEX/module compatibility. `src/xam/` owns XAM services
+import resolution, and XEX/module compatibility; the XEX loader is split by
+stage under `src/xbox/xex/` (`format/`, `security/`, `compression/`, `image/`,
+`imports/`, `loading/`, `title_updates/`). `src/xam/` owns XAM services
 and their guest export registration. Export tests should invoke the production
 registry with guest memory and actual ordinals.
 
@@ -75,28 +85,33 @@ Xenos PM4/register/shader frontend
     -> Vulkan / D3D12 / future native host backend
 ```
 
-`src/graphics/xenos/` currently owns PM4 command processing, register access,
-graphics and resource IR, shader decoding/lowering, primitive conversion,
-texture interpretation, EDRAM surfaces, and presentation descriptions.
+`src/graphics/xenos/` owns PM4 command processing, register access, graphics
+and resource IR, shader decoding/lowering, primitive conversion, texture
+interpretation, EDRAM surfaces, and presentation descriptions.
 `src/graphics/vulkan/` and `src/graphics/d3d12/` own native devices, command
 queues, resources, pipelines, synchronization, and presentation. DXC is a
 separate optional shader compiler target. A native Metal implementation does
 not exist; it should be added only with a real host implementation.
 
-The current Vulkan and D3D12 `Backend::consume()` functions still repeat large
-amounts of Xenon-level command handling. Common semantics and planning should
-move behind a narrow API-neutral boundary with equivalence tests before native
-backend behavior changes. The current `Backend` interface and graphics/resource
-IR are starting points, not completed proof of backend neutrality.
+`src/graphics/common/backend_core*.hpp` holds the command handling both native
+backends share: EDRAM ownership, resolves, draw setup, shader variants,
+pipelines, submission and presentation. Each backend's `Backend::Impl` derives
+from `BackendCore<Impl, Api>` and supplies hooks for the steps whose native
+calls differ, such as creating render targets, binding textures and recording
+a draw. Where the two backends behave differently, the hooks preserve each
+behaviour; `docs/development/RESTRUCTURE_FINDINGS.md` lists those differences.
+`src/graphics/common/` also holds backend capability discovery.
 
 ### Recompiler and core session
 
-`src/recomp/driver.cpp` currently combines module analysis, candidate discovery,
-control-flow work, and project generation. `src/core/session.cpp` combines title
-loading, exports, guest threads, GPU runtime, execution, and reporting. Their
-state ownership should remain obvious as member functions move into coherent
-translation units. Cache keys and generated output need deterministic regression
-coverage during that split.
+`src/recomp/` separates the driver (`driver/`), module analysis (`analysis/`,
+by discovery, control flow, value tracking, ownership and validation), code
+and project generation (`compilation/`), caching, hints, intake and reporting.
+`src/core/session/` splits `XenonSession` by lifecycle, exports, guest
+threading, execution, the GPU and audio pumps, and diagnostics, around
+`session_internal.hpp`. Cache keys and generated output keep deterministic
+regression coverage (`xenon_recomp_driver_tests` and the compilation-graph
+tests).
 
 ## Optional and platform targets
 
