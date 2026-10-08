@@ -622,8 +622,16 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, entry: dict,
     have_nasm = bool(shutil.which("nasm.exe") or shutil.which("nasm"))
     args = _ffmpeg_configure_args(Path(prefix_msys), windows=True, have_nasm=have_nasm)
     quoted = " ".join(_shell_quote(x) for x in args)
+    # bash is started as a non-login shell, so PATH is the inherited Windows
+    # PATH and tools such as awk resolve to whichever copy comes first. On
+    # GitHub runners that is Git for Windows' usr/bin, a separate MSYS runtime;
+    # passing FFmpeg's MSVC dependency command across runtimes collapses its
+    # `gsub(/\\/, "/")` to `gsub(/\/, "/")`, an awk syntax error. Put this
+    # MSYS2's tools first, as a login shell would. MSVC's link.exe is still
+    # found: FFmpeg's compat/windows/mslink resolves it beside cl.exe.
     script = (
         f"set -euo pipefail\n"
+        f"export PATH=\"/usr/bin:$PATH\"\n"
         f"cd {_shell_quote(build_msys)}\n"
         f"test -f {_shell_quote(src_msys + '/Makefile')} || "
         f"{{ echo 'Pinned FFmpeg source Makefile is missing' >&2; exit 2; }}\n"
