@@ -291,25 +291,65 @@ file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/backend_cpp_aot.cpp" XE
 find_package(Threads REQUIRED)
 
 add_library(xenon_recomp STATIC
-  src/recomp/driver.cpp
-  src/recomp/cpu_coverage.cpp
-  src/recomp/ppc_value_analysis.cpp
-  src/recomp/knowledge_base.cpp
-  src/recomp/compilation_graph.cpp
-  src/recomp/game_intake.cpp
-  src/recomp/analysis_schema.cpp
-  src/recomp/analysis_schema_json.cpp
-  src/recomp/native_replacements.cpp
-  src/recomp/runtime_helpers.cpp
-  src/recomp/module_hint_provider.cpp
-  src/recomp/artifact_cache.cpp
-  src/recomp/worker_pool.cpp
+  # Orchestration: load_and_analyze() and generate_project().
+  src/recomp/driver/analysis_pipeline.cpp
+  src/recomp/driver/project_generation.cpp
+  src/recomp/driver/driver_support.cpp
+  src/recomp/driver/worker_pool.cpp
+  # Static analysis.
+  src/recomp/analysis/executable_ranges.cpp
+  src/recomp/analysis/discovery/candidate_filters.cpp
+  src/recomp/analysis/discovery/discovery_sources.cpp
+  src/recomp/analysis/discovery/discovery_waves.cpp
+  src/recomp/analysis/discovery/instruction_classification.cpp
+  src/recomp/analysis/discovery/pointer_tables.cpp
+  src/recomp/analysis/discovery/recovery.cpp
+  src/recomp/analysis/discovery/seed_collection.cpp
+  src/recomp/analysis/control_flow/candidate_analysis.cpp
+  src/recomp/analysis/control_flow/function_chunks.cpp
+  src/recomp/analysis/control_flow/local_cfg_closure.cpp
+  src/recomp/analysis/control_flow/primary_scan.cpp
+  src/recomp/analysis/control_flow/return_inference.cpp
+  src/recomp/analysis/control_flow/switch_tables.cpp
+  src/recomp/analysis/value/ppc_value_analysis.cpp
+  src/recomp/analysis/ownership/entry_reconciliation.cpp
+  src/recomp/analysis/ownership/function_ownership.cpp
+  src/recomp/analysis/validation/codegen_validation.cpp
+  src/recomp/analysis/diagnostics/analysis_diagnostics.cpp
+  src/recomp/analysis/diagnostics/cpu_coverage.cpp
+  # Module hints and learned knowledge.
+  src/recomp/hints/analysis_schema.cpp
+  src/recomp/hints/analysis_schema_json.cpp
+  src/recomp/hints/module_hint_provider.cpp
+  src/recomp/hints/module_hints.cpp
+  src/recomp/knowledge/adaptive_observations.cpp
+  src/recomp/knowledge/knowledge_base.cpp
+  src/recomp/knowledge/knowledge_matching.cpp
+  # Generated-project emission.
+  src/recomp/compilation/codegen/function_emission.cpp
+  src/recomp/compilation/graph/compilation_graph.cpp
+  src/recomp/compilation/project/generated_project_files.cpp
+  src/recomp/compilation/project/generated_registry.cpp
+  src/recomp/compilation/project/generation_staging.cpp
+  src/recomp/compilation/shards/shard_assembly.cpp
+  # Caching, reporting and title intake.
+  src/recomp/caching/artifact_cache.cpp
+  src/recomp/caching/configuration_identity.cpp
+  src/recomp/reporting/report_json.cpp
+  src/recomp/reporting/report_text.cpp
+  src/recomp/intake/game_intake.cpp
+  # Runtime support linked into generated game modules.
+  src/recomp/runtime/native_replacements.cpp
+  src/recomp/runtime/runtime_helpers.cpp
 )
 target_compile_definitions(xenon_recomp PRIVATE
   XENON_GRAPH_IR_PRODUCER="${XENON_GRAPH_IR_PRODUCER}"
   XENON_GRAPH_CODEGEN_PRODUCER="${XENON_GRAPH_CODEGEN_PRODUCER}")
 
-target_include_directories(xenon_recomp PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(xenon_recomp
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  # Private headers are included as "recomp/<area>/<header>.hpp".
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io Threads::Threads)
 target_compile_features(xenon_recomp PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_recomp)
