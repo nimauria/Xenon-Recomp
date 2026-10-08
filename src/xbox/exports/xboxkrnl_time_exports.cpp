@@ -70,6 +70,8 @@ struct TimeExportSpec {
   std::uint32_t ordinal;
   const char* name;
   core::ExportHandler handler;
+  bool partial{false};
+  const char* partial_note{nullptr};
 };
 
 // Ordinals verified against the xenia-project/xenia xboxkrnl export table
@@ -77,7 +79,8 @@ struct TimeExportSpec {
 const TimeExportSpec kTimeExports[] = {
     {0x083u, "KeQueryPerformanceFrequency", &ke_query_performance_frequency},
     {0x084u, "KeQuerySystemTime", &ke_query_system_time},
-    {0x05Au, "KeDelayExecutionThread", &ke_delay_execution_thread},
+    {0x05Au, "KeDelayExecutionThread", &ke_delay_execution_thread, true,
+     "alertable/APC delivery is not implemented"},
     {0x0A8u, "KeStallExecutionProcessor", &ke_stall_execution_processor},
 };
 
@@ -91,6 +94,8 @@ bool register_xboxkrnl_time_exports(core::ExportRegistry& registry) {
     descriptor.ordinal = spec.ordinal;
     descriptor.handler = spec.handler;
     descriptor.requirement = core::ExportRequirement::Required;
+    descriptor.partial = spec.partial;
+    if (spec.partial_note) descriptor.partial_note = spec.partial_note;
 
     if (!registry.register_export(std::move(descriptor))) {
       return false;

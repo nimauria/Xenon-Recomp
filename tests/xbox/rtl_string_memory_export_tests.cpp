@@ -7,7 +7,10 @@
 // path).
 
 #include <cassert>
+#include <array>
 #include <iostream>
+#include <string_view>
+#include <utility>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -42,6 +45,36 @@ struct Fixture {
     return registry.invoke("xboxkrnl.exe", ordinal, ctx);
   }
 };
+
+void test_export_metadata_matches_registered_rtl_subset() {
+  constexpr std::array<std::pair<std::uint16_t, std::string_view>, 10> expected{{
+      {0x12Cu, "RtlInitAnsiString"}, {0x12Du, "RtlInitUnicodeString"},
+      {0x12Bu, "RtlImageXexHeaderField"}, {0x12Eu, "RtlInitializeCriticalSection"},
+      {0x130u, "RtlLeaveCriticalSection"}, {0x125u, "RtlEnterCriticalSection"},
+      {0x114u, "RtlAnsiStringToUnicodeString"}, {0x11Au, "RtlCompareMemory"},
+      {0x11Bu, "RtlCompareMemoryUlong"}, {0x126u, "RtlFillMemoryUlong"},
+  }};
+  Fixture fx;
+  for (const auto& [ordinal, name] : expected) {
+    const auto* by_ordinal = xbox::lookup_export_metadata("XBOXKRNL.EXE", ordinal);
+    const auto* by_name = xbox::lookup_export_metadata_by_name("xboxkrnl", name);
+    assert(by_ordinal && by_name && by_ordinal == by_name);
+    assert(by_ordinal->canonical_name == name);
+    assert(by_ordinal->kind == xbox::ExportKind::Function);
+  }
+  for (const auto& [ordinal, name] : expected) {
+    // Critical-section exports need a KernelProcess and are registered by the
+    // session; the other sample entries are available in this fixture.
+    if (name == "RtlInitializeCriticalSection" || name == "RtlLeaveCriticalSection" ||
+        name == "RtlEnterCriticalSection") {
+      continue;
+    }
+    const auto* descriptor = fx.registry.resolve("xboxkrnl.exe", ordinal);
+    assert(descriptor && descriptor->name == name);
+  }
+  assert(xbox::lookup_export_metadata("xboxkrnl", 0x129u) == nullptr);
+  assert(xbox::lookup_export_metadata_by_name("xboxkrnl", "RtlFillMemory") == nullptr);
+}
 
 void test_rtl_compare_memory_ulong() {
   std::cout << "[TEST] RtlCompareMemoryUlong..." << std::endl;
@@ -328,6 +361,7 @@ void test_c_specific_handler_reports_continue_search() {
 }  // namespace
 
 int main() {
+  test_export_metadata_matches_registered_rtl_subset();
   std::cout << "\n=== RTL String/Memory Export Correctness Tests ===" << std::endl;
 
   test_rtl_compare_memory_ulong();

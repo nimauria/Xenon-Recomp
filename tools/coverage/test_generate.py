@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 import generate
 
@@ -20,8 +21,47 @@ class CoverageTests(unittest.TestCase):
             return generate.load_manifest(path, self.items)
 
     def test_source_inventory_and_manifest(self):
-        self.assertEqual(len(self.items), 616)
-        self.assertEqual(len(self.entries), 18)
+        self.assertEqual(len(self.items), 864)
+        self.assertEqual(len(self.entries), 25)
+        self.assertEqual(len(generate.kernel_inventory()), 254)
+
+    def test_kernel_diagnostic_metadata_must_match_registration(self):
+        original = generate.source
+
+        def altered(path):
+            content = original(path)
+            if path == "src/xbox/export_metadata.cpp":
+                return content.replace('0x012Cu, "RtlInitAnsiString"',
+                                       '0x0129u, "RtlInitAnsiString"')
+            return content
+
+        with patch.object(generate, "source", side_effect=altered):
+            with self.assertRaisesRegex(generate.CoverageError, "diagnostic metadata disagrees"):
+                generate.kernel_inventory()
+
+    def test_kernel_source_conflicts_and_audio_symbol_drift(self):
+        original = generate.source
+
+        def conflicting(path):
+            content = original(path)
+            if path == "src/xbox/exports/xboxkrnl_time_exports.cpp":
+                return content + '\n{0x0FFFu, "KeQuerySystemTime", nullptr},\n'
+            return content
+
+        with patch.object(generate, "source", side_effect=conflicting):
+            with self.assertRaisesRegex(generate.CoverageError, "conflicting xboxkrnl ordinals"):
+                generate.kernel_inventory()
+
+        def audio_drift(path):
+            content = original(path)
+            if path == "src/audio/exports.cpp":
+                return content.replace('add("XAudioRenderDriverInitialize",',
+                                       'add("WrongAudioName",')
+            return content
+
+        with patch.object(generate, "source", side_effect=audio_drift):
+            with self.assertRaisesRegex(generate.CoverageError, "audio export name/ordinal symbol mismatch"):
+                generate.kernel_inventory()
 
     def test_percentage_and_empty_category(self):
         self.assertEqual(generate.percent(1, 4), "25.0%")
@@ -70,8 +110,8 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(ET.fromstring(first).attrib["viewBox"], "0 0 1200 1030")
         self.assertIn("Unassessed", first)
         self.assertIn("Unimplemented", first)
-        self.assertIn("≥50.0%", first)
-        self.assertIn("12/616", first)
+        self.assertIn("≥3.9%", first)
+        self.assertIn("19/864", first)
 
     def test_ci_references_real_workflow_and_jobs(self):
         workflow = (generate.ROOT / ".github/workflows/ci.yml").read_text()

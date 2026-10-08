@@ -30,6 +30,10 @@ void test_ordinals_are_registered() {
   assert(registry.contains("xboxkrnl", 0x05Au));
   assert(registry.contains("xboxkrnl", "KeDelayExecutionThread"));
   assert(registry.contains("xboxkrnl", 0x0A8u));
+  const auto* delay = registry.resolve("xboxkrnl", 0x05Au);
+  assert(delay && delay->partial && !delay->partial_note.empty());
+  const auto* frequency = registry.resolve("xboxkrnl", 0x083u);
+  assert(frequency && !frequency->partial);
   assert(registry.contains("xboxkrnl", "KeStallExecutionProcessor"));
 
   // Registering twice must remain safe (session re-init calls this again).

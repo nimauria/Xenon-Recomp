@@ -56,21 +56,90 @@ def enum_rows(path: str, enum: str) -> list[str]:
     return rows
 
 
+def kernel_group(name: str, path: str) -> str:
+    if path.endswith("kernel_variables.cpp"):
+        return "Variables"
+    if path.endswith("src/audio/exports.cpp"):
+        return "XMA" if name.startswith("XMA") else "Audio"
+    for prefix, group in (("Rtl", "RTL"), ("Ke", "Kernel"), ("Kf", "Kernel"),
+                          ("Ki", "Kernel"), ("Nt", "NT / I/O"), ("Io", "NT / I/O"),
+                          ("Ex", "Executive"), ("Ob", "Objects"), ("Xex", "Modules"),
+                          ("Vd", "Video"), ("Mm", "Memory"), ("Xe", "Crypto"),
+                          ("Dbg", "Debug")):
+        if name.startswith(prefix):
+            return group
+    return "Other"
+
+
+def kernel_inventory() -> list[Item]:
+    """Read statically recoverable xboxkrnl registrations from source."""
+    paths = sorted((ROOT / "src/xbox/exports").glob("xboxkrnl_*.cpp"))
+    paths += sorted((ROOT / "src/core/session/exports").glob("*.cpp"))
+    rows: dict[str, tuple[int, str]] = {}
+    by_ordinal: dict[int, str] = {}
+
+    def add(name: str, ordinal: int, path: str) -> None:
+        prior = rows.get(name)
+        if prior and prior[0] != ordinal:
+            raise CoverageError(f"conflicting xboxkrnl ordinals for {name}")
+        if ordinal in by_ordinal and by_ordinal[ordinal] != name:
+            raise CoverageError(f"conflicting xboxkrnl names for ordinal 0x{ordinal:X}")
+        if not prior:
+            rows[name] = (ordinal, path)
+        by_ordinal[ordinal] = name
+
+    spec = re.compile(r'\{\s*(0x[0-9A-Fa-f]+)u?\s*,\s*"([A-Za-z_]\w*)"\s*,')
+    for file in paths:
+        path = str(file.relative_to(ROOT))
+        for ordinal, name in spec.findall(source(path)):
+            add(name, int(ordinal, 16), path)
+    direct = re.compile(
+        r'(?P<var>\w+)\.library\s*=\s*"xboxkrnl(?:\.exe)?"\s*;\s*'
+        r'(?P=var)\.name\s*=\s*"([A-Za-z_]\w*)"\s*;\s*'
+        r'(?P=var)\.ordinal\s*=\s*(0x[0-9A-Fa-f]+)u?\s*;', re.S)
+    for path in ("src/xbox/exports/xboxkrnl_misc_exports.cpp",
+                 "src/core/session/exports/export_registration.cpp"):
+        for match in direct.finditer(source(path)):
+            add(match.group(2), int(match.group(3), 16), path)
+
+    audio_path = "src/audio/exports.cpp"
+    audio = source(audio_path)
+    constants = {name: int(ordinal, 16) for name, ordinal in re.findall(
+        r'constexpr std::uint32_t (\w+) = (0x[0-9A-Fa-f]+);', audio)}
+    calls = re.findall(r'(?:add|get_context_field)\(\s*"(\w+)"\s*,\s*ordinal::(\w+)', audio)
+    if not calls or len(calls) != len(constants):
+        raise CoverageError("audio export declarations and registrations differ")
+    for name, symbol in calls:
+        if name != symbol or symbol not in constants:
+            raise CoverageError(f"audio export name/ordinal symbol mismatch: {name}")
+        add(name, constants[symbol], audio_path)
+    if len(rows) < 240:
+        raise CoverageError("xboxkrnl static registration extraction unexpectedly small")
+
+    # The independent diagnostic lookup table is only a sample. Every sampled
+    # name/ordinal must agree with the registered source inventory.
+    metadata = source("src/xbox/export_metadata.cpp")
+    sample = re.findall(
+        r'\{"xboxkrnl\.exe",\s*(0x[0-9A-Fa-f]+)u,\s*"([A-Za-z_]\w*)",\s*ExportKind::Function\}',
+        metadata)
+    if not sample:
+        raise CoverageError("xboxkrnl diagnostic metadata sample missing")
+    for ordinal, name in sample:
+        if name not in rows or rows[name][0] != int(ordinal, 16):
+            raise CoverageError(f"diagnostic metadata disagrees with registration: {name}")
+
+    items = []
+    for name, (_, path) in sorted(rows.items()):
+        group = kernel_group(name, path)
+        ident = (f"kernel:time:{name}" if path.endswith("xboxkrnl_time_exports.cpp")
+                 else f"kernel:crypto:{name}" if name.startswith("XeKeysConsole")
+                 else f"kernel:registered:{name}")
+        items.append(Item(ident, "kernel", f"xboxkrnl.exe / {group}", name, path))
+    return items
+
+
 def inventory() -> list[Item]:
-    items: list[Item] = []
-    time_path = "src/xbox/exports/xboxkrnl_time_exports.cpp"
-    time = source(time_path)
-    specs = re.search(r"const TimeExportSpec kTimeExports\[\]\s*=\s*\{(.*?)\};", time, re.S)
-    if not specs:
-        raise CoverageError("time export specification missing")
-    for name in re.findall(r'\{0x[0-9A-Fa-f]+u,\s*"([^"]+)"', specs.group(1)):
-        items.append(Item(f"kernel:time:{name}", "kernel", "xboxkrnl.exe / time", name, time_path))
-    misc_path = "src/xbox/exports/xboxkrnl_misc_exports.cpp"
-    misc = source(misc_path)
-    for name in re.findall(r'desc\.name\s*=\s*"(XeKeysConsole(?:PrivateKeySign|SignatureVerification))";', misc):
-        items.append(Item(f"kernel:crypto:{name}", "kernel", "xboxkrnl.exe / crypto", name, misc_path))
-    if len([i for i in items if i.category == "kernel"]) != 6:
-        raise CoverageError("kernel audit subset changed; review source extraction")
+    items: list[Item] = kernel_inventory()
 
     ppc_path = "src/cpu/ppc/decoder/opcode_catalog.inc"
     ppc = source(ppc_path)
@@ -204,6 +273,39 @@ def summary(items: list[Item], entries: dict[str, dict]) -> str:
     return f"{len(items)} listed · {known} audited · ≥{percent(c['verified'], len(items))} test verified"
 
 
+def render_groups(lines: list[str], groups: dict[str, list[Item]], entries: dict[str, dict],
+                  x: int, y: int, width: int, height: int) -> None:
+    if not groups:
+        return
+    minimum = 28
+    available = height - minimum * len(groups)
+    if available < 0:
+        raise CoverageError("dashboard has too many groups for its panel")
+    total = sum(len(members) for members in groups.values())
+    assigned = 0
+    used = 0
+    for group, members in groups.items():
+        assigned += len(members)
+        extra = (available * assigned // total) - used
+        used += extra
+        band = minimum + extra
+        c = counts(members, entries)
+        short = group.removeprefix("xboxkrnl.exe / ")
+        label = f"{short}  ·  {len(members)}  ·  ≥{percent(c['verified'], len(members))} verified"
+        lines.append(f'<text x="{x}" y="{y+12}" fill="#dce7f2" font-size="11" font-family="sans-serif">{escape(label)}</text>')
+        cols = max(1, min(len(members), 36, width // 11))
+        rows = (len(members) + cols - 1) // cols
+        cw = width / cols
+        ch = (band - 19) / rows
+        for j, item in enumerate(members):
+            state = entries.get(item.id, {}).get("state", "unassessed")
+            cx = x + (j % cols) * cw
+            cy = y + 17 + (j // cols) * ch
+            title = f"{item.id}: {state}; {item.source}"
+            lines.append(f'<rect x="{cx:.2f}" y="{cy:.2f}" width="{max(1,cw-1):.2f}" height="{max(1,ch-1):.2f}" fill="{COLORS[state]}" stroke="#101721" stroke-width="0.5"><title>{escape(title)}</title></rect>')
+        y += band
+
+
 def render_svg(items: list[Item], entries: dict[str, dict]) -> str:
     by_category: dict[str, list[Item]] = defaultdict(list)
     for item in items:
@@ -227,32 +329,18 @@ def render_svg(items: list[Item], entries: dict[str, dict]) -> str:
         groups: dict[str, list[Item]] = defaultdict(list)
         for item in panel:
             groups[item.group].append(item)
-        cursor = y + 68
-        remaining = 325
-        remaining_count = len(panel)
-        for group_index, (group, members) in enumerate(groups.items()):
-            height = remaining if group_index == len(groups) - 1 else max(28, round(325 * len(members) / len(panel)))
-            height = min(height, remaining)
-            remaining -= height
-            remaining_count -= len(members)
-            if height <= 0:
-                continue
-            c = counts(members, entries)
-            label = f"{group}  ·  {len(members)}  ·  ≥{percent(c['verified'], len(members))} verified"
-            lines.append(f'<text x="{x+16}" y="{cursor+12}" fill="#dce7f2" font-size="11" font-family="sans-serif">{escape(label)}</text>')
-            cell_top = cursor + 17
-            area_height = max(4, height - 20)
-            cols = max(1, min(len(members), 36))
-            rows = (len(members) + cols - 1) // cols
-            cw = 520 / cols
-            ch = area_height / rows
-            for j, item in enumerate(members):
-                state = entries.get(item.id, {}).get("state", "unassessed")
-                cx = x + 16 + (j % cols) * cw
-                cy = cell_top + (j // cols) * ch
-                title = f"{item.id}: {state}; {item.source}"
-                lines.append(f'<rect x="{cx:.2f}" y="{cy:.2f}" width="{max(1,cw-1):.2f}" height="{max(1,ch-1):.2f}" fill="{COLORS[state]}" stroke="#101721" stroke-width="0.5"><title>{escape(title)}</title></rect>')
-            cursor += height
+        if category == "kernel":
+            columns: list[dict[str, list[Item]]] = [{}, {}]
+            sizes = [0, 0]
+            for group, members in sorted(groups.items(), key=lambda pair: (-len(pair[1]), pair[0])):
+                side = 0 if sizes[0] <= sizes[1] else 1
+                columns[side][group] = members
+                sizes[side] += len(members)
+            for side, column in enumerate(columns):
+                render_groups(lines, dict(sorted(column.items())), entries,
+                              x + 16 + side * 264, y + 68, 256, 325)
+        else:
+            render_groups(lines, groups, entries, x + 16, y + 68, 520, 325)
     legend = [("verified", "Verified by test"), ("implemented_unverified", "Implemented, unverified"),
               ("partial", "Partial / stub"), ("unimplemented", "Unimplemented"), ("unassessed", "Unassessed")]
     for i, (state, label) in enumerate(legend):
@@ -265,14 +353,14 @@ def render_svg(items: list[Item], entries: dict[str, dict]) -> str:
 
 def render_report(items: list[Item], entries: dict[str, dict]) -> str:
     total = counts(items, entries)
-    lines = ["# Phase 1 coverage audit", "", "Generated by `python3 tools/coverage/generate.py` from source inventories and `coverage.json`.",
+    lines = ["# Xenon coverage audit", "", "Generated by `python3 tools/coverage/generate.py` from source inventories and `coverage.json`.",
              "Percentages below are audited lower bounds against **source-declared** inventories. Unassessed entries are unknown, not unimplemented. They are not game compatibility figures.", "",
              "| Area | Listed | Audited | Verified by tests | Implemented, unverified | Partial / stub | Unimplemented | Unassessed |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
-    for category, name in (("kernel", "Kernel subset"), ("ppc", "PPC catalog"), ("shader", "Shader frontend"), ("pm4", "PM4 source enum")):
+    for category, name in (("kernel", "Kernel static registrations"), ("ppc", "PPC catalog"), ("shader", "Shader frontend"), ("pm4", "PM4 source enum")):
         group = [item for item in items if item.category == category]
         c = counts(group, entries)
         lines.append(f"| {name} | {len(group)} | {len(group)-c['unassessed']} | {c['verified']} (≥{percent(c['verified'],len(group))}) | {c['implemented_unverified']} | {c['partial']} | {c['unimplemented']} | {c['unassessed']} |")
-    lines += ["", f"**Combined source-declared audit lower bound:** {total['verified']}/{len(items)} (≥{percent(total['verified'],len(items))}) test verified; {total['verified']+total['implemented_unverified']}/{len(items)} (≥{percent(total['verified']+total['implemented_unverified'],len(items))}) has traced implementation. **Overall Xbox 360 implementation coverage: unknown.** The kernel inventory includes only four time exports and two crypto stubs, not a complete xboxkrnl export table. PPC counts the decoder catalog, not every possible PowerPC encoding. Shader counts control-flow enum values and ALU/fetch forms recognized by this frontend; reserved scalar opcode 41 is excluded. PM4 counts declared packet headers and type-3 opcodes, not undocumented hardware values; host extension 0x64 is excluded. A handler, decoder entry, or passthrough packet does not by itself prove implementation.",
+    lines += ["", f"**Combined source-declared audit lower bound:** {total['verified']}/{len(items)} (≥{percent(total['verified'],len(items))}) test verified; {total['verified']+total['implemented_unverified']}/{len(items)} (≥{percent(total['verified']+total['implemented_unverified'],len(items))}) has traced implementation. **Overall Xbox 360 implementation coverage: unknown.** The kernel inventory extracts statically recoverable ordinal/name registrations and variables from xboxkrnl export, audio, and session sources. It is not a complete console export table: operations absent from Xenon source are outside the denominator, and optional audio exports depend on build configuration. PPC counts the decoder catalog, not every possible PowerPC encoding. Shader counts control-flow enum values and ALU/fetch forms recognized by this frontend; reserved scalar opcode 41 is excluded. PM4 counts declared packet headers and type-3 opcodes, not undocumented hardware values; host extension 0x64 is excluded. A handler, decoder entry, or passthrough packet does not by itself prove implementation.",
               "", "Evidence paths and test tokens are in the manifest. `verified` means a behavior-oriented test is traced to the entry; it does not imply retail-title qualification. GitHub CI checks the generated files for drift.", ""]
     return "\n".join(lines)
 

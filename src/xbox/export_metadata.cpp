@@ -13,26 +13,24 @@ namespace {
 // present in real titles' startup path. This is not an exhaustive export
 // table; add entries as needed for compatibility work.
 // 
-// Names/ordinals sourced from:
-// 1. Xenia's export table (referenced in task "Research rule")
-// 2. Xbox 360 ABI documentation
-// 3. ReXGlue/xboxkrnl ordinal analysis
+// Names/ordinals cross-checked against Xenia's xboxkrnl export table:
+// https://github.com/xenia-project/xenia/blob/master/src/xenia/kernel/xboxkrnl/xboxkrnl_table.inc
 //
 // NOTE: "Known here" does NOT mean "implemented here". An export in this
 // table may still be unimplemented; the ExportRegistry determines what
 // is actually callable.
 
 constexpr ExportMetadata kXboxkrnlRtlExports[] = {
-    {"xboxkrnl.exe", 0x0129u, "RtlInitAnsiString", ExportKind::Function},
-    {"xboxkrnl.exe", 0x012Au, "RtlInitUnicodeString", ExportKind::Function},
+    {"xboxkrnl.exe", 0x012Cu, "RtlInitAnsiString", ExportKind::Function},
+    {"xboxkrnl.exe", 0x012Du, "RtlInitUnicodeString", ExportKind::Function},
     {"xboxkrnl.exe", 0x012Bu, "RtlImageXexHeaderField", ExportKind::Function},
-    {"xboxkrnl.exe", 0x012Cu, "RtlInitializeCriticalSection", ExportKind::Function},
-    {"xboxkrnl.exe", 0x012Du, "RtlLeaveCriticalSection", ExportKind::Function},
-    {"xboxkrnl.exe", 0x012Eu, "RtlEnterCriticalSection", ExportKind::Function},
-    {"xboxkrnl.exe", 0x0136u, "RtlAnsiStringToUnicodeString", ExportKind::Function},
-    {"xboxkrnl.exe", 0x0148u, "RtlCompareMemory", ExportKind::Function},
-    {"xboxkrnl.exe", 0x014Bu, "RtlFillMemory", ExportKind::Function},
-    {"xboxkrnl.exe", 0x014Cu, "RtlZeroMemory", ExportKind::Function},
+    {"xboxkrnl.exe", 0x012Eu, "RtlInitializeCriticalSection", ExportKind::Function},
+    {"xboxkrnl.exe", 0x0130u, "RtlLeaveCriticalSection", ExportKind::Function},
+    {"xboxkrnl.exe", 0x0125u, "RtlEnterCriticalSection", ExportKind::Function},
+    {"xboxkrnl.exe", 0x0114u, "RtlAnsiStringToUnicodeString", ExportKind::Function},
+    {"xboxkrnl.exe", 0x011Au, "RtlCompareMemory", ExportKind::Function},
+    {"xboxkrnl.exe", 0x011Bu, "RtlCompareMemoryUlong", ExportKind::Function},
+    {"xboxkrnl.exe", 0x0126u, "RtlFillMemoryUlong", ExportKind::Function},
 };
 
 // Normalize module name for lookup (remove .exe/.xex suffix, lowercase)
@@ -51,8 +49,7 @@ std::string normalize_module_name(std::string_view module) {
 }
 
 bool module_matches(std::string_view metadata_module, std::string_view query_module) {
-  const auto normalized = normalize_module_name(query_module);
-  return metadata_module == normalized;
+  return normalize_module_name(metadata_module) == normalize_module_name(query_module);
 }
 
 }  // namespace
