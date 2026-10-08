@@ -1,8 +1,8 @@
 #pragma once
 
-// State and EDRAM-ownership logic shared by the Vulkan and D3D12 backends.
-// Each backend's Backend::Impl derives from BackendCore<Api>, where Api names
-// that backend's native types and its name for error messages:
+// State, EDRAM ownership and command consumption shared by the Vulkan and
+// D3D12 backends. Each backend's Backend::Impl derives from
+// BackendCore<Impl, Api>. Api names the backend's native types and constants:
 //
 //   struct Api {
 //     static constexpr std::string_view kName = "Vulkan";
@@ -11,13 +11,27 @@
 //     using ResourceLayout = ...; using Buffer = ...;
 //     using TextureImage = ...; using RenderTargetImage = ...;
 //     using DepthTargetImage = ...; using GraphicsPipeline = ...;
+//     using Format = ...;                     // native color/depth format
+//     static constexpr Format kUndefinedFormat = ...;
+//     static Format color_format(const RenderTargetImage* target);
+//     static Format native_color_format(ColorRenderTargetFormat format);
+//     static constexpr bool kEmulatesFrontAndBackCull = ...;
+//     // With XENON_HAS_DXC:
+//     static constexpr ShaderBinaryFormat kShaderBinaryFormat = ...;
+//     static constexpr std::string_view kShaderBinaryName = "SPIR-V";
 //   };
 //
-// Impl keeps its own destructor so the queue drains before any member,
+// Impl supplies the steps whose native calls differ (see "Backend hooks"
+// below). It keeps its own destructor so the queue drains before any member,
 // including Impl's own, is destroyed.
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -28,26 +42,27 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "xenon/gpu/backend.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_ownership.hpp"
 #include "xenon/gpu/edram_surface.hpp"
+#include "xenon/gpu/ir.hpp"
+#include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/logging/logger.hpp"
+#include "xenon/memory/address_space.hpp"
 #ifdef XENON_HAS_DXC
 #include "xenon/gpu/dxc_shader_compiler.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 #endif
 
-namespace xenon::memory {
-class AddressSpace;
-}  // namespace xenon::memory
-
 namespace xenon::gpu::detail {
 
-template <typename Api>
+template <typename Derived, typename Api>
 class BackendCore {
  public:
   using Context = typename Api::Context;
@@ -60,6 +75,44 @@ class BackendCore {
   using RenderTargetImage = typename Api::RenderTargetImage;
   using DepthTargetImage = typename Api::DepthTargetImage;
   using GraphicsPipeline = typename Api::GraphicsPipeline;
+
+  // Backend hooks. Derived implements these:
+  //   bool create_render_target(RenderTargetImage&, const EdramSurfaceLayout&,
+  //                             ColorRenderTargetFormat);
+  //   bool fill_unbound_color_slots(const DrawResourceState&, std::uint32_t height,
+  //                                 std::size_t color_count,
+  //                                 std::array<RenderTargetImage*, 4>&,
+  //                                 std::array<std::uint8_t, 4>& write_masks,
+  //                                 std::array<BlendState, 4>& blends);
+  //   bool create_depth_target(DepthTargetImage&, const EdramSurfaceLayout&,
+  //                            DepthRenderTargetFormat);
+  //   bool create_texture(TextureImage&, const DecodedTexture&);
+  //   bool bind_texture(std::uint32_t slot, const TextureDescriptor&, TextureImage&);
+  //   <root object> pipeline_root();
+  //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
+  //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
+  //   bool record_draw(const DrawRecording&, bool& record_failed);
+
+  // Everything a backend needs to record one draw. Built after the pipeline
+  // is resolved; references stay valid for the record_draw() call only.
+  struct DrawRecording {
+    const DrawResourceState& state;
+    const ProcessedPrimitiveBatch& batch;
+    const GraphicsPipeline& pipeline;
+    const std::array<RenderTargetImage*, 4>& targets;
+    std::size_t color_count;
+    DepthTargetImage* depth;
+    std::size_t index_byte_size;
+    bool memexport_writable;
+    std::uint32_t render_width;
+    std::uint32_t render_height;
+    std::int32_t scissor_left;
+    std::int32_t scissor_top;
+    std::int32_t scissor_right;
+    std::int32_t scissor_bottom;
+  };
+
+  void consume(const ir::Command& command);
 
   static std::string named(std::string_view message) {
     std::string result(Api::kName);
@@ -385,6 +438,39 @@ class BackendCore {
     edram_ownership.make_canonical_region(surface, region);
     return true;
   }
+
+  // Copies an indexed batch into this frame's transient upload arena, which
+  // restarts on the frame's first draw, and returns the 4-byte aligned offset
+  // it was written at. Called from inside record_draw().
+  bool upload_draw_indices(const DrawRecording& draw, std::uint32_t frame_index,
+                           std::uint32_t draw_slot, std::size_t& offset) {
+    if (draw_slot == 0) transient_upload_offsets[frame_index] = 0;
+    if (!draw.batch.indexed) return true;
+    const auto aligned_offset =
+        (transient_upload_offsets[frame_index] + 3u) & ~std::size_t{3u};
+    if (draw.index_byte_size >
+        transient_upload_mappings[frame_index].size() -
+            (std::min)(aligned_offset,
+                       transient_upload_mappings[frame_index].size())) {
+      error = named("transient upload arena exhausted by one draw batch");
+      return false;
+    }
+    std::memcpy(transient_upload_mappings[frame_index].data() + aligned_offset,
+                draw.batch.indices.data(), draw.index_byte_size);
+    transient_upload_offsets[frame_index] =
+        aligned_offset + draw.index_byte_size;
+    offset = aligned_offset;
+    return true;
+  }
+
+ private:
+  Derived& self() { return static_cast<Derived&>(*this); }
+  void consume_resolve(const DrawResourceState& state);
+  void consume_draw(const ir::DrawPacket* draw, const DrawResourceState& state);
+  void consume_shader_load(const ir::ShaderLoad* load);
 };
 
 }  // namespace xenon::gpu::detail
+
+#include "graphics/common/backend_core_consume.hpp"
+#include "graphics/common/backend_core_draw.hpp"

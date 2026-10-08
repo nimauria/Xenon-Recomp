@@ -73,7 +73,9 @@ if(XENON_ENABLE_GRAPHICS)
         vulkan/texture.cpp
         vulkan/presentation.cpp
         vulkan/backend.cpp
-        common/backend_core.hpp)
+        common/backend_core.hpp
+        common/backend_core_consume.hpp
+        common/backend_core_draw.hpp)
       target_include_directories(xenon_graphics_vulkan
         PUBLIC "${XENON_SOURCE_DIR}/include"
         PRIVATE "${XENON_SOURCE_DIR}/src")
@@ -103,7 +105,9 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/texture.cpp
       d3d12/presentation.cpp
       d3d12/backend.cpp
-      common/backend_core.hpp)
+      common/backend_core.hpp
+      common/backend_core_consume.hpp
+      common/backend_core_draw.hpp)
     target_include_directories(xenon_graphics_d3d12
       PUBLIC "${XENON_SOURCE_DIR}/include"
       PRIVATE "${XENON_SOURCE_DIR}/src")

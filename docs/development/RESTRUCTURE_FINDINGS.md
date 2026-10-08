@@ -5,17 +5,45 @@ findings remain below; resolved findings record the observed cause and fix.
 
 ## Build and test defects
 
-1. **D3D12 backend does not compile without DXC.**
-   `src/graphics/d3d12/backend.cpp` uses `Impl::shader_cache` and
-   `Impl::decoded_shaders` outside the `#ifdef XENON_HAS_DXC` blocks that
-   declare them: in the shader-load path, in `performance_counters()` and in
-   `shader_coverage()`. A Windows build with `XENON_ENABLE_D3D12=ON` and no
-   resolvable DXC fails. Observed with the MinGW + DirectX-Headers syntax
-   check described in `TESTING.md`.
+1. **Neither GPU backend compiles without DXC.**
+   `performance_counters()` and `shader_coverage()` in both
+   `src/graphics/vulkan/backend.cpp` and `src/graphics/d3d12/backend.cpp` use
+   `shader_cache` and `decoded_shaders` outside the `#ifdef XENON_HAS_DXC`
+   blocks that declare them. A build with a GPU backend enabled and no
+   resolvable DXC fails. Observed for D3D12 with the MinGW + DirectX-Headers
+   syntax check described in `TESTING.md`, and for Vulkan by compiling
+   `backend.cpp` without `XENON_HAS_DXC`.
 
 2. **`XenonSession::mount_content()` is a no-op.** It ignores both
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
+
+## Differences between the Vulkan and D3D12 backends
+
+Both backends now share `src/graphics/common/backend_core*.hpp`. Where their
+behaviour differed, the shared code keeps each backend's behaviour behind a
+hook rather than choosing one. Whether each difference is intended is still
+open:
+
+- **Render area for color draws.** Vulkan uses the surface pitch and
+  `scissor_bottom`. D3D12 uses the bound render target's width and height.
+  Render targets are only replaced when they need to grow, so on D3D12 the
+  height can exceed `scissor_bottom`, which changes the default viewport and
+  the scissor clamp.
+- **Negative viewport scale.** D3D12 takes the absolute value of the guest X
+  and Y scale. Vulkan passes the signed values, so a negative X scale becomes
+  a negative viewport width, which Vulkan does not allow (only a negative
+  height is permitted).
+- **`pipeline_cache_misses`.** Vulkan reports the number of native pipelines;
+  D3D12 reports the number of distinct guest pipeline-state hashes.
+- **`unsupported_sampler_behaviors`.** Vulkan adds a texture's count each time
+  the texture image is created; D3D12 reports the count accumulated by its
+  descriptor layout across `bind_texture()` calls.
+
+These are API differences rather than open questions: D3D12 binds dummy render
+targets for unused color slots where Vulkan leaves them undefined, and it
+emulates a cull-both memexport draw with an empty scissor where Vulkan uses
+`VK_CULL_MODE_FRONT_AND_BACK`.
 
 ## Resolved build and test defects
 
