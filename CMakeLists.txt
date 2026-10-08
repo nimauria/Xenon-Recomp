@@ -77,6 +77,7 @@ endif()
 # Logger::instance()'s function-local static singleton.
 add_library(xenon_logging STATIC
   src/logging/logger.cpp
+  src/logging/probe_log.cpp
 )
 target_include_directories(xenon_logging PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(xenon_logging PUBLIC cxx_std_20)
