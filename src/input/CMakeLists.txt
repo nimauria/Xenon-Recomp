@@ -8,7 +8,10 @@ add_library(Xenon::InputAPI ALIAS xenon_input_api)
 if(XENON_ENABLE_INPUT)
   add_library(xenon_input STATIC
     action_router.cpp
-    system.cpp
+    system/activity.cpp
+    system/lifecycle.cpp
+    system/queries.cpp
+    system/routing.cpp
     module_api.cpp
     state_merge.cpp
     profile.cpp
