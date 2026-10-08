@@ -513,8 +513,17 @@ def _prepare_ffmpeg_source(source: Path, build: Path, entry: dict, quiet: bool) 
         if hashlib.sha256(patch_path.read_bytes()).hexdigest() != patch["sha256"]:
             raise BootstrapError(f"Pinned FFmpeg patch hash mismatch: {patch_path}")
         source_file = configured_source / patch["source_file"]
-        if not source_file.is_file() or hashlib.sha256(source_file.read_bytes()).hexdigest() != patch["source_sha256"]:
+        if not source_file.is_file():
             raise BootstrapError(f"Pinned FFmpeg patch source mismatch: {source_file}")
+        # Git for Windows may check out this upstream C header with CRLF.
+        # Normalize only the isolated copy so the source hash and patch apply
+        # against the same bytes on every host.
+        source_bytes = source_file.read_bytes()
+        normalized_bytes = source_bytes.replace(b"\r\n", b"\n")
+        if hashlib.sha256(normalized_bytes).hexdigest() != patch["source_sha256"]:
+            raise BootstrapError(f"Pinned FFmpeg patch source mismatch: {source_file}")
+        if normalized_bytes != source_bytes:
+            source_file.write_bytes(normalized_bytes)
         _run(["git", "apply", "--check", str(patch_path)], cwd=configured_source, quiet=quiet)
         _run(["git", "apply", str(patch_path)], cwd=configured_source, quiet=quiet)
     return configured_source

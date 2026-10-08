@@ -1,4 +1,6 @@
 import importlib.util
+import difflib
+import hashlib
 import io
 import json
 import os
@@ -107,6 +109,35 @@ class DependencyBootstrapTests(unittest.TestCase):
             self.assertEqual(config.read_text(), "pinned fork config\n")
             self.assertFalse((root / "build-source" / "config.h").exists())
             self.assertEqual((root / "build-source" / "Makefile").read_text(), "all:\n")
+
+    @unittest.skipUnless(shutil.which("git"), "FFmpeg patch test requires Git")
+    def test_ffmpeg_patch_accepts_windows_checkout_line_endings(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            (source / "libavcodec" / "x86").mkdir(parents=True)
+            (source / "Makefile").write_text("all:\n")
+            original = "first\nshift old\nlast\n"
+            revised = "first\nshift fixed\nlast\n"
+            (source / "libavcodec" / "x86" / "mathops.h").write_bytes(
+                original.replace("\n", "\r\n").encode()
+            )
+            patch_text = "".join(difflib.unified_diff(
+                original.splitlines(keepends=True), revised.splitlines(keepends=True),
+                fromfile="a/libavcodec/x86/mathops.h", tofile="b/libavcodec/x86/mathops.h",
+            ))
+            patch_file = root / "mathops.patch"
+            patch_file.write_text(patch_text)
+            entry = {"patches": [{
+                "path": patch_file.name,
+                "sha256": hashlib.sha256(patch_file.read_bytes()).hexdigest(),
+                "source_file": "libavcodec/x86/mathops.h",
+                "source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+            }]}
+            with mock.patch.object(bootstrap, "SCRIPT_DIR", root):
+                copied = bootstrap._prepare_ffmpeg_source(source, root / "build", entry, True)
+            self.assertEqual((copied / "libavcodec" / "x86" / "mathops.h").read_text(), revised)
+            self.assertIn(b"\r\n", (source / "libavcodec" / "x86" / "mathops.h").read_bytes())
 
     def test_visual_studio_generator_detection_prefers_newest(self):
         help_text = """

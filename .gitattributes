@@ -1,1 +1,1 @@
-tools/deps/patches/*.patch whitespace=-trailing-space,-blank-at-eof
+tools/deps/patches/*.patch text eol=lf whitespace=-trailing-space,-blank-at-eof
