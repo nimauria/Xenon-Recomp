@@ -755,6 +755,13 @@ endif()
 if(XENON_BUILD_TESTS)
   enable_testing()
 
+  function(xenon_add_standalone_test target source)
+    add_executable(${target} "${source}")
+    target_link_libraries(${target} PRIVATE ${ARGN})
+    xenon_enable_test_asserts(${target})
+    add_test(NAME ${target} COMMAND ${target})
+  endfunction()
+
   find_package(Python3 3.9 QUIET COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/deps/bootstrap_tests.py")
     add_test(NAME xenon_dependency_bootstrap_tests
@@ -1249,23 +1256,35 @@ if(XENON_BUILD_TESTS)
   # actual production pipeline (XEX Loader V2, Recomp Driver, a compiled and
   # loaded native module, KernelProcess/KernelThread) - not a direct C++
   # shortcut. See tests/core/guest_export_abi_tests.cpp's header comment.
-  add_executable(xenon_guest_export_abi_tests tests/core/guest_export_abi_tests.cpp)
-  target_link_libraries(xenon_guest_export_abi_tests PRIVATE xenon_core xenon_recomp)
-  target_compile_definitions(xenon_guest_export_abi_tests PRIVATE
-    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-  xenon_enable_test_asserts(xenon_guest_export_abi_tests)
-  add_test(NAME xenon_guest_export_abi_tests COMMAND xenon_guest_export_abi_tests)
+  if(TARGET xenon_audio)
+    add_executable(xenon_guest_export_abi_tests tests/core/guest_export_abi_tests.cpp)
+    target_link_libraries(xenon_guest_export_abi_tests PRIVATE xenon_core xenon_recomp)
+    target_compile_definitions(xenon_guest_export_abi_tests PRIVATE
+      XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    xenon_enable_test_asserts(xenon_guest_export_abi_tests)
+    add_test(NAME xenon_guest_export_abi_tests COMMAND xenon_guest_export_abi_tests)
+  endif()
 
   # Part 4 (Gracemeria readiness pass): proves the audio render-driver guest
   # callback runs with a real KernelProcess/KernelThread/KPCR/TLS identity
   # (XenonSession::start_audio_guest_thread()/invoke_audio_callback()) rather
   # than an isolated bare CpuState. See the file's header comment.
-  add_executable(xenon_audio_guest_callback_tests tests/core/audio_guest_callback_tests.cpp)
-  target_link_libraries(xenon_audio_guest_callback_tests PRIVATE xenon_core xenon_recomp)
-  target_compile_definitions(xenon_audio_guest_callback_tests PRIVATE
-    XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
-  xenon_enable_test_asserts(xenon_audio_guest_callback_tests)
-  add_test(NAME xenon_audio_guest_callback_tests COMMAND xenon_audio_guest_callback_tests)
+  if(TARGET xenon_audio)
+    add_executable(xenon_audio_guest_callback_tests tests/core/audio_guest_callback_tests.cpp)
+    target_link_libraries(xenon_audio_guest_callback_tests PRIVATE xenon_core xenon_recomp)
+    target_compile_definitions(xenon_audio_guest_callback_tests PRIVATE
+      XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+    xenon_enable_test_asserts(xenon_audio_guest_callback_tests)
+    add_test(NAME xenon_audio_guest_callback_tests COMMAND xenon_audio_guest_callback_tests)
+
+    # These exercise the production SDL audio path without requiring a
+    # physical audio device on headless developer and CI machines.
+    set_tests_properties(
+      xenon_thread_creation_tests
+      xenon_guest_export_abi_tests
+      xenon_audio_guest_callback_tests
+      PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy")
+  endif()
 
   # Negative-path coverage for the same import/export dispatch boundary:
   # unknown library, known library/missing ordinal, a malformed native
@@ -1727,6 +1746,51 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_gpu_frontend_tests)
     add_test(NAME xenon_gpu_frontend_tests COMMAND xenon_gpu_frontend_tests)
   endif()
+
+  # Keep standalone regressions attached to a build target and CTest. The
+  # source ownership audit checks this contract for every test main().
+  xenon_add_standalone_test(xenon_export_trace_tests
+    tests/core/export_trace_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_guest_memory_watch_tests
+    tests/core/guest_memory_watch_tests.cpp xenon_core)
+
+  xenon_add_standalone_test(xenon_cpu_v2_memory_integration_tests
+    tests/cpu/codegen/cpu_v2_memory_integration.cpp xenon_cpu)
+  foreach(test_name IN ITEMS control_flow effective_address flags optimizer)
+    xenon_add_standalone_test(xenon_cpu_v2_${test_name}_tests
+      tests/cpu/optimizer/cpu_v2_${test_name}.cpp xenon_cpu)
+  endforeach()
+  xenon_add_standalone_test(xenon_fallback_lifter_parity_tests
+    tests/cpu/fallback_lifter_parity_tests.cpp xenon_recomp)
+  xenon_add_standalone_test(xenon_cpu_coverage_tests
+    tests/recomp/cpu_coverage_tests.cpp xenon_recomp)
+
+  if(TARGET xenon_memory)
+    xenon_add_standalone_test(xenon_dynamic_fallback_rotate_tests
+      tests/cpu/dynamic_fallback_rotate_tests.cpp xenon_cpu xenon_memory)
+    xenon_add_standalone_test(xenon_dynamic_fallback_parity_semantics_tests
+      tests/cpu/dynamic_fallback_parity_semantics_tests.cpp xenon_cpu xenon_memory)
+  endif()
+  if(WIN32 AND TARGET xenon_memory)
+    xenon_add_standalone_test(xenon_xam_net_socket_tests
+      tests/xam/xam_net_socket_tests.cpp xenon_core)
+  endif()
+  if(TARGET xenon_kernel)
+    xenon_add_standalone_test(xenon_kernel_infinite_wait_tests
+      tests/kernel/infinite_wait_tests.cpp xenon_kernel)
+  endif()
+  if(TARGET xenon_graphics)
+    xenon_add_standalone_test(xenon_xenos_register_aperture_tests
+      tests/graphics/xenos/register_aperture_tests.cpp xenon_graphics xenon_memory)
+  endif()
+
+  xenon_add_standalone_test(xenon_xam_content_services_tests
+    tests/xam/content_services_tests.cpp xenon_core)
+  foreach(test_name IN ITEMS module_lookup ob_exports pool_debug
+      rtl_string_family string_format threading_exports virtual_memory_export)
+    xenon_add_standalone_test(xenon_xbox_${test_name}_tests
+      tests/xbox/${test_name}_tests.cpp xenon_core)
+  endforeach()
 endif()
 # -----------------------------------------------------------------------------
 # Generic runtime/game-host process. The launcher spawns this to actually run

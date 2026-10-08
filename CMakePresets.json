@@ -29,6 +29,31 @@
       }
     },
     {
+      "name": "linux-x64-sanitizers",
+      "inherits": "base",
+      "displayName": "Linux x64 ASan and UBSan",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined",
+        "XENON_ENABLE_AUDIO": "OFF",
+        "XENON_ENABLE_VULKAN": "OFF",
+        "XENON_ENABLE_DXC": "OFF",
+        "XENON_BUILD_LAUNCHER": "OFF",
+        "XENON_BUILD_RUNTIME_HOST": "OFF",
+        "XENON_INPUT_ENABLE_SDL2": "OFF",
+        "XENON_INPUT_ENABLE_SDL3": "OFF",
+        "XENON_AUTO_BOOTSTRAP_DEPS": "OFF",
+        "XENON_FETCH_MISSING_DEPS": "OFF"
+      }
+    },
+    {
       "name": "linux-x64-release",
       "inherits": "base",
       "displayName": "Linux x64 Release",

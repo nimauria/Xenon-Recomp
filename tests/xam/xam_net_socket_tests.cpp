@@ -14,6 +14,7 @@
 #include <iostream>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/session.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/xam_exports.hpp"
 #include "xenon/xam/xam_session.hpp"
@@ -56,7 +57,8 @@ void test_udp_loopback_round_trip() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
   assert(memory.initialize());
@@ -101,7 +103,8 @@ void test_udp_loopback_round_trip() {
   bind2_cpu.gpr[4] = handle_c;
   bind2_cpu.gpr[5] = addr_a;
   auto bind2_ctx = make_context(bind2_cpu, memory, kThreadA);
-  registry.invoke("xam", xam::ordinal::NetDll_bind, bind2_ctx);
+  const auto bind2_result = registry.invoke("xam", xam::ordinal::NetDll_bind, bind2_ctx);
+  assert(bind2_result.handled && bind2_result.success);
   assert(static_cast<std::int32_t>(bind2_cpu.gpr[3]) == 0 &&
          "bind() to a fixed loopback port must succeed");
 
@@ -170,7 +173,8 @@ void test_operations_on_invalid_handle_fail_cleanly() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
   assert(memory.initialize());
@@ -224,7 +228,8 @@ void test_set_and_get_last_error_round_trip() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
   assert(memory.initialize());

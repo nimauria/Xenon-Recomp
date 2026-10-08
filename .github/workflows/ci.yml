@@ -1,0 +1,123 @@
+name: Xenon CI
+
+on:
+  push:
+    branches:
+      - dev
+      - refactor/architecture-cleanup
+  pull_request:
+    branches:
+      - dev
+      - main
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: "6.10.3"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build nasm pkg-config \
+            libx11-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxrandr-dev libxcb1-dev libxcb-cursor-dev \
+            libxcb-keysyms1-dev libxcb-xkb-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxcb-sync-dev libxcb-randr0-dev libgl1-mesa-dev mesa-vulkan-drivers
+      - name: Install Qt SDK
+        run: |
+          python3 -m pip install --user --upgrade aqtinstall
+          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
+      - uses: actions/cache@v4
+        with:
+          path: .xenon/deps
+          key: xenon-deps-linux-x64-${{ hashFiles('tools/deps/manifest.json') }}
+      - name: Provision pinned dependencies
+        run: |
+          python3 tools/deps/bootstrap.py ensure --triplet linux-x64 --jobs 4
+          python3 tools/deps/bootstrap.py verify --triplet linux-x64
+      - name: Configure
+        run: |
+          python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-debug
+          cmake --preset linux-x64-debug -DCMAKE_PREFIX_PATH="$HOME/Qt/$QT_VERSION/gcc_64"
+      - name: Build
+        run: cmake --build build/linux-x64-debug --parallel 4
+      - name: Require Vulkan, runtime host, and launcher targets
+        run: cmake --build build/linux-x64-debug --target xenon_graphics_vulkan xenon_runtime_host xenon_launcher
+      - name: Test
+        run: ctest --test-dir build/linux-x64-debug --output-on-failure --parallel 2 --timeout 900
+      - name: Audit source ownership
+        run: python3 tools/development/build_accountability.py check --build-dir build/linux-x64-debug
+
+  linux-sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ninja-build
+      - name: Configure
+        run: |
+          python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-sanitizers
+          cmake --preset linux-x64-sanitizers
+      - name: Build focused targets
+        run: |
+          cmake --build build/linux-x64-sanitizers --parallel 4 --target \
+            xenon_memory_hardening_tests xenon_dynamic_fallback_tests \
+            xenon_kernel_synchronization_tests xenon_gpu_frontend_tests \
+            xenon_recomp_driver_tests
+      - name: Test with ASan and UBSan
+        run: |
+          ctest --test-dir build/linux-x64-sanitizers --output-on-failure --timeout 900 \
+            -R '^(xenon_memory_hardening_tests|xenon_dynamic_fallback_tests|xenon_kernel_synchronization_tests|xenon_gpu_frontend_tests|xenon_recomp_driver_tests)$'
+      - name: Audit source ownership
+        run: python3 tools/development/build_accountability.py check --build-dir build/linux-x64-sanitizers
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install build tools
+        shell: pwsh
+        run: choco install ninja nasm -y --no-progress
+      - uses: msys2/setup-msys2@v2
+        with:
+          location: C:\msys64
+          update: true
+          install: make
+      - uses: actions/cache@v4
+        with:
+          path: .xenon/deps
+          key: xenon-deps-windows-x64-${{ hashFiles('tools/deps/manifest.json') }}
+      - name: Provision pinned dependencies
+        shell: pwsh
+        run: |
+          python tools/deps/bootstrap.py ensure --triplet windows-x64 --jobs 4
+          python tools/deps/bootstrap.py verify --triplet windows-x64
+      - name: Configure
+        shell: pwsh
+        run: |
+          python tools/development/build_accountability.py prepare --build-dir build/windows-x64-debug
+          cmake --preset windows-x64-debug -DXENON_BUILD_LAUNCHER=OFF
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/windows-x64-debug --parallel 4
+      - name: Require D3D12 and runtime host targets
+        shell: pwsh
+        run: cmake --build build/windows-x64-debug --target xenon_graphics_d3d12 xenon_runtime_host
+      - name: Test
+        shell: pwsh
+        run: ctest --test-dir build/windows-x64-debug --output-on-failure --parallel 2 --timeout 900
+      - name: Audit source ownership
+        shell: pwsh
+        run: python tools/development/build_accountability.py check --build-dir build/windows-x64-debug

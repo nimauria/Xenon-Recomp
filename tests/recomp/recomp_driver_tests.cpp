@@ -124,7 +124,7 @@ int main() {
   const auto configure = "cmake -S " + quote(output) + " -B " + quote(build) +
                          " -DXENON_RECOMP_ROOT=" + quote(XENON_SOURCE_ROOT);
   assert(std::system(configure.c_str()) == 0);
-  const auto compile = "cmake --build " + quote(build) + " --target xenon_game";
+  const auto compile = "cmake --build " + quote(build) + " --target xenon_game --parallel 4";
   assert(std::system(compile.c_str()) == 0);
 #endif
   std::filesystem::remove_all(root);

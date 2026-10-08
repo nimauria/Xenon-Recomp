@@ -3977,12 +3977,14 @@ bool XenonSession::start_gpu_pump_thread() {
       std::fclose(_d);
     }
   }
+#if defined(XENON_HAS_AUDIO)
   if (audio_thread_) {
     if (FILE* _d = std::fopen("thread_identity_diag.log", "a")) {
       std::fprintf(_d, "audio_thread_ thread_id=%u\n", audio_thread_->thread_id());
       std::fclose(_d);
     }
   }
+#endif
 
   // Mark the pump active before starting the thread, so there is no window
   // where the thread is running but gpu_pump_running_ has not been observed
