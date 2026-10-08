@@ -167,7 +167,7 @@ trustworthy rather than merely "probably fine."
 
 `ArtifactCacheKey` gained `preparation_identity`: a `graph::Node` digest
 (`xenon::recomp::graph::preparation_identity()`, shared by
-`tools/xenon_prepare.cpp` and by tests that need to reconstruct the identical
+`tools/xenon_prepare/` and by tests that need to reconstruct the identical
 key) over Xenon's own `include/`, `src/`, `cmake/` trees, `CMakeLists.txt`
 and `tools/compilation_cache.py`, the exact `cmake` binary, the exact
 compiler binary and its directory, and toolchain-relevant environment
@@ -177,7 +177,7 @@ a toolchain or Xenon-source upgrade by accident — the whole-module artifact
 cache and the fine-grained compilation graph agree on when the ground has
 shifted under them. `kArtifactAbiVersion` was bumped to 4 to invalidate
 artifacts prepared before this field existed. This function lives in
-`xenon::recomp::graph` (not as a private static in `xenon_prepare.cpp`)
+`xenon::recomp::graph` (not as a private static in `tools/xenon_prepare/`)
 specifically so a second caller — currently `tests/recomp/
 xenon_prepare_worker_tests.cpp`'s independent key reconstruction — can never
 silently drift from what production actually hashes.

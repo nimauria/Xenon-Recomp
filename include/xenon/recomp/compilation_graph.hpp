@@ -26,7 +26,7 @@ struct Versions {
 // include/src/cmake trees, the CMake driver script, the compiler itself (and
 // its adjacent helper binaries), and toolchain-relevant environment variables
 // (including every header/import-library directory INCLUDE/LIB name). Shared
-// between tools/xenon_prepare.cpp (which sets ArtifactCacheKey::preparation_identity
+// between tools/xenon_prepare/ (which sets ArtifactCacheKey::preparation_identity
 // from it) and tests that need to reconstruct the exact same cache key
 // independently, so the two can never silently drift apart.
 [[nodiscard]] std::string preparation_identity(const std::filesystem::path& source_root,

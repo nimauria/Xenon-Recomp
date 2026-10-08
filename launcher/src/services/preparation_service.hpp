@@ -1,7 +1,7 @@
 #pragma once
 
 // Launcher-side wrapper around the out-of-process automatic game preparation
-// worker (xenon-prepare, tools/xenon_prepare.cpp) - see
+// worker (xenon-prepare, tools/xenon_prepare/) - see
 // docs/development/GAME_PREPARATION.md for the full pipeline and CLI contract. The
 // (potentially minutes-long) native compilation always runs in a separate
 // process; this class only ever spawns it and polls its status file, so it

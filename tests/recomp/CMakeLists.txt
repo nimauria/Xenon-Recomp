@@ -90,7 +90,7 @@ if(XENON_BUILD_TESTS)
 
   # End-to-end xenon-prepare worker tests: drives the real xenon-prepare
   # binary as a subprocess (first build, no-rebuild, hint-change rebuild,
-  # deterministic cancellation) - see tools/xenon_prepare.cpp and
+  # deterministic cancellation) - see tools/xenon_prepare/ and
   # docs/development/GAME_PREPARATION.md.
   add_executable(xenon_prepare_worker_tests xenon_prepare_worker_tests.cpp)
   target_link_libraries(xenon_prepare_worker_tests PRIVATE xenon_recomp)

@@ -28,7 +28,13 @@ xenon_enable_warnings(import-scanner)
 # generates native source (xenon_recomp), then drives a nested CMake build
 # and promotes the result through the artifact cache. XENON_SOURCE_ROOT lets
 # it default --recomp-root to this checkout, matching xenon_recomp_driver_tests.
-add_executable(xenon-prepare xenon_prepare.cpp)
+add_executable(xenon-prepare
+  xenon_prepare/main.cpp
+  xenon_prepare/module_build.cpp
+  xenon_prepare/options.cpp
+  xenon_prepare/process.cpp
+  xenon_prepare/support.cpp
+  xenon_prepare/prepare_internal.hpp)
 target_link_libraries(xenon-prepare PRIVATE xenon_recomp)
 target_compile_definitions(xenon-prepare PRIVATE XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_compile_definitions(xenon-prepare PRIVATE

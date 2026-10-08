@@ -75,7 +75,7 @@ directory or fight over the same `xenon_game_module` output.
 
 ## `xenon-prepare` behavior
 
-`tools/xenon_prepare.cpp`'s single-module code path is preserved verbatim
+`tools/xenon_prepare/module_build.cpp`'s single-module code path is preserved verbatim
 for the common case (exactly one discovered executable): identical CLI
 contract, identical `status.json`/`--query` JSON shape, identical exit codes.
 The actual analyze/generate/compile/validate/commit sequence

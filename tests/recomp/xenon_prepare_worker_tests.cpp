@@ -1,5 +1,5 @@
 // End-to-end tests for the xenon-prepare automatic game preparation worker
-// (tools/xenon_prepare.cpp): first-Play build, no-rebuild on a second Play,
+// (tools/xenon_prepare/): first-Play build, no-rebuild on a second Play,
 // rebuild when a module's analysis hints actually change (while the
 // superseded entry's absence is verified without disturbing anything else),
 // and deterministic cancellation. Mirrors tests/recomp/recomp_driver_tests.cpp

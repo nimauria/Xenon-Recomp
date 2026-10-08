@@ -188,7 +188,7 @@ change without disturbing the prior entry, deterministic cancellation).
 
 ## 4. The `xenon-prepare` worker
 
-`tools/xenon_prepare.cpp` → executable `xenon-prepare`. Runs **out of
+`tools/xenon_prepare/` → executable `xenon-prepare`. Runs **out of
 process** from the launcher (Part 10) — the launcher UI thread never blocks
 on compilation, and a worker crash cannot crash the launcher.
 
