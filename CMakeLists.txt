@@ -88,7 +88,33 @@ add_library(Xenon::Logging ALIAS xenon_logging)
 # Core runtime
 add_library(xenon_core STATIC
   src/core/runtime.cpp
-  src/core/session.cpp
+  # XenonSession, by responsibility (see src/core/session/).
+  src/core/session/session.cpp
+  src/core/session/lifecycle/subsystem_init.cpp
+  src/core/session/lifecycle/graphics_init.cpp
+  src/core/session/lifecycle/input_init.cpp
+  src/core/session/lifecycle/game_loading.cpp
+  src/core/session/lifecycle/native_extension.cpp
+  src/core/session/lifecycle/execution_control.cpp
+  src/core/session/lifecycle/shutdown.cpp
+  src/core/session/exports/export_registration.cpp
+  src/core/session/exports/kernel_object_exports.cpp
+  src/core/session/exports/kernel_variables.cpp
+  src/core/session/threading/guest_process.cpp
+  src/core/session/threading/thread_creation.cpp
+  src/core/session/threading/thread_execution.cpp
+  src/core/session/execution/guest_dispatch.cpp
+  src/core/session/execution/runtime_services.cpp
+  src/core/session/pumps/gpu_pump.cpp
+  src/core/session/pumps/audio_callbacks.cpp
+  src/core/session/diagnostics/adaptive_observations.cpp
+  src/core/session/diagnostics/boot_progress.cpp
+  src/core/session/diagnostics/fault_report.cpp
+  src/core/session/diagnostics/memory_watch.cpp
+  src/core/session/diagnostics/runtime_probes.cpp
+  src/core/session/diagnostics/session_capability_report.cpp
+  src/core/session/diagnostics/stop_report.cpp
+  src/core/session/diagnostics/title_probes.cpp
   src/core/guest_thread_context.cpp
   src/core/export_registry.cpp
   src/core/call_bridge.cpp
@@ -129,7 +155,9 @@ add_library(xenon_core STATIC
   src/xam/xam_session_handle_exports.cpp
   src/xam/xam_ui_exports.cpp
 )
-target_include_directories(xenon_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(xenon_core
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(xenon_core PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_core)
 # xenon_logging is unconditional (declared just above, no optional

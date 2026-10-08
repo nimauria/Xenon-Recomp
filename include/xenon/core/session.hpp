@@ -387,6 +387,11 @@ class XenonSession final : public cpu::RuntimeServices {
   bool init_audio();
   bool init_xam();
   bool init_exports();
+  // init_exports() phases, in registration order (src/core/session/exports/).
+  bool register_process_free_kernel_exports();
+  bool register_kernel_object_exports();
+  bool register_session_bound_kernel_exports();
+  bool register_subsystem_bridge_exports();
   bool init_kernel_variable_exports();
   bool bind_xex_variable_imports();
   bool refresh_dynamic_kernel_variables();
@@ -560,6 +565,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // return addresses; empty when export tracing is off or the thread is unknown.
   [[nodiscard]] std::string describe_recent_exports(std::uint32_t thread_id,
                                                     std::size_t limit) const;
+  // Stall evidence logged by stop() when the guest is still executing
+  // (src/core/session/diagnostics/stop_report.cpp).
+  void report_stop_diagnostics();
 
   SessionConfig config_{};
   GuestMemoryWatch memory_watch_{};
