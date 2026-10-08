@@ -74,9 +74,13 @@ ModuleBuildResult prepare_one_module(const xenon::xbox::XexImage& effective_imag
   // Gen 11: the relative path is part of this key too, since two different
   // XEX modules of the same title each need their own independent nested
   // CMake build/generated project, never sharing one workspace directory.
+  // The directory name is the digest's first 16 hex digits: the nested build
+  // nests deep object paths under it, and the full 64 pushed them past
+  // Windows' 260-character MAX_PATH (MSVC C1083) under ordinary AppData or
+  // temp cache roots.
   const auto workspace_key = xenon::recomp::graph::digest(
       title_id_hex + ":" + media_id_hex + ":" + module_relative_path + ":" + options.config + ":" +
-      options.recomp_root.string());
+      options.recomp_root.string()).substr(0, 16);
   PreparationWorkspace workspace(options.cache_root / "workspaces" / workspace_key);
   driver_options.output = workspace.path / "generated";
   if (!xenon::recomp::generate_project(driver_options, report, driver_error)) {
