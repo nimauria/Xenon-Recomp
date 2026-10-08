@@ -167,7 +167,7 @@ ExecutionResult tls_isolation_probe_entry(ExecutionContext& context) {
 // increment unrelated to real elapsed time; read_spr()/write_spr() silently
 // no-opped every SPR). Dispatched through the exact real production
 // RuntimeServices interface a real AOT-compiled Op::ReadTimeBase/ReadSPR/
-// WriteSPR would use (see src/cpu/codegen/backend_cpp_aot.cpp), not called
+// WriteSPR would use (see src/cpu/codegen/emission/backend_cpp_aot.cpp), not called
 // directly on XenonSession.
 std::atomic<std::uint64_t> g_timebase_probe_first{0};
 std::atomic<std::uint64_t> g_timebase_probe_second{0};

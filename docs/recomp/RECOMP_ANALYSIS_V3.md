@@ -147,7 +147,7 @@ inline during each function's own linear decode scan:
 - `addi`/`addis` and `ori`/`oris` update a per-register tracked-constant
   table (`gpr_constant[32]`), correctly handling that `ori`/`oris` has its
   source and destination register fields **reversed** relative to
-  `addi`/`addis` (verified against `src/cpu/ppc/lifter_integer.cpp`'s own
+  `addi`/`addis` (verified against `src/cpu/ppc/lifter/integer.cpp`'s own
   field usage, not just PPC ISA manual convention, since a mismatch here
   would statically resolve to a **wrong** address rather than merely fail to
   resolve).
@@ -260,7 +260,7 @@ range overlaps) and, once the post-wave cross-reference pass ran, picked up
 `branch_references` happened to name it (hence the `direct-branch +
 validated-tail-call` pattern dominating the discovered set).
 
-**Fix** (`src/recomp/driver.cpp`, `analyze_function_candidate()`):
+**Fix** (`src/recomp/analysis/control_flow/candidate_analysis.cpp`, `analyze_function_candidate()`):
 
 1. A plain direct branch's target is no longer pushed to `result.discovered`
    at decode time. It is buffered (`pending_direct_branch_targets` for the

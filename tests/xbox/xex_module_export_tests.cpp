@@ -4,7 +4,7 @@
 // Real-world context: this is the next real export AC6's boot path calls
 // once the gpr[12]-vs-gpr[0] save/restore-helper LR-source bug was fixed
 // (real guest address 0x823d02cc) - a correctly-recognized-but-previously-
-// unimplemented import, per src/core/session.cpp's Trap path
+// unimplemented import, per src/core/session/execution/runtime_services.cpp's Trap path
 // (STATUS_PROCEDURE_NOT_FOUND / 0xC0000005-style unresolved-import trap).
 //
 // Verified semantics (xenia-project/xenia's XexCheckExecutablePrivilege_entry

@@ -403,5 +403,5 @@ and title updates without the loader hard-coding any of that policy itself.
 
 - `include/xenon/xbox/xex_loader.hpp`, `src/xbox/xex/xex_loader.cpp` - header/security/
   compression/PE orchestration, `load_xex()`, `apply_title_update()`.
-- `include/xenon/xbox/xex_crypto.hpp`, `src/xbox/xex/xex_crypto.cpp` - AES-128, SHA-1.
-- `include/xenon/xbox/xex_lzx.hpp`, `src/xbox/xex/xex_lzx.cpp` - LZX/LZXDELTA decoder.
+- `include/xenon/xbox/xex_crypto.hpp`, `src/xbox/xex/security/xex_crypto.cpp` - AES-128, SHA-1.
+- `include/xenon/xbox/xex_lzx.hpp`, `src/xbox/xex/compression/xex_lzx.cpp` - LZX/LZXDELTA decoder.

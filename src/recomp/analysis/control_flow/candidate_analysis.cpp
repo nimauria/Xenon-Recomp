@@ -67,7 +67,7 @@ bool try_short_circuit_candidate(GuestAddress start, const AnalysisContext& ctx,
   // import metadata word), and in the worst case a coincidentally-valid
   // decode could register a bogus compiled function that shadows the
   // correct runtime import dispatch. Xenon's runtime (XenonSession::call(),
-  // src/core/session.cpp) already matches call targets against
+  // src/core/session/execution/runtime_services.cpp) already matches call targets against
   // XexImage::imports[].guest_thunk before falling back to compiled code, so
   // this candidate deliberately stays uncompiled (`compiled = false`): no
   // lookup_compiled() case gets emitted for it, and the existing

@@ -2,7 +2,8 @@
 // tests/core/title_update_integration_tests.cpp. Exports the real Xenon
 // module ABI (see docs/runtime/RUNTIME_HOST.md "Native extension contract") plus the
 // optional Xenon_SupportedExecutableRevisions() identity export
-// XenonSession::load_native_extension() checks (see src/core/session.cpp).
+// XenonSession::load_native_extension() checks (see
+// src/core/session/lifecycle/native_extension.cpp).
 //
 // This module never binds any compiled code (compiled_lookup stays null) -
 // these tests only exercise load_game()/load_native_extension()'s effective-

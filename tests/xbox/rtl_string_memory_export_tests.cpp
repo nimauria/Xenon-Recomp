@@ -3,7 +3,7 @@
 // real core::ExportRegistry exactly as a guest thunk would - AC6's boot
 // path calls these directly (real guest addresses under 0x821Fxxxx),
 // previously trapping with STATUS_PROCEDURE_NOT_FOUND (xam.xex ordinal
-// pattern mirrored here for xboxkrnl.exe; see src/core/session.cpp's Trap
+// pattern mirrored here for xboxkrnl.exe; see src/core/session/execution/runtime_services.cpp's Trap
 // path).
 
 #include <cassert>

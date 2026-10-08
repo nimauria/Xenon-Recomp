@@ -12,7 +12,7 @@
 // AC6's boot path calls once KeFlushUserModeTb and RtlImageXexHeaderField
 // were both fixed (real guest address 0x823d037c) - both are
 // correctly-recognized-but-previously-unimplemented imports, per
-// src/core/session.cpp's Trap path (STATUS_PROCEDURE_NOT_FOUND).
+// src/core/session/execution/runtime_services.cpp's Trap path (STATUS_PROCEDURE_NOT_FOUND).
 
 #include <cassert>
 #include <cstdint>

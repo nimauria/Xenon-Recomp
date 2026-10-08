@@ -30,7 +30,7 @@ this document now tracks them separately below rather than conflating them.
 
 ## Export Surface: actually guest-callable today
 
-Registered in `XenonSession::init_exports()` (`src/core/session.cpp`) and
+Registered in `XenonSession::init_exports()` (`src/core/session/exports/export_registration.cpp`) and
 verified by tests driving them through the real `core::ExportRegistry`, not
 just claimed:
 
@@ -44,7 +44,7 @@ just claimed:
   (0xF3), `NtCreateMutant` (0xD4), `NtReleaseMutant` (0xF2),
   `NtWaitForSingleObjectEx` (0xFD), `NtWaitForMultipleObjectsEx` (0xFE).
   Tests: `tests/xbox/sync_export_tests.cpp`.
-- **`ExCreateThread`** (`src/core/session.cpp`'s `export_ex_create_thread()`,
+- **`ExCreateThread`** (`src/core/session/threading/thread_creation.cpp`'s `export_ex_create_thread()`,
   ordinal 0x0D): spawns a real guest-executing thread, honoring
   `CREATE_SUSPENDED`, publishing its `Handle` through the same shared
   dispatcher-object table the `Nt*` sync exports use (so it is waitable via

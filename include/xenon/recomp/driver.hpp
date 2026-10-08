@@ -304,7 +304,7 @@ struct DiscoveredFunction {
   // loader-owned placeholder data (ordinal/attributes/record-type, see
   // xex_loader.cpp's parse_native_import_libraries()), never guest PPC
   // bytes, and must never be decoded/compiled. Xenon's runtime import
-  // dispatch (XenonSession::call(), src/core/session.cpp) already resolves
+  // dispatch (XenonSession::call(), src/core/session/execution/runtime_services.cpp) already resolves
   // calls to this exact address by matching it against
   // XexImage::imports[].guest_thunk; this field only records the
   // recognition so static analysis never misclassifies the address as an

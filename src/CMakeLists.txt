@@ -39,7 +39,8 @@ if(TARGET xenon_input)
   target_link_libraries(xenon_core PUBLIC xenon_input)
 endif()
 # XenonSession::init_exports() registers input::xam::guest::GuestInputBridge's
-# dispatch() into the unified ExportRegistry (see src/core/session.cpp), so it
+# dispatch() into the unified ExportRegistry (see
+# src/core/session/exports/export_registration.cpp), so it
 # needs the guest ABI bridge linked in whenever it was built.
 if(TARGET xenon_input_guest)
   target_link_libraries(xenon_core PUBLIC xenon_input_guest)
@@ -48,7 +49,7 @@ if(TARGET xenon_graphics)
   target_link_libraries(xenon_core PUBLIC xenon_graphics)
 endif()
 # XenonSession::init_gpu() selects and constructs the real native backend
-# directly (see src/core/session.cpp) rather than going through a separate
+# directly (see src/core/session/lifecycle/graphics_init.cpp) rather than going through a separate
 # factory/plugin layer, so it needs these compiled in whenever they exist.
 if(TARGET xenon_graphics_vulkan)
   target_link_libraries(xenon_core PUBLIC xenon_graphics_vulkan)

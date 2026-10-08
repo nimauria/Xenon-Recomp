@@ -53,7 +53,7 @@ hints must never apply to a title-update-patched revision, or vice versa).
 JSON (de)serialization lives in `analysis_schema_json.hpp`/`.cpp`, built on
 the existing dependency-free `xenon::core::JsonValue`.
 
-## Recomp Driver consumption (`src/recomp/driver.cpp`)
+## Recomp Driver consumption (`src/recomp/analysis/`)
 
 `load_and_analyze()` actually **uses** the hint set, not merely stores it:
 
@@ -135,7 +135,7 @@ parentless `FunctionHint` is excluded from its declared parent's merged body
 and compiles as that independent function instead - the two are mutually
 exclusive so the same guest bytes are never compiled twice under two
 canonical identities (see `has_independent_function_hint()` in
-`src/recomp/driver.cpp` and that test file's "A FunctionChunk excluded by a
+`src/recomp/analysis/` and that test file's "A FunctionChunk excluded by a
 conflicting independent FunctionHint..." case). `DiscoveredFunction::
 chunk_parent` remains unset by this pass (nothing currently populates it);
 chunk association is recoverable from the parent's own `ranges` instead.

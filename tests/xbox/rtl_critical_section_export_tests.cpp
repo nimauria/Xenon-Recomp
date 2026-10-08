@@ -4,7 +4,7 @@
 // Real-world context: RtlInitializeCriticalSection (ordinal 302 / 0x12E) is
 // the next real export AC6's boot path calls once the process-type exports
 // were fixed (real guest address 0x823d009c) - a correctly-recognized-but-
-// previously-unimplemented import, per src/core/session.cpp's Trap path
+// previously-unimplemented import, per src/core/session/execution/runtime_services.cpp's Trap path
 // (STATUS_PROCEDURE_NOT_FOUND).
 
 #include <atomic>

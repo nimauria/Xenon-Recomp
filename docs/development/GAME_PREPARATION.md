@@ -128,7 +128,7 @@ never inferred from a filename.
 
 ## 3. The prepared-module artifact cache
 
-`include/xenon/recomp/artifact_cache.hpp` / `src/recomp/artifact_cache.cpp`
+`include/xenon/recomp/artifact_cache.hpp` / `src/recomp/caching/artifact_cache.cpp`
 (target `xenon_recomp`). A content-addressed store for compiled
 `xenon_game_module` shared libraries.
 

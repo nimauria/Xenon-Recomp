@@ -1097,7 +1097,7 @@ void test_map_xex_image_matches_load_xex() {
 
 // compute_effective_identity()/compute_effective_image_hash(): the "which
 // exact executable" identity XenonSession publishes and native-extension
-// compatibility gating relies on (see src/core/session.cpp) must actually
+// compatibility gating relies on (see src/core/session/lifecycle/native_extension.cpp) must actually
 // differ once a title update changes the effective image, and match
 // whichever image (base or patched) it was computed from.
 void test_effective_identity_reflects_title_update() {

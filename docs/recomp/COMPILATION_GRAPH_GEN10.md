@@ -89,7 +89,7 @@ covers a full round trip plus truncated/out-of-schema rejection).
 
 ## Driver integration
 
-`analyze_function_candidate()` (`src/recomp/driver.cpp`) now calls
+`analyze_function_candidate()` (`src/recomp/analysis/control_flow/candidate_analysis.cpp`) now calls
 `graph::compile_region()` instead of invoking `cpu::StaticFunctionCompiler`
 directly. The region's guest ranges are hashed into the `decoded-region`
 node; the CFG boundary Gen 6 discovery actually proved for that region is the

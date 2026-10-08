@@ -5,7 +5,7 @@
 // loaded native module -> KernelProcess -> KernelThread), not a direct C++
 // call into ExportRegistry.
 //
-// Mechanism this exercises (see src/core/session.cpp's
+// Mechanism this exercises (see src/core/session/execution/runtime_services.cpp's
 // XenonSession::call()): a guest `bl <address>` whose target is not a
 // discovered/compiled function already falls back to
 // RuntimeServices::call(), which CPU V2's generated code always calls for
