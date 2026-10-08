@@ -18,6 +18,18 @@ findings remain below; resolved findings record the observed cause and fix.
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
+3. **`xenon_xbox_threading_exports_tests` hangs intermittently.** Its
+   `slist_concurrent` case (four threads pushing 1,200 entries through
+   `InterlockedPushEntrySList` while four pop them) occasionally never sees all
+   entries popped, so the poppers spin until CTest's 900 s timeout. Locally the
+   test hung in 2 of 15 runs on this branch and 4 of 30 runs built from
+   `780d017`, before any code moved, so the defect predates the refactor.
+   The SList exports (`src/xbox/exports/xboxkrnl_threading_exports.cpp`) rely
+   on `AddressSpace::reserve64()`/`store_conditional64()`
+   (`src/memory/guest/reservations/reservations.cpp`) to reject a store over a
+   header another thread changed; a lost entry points at a
+   window where a stale reservation still commits.
+
 ## Differences between the Vulkan and D3D12 backends
 
 Both backends now share `src/graphics/common/backend_core*.hpp`. Where their
