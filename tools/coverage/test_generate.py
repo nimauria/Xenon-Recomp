@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
+import check_ci_platforms
+import check_ctest
 import generate
 
 
@@ -21,9 +23,27 @@ class CoverageTests(unittest.TestCase):
             return generate.load_manifest(path, self.items)
 
     def test_source_inventory_and_manifest(self):
-        self.assertEqual(len(self.items), 864)
-        self.assertEqual(len(self.entries), 25)
-        self.assertEqual(len(generate.kernel_inventory()), 254)
+        self.assertGreater(len(self.items), 800)
+        self.assertEqual(len(self.items), sum(1 for category in ("kernel", "ppc", "shader", "pm4")
+                                             for item in self.items if item.category == category))
+        self.assertEqual(len(generate.kernel_inventory()), len([item for item in self.items if item.category == "kernel"]))
+        self.assertEqual(sum(generate.counts(self.items, self.entries).values()), len(self.items))
+
+    def test_source_inventory_change_affects_denominator(self):
+        original = generate.source
+
+        def changed(path):
+            data = original(path)
+            if path == "src/cpu/ppc/decoder/opcode_catalog.inc":
+                return data + '\nX(0x12345678u, "audit_new_opcode", D, Integer, General)\n'
+            return data
+
+        with patch.object(generate, "source", side_effect=changed):
+            expanded = generate.inventory()
+        self.assertEqual(len(expanded), len(self.items) + 1)
+        self.assertIn("ppc:audit_new_opcode", {item.id for item in expanded})
+        self.assertEqual(generate.counts(expanded, self.entries)["unassessed"],
+                         generate.counts(self.items, self.entries)["unassessed"] + 1)
 
     def test_kernel_diagnostic_metadata_must_match_registration(self):
         original = generate.source
@@ -116,12 +136,16 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(generate.percent(1, 4), "25.0%")
         self.assertEqual(generate.percent(0, 0), "unknown")
         self.assertEqual(generate.counts([], {}), {})
+        selected = self.items[:4]
+        self.assertEqual(sum(generate.counts(selected, self.entries).values()), len(selected))
 
     def test_partial_and_unverified_not_counted_as_verified(self):
         chosen = [i for i in self.items if i.id in {
-            "kernel:crypto:XeKeysConsolePrivateKeySign", "shader:vector:0"}]
+            "kernel:crypto:XeKeysConsolePrivateKeySign",
+            "kernel:registered:NtAllocateVirtualMemory", "shader:vector:0"}]
         states = generate.counts(chosen, self.entries)
         self.assertEqual(states["partial"], 1)
+        self.assertEqual(states["stub"], 1)
         self.assertEqual(states["implemented_unverified"], 1)
         self.assertEqual(states["verified"], 0)
 
@@ -139,13 +163,43 @@ class CoverageTests(unittest.TestCase):
         row["state"] = "magic"
         with self.assertRaisesRegex(generate.CoverageError, "invalid audited state"):
             self.temporary_manifest([row])
-        row["state"] = "verified"
+        row = dict(self.entries["ppc:addi"])
+        row["kind"] = "stub"
+        with self.assertRaisesRegex(generate.CoverageError, "invalid implementation kind"):
+            self.temporary_manifest([row])
+        row = dict(self.entries["ppc:addi"])
         row.pop("test")
         with self.assertRaisesRegex(generate.CoverageError, "lacks test trace"):
             self.temporary_manifest([row])
         row["state"] = []
         with self.assertRaisesRegex(generate.CoverageError, "invalid audited state"):
             self.temporary_manifest([row])
+
+    def test_manifest_schema_test_targets_and_duplicate_evidence(self):
+        row = dict(self.entries["ppc:addi"])
+        row["test_target"] = "xenon_missing_test"
+        with self.assertRaisesRegex(generate.CoverageError, "not registered with CTest"):
+            self.temporary_manifest([row])
+        row = dict(self.entries["ppc:addi"])
+        row["test"] = "tests/cpu/renamed_native_smoke.cpp"
+        with self.assertRaisesRegex(generate.CoverageError, "source inventory missing"):
+            self.temporary_manifest([row])
+        row = dict(self.entries["ppc:addi"])
+        row["unexpected"] = True
+        with self.assertRaisesRegex(generate.CoverageError, "unknown coverage fields"):
+            self.temporary_manifest([row])
+        other = dict(self.entries["kernel:registered:KeSetCurrentProcessType"])
+        other["test_token"] = self.entries["kernel:registered:KeGetCurrentProcessType"]["test_token"]
+        with self.assertRaisesRegex(generate.CoverageError, "duplicate test evidence"):
+            self.temporary_manifest([self.entries["kernel:registered:KeGetCurrentProcessType"], other])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.json"
+            path.write_text(json.dumps({"schema": 2, "entries": []}))
+            with self.assertRaisesRegex(generate.CoverageError, "requires schema 1"):
+                generate.load_manifest(path, self.items)
+            path.write_text(json.dumps({"schema": True, "entries": []}))
+            with self.assertRaisesRegex(generate.CoverageError, "requires schema 1"):
+                generate.load_manifest(path, self.items)
 
     def test_source_trace_validation(self):
         row = dict(self.entries["ppc:addi"])
@@ -156,23 +210,80 @@ class CoverageTests(unittest.TestCase):
     def test_deterministic_svg_and_states(self):
         first = generate.render_svg(self.items, self.entries)
         self.assertEqual(first, generate.render_svg(self.items, self.entries))
-        self.assertEqual(ET.fromstring(first).attrib["viewBox"], "0 0 1200 1030")
+        root = ET.fromstring(first)
+        self.assertEqual(root.attrib["viewBox"].split()[:3], ["0", "0", "1200"])
         self.assertIn("Unassessed", first)
         self.assertIn("Unimplemented", first)
-        self.assertIn("≥3.9%", first)
-        self.assertIn("19/864", first)
+        self.assertIn(f"{generate.counts(self.items, self.entries)['verified']}/{len(self.items)}", first)
+        self.assertEqual(first.count("<title>"), len(self.items))
+        compact = generate.render_summary_svg(self.items, self.entries)
+        self.assertEqual(compact, generate.render_summary_svg(self.items, self.entries))
+        self.assertEqual(ET.fromstring(compact).attrib["viewBox"], "0 0 1200 650")
+        self.assertIn("Xbox 360 kernel exports", compact)
+        self.assertIn("GPU PM4 packets", compact)
+        for svg in (first, compact):
+            for rect in ET.fromstring(svg).iter("{http://www.w3.org/2000/svg}rect"):
+                self.assertGreater(float(rect.attrib["width"]), 0)
+                self.assertGreater(float(rect.attrib["height"]), 0)
+
+    def test_detailed_layout_grows_with_inventory(self):
+        extra = [generate.Item(f"ppc:synthetic_{n}", "ppc", "Vector", f"synthetic_{n}", "test")
+                 for n in range(2000)]
+        root = ET.fromstring(generate.render_svg(self.items + extra, self.entries))
+        self.assertGreater(int(root.attrib["viewBox"].split()[-1]),
+                           int(ET.fromstring(generate.render_svg(self.items, self.entries)).attrib["viewBox"].split()[-1]))
 
     def test_ci_references_real_workflow_and_jobs(self):
         workflow = (generate.ROOT / ".github/workflows/ci.yml").read_text()
+        windows = (generate.ROOT / ".github/workflows/windows.yml").read_text()
+        linux = (generate.ROOT / ".github/workflows/linux.yml").read_text()
         readme = (generate.ROOT / "README.md").read_text()
         self.assertIn("name: Xenon CI", workflow)
-        for job in ("linux:", "windows:", "coverage-dashboard:"):
-            self.assertIn(job, workflow)
-        self.assertIn("ilammy/msvc-dev-cmd@v1", workflow)
-        self.assertIn("ctest --test-dir build/windows-x64-debug", workflow)
-        self.assertIn("ctest --test-dir build/linux-x64-debug", workflow)
-        self.assertIn("actions/workflows/ci.yml/badge.svg?branch=development-restructure", readme)
-        self.assertIn("docs/coverage/dashboard.svg", readme)
+        self.assertIn("platform-results:", workflow)
+        self.assertIn("coverage-dashboard:", workflow)
+        self.assertIn("linux-sanitizers:", workflow)
+        self.assertIn("ilammy/msvc-dev-cmd@v1", windows)
+        self.assertIn("where.exe cl.exe", windows)
+        self.assertIn("ctest --test-dir build/windows-x64-debug", windows)
+        self.assertIn("ctest --test-dir build/linux-x64-debug", linux)
+        for workflow_file in ("windows.yml", "linux.yml", "ci.yml"):
+            self.assertIn(f"actions/workflows/{workflow_file}/badge.svg?branch=development-restructure&amp;event=push".replace("&amp;", "&"), readme)
+            self.assertTrue((generate.ROOT / ".github/workflows" / workflow_file).is_file())
+        self.assertIn("[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/dashboard.svg)", readme)
+        self.assertIn("docs/coverage/REPORT.md", readme)
+        self.assertEqual((generate.ROOT / "README.md").read_bytes().count(b"\r\n"),
+                         (generate.ROOT / "README.md").read_bytes().count(b"\n"))
+        for link in ("docs/coverage/summary.svg", "docs/coverage/dashboard.svg",
+                     "docs/coverage/README.md", "docs/coverage/REPORT.md"):
+            self.assertTrue((generate.ROOT / link).is_file(), link)
+        self.assertTrue(generate.SUMMARY_SVG.is_file())
+        self.assertEqual(generate.SUMMARY_SVG.read_text(), generate.render_summary_svg(self.items, self.entries))
+        self.assertEqual(generate.SVG.read_text(), generate.render_svg(self.items, self.entries))
+
+    def test_ctest_report_and_platform_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.xml"
+            path.write_text('<testsuite><testcase name="one"/></testsuite>')
+            self.assertEqual(check_ctest.check(path), (1, 0, 0, 0))
+            path.write_text('<testsuite><testcase name="one"><skipped/></testcase></testsuite>')
+            self.assertEqual(check_ctest.check(path), (1, 0, 0, 1))
+            path.write_text('<testsuite/>')
+            with self.assertRaisesRegex(ValueError, "no test cases"):
+                check_ctest.check(path)
+        run = {"workflow_runs": [{"id": 42, "head_sha": "abc", "event": "push",
+                                  "status": "completed", "conclusion": "success"}]}
+        jobs = {"jobs": [{"name": "windows", "conclusion": "success"}]}
+        with patch.object(check_ci_platforms, "get_json", side_effect=[run, jobs]):
+            self.assertEqual(check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"), "success")
+        with patch.object(check_ci_platforms, "get_json", return_value={"workflow_runs": []}):
+            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
+        run["workflow_runs"][0]["status"] = "in_progress"
+        with patch.object(check_ci_platforms, "get_json", return_value=run):
+            self.assertIn("pending:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
+        run["workflow_runs"][0]["status"] = "completed"
+        jobs["jobs"][0]["conclusion"] = "skipped"
+        with patch.object(check_ci_platforms, "get_json", side_effect=[run, jobs]):
+            self.assertIn("failed:", check_ci_platforms.workflow_result("o/r", "windows.yml", "windows", "abc", "push", "token"))
 
 
 if __name__ == "__main__":

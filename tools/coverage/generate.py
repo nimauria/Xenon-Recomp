@@ -15,14 +15,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).with_name("coverage.json")
 SVG = ROOT / "docs" / "coverage" / "dashboard.svg"
+SUMMARY_SVG = ROOT / "docs" / "coverage" / "summary.svg"
 REPORT = ROOT / "docs" / "coverage" / "REPORT.md"
 KERNEL_REFERENCE = Path(__file__).with_name("reference") / "xenia_xboxkrnl_997d055.json"
 KERNEL_REFERENCE_REPORT = ROOT / "docs" / "coverage" / "KERNEL_REFERENCE.md"
-STATES = {"verified", "implemented_unverified", "partial", "unimplemented", "unassessed"}
+STATES = {"verified", "implemented_unverified", "partial", "stub", "unimplemented", "unassessed"}
 COLORS = {
     "verified": "#3dbb79",
     "implemented_unverified": "#55a6e9",
     "partial": "#f2bc5a",
+    "stub": "#d98b6a",
     "unimplemented": "#88919e",
     "unassessed": "#514c72",
 }
@@ -42,7 +44,9 @@ class Item:
 
 
 def source(path: str) -> str:
-    target = ROOT / path
+    target = (ROOT / path).resolve()
+    if not target.is_relative_to(ROOT):
+        raise CoverageError(f"source path escapes repository: {path}")
     if not target.is_file():
         raise CoverageError(f"source inventory missing: {path}")
     return target.read_text(encoding="utf-8")
@@ -152,7 +156,7 @@ def load_kernel_reference(path: Path = KERNEL_REFERENCE) -> tuple[dict, list[dic
         raise CoverageError(f"cannot load kernel reference: {exc}") from exc
     provenance = raw.get("provenance") if isinstance(raw, dict) else None
     rows = raw.get("exports") if isinstance(raw, dict) else None
-    if (not isinstance(raw, dict) or raw.get("schema") != 1 or
+    if (not isinstance(raw, dict) or type(raw.get("schema")) is not int or raw.get("schema") != 1 or
             not isinstance(provenance, dict) or not isinstance(rows, list) or not rows):
         raise CoverageError("kernel reference requires schema 1, provenance, and exports")
     commit = provenance.get("commit")
@@ -281,13 +285,35 @@ def inventory() -> list[Item]:
     return items
 
 
+def ctest_targets() -> dict[str, set[str]]:
+    """Read declared test executables and their CTest registrations from CMake."""
+    targets: dict[str, set[str]] = {}
+    for file in sorted((ROOT / "tests").rglob("CMakeLists.txt")):
+        cmake = file.read_text(encoding="utf-8")
+        relative = file.parent.relative_to(ROOT)
+        registered = set(re.findall(r'\badd_test\s*\(\s*NAME\s+(\w+)', cmake))
+        for match in re.finditer(r'\b(add_executable|xenon_add_standalone_test)\s*\(\s*(\w+)\s+(.*?)\)', cmake, re.S):
+            command, target, body = match.groups()
+            if command == "add_executable" and target not in registered:
+                continue
+            paths = {str(relative / path) for path in re.findall(r'[\w/.-]+\.cpp', body)}
+            if target in targets:
+                raise CoverageError(f"duplicate CTest target: {target}")
+            targets[target] = paths
+    return targets
+
+
 def load_manifest(path: Path, items: list[Item]) -> dict[str, dict]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise CoverageError(f"cannot load coverage manifest: {exc}") from exc
-    if not isinstance(raw, dict) or raw.get("schema") != 1 or not isinstance(raw.get("entries"), list):
+    if (not isinstance(raw, dict) or type(raw.get("schema")) is not int or
+            raw.get("schema") != 1 or not isinstance(raw.get("entries"), list)):
         raise CoverageError("coverage manifest requires schema 1 and an entries array")
+    unknown_root = set(raw) - {"schema", "scope", "entries", "exclusions"}
+    if unknown_root:
+        raise CoverageError(f"unknown coverage manifest fields: {sorted(unknown_root)}")
     allowed = {item.id: item for item in items}
     exclusions = raw.get("exclusions", [])
     if not isinstance(exclusions, list):
@@ -306,10 +332,17 @@ def load_manifest(path: Path, items: list[Item]) -> dict[str, dict]:
         if not isinstance(path, str) or not path.startswith(("src/", "include/")) or not isinstance(token, str) or not token or token not in source(path):
             raise CoverageError(f"invalid exclusion trace for {ident}")
     entries: dict[str, dict] = {}
+    test_targets = ctest_targets()
+    evidence: dict[tuple[str, str], dict] = {}
     for row in raw["entries"]:
         if not isinstance(row, dict) or not isinstance(row.get("id"), str):
             raise CoverageError("coverage entry has no string identifier")
         ident = row["id"]
+        unknown_fields = set(row) - {"id", "state", "kind", "implementation",
+                                     "implementation_token", "test", "test_token",
+                                     "test_target", "shared_test", "note"}
+        if unknown_fields:
+            raise CoverageError(f"unknown coverage fields for {ident}: {sorted(unknown_fields)}")
         if ident in entries:
             raise CoverageError(f"duplicate coverage identifier: {ident}")
         if ident not in allowed:
@@ -317,11 +350,12 @@ def load_manifest(path: Path, items: list[Item]) -> dict[str, dict]:
         state = row.get("state")
         if not isinstance(state, str) or state not in STATES or state == "unassessed":
             raise CoverageError(f"invalid audited state for {ident}: {state}")
-        if state == "verified" and (not row.get("test") or not row.get("test_token")):
+        if state == "verified" and (not row.get("test") or not row.get("test_token") or not row.get("test_target")):
             raise CoverageError(f"verified entry lacks test trace: {ident}")
-        if state in {"partial", "unimplemented"} and not isinstance(row.get("note"), str):
+        if state in {"partial", "stub", "unimplemented"} and (
+                not isinstance(row.get("note"), str) or not row["note"].strip()):
             raise CoverageError(f"{state} entry lacks explanation: {ident}")
-        if row.get("kind") not in {None, "stub", "fallback"} or (row.get("kind") and state != "partial"):
+        if row.get("kind") not in {None, "fallback"} or (row.get("kind") and state != "partial"):
             raise CoverageError(f"invalid implementation kind for {ident}")
         impl = row.get("implementation")
         if not isinstance(impl, str) or not impl.startswith(("src/", "include/")):
@@ -337,8 +371,23 @@ def load_manifest(path: Path, items: list[Item]) -> dict[str, dict]:
             if not isinstance(test_path, str) or not test_path.startswith("tests/"):
                 raise CoverageError(f"invalid test path for {ident}")
             test_token = row.get("test_token", allowed[ident].name)
-            if not isinstance(test_token, str) or not test_token or test_token not in source(test_path):
+            test_text = source(test_path)
+            if not isinstance(test_token, str) or not test_token or test_token not in test_text:
                 raise CoverageError(f"test token absent for {ident}")
+            if test_token.startswith("test_") and len(re.findall(r'\b' + re.escape(test_token) + r'\s*\(', test_text)) < 2:
+                raise CoverageError(f"test function is not invoked for {ident}: {test_token}")
+            target = row.get("test_target")
+            if not isinstance(target, str) or test_path not in test_targets.get(target, set()):
+                raise CoverageError(f"test source not registered with CTest target for {ident}: {target}")
+            key = (target, test_token)
+            if key in evidence and not (row.get("shared_test") is True and
+                                        evidence[key].get("shared_test") is True):
+                raise CoverageError(f"duplicate test evidence for {ident} and {evidence[key]['id']}")
+            evidence[key] = row
+        elif any(key in row for key in ("test_target", "test_token", "shared_test")):
+            raise CoverageError(f"test evidence incomplete for {ident}")
+        if "shared_test" in row and row["shared_test"] is not True:
+            raise CoverageError(f"invalid shared_test value for {ident}")
         entries[ident] = row
     return entries
 
@@ -357,36 +406,28 @@ def summary(items: list[Item], entries: dict[str, dict]) -> str:
     return f"{len(items)} listed · {known} audited · ≥{percent(c['verified'], len(items))} test verified"
 
 
+def group_height(members: list[Item], width: int) -> int:
+    columns = max(1, min(36, width // 11))
+    return 25 + ((len(members) + columns - 1) // columns) * 7
+
+
 def render_groups(lines: list[str], groups: dict[str, list[Item]], entries: dict[str, dict],
-                  x: int, y: int, width: int, height: int) -> None:
-    if not groups:
-        return
-    minimum = 28
-    available = height - minimum * len(groups)
-    if available < 0:
-        raise CoverageError("dashboard has too many groups for its panel")
-    total = sum(len(members) for members in groups.values())
-    assigned = 0
-    used = 0
+                  x: int, y: int, width: int) -> None:
     for group, members in groups.items():
-        assigned += len(members)
-        extra = (available * assigned // total) - used
-        used += extra
-        band = minimum + extra
+        band = group_height(members, width)
         c = counts(members, entries)
         short = group.removeprefix("xboxkrnl.exe / ")
-        label = f"{short}  ·  {len(members)}  ·  ≥{percent(c['verified'], len(members))} verified"
-        lines.append(f'<text x="{x}" y="{y+12}" fill="#dce7f2" font-size="11" font-family="sans-serif">{escape(label)}</text>')
+        label = f"{short}  ·  {len(members)}  ·  {c['verified']} verified (≥{percent(c['verified'], len(members))})"
+        lines.append(f'<rect x="{x-4}" y="{y}" width="{width+8}" height="{band-3}" rx="3" fill="#223044"/>')
+        lines.append(f'<text x="{x}" y="{y+13}" fill="#e5edf6" font-size="12" font-family="sans-serif">{escape(label)}</text>')
         cols = max(1, min(len(members), 36, width // 11))
-        rows = (len(members) + cols - 1) // cols
         cw = width / cols
-        ch = (band - 19) / rows
         for j, item in enumerate(members):
             state = entries.get(item.id, {}).get("state", "unassessed")
             cx = x + (j % cols) * cw
-            cy = y + 17 + (j // cols) * ch
+            cy = y + 18 + (j // cols) * 7
             title = f"{item.id}: {state}; {item.source}"
-            lines.append(f'<rect x="{cx:.2f}" y="{cy:.2f}" width="{max(1,cw-1):.2f}" height="{max(1,ch-1):.2f}" fill="{COLORS[state]}" stroke="#101721" stroke-width="0.5"><title>{escape(title)}</title></rect>')
+            lines.append(f'<rect x="{cx:.2f}" y="{cy:.2f}" width="{cw-1:.2f}" height="6" fill="{COLORS[state]}"><title>{escape(title)}</title></rect>')
         y += band
 
 
@@ -396,41 +437,118 @@ def render_svg(items: list[Item], entries: dict[str, dict]) -> str:
         by_category[item.category].append(item)
     total = counts(items, entries)
     overall = f"{total['verified']}/{len(items)} (≥{percent(total['verified'], len(items))}) test verified in the listed source subset"
-    lines = ['<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1030" viewBox="0 0 1200 1030" role="img" aria-labelledby="title desc">',
+    grouped: dict[str, list[dict[str, list[Item]]]] = {}
+    panel_heights: dict[str, int] = {}
+    for category in ("kernel", "ppc", "shader", "pm4"):
+        groups: dict[str, list[Item]] = defaultdict(list)
+        for item in by_category[category]:
+            groups[item.group].append(item)
+        columns: list[dict[str, list[Item]]] = [{}, {}] if category == "kernel" else [{}]
+        if category == "kernel":
+            sizes = [0, 0]
+            for group, members in sorted(groups.items(), key=lambda pair: (-len(pair[1]), pair[0])):
+                side = 0 if sizes[0] <= sizes[1] else 1
+                columns[side][group] = members
+                sizes[side] += group_height(members, 256)
+        else:
+            columns[0] = groups
+        grouped[category] = [dict(sorted(column.items())) for column in columns]
+        content_height = max((sum(group_height(m, 256 if category == "kernel" else 520)
+                                  for m in column.values()) for column in columns), default=0)
+        panel_heights[category] = max(410, 80 + content_height)
+    first_row = max(panel_heights["kernel"], panel_heights["ppc"])
+    second_row = max(panel_heights["shader"], panel_heights["pm4"])
+    height = 105 + first_row + 20 + second_row + 80
+    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="{height}" viewBox="0 0 1200 {height}" role="img" aria-labelledby="title desc">',
              '<title id="title">Xenon source coverage audit</title>',
              '<desc id="desc">Treemaps of audited source-declared operations. Percentages are verified lower bounds; unassessed entries remain unknown.</desc>',
-             '<rect width="1200" height="1030" fill="#101721"/>',
+             f'<rect width="1200" height="{height}" fill="#101721"/>',
              '<text x="30" y="49" fill="#f4f7fb" font-size="30" font-family="sans-serif" font-weight="700">XENON  /  IMPLEMENTATION AUDIT</text>',
              f'<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • {escape(overall)} • overall hardware coverage unknown</text>']
     titles = {"kernel": "Xbox kernel exports", "ppc": "PowerPC instructions", "shader": "Xenos shader instructions", "pm4": "GPU PM4 packets"}
     for index, category in enumerate(("kernel", "ppc", "shader", "pm4")):
         x = 30 + (index % 2) * 585
-        y = 105 + (index // 2) * 430
+        y = 105 if index < 2 else 125 + first_row
         panel = by_category[category]
-        lines.append(f'<rect x="{x}" y="{y}" width="555" height="410" rx="8" fill="#1b2634" stroke="#405168"/>')
+        lines.append(f'<rect x="{x}" y="{y}" width="555" height="{panel_heights[category]}" rx="8" fill="#1b2634" stroke="#405168"/>')
         lines.append(f'<text x="{x+16}" y="{y+30}" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">{titles[category]}</text>')
         lines.append(f'<text x="{x+16}" y="{y+52}" fill="#bdc9d6" font-size="12" font-family="sans-serif">{escape(summary(panel, entries))}</text>')
-        groups: dict[str, list[Item]] = defaultdict(list)
-        for item in panel:
-            groups[item.group].append(item)
         if category == "kernel":
-            columns: list[dict[str, list[Item]]] = [{}, {}]
-            sizes = [0, 0]
-            for group, members in sorted(groups.items(), key=lambda pair: (-len(pair[1]), pair[0])):
-                side = 0 if sizes[0] <= sizes[1] else 1
-                columns[side][group] = members
-                sizes[side] += len(members)
-            for side, column in enumerate(columns):
-                render_groups(lines, dict(sorted(column.items())), entries,
-                              x + 16 + side * 264, y + 68, 256, 325)
+            for side, column in enumerate(grouped[category]):
+                render_groups(lines, column, entries, x + 16 + side * 264, y + 68, 256)
         else:
-            render_groups(lines, groups, entries, x + 16, y + 68, 520, 325)
+            render_groups(lines, grouped[category][0], entries, x + 16, y + 68, 520)
     legend = [("verified", "Verified by test"), ("implemented_unverified", "Implemented, unverified"),
-              ("partial", "Partial / stub"), ("unimplemented", "Unimplemented"), ("unassessed", "Unassessed")]
+              ("partial", "Partial"), ("stub", "Stub"),
+              ("unimplemented", "Unimplemented"), ("unassessed", "Unassessed")]
     for i, (state, label) in enumerate(legend):
-        x = 31 + i * 232
-        lines.append(f'<rect x="{x}" y="984" width="18" height="18" fill="{COLORS[state]}"/>')
-        lines.append(f'<text x="{x+26}" y="998" fill="#e5edf6" font-size="13" font-family="sans-serif">{escape(label)}</text>')
+        x = 31 + i * 193
+        lines.append(f'<rect x="{x}" y="{height-42}" width="18" height="18" fill="{COLORS[state]}"/>')
+        lines.append(f'<text x="{x+26}" y="{height-28}" fill="#e5edf6" font-size="13" font-family="sans-serif">{escape(label)}</text>')
+    lines.append('</svg>')
+    return "\n".join(lines) + "\n"
+
+
+def render_summary_svg(items: list[Item], entries: dict[str, dict]) -> str:
+    by_category: dict[str, list[Item]] = defaultdict(list)
+    for item in items:
+        by_category[item.category].append(item)
+    total = counts(items, entries)
+    titles = {"kernel": "Xbox 360 kernel exports", "ppc": "PowerPC instructions",
+              "shader": "Xenos shader instructions", "pm4": "GPU PM4 packets"}
+    height = 650
+    lines = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="{height}" viewBox="0 0 1200 {height}" role="img" aria-labelledby="title desc">',
+             '<title id="title">Xenon implementation coverage summary</title>',
+             '<desc id="desc">Source-listed operations grouped by subsystem. Coloured bars show audited states; unassessed operations remain unknown.</desc>',
+             f'<rect width="1200" height="{height}" fill="#101721"/>',
+             '<text x="30" y="48" fill="#f4f7fb" font-size="29" font-weight="700" font-family="sans-serif">XENON  /  IMPLEMENTATION COVERAGE</text>',
+             f'<text x="30" y="77" fill="#c5d1dd" font-size="16" font-family="sans-serif">{total["verified"]}/{len(items)} verified by tests (≥{percent(total["verified"], len(items))})  ·  {len(items)-total["unassessed"]}/{len(items)} audited  ·  source-listed scope</text>']
+    states = ("verified", "implemented_unverified", "partial", "stub", "unimplemented", "unassessed")
+    for index, category in enumerate(("kernel", "ppc", "shader", "pm4")):
+        x = 30 + (index % 2) * 585
+        y = 102 + (index // 2) * 260
+        members = by_category[category]
+        c = counts(members, entries)
+        lines.append(f'<rect x="{x}" y="{y}" width="555" height="244" rx="8" fill="#1b2634" stroke="#405168"/>')
+        lines.append(f'<text x="{x+16}" y="{y+30}" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">{titles[category]}</text>')
+        lines.append(f'<text x="{x+16}" y="{y+53}" fill="#c5d1dd" font-size="13" font-family="sans-serif">{len(members)} listed  ·  {len(members)-c["unassessed"]} audited  ·  {c["verified"]} verified (≥{percent(c["verified"], len(members))})</text>')
+        groups: dict[str, list[Item]] = defaultdict(list)
+        for item in members:
+            groups[item.group].append(item)
+        group_rows = sorted(groups.items())
+        if len(group_rows) > 14:
+            extra = [operation for _, group_members in group_rows[13:]
+                     for operation in group_members]
+            group_rows = group_rows[:13] + [("Additional groups", extra)]
+        for j, (group, operations) in enumerate(group_rows):
+            col, row = j // 7, j % 7
+            gx = x + 16 + col * 264
+            gy = y + 70 + row * 23
+            label = group.removeprefix("xboxkrnl.exe / ").replace("FloatingPoint", "Floating point")
+            display_label = label if len(label) <= 16 else label[:14] + "…"
+            lines.append(f'<text x="{gx}" y="{gy+11}" fill="#dce7f2" font-size="11" font-family="sans-serif">{escape(display_label)}</text>')
+            group_counts = counts(operations, entries)
+            bx, bar_width = gx + 113, 115
+            present_states = [state for state in states if group_counts[state]]
+            available = bar_width - len(present_states)
+            assigned = 0
+            offset = 0
+            for state in present_states:
+                count = group_counts[state]
+                next_edge = available * (assigned + count) // len(operations)
+                start_edge = available * assigned // len(operations)
+                cell_width = 1 + next_edge - start_edge
+                lines.append(f'<rect x="{bx+offset}" y="{gy}" width="{cell_width}" height="13" fill="{COLORS[state]}"><title>{escape(label)}: {count} {state}</title></rect>')
+                offset += cell_width
+                assigned += count
+            lines.append(f'<text x="{gx+253}" y="{gy+11}" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">{len(operations)}</text>')
+    legend = (("verified", "Verified"), ("implemented_unverified", "Implemented, unverified"),
+              ("partial", "Partial"), ("stub", "Stub"), ("unimplemented", "Unimplemented"),
+              ("unassessed", "Unassessed"))
+    for i, (state, label) in enumerate(legend):
+        x = 30 + i * 193
+        lines.append(f'<rect x="{x}" y="{height-43}" width="17" height="17" fill="{COLORS[state]}"/>')
+        lines.append(f'<text x="{x+25}" y="{height-29}" fill="#e5edf6" font-size="13" font-family="sans-serif">{escape(label)}</text>')
     lines.append('</svg>')
     return "\n".join(lines) + "\n"
 
@@ -439,13 +557,13 @@ def render_report(items: list[Item], entries: dict[str, dict]) -> str:
     total = counts(items, entries)
     lines = ["# Xenon coverage audit", "", "Generated by `python3 tools/coverage/generate.py` from source inventories and `coverage.json`.",
              "Percentages below are audited lower bounds against **source-declared** inventories. Unassessed entries are unknown, not unimplemented. They are not game compatibility figures.", "",
-             "| Area | Listed | Audited | Verified by tests | Implemented, unverified | Partial / stub | Unimplemented | Unassessed |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+             "| Area | Listed | Audited | Verified by tests | Implemented, unverified | Partial | Stub | Unimplemented | Unassessed |", "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for category, name in (("kernel", "Kernel static registrations"), ("ppc", "PPC catalog"), ("shader", "Shader frontend"), ("pm4", "PM4 source enum")):
         group = [item for item in items if item.category == category]
         c = counts(group, entries)
-        lines.append(f"| {name} | {len(group)} | {len(group)-c['unassessed']} | {c['verified']} (≥{percent(c['verified'],len(group))}) | {c['implemented_unverified']} | {c['partial']} | {c['unimplemented']} | {c['unassessed']} |")
-    lines += ["", f"**Combined source-declared audit lower bound:** {total['verified']}/{len(items)} (≥{percent(total['verified'],len(items))}) test verified; {total['verified']+total['implemented_unverified']}/{len(items)} (≥{percent(total['verified']+total['implemented_unverified'],len(items))}) has traced implementation. **Overall Xbox 360 implementation coverage: unknown.** The kernel inventory extracts statically recoverable ordinal/name registrations and variables from xboxkrnl export, audio, and session sources. It is not a complete console export table: operations absent from Xenon source are outside the denominator, and optional audio exports depend on build configuration. PPC counts the decoder catalog, not every possible PowerPC encoding. Shader counts control-flow enum values and ALU/fetch forms recognized by this frontend; reserved scalar opcode 41 is excluded. PM4 counts declared packet headers and type-3 opcodes, not undocumented hardware values; host extension 0x64 is excluded. A handler, decoder entry, or passthrough packet does not by itself prove implementation.",
-              "", "Evidence paths and test tokens are in the manifest. `verified` means a behavior-oriented test is traced to the entry; it does not imply retail-title qualification. GitHub CI checks the generated files for drift.", ""]
+        lines.append(f"| {name} | {len(group)} | {len(group)-c['unassessed']} | {c['verified']} (≥{percent(c['verified'],len(group))}) | {c['implemented_unverified']} | {c['partial']} | {c['stub']} | {c['unimplemented']} | {c['unassessed']} |")
+    lines += ["", f"**Combined source-declared audit lower bound:** {total['verified']}/{len(items)} (≥{percent(total['verified'],len(items))}) have reviewed behavior-test evidence; {total['verified']+total['implemented_unverified']}/{len(items)} (≥{percent(total['verified']+total['implemented_unverified'],len(items))}) have traced implementations without a known partial limitation. **Audit progress:** {len(items)-total['unassessed']}/{len(items)} ({percent(len(items)-total['unassessed'],len(items))}) classified; {total['unassessed']} remain unassessed. **Overall Xbox 360 implementation coverage: unknown.** The kernel inventory extracts statically recoverable ordinal/name registrations and variables from xboxkrnl export, audio, and session sources. It is not a complete console export table: operations absent from Xenon source are outside the denominator, and optional audio exports depend on build configuration. PPC counts the decoder catalog, not every possible PowerPC encoding. Shader counts control-flow enum values and ALU/fetch forms recognized by this frontend; reserved scalar opcode 41 is excluded. PM4 counts declared packet headers and type-3 opcodes, not undocumented hardware values; host extension 0x64 is excluded. A handler, decoder entry, or passthrough packet does not by itself prove implementation.",
+              "", "Implementation paths, test source tokens and CTest target names are in the manifest. The generator checks source traceability and target registration, not semantic correctness or test success. `verified` means a behavior-oriented assertion was reviewed and traced to the entry; its actual execution result must be checked separately in CTest/CI. It does not imply retail-title qualification. GitHub CI checks generated assets for drift and requires all selected CTest cases to run without skips or failures.", ""]
     return "\n".join(lines)
 
 
@@ -459,7 +577,7 @@ def main() -> int:
         entries = load_manifest(args.manifest, items)
         provenance, reference = load_kernel_reference()
         reconciliation = reconcile_kernel_reference(reference, kernel_registration_rows())
-        products = {SVG: render_svg(items, entries), REPORT: render_report(items, entries),
+        products = {SVG: render_svg(items, entries), SUMMARY_SVG: render_summary_svg(items, entries), REPORT: render_report(items, entries),
                     KERNEL_REFERENCE_REPORT: render_kernel_reference_report(
                         provenance, reference, reconciliation)}
         if args.check:

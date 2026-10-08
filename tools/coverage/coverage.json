@@ -2,34 +2,382 @@
   "schema": 1,
   "scope": "Source-declared Xenon operations; an audit lower bound, not Xbox 360 hardware or game compatibility coverage",
   "exclusions": [
-    {"id": "shader:scalar:41", "kind": "reserved", "source": "src/graphics/xenos/shader_translation.cpp", "token": "alu.scalar_opcode == 41"},
-    {"id": "pm4:type3:0x64", "kind": "host_extension", "source": "include/xenon/gpu/types.hpp", "token": "0x64 is a host-emulator extension"}
+    {
+      "id": "shader:scalar:41",
+      "kind": "reserved",
+      "source": "src/graphics/xenos/shader_translation.cpp",
+      "token": "alu.scalar_opcode == 41"
+    },
+    {
+      "id": "pm4:type3:0x64",
+      "kind": "host_extension",
+      "source": "include/xenon/gpu/types.hpp",
+      "token": "0x64 is a host-emulator extension"
+    }
   ],
   "entries": [
-    {"id": "kernel:time:KeQueryPerformanceFrequency", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_query_performance_frequency"},
-    {"id": "kernel:time:KeQuerySystemTime", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_query_system_time"},
-    {"id": "kernel:time:KeDelayExecutionThread", "state": "partial", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_delay_execution_thread", "note": "Relative delay is tested; alertable/APC semantics are explicitly ignored"},
-    {"id": "kernel:time:KeStallExecutionProcessor", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_stall_execution_processor"},
-    {"id": "kernel:crypto:XeKeysConsolePrivateKeySign", "state": "partial", "kind": "stub", "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp", "note": "Registered success stub; no console private key or signature"},
-    {"id": "kernel:crypto:XeKeysConsoleSignatureVerification", "state": "partial", "kind": "stub", "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp", "note": "Registered success stub; no signature verification"},
-    {"id": "kernel:registered:RtlInitAnsiString", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp", "test": "tests/xbox/rtl_string_memory_export_tests.cpp", "test_token": "test_rtl_init_ansi_string"},
-    {"id": "kernel:registered:RtlInitUnicodeString", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp", "test": "tests/xbox/rtl_string_memory_export_tests.cpp", "test_token": "test_rtl_init_unicode_string"},
-    {"id": "kernel:registered:RtlCompareMemoryUlong", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp", "test": "tests/xbox/rtl_string_memory_export_tests.cpp", "test_token": "test_rtl_compare_memory_ulong"},
-    {"id": "kernel:registered:RtlFillMemoryUlong", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp", "test": "tests/xbox/rtl_string_memory_export_tests.cpp", "test_token": "test_rtl_fill_memory_ulong"},
-    {"id": "kernel:registered:RtlInitializeCriticalSection", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp", "test": "tests/xbox/rtl_critical_section_export_tests.cpp", "test_token": "test_initialize_sets_real_initial_state"},
-    {"id": "kernel:registered:RtlEnterCriticalSection", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp", "test": "tests/xbox/rtl_critical_section_export_tests.cpp", "test_token": "test_enter_leave_uncontended"},
-    {"id": "kernel:registered:RtlLeaveCriticalSection", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp", "test": "tests/xbox/rtl_critical_section_export_tests.cpp", "test_token": "test_enter_leave_uncontended"},
-    {"id": "ppc:addi", "state": "verified", "implementation": "src/cpu/ppc/lifter/integer.cpp", "test": "tests/cpu/x86_64/native_smoke.cpp", "test_token": "smoke_addi3"},
-    {"id": "shader:control:ExecEnd", "state": "verified", "implementation": "src/graphics/xenos/shader_translation.cpp", "test": "tests/graphics/xenos/shader_lowering.cpp", "test_token": "ControlFlowOpcode::ExecEnd"},
-    {"id": "shader:vector:0", "state": "implemented_unverified", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "if (op == 0) return a + b;", "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"},
-    {"id": "shader:scalar:50", "state": "implemented_unverified", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "op==50) return previous", "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"},
-    {"id": "shader:texture:16", "state": "unimplemented", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "getTextureBorderColorFrac has no lowering implementation", "note": "Explicitly rejected by the lowerer"},
-    {"id": "pm4:header:Type0", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type0"},
-    {"id": "pm4:header:Type1", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type1"},
-    {"id": "pm4:header:Type2", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type2"},
-    {"id": "pm4:header:Type3", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type3"},
-    {"id": "pm4:type3:RegRmw", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::RegRmw"},
-    {"id": "pm4:type3:CondExec", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::CondExec"},
-    {"id": "pm4:type3:MemWrite", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::MemWrite"}
+    {
+      "id": "kernel:time:KeQueryPerformanceFrequency",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp",
+      "test": "tests/xbox/time_export_tests.cpp",
+      "test_token": "test_ke_query_performance_frequency",
+      "test_target": "xenon_xboxkrnl_time_export_tests"
+    },
+    {
+      "id": "kernel:time:KeQuerySystemTime",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp",
+      "test": "tests/xbox/time_export_tests.cpp",
+      "test_token": "test_ke_query_system_time_writes_guest_memory",
+      "test_target": "xenon_xboxkrnl_time_export_tests"
+    },
+    {
+      "id": "kernel:time:KeDelayExecutionThread",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp",
+      "test": "tests/xbox/time_export_tests.cpp",
+      "test_token": "test_ke_delay_execution_thread_relative_blocks_calling_thread",
+      "note": "Relative delay is tested; alertable/APC semantics are explicitly ignored",
+      "test_target": "xenon_xboxkrnl_time_export_tests"
+    },
+    {
+      "id": "kernel:time:KeStallExecutionProcessor",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp",
+      "test": "tests/xbox/time_export_tests.cpp",
+      "test_token": "test_ke_stall_execution_processor_blocks_for_microseconds",
+      "test_target": "xenon_xboxkrnl_time_export_tests"
+    },
+    {
+      "id": "kernel:crypto:XeKeysConsolePrivateKeySign",
+      "state": "stub",
+      "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp",
+      "note": "Registered success stub; no console private key or signature"
+    },
+    {
+      "id": "kernel:crypto:XeKeysConsoleSignatureVerification",
+      "state": "stub",
+      "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp",
+      "note": "Registered success stub; no signature verification"
+    },
+    {
+      "id": "kernel:registered:RtlInitAnsiString",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_token": "test_rtl_init_ansi_string",
+      "test_target": "xenon_rtl_string_memory_export_tests"
+    },
+    {
+      "id": "kernel:registered:RtlInitUnicodeString",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_token": "test_rtl_init_unicode_string",
+      "test_target": "xenon_rtl_string_memory_export_tests"
+    },
+    {
+      "id": "kernel:registered:RtlCompareMemoryUlong",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_token": "test_rtl_compare_memory_ulong",
+      "test_target": "xenon_rtl_string_memory_export_tests"
+    },
+    {
+      "id": "kernel:registered:RtlFillMemoryUlong",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_token": "test_rtl_fill_memory_ulong",
+      "test_target": "xenon_rtl_string_memory_export_tests"
+    },
+    {
+      "id": "kernel:registered:RtlInitializeCriticalSection",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp",
+      "test": "tests/xbox/rtl_critical_section_export_tests.cpp",
+      "test_token": "test_initialize_sets_real_initial_state",
+      "test_target": "xenon_rtl_critical_section_export_tests"
+    },
+    {
+      "id": "kernel:registered:RtlEnterCriticalSection",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp",
+      "test": "tests/xbox/rtl_critical_section_export_tests.cpp",
+      "test_token": "test_enter_leave_uncontended",
+      "test_target": "xenon_rtl_critical_section_export_tests",
+      "shared_test": true
+    },
+    {
+      "id": "kernel:registered:RtlLeaveCriticalSection",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp",
+      "test": "tests/xbox/rtl_critical_section_export_tests.cpp",
+      "test_token": "test_enter_leave_uncontended",
+      "test_target": "xenon_rtl_critical_section_export_tests",
+      "shared_test": true
+    },
+    {
+      "id": "ppc:addi",
+      "state": "verified",
+      "implementation": "src/cpu/ppc/lifter/integer.cpp",
+      "test": "tests/cpu/x86_64/native_smoke.cpp",
+      "test_token": "smoke_addi3",
+      "test_target": "xenon_cpu_native_smoke"
+    },
+    {
+      "id": "shader:control:ExecEnd",
+      "state": "verified",
+      "implementation": "src/graphics/xenos/shader_translation.cpp",
+      "test": "tests/graphics/xenos/shader_lowering.cpp",
+      "test_token": "ControlFlowOpcode::ExecEnd",
+      "test_target": "xenon_shader_lowering_tests"
+    },
+    {
+      "id": "shader:vector:0",
+      "state": "implemented_unverified",
+      "implementation": "src/graphics/xenos/shader_translation.cpp",
+      "implementation_token": "if (op == 0) return a + b;",
+      "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"
+    },
+    {
+      "id": "shader:scalar:50",
+      "state": "implemented_unverified",
+      "implementation": "src/graphics/xenos/shader_translation.cpp",
+      "implementation_token": "op==50) return previous",
+      "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"
+    },
+    {
+      "id": "shader:texture:16",
+      "state": "unimplemented",
+      "implementation": "src/graphics/xenos/shader_translation.cpp",
+      "implementation_token": "getTextureBorderColorFrac has no lowering implementation",
+      "note": "Explicitly rejected by the lowerer"
+    },
+    {
+      "id": "pm4:header:Type0",
+      "state": "verified",
+      "implementation": "include/xenon/gpu/types.hpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "make_packet_type0",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:header:Type1",
+      "state": "verified",
+      "implementation": "include/xenon/gpu/types.hpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "make_packet_type1",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:header:Type2",
+      "state": "verified",
+      "implementation": "include/xenon/gpu/types.hpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "make_packet_type2",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:header:Type3",
+      "state": "verified",
+      "implementation": "include/xenon/gpu/types.hpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "make_packet_type3",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:type3:RegRmw",
+      "state": "verified",
+      "implementation": "src/graphics/xenos/command_processor.cpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "Type3Opcode::RegRmw",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:type3:CondExec",
+      "state": "verified",
+      "implementation": "src/graphics/xenos/command_processor.cpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "Type3Opcode::CondExec",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "pm4:type3:MemWrite",
+      "state": "verified",
+      "implementation": "src/graphics/xenos/command_processor.cpp",
+      "test": "tests/graphics/xenos/gpu_frontend.cpp",
+      "test_token": "Type3Opcode::MemWrite",
+      "test_target": "xenon_gpu_frontend_tests"
+    },
+    {
+      "id": "kernel:registered:NtAllocateVirtualMemory",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_memory_exports.cpp",
+      "test": "tests/xbox/memory_export_tests.cpp",
+      "test_target": "xenon_xboxkrnl_memory_export_tests",
+      "test_token": "test_nt_allocate_virtual_memory_protection_is_real",
+      "note": "MEM_RESET is deliberately treated as a no-op; the basic allocation and protection paths are tested"
+    },
+    {
+      "id": "kernel:registered:KeFlushUserModeTb",
+      "state": "implemented_unverified",
+      "implementation": "src/xbox/exports/xboxkrnl_memory_exports.cpp",
+      "note": "Host memory mapping is applied immediately; the test only confirms no guest-memory corruption, not cross-thread mapping propagation"
+    },
+    {
+      "id": "kernel:registered:KeGetCurrentProcessType",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_process_exports.cpp",
+      "test": "tests/xbox/process_export_tests.cpp",
+      "test_target": "xenon_xboxkrnl_process_export_tests",
+      "test_token": "test_default_process_type_is_user"
+    },
+    {
+      "id": "kernel:registered:KeSetCurrentProcessType",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_process_exports.cpp",
+      "test": "tests/xbox/process_export_tests.cpp",
+      "test_target": "xenon_xboxkrnl_process_export_tests",
+      "test_token": "test_set_then_get_round_trips"
+    },
+    {
+      "id": "kernel:registered:RtlTimeToTimeFields",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_target": "xenon_rtl_string_memory_export_tests",
+      "test_token": "test_rtl_time_to_time_fields_known_date"
+    },
+    {
+      "id": "kernel:registered:RtlTimeFieldsToTime",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_target": "xenon_rtl_string_memory_export_tests",
+      "test_token": "test_rtl_time_fields_to_time_round_trip"
+    },
+    {
+      "id": "kernel:registered:RtlTryEnterCriticalSection",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp",
+      "test": "tests/xbox/rtl_critical_section_export_tests.cpp",
+      "test_target": "xenon_rtl_critical_section_export_tests",
+      "test_token": "test_try_enter"
+    },
+    {
+      "id": "kernel:registered:RtlFreeAnsiString",
+      "state": "implemented_unverified",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_string_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_target": "xenon_rtl_string_memory_export_tests",
+      "test_token": "test_rtl_free_ansi_string",
+      "note": "Header clearing is tested; pool-owned buffer release has not been semantically verified"
+    },
+    {
+      "id": "kernel:registered:RtlCaptureContext",
+      "state": "stub",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_target": "xenon_rtl_string_memory_export_tests",
+      "test_token": "test_rtl_capture_context_is_a_documented_no_op",
+      "note": "Deliberate no-op; guest CONTEXT layout is not implemented"
+    },
+    {
+      "id": "kernel:registered:__C_specific_handler",
+      "state": "stub",
+      "implementation": "src/xbox/exports/xboxkrnl_rtl_exports.cpp",
+      "test": "tests/xbox/rtl_string_memory_export_tests.cpp",
+      "test_target": "xenon_rtl_string_memory_export_tests",
+      "test_token": "test_c_specific_handler_reports_continue_search",
+      "note": "Returns ExceptionContinueSearch without guest exception-dispatch semantics"
+    },
+    {
+      "id": "kernel:registered:KeTlsAlloc",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_tls_exports.cpp",
+      "test": "tests/xbox/tls_export_tests.cpp",
+      "test_target": "xenon_tls_export_tests",
+      "test_token": "test_allocator_reports_out_of_indexes_when_exhausted"
+    },
+    {
+      "id": "kernel:registered:KeTlsFree",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_tls_exports.cpp",
+      "test": "tests/xbox/tls_export_tests.cpp",
+      "test_target": "xenon_tls_export_tests",
+      "test_token": "test_free_allows_slot_reuse"
+    },
+    {
+      "id": "kernel:registered:KeTlsGetValue",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_tls_exports.cpp",
+      "test": "tests/xbox/tls_export_tests.cpp",
+      "test_target": "xenon_tls_export_tests",
+      "test_token": "test_get_value_on_unallocated_slot_returns_zero"
+    },
+    {
+      "id": "kernel:registered:KeTlsSetValue",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_tls_exports.cpp",
+      "test": "tests/xbox/tls_export_tests.cpp",
+      "test_target": "xenon_tls_export_tests",
+      "test_token": "test_set_then_get_round_trips"
+    },
+    {
+      "id": "kernel:registered:VdInitializeRingBuffer",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_initialize_ring_buffer_converts_log2_size",
+      "note": "Ring configuration state is tested; GPU command consumption is a separate path"
+    },
+    {
+      "id": "kernel:registered:VdEnableRingBufferRPtrWriteBack",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_enable_ring_buffer_rptr_write_back_stores_address",
+      "note": "Writeback address storage is tested, not a GPU-driven read pointer update"
+    },
+    {
+      "id": "kernel:registered:VdSetGraphicsInterruptCallback",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_set_graphics_interrupt_callback_round_trips",
+      "note": "Callback registration is tested; interrupt delivery is outside this assertion"
+    },
+    {
+      "id": "kernel:registered:VdQueryVideoMode",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_query_video_mode_populates_struct",
+      "note": "Reports a fixed 1280x720 mode, not dynamic console video negotiation"
+    },
+    {
+      "id": "kernel:registered:VdSwap",
+      "state": "partial",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_swap_populates_front_buffer",
+      "note": "Guest-visible buffer bookkeeping is tested; native presentation is not"
+    },
+    {
+      "id": "kernel:registered:VdGetSystemCommandBuffer",
+      "state": "verified",
+      "implementation": "src/xbox/exports/xboxkrnl_video_exports.cpp",
+      "test": "tests/xbox/video_export_tests.cpp",
+      "test_target": "xenon_video_export_tests",
+      "test_token": "test_get_system_command_buffer_writes_exact_sentinels"
+    }
   ]
 }

@@ -1,10 +1,10 @@
 # Xenon Recomp
 
-[![Xenon CI: Windows MSVC/CL, Linux, and tests](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml/badge.svg?branch=development-restructure)](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml?query=branch%3Adevelopment-restructure)
+[![Windows MSVC / CL](https://github.com/nimauria/Xenon-Recomp/actions/workflows/windows.yml/badge.svg?branch=development-restructure&event=push)](https://github.com/nimauria/Xenon-Recomp/actions/workflows/windows.yml?query=branch%3Adevelopment-restructure) [![Linux](https://github.com/nimauria/Xenon-Recomp/actions/workflows/linux.yml/badge.svg?branch=development-restructure&event=push)](https://github.com/nimauria/Xenon-Recomp/actions/workflows/linux.yml?query=branch%3Adevelopment-restructure) [![Overall CI](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml/badge.svg?branch=development-restructure&event=push)](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml?query=branch%3Adevelopment-restructure)
 
-**Windows MSVC / CL build and tests** | **Linux build and tests** | **Automated tests** — all are required jobs in [Xenon CI](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml). The badge reports the combined workflow status.
+[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/dashboard.svg)
 
-[Detailed implementation coverage dashboard](docs/coverage/README.md) · [SVG treemaps](docs/coverage/dashboard.svg)
+[View the detailed dashboard](docs/coverage/README.md) · [Read the coverage report](docs/coverage/REPORT.md)
 
 **Xenon Recomp** is an experimental, modular Xbox 360 static-recompilation platform and native runtime for modern systems.
 
