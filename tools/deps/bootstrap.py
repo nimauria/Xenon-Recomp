@@ -495,6 +495,31 @@ def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool)
     _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
 
+def _prepare_ffmpeg_source(source: Path, build: Path, entry: dict, quiet: bool) -> Path:
+    # This fork tracks a premake config.h, which prevents an out-of-tree
+    # configure. Keep the pinned checkout untouched and put the configured
+    # copy beside the build directory, never inside it. FFmpeg's configure
+    # writes build files and source links relative to its working directory.
+    configured_source = build.with_name(build.name + "-source")
+    shutil.rmtree(configured_source, ignore_errors=True)
+    shutil.copytree(source, configured_source,
+                    ignore=shutil.ignore_patterns(".git", "config.h"))
+    if not (configured_source / "Makefile").is_file():
+        raise BootstrapError("Pinned FFmpeg source copy is missing Makefile")
+    for patch in entry.get("patches", []):
+        patch_path = (SCRIPT_DIR / patch["path"]).resolve()
+        if not patch_path.is_relative_to(SCRIPT_DIR) or not patch_path.is_file():
+            raise BootstrapError(f"Invalid pinned FFmpeg patch path: {patch['path']}")
+        if hashlib.sha256(patch_path.read_bytes()).hexdigest() != patch["sha256"]:
+            raise BootstrapError(f"Pinned FFmpeg patch hash mismatch: {patch_path}")
+        source_file = configured_source / patch["source_file"]
+        if not source_file.is_file() or hashlib.sha256(source_file.read_bytes()).hexdigest() != patch["source_sha256"]:
+            raise BootstrapError(f"Pinned FFmpeg patch source mismatch: {source_file}")
+        _run(["git", "apply", "--check", str(patch_path)], cwd=configured_source, quiet=quiet)
+        _run(["git", "apply", str(patch_path)], cwd=configured_source, quiet=quiet)
+    return configured_source
+
+
 def _find_msys_bash() -> str | None:
     explicit = os.environ.get("XENON_MSYS2_BASH")
     candidates = [
@@ -537,32 +562,25 @@ def _ffmpeg_configure_args(prefix: Path, *, windows: bool, have_nasm: bool) -> l
     return args
 
 
-def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
+def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, entry: dict,
+                        jobs: int, quiet: bool) -> None:
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
+    source = _prepare_ffmpeg_source(source, build, entry, quiet)
     configure = source / "configure"
     if not configure.is_file():
         raise BootstrapError(f"FFmpeg configure script missing: {configure}")
     have_nasm = bool(shutil.which("nasm") or shutil.which("yasm"))
-    # The pinned fork commits a platform-dispatch config.h in its source tree.
-    # FFmpeg's configure rejects out-of-tree builds while that file exists.
-    source_config = source / "config.h"
-    saved_config = build / "source-config.h"
-    if source_config.is_file():
-        source_config.replace(saved_config)
-    try:
-        _run([str(configure), *_ffmpeg_configure_args(prefix, windows=False, have_nasm=have_nasm)], cwd=build, quiet=quiet)
-        make = _which_any(["gmake", "make"])
-        if not make:
-            raise BootstrapError("Building xenia-project FFmpeg requires make or gmake")
-        _run([make, f"-j{jobs}"], cwd=build, quiet=quiet)
-        _run([make, "install"], cwd=build, quiet=quiet)
-    finally:
-        if saved_config.is_file():
-            saved_config.replace(source_config)
+    _run([str(configure), *_ffmpeg_configure_args(prefix, windows=False, have_nasm=have_nasm)], cwd=build, quiet=quiet)
+    make = _which_any(["gmake", "make"])
+    if not make:
+        raise BootstrapError("Building xenia-project FFmpeg requires make or gmake")
+    _run([make, f"-j{jobs}"], cwd=build, quiet=quiet)
+    _run([make, "install"], cwd=build, quiet=quiet)
 
 
-def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
+def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, entry: dict,
+                          jobs: int, quiet: bool) -> None:
     # Xenia's FFmpeg fork uses the normal FFmpeg configure/make build. Native
     # MSVC is supported, but configure/make need an MSYS2 shell. The compiler
     # environment (cl/link) must be visible to this process; official CI should
@@ -580,13 +598,7 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, qu
         )
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
-
-    # This pinned fork tracks config.h for its premake build. FFmpeg's
-    # configure refuses an out-of-tree build when that file is present.
-    # Use an isolated source copy, preserving the pinned checkout verbatim.
-    configured_source = build / "source"
-    shutil.copytree(source, configured_source, ignore=shutil.ignore_patterns(".git", "config.h"))
-    source = configured_source
+    source = _prepare_ffmpeg_source(source, build, entry, quiet)
 
     # Convert Windows paths to MSYS-style paths without requiring cygpath.
     def msys_path(p: Path) -> str:
@@ -604,9 +616,13 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, qu
     script = (
         f"set -euo pipefail\n"
         f"cd {_shell_quote(build_msys)}\n"
+        f"test -f {_shell_quote(src_msys + '/Makefile')} || "
+        f"{{ echo 'Pinned FFmpeg source Makefile is missing' >&2; exit 2; }}\n"
         f"{_shell_quote(src_msys + '/configure')} {quoted}\n"
-        f"make -j{jobs}\n"
-        f"make install\n"
+        f"test -f {_shell_quote(src_msys + '/Makefile')} || "
+        f"{{ echo 'FFmpeg configure removed the source Makefile' >&2; exit 2; }}\n"
+        f"/usr/bin/make -j{jobs}\n"
+        f"/usr/bin/make install\n"
     )
     script_path = build / "xenon-build-ffmpeg.sh"
     script_path.write_text(script, encoding="utf-8", newline="\n")
@@ -805,9 +821,9 @@ def ensure_dependency(key: str, entry: dict, *, root: Path, cache_base: Path, tr
             _build_sdl2(source, build, prefix, jobs, quiet)
         elif key == "xenia-ffmpeg":
             if sys.platform.startswith("win"):
-                _build_ffmpeg_windows(source, build, prefix, jobs, quiet)
+                _build_ffmpeg_windows(source, build, prefix, entry, jobs, quiet)
             else:
-                _build_ffmpeg_posix(source, build, prefix, jobs, quiet)
+                _build_ffmpeg_posix(source, build, prefix, entry, jobs, quiet)
         elif key == "vulkan-headers":
             _build_vulkan_headers(source, build, prefix, jobs, quiet)
         elif key == "vulkan-loader":

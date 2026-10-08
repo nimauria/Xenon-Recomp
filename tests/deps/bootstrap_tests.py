@@ -92,18 +92,21 @@ class DependencyBootstrapTests(unittest.TestCase):
         args = bootstrap._ffmpeg_configure_args(Path("/tmp/ffmpeg"), windows=False, have_nasm=False)
         self.assertIn("--disable-asm", args)
 
-    def test_ffmpeg_build_restores_source_config_after_failure(self):
+    def test_ffmpeg_build_preserves_pinned_source_after_failure(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             source = root / "source"
             source.mkdir()
             (source / "configure").write_text("#!/bin/sh\n")
+            (source / "Makefile").write_text("all:\n")
             config = source / "config.h"
             config.write_text("pinned fork config\n")
             with mock.patch.object(bootstrap, "_run", side_effect=bootstrap.BootstrapError("configure failed")):
                 with self.assertRaisesRegex(bootstrap.BootstrapError, "configure failed"):
-                    bootstrap._build_ffmpeg_posix(source, root / "build", root / "prefix", 1, True)
+                    bootstrap._build_ffmpeg_posix(source, root / "build", root / "prefix", {}, 1, True)
             self.assertEqual(config.read_text(), "pinned fork config\n")
+            self.assertFalse((root / "build-source" / "config.h").exists())
+            self.assertEqual((root / "build-source" / "Makefile").read_text(), "all:\n")
 
     def test_visual_studio_generator_detection_prefers_newest(self):
         help_text = """

@@ -21,6 +21,15 @@
       "license": "LGPL-2.1-or-later",
       "linkage": "shared",
       "install_subdir": "xenia-ffmpeg",
+      "patches": [
+        {
+          "path": "patches/xenia-ffmpeg-mathops-binutils-2.41.patch",
+          "sha256": "8793090c9c526c3b433fc77b7f2bcece8df3d7dd8aa6bb01a1157859f61dfcfb",
+          "source_file": "libavcodec/x86/mathops.h",
+          "source_sha256": "c014e5bbcac3e8514b97b4c79ab14439e6b848a361e674f43366026a38a60290",
+          "upstream_commit": "effadce6c756247ea8bae32dc13bb3e6f464f0eb"
+        }
+      ],
       "required_capabilities": ["AV_CODEC_ID_XMAFRAMES"]
     },
     "vulkan-headers": {
