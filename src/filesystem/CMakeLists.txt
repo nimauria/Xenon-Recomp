@@ -15,9 +15,13 @@ if(XENON_ENABLE_FILESYSTEM)
     virtual/virtual_file_system.cpp
     devices/null_device.cpp
     devices/read_only_content_device.cpp
-    host/host_path_device.cpp
+    host/host_path_device/host_path_device.cpp
+    host/host_path_device/host_path_internal.hpp
+    host/host_path_device/host_file_handle.hpp
   )
-  target_include_directories(xenon_filesystem PUBLIC "${XENON_SOURCE_DIR}/include")
+  target_include_directories(xenon_filesystem
+    PUBLIC "${XENON_SOURCE_DIR}/include"
+    PRIVATE "${XENON_SOURCE_DIR}/src")
   target_compile_features(xenon_filesystem PUBLIC cxx_std_20)
   xenon_enable_warnings(xenon_filesystem)
   add_library(Xenon::Filesystem ALIAS xenon_filesystem)
