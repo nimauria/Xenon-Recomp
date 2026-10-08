@@ -6,7 +6,12 @@ if(XENON_ENABLE_KERNEL)
     handles/handle_table.cpp
     handles/io_request.cpp
     handles/file_object.cpp
-    handles/io_manager.cpp
+    handles/io_manager/io_manager.cpp
+    handles/io_manager/share_state.cpp
+    handles/io_manager/file_io.cpp
+    handles/io_manager/information.cpp
+    handles/io_manager/async.cpp
+    handles/io_manager/io_manager_internal.hpp
     xboxkrnl/xbox_io.cpp
     synchronization/completion_port.cpp
     synchronization/event.cpp
@@ -21,7 +26,9 @@ if(XENON_ENABLE_KERNEL)
     exception/exception.cpp
   )
   target_link_libraries(xenon_kernel PUBLIC xenon_filesystem xenon_logging)
-  target_include_directories(xenon_kernel PUBLIC "${XENON_SOURCE_DIR}/include")
+  target_include_directories(xenon_kernel
+    PUBLIC "${XENON_SOURCE_DIR}/include"
+    PRIVATE "${XENON_SOURCE_DIR}/src")
   target_compile_features(xenon_kernel PUBLIC cxx_std_20)
   xenon_enable_warnings(xenon_kernel)
   add_library(Xenon::Kernel ALIAS xenon_kernel)
