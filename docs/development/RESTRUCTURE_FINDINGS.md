@@ -13,14 +13,7 @@ findings remain below; resolved findings record the observed cause and fix.
    resolvable DXC fails. Observed with the MinGW + DirectX-Headers syntax
    check described in `TESTING.md`.
 
-2. **`xenon_backend_capability_tests` cannot pass on non-Windows hosts.**
-   `discover_backend_capabilities()` (`src/graphics/windows/backend_capabilities.cpp`)
-   sets `runtime_available` only on the `_WIN32` path. The test asserts
-   `capabilities[0].runtime_available` whenever `XENON_TEST_VULKAN` is
-   defined, so it aborts on Linux even with a working Vulkan device
-   (verified with Mesa llvmpipe).
-
-3. **`XenonSession::mount_content()` is a no-op.** It ignores both
+2. **`XenonSession::mount_content()` is a no-op.** It ignores both
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
@@ -35,6 +28,18 @@ preparation key now hashes the compiler executable and increments its
 producer version. `compilation_graph_tests` checks that changing an unrelated
 neighbouring file leaves the key stable while changing the compiler changes
 it.
+
+**`xenon_backend_capability_tests` could not pass on Linux.**
+`discover_backend_capabilities()` (`src/graphics/windows/backend_capabilities.cpp`)
+set `runtime_available` only on the `_WIN32` path, so the test aborted on
+Linux even with a working Vulkan device. Linux now loads `libvulkan.so.1` and
+queries `vkEnumerateInstanceVersion`, as Windows does with `vulkan-1.dll`.
+That let the test reach its depth-sample checks, which then failed on Mesa
+llvmpipe: a D24S8 depth of 0.875 written through `SV_Depth` read back as
+`0xE00000` instead of `0xDFFFFF`. Vulkan allows a float-to-UNORM conversion to
+return either neighbouring integer when the scaled value is not exact, so the
+test now accepts one unit of D24S8 depth error; stencil and D24FS8 depth still
+compare exactly.
 
 ## Runtime observations
 

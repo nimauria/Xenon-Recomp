@@ -26,10 +26,11 @@ source coverage matters.
 ## Vulkan tests on headless Linux
 
 Vulkan backend tests need a Vulkan device. On a machine without a GPU,
-Mesa's software rasterizer provides one:
+Mesa's software rasterizer provides one. `xenon_backend_capability_tests`
+also enables the Khronos validation layer:
 
 ```sh
-sudo apt-get install mesa-vulkan-drivers vulkan-tools
+sudo apt-get install mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
 vulkaninfo --summary   # expect deviceName = llvmpipe
 ```
 

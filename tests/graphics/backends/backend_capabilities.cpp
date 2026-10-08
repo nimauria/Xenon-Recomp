@@ -173,6 +173,34 @@ Output main() {
   return shader;
 }
 
+// Host APIs may round a float-to-UNORM24 depth write to either neighbouring
+// integer when the scaled value is not exact (Vulkan "Conversion from
+// Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875 up to
+// 0xE00000). D24S8 depth therefore allows one unit of error; stencil and
+// D24FS8, which is stored as host float32, must match exactly.
+bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
+                         const std::vector<std::uint32_t>& actual,
+                         const std::vector<std::uint32_t>& expected,
+                         std::string_view backend_label, std::uint32_t sample) {
+  const bool unorm24 = format == xenon::gpu::DepthRenderTargetFormat::D24S8;
+  bool match = actual.size() == expected.size();
+  for (std::size_t pixel = 0; match && pixel < actual.size(); ++pixel) {
+    const auto a = actual[pixel], e = expected[pixel];
+    const auto a_depth = a & 0x00FFFFFFu, e_depth = e & 0x00FFFFFFu;
+    const auto depth_error = a_depth > e_depth ? a_depth - e_depth : e_depth - a_depth;
+    if ((a >> 24u) == (e >> 24u) && depth_error <= (unorm24 ? 1u : 0u)) continue;
+    std::cerr << backend_label << " depth mismatch: format="
+              << static_cast<unsigned>(format) << " sample=" << sample
+              << " pixel=" << pixel << " expected=0x" << std::hex << e
+              << " actual=0x" << a << std::dec << '\n';
+    match = false;
+  }
+  if (actual.size() != expected.size())
+    std::cerr << backend_label << " depth readback returned " << actual.size()
+              << " pixels, expected " << expected.size() << '\n';
+  return match;
+}
+
 template <typename DepthTarget, typename Queue>
 void validate_depth_sample_transfer_matrix(
     DepthTarget& target, Queue& queue,
@@ -218,7 +246,9 @@ void validate_depth_sample_transfer_matrix(
       std::cerr << backend_label << " depth readback failed: "
                 << target.error() << '\n';
     assert(read);
-    assert(pitch == kWidth * 4u && returned == expected[sample]);
+    assert(pitch == kWidth * 4u);
+    assert(depth_samples_match(depth_format, returned, expected[sample],
+                               backend_label, sample));
   }
 
   const auto read_native = [&](std::uint32_t host_sample,
@@ -227,7 +257,9 @@ void validate_depth_sample_transfer_matrix(
     std::uint32_t pitch{};
     assert(target.readback_native_sample(
         queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
-    assert(pitch == kWidth * 4u && returned == wanted);
+    assert(pitch == kWidth * 4u);
+    assert(depth_samples_match(depth_format, returned, wanted, backend_label,
+                               host_sample));
   };
 
   if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
