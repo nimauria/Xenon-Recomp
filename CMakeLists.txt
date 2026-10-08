@@ -263,30 +263,46 @@ endif()
 # -----------------------------------------------------------------------------
 # CPU: Xenon PPC/VMX128 frontend -> Xenon IR -> optimizer -> native C++ AOT.
 add_library(xenon_cpu STATIC
-  src/cpu/memory_port.cpp
-  src/cpu/ppc/state.cpp
-  src/cpu/external_calls.cpp
-  src/cpu/ppc/decoder.cpp
-  src/cpu/ppc/lifter.cpp
-  src/cpu/ppc/lifter_integer.cpp
-  src/cpu/ppc/lifter_control.cpp
-  src/cpu/ppc/lifter_memory.cpp
-  src/cpu/ppc/lifter_fpu.cpp
-  src/cpu/ppc/lifter_vector.cpp
-  src/cpu/ppc/flat_memory.cpp
+  # PowerPC frontend: decode and lift guest instructions to Xenon IR.
+  src/cpu/ppc/decoder/decoder.cpp
+  src/cpu/ppc/lifter/lifter.cpp
+  src/cpu/ppc/lifter/integer.cpp
+  src/cpu/ppc/lifter/control_flow.cpp
+  src/cpu/ppc/lifter/memory.cpp
+  src/cpu/ppc/lifter/floating_point.cpp
+  src/cpu/ppc/lifter/vector.cpp
+  src/cpu/ppc/state/state.cpp
+  # IR, verification and optimization.
   src/cpu/ir/ir.cpp
   src/cpu/ir/verifier.cpp
   src/cpu/optimizer/optimizer.cpp
-  src/cpu/codegen/aot_semantics.cpp
-  src/cpu/codegen/backend_cpp_aot.cpp
-  src/cpu/codegen/dynamic_fallback.cpp
-  src/cpu/codegen/executable_code_cache.cpp
-  src/cpu/codegen/function_compiler.cpp
+  src/cpu/optimizer/passes/value_simplification.cpp
+  src/cpu/optimizer/passes/redundancy_elimination.cpp
+  src/cpu/optimizer/passes/state_promotion.cpp
+  src/cpu/optimizer/passes/control_flow_simplification.cpp
   src/cpu/verification/semantic_verifier.cpp
+  # Code generation: function pipeline, C++ AOT emission, AOT runtime
+  # semantics and the dynamic-fallback interpreter.
+  src/cpu/codegen/function_compiler.cpp
+  src/cpu/codegen/emission/backend_cpp_aot.cpp
+  src/cpu/codegen/emission/instruction_emission.cpp
+  src/cpu/codegen/aot/aot_semantics.cpp
+  src/cpu/codegen/fallback/dynamic_fallback.cpp
+  src/cpu/codegen/fallback/interpreter/scalar_memory.cpp
+  src/cpu/codegen/fallback/interpreter/integer.cpp
+  src/cpu/codegen/fallback/interpreter/system.cpp
+  src/cpu/codegen/fallback/interpreter/floating_point.cpp
+  src/cpu/codegen/fallback/interpreter/vector.cpp
+  # Execution support shared with the runtime.
+  src/cpu/execution/memory_port.cpp
+  src/cpu/execution/external_calls.cpp
+  src/cpu/execution/executable_code_cache.cpp
+  src/cpu/execution/flat_memory.cpp
 )
 target_include_directories(xenon_cpu
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ppc"
+  # Private headers are included as "cpu/<area>/<header>.hpp".
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 target_compile_features(xenon_cpu PUBLIC cxx_std_20)
 xenon_enable_guest_fp_semantics(xenon_cpu PUBLIC)
@@ -315,8 +331,17 @@ foreach(_input IN LISTS _graph_ir_inputs)
   string(APPEND _graph_ir_identity "${_hash};")
 endforeach()
 string(SHA256 XENON_GRAPH_IR_PRODUCER "${_graph_ir_identity}")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/backend_cpp_aot.cpp")
-file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/backend_cpp_aot.cpp" XENON_GRAPH_CODEGEN_PRODUCER)
+# The generated-source producer is exactly the C++ AOT emitter.
+file(GLOB _graph_codegen_inputs CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/codegen/emission/*")
+list(SORT _graph_codegen_inputs)
+set(_graph_codegen_identity "")
+foreach(_input IN LISTS _graph_codegen_inputs)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_input}")
+  file(SHA256 "${_input}" _hash)
+  string(APPEND _graph_codegen_identity "${_hash};")
+endforeach()
+string(SHA256 XENON_GRAPH_CODEGEN_PRODUCER "${_graph_codegen_identity}")
 find_package(Threads REQUIRED)
 
 add_library(xenon_recomp STATIC
@@ -1421,7 +1446,7 @@ if(XENON_BUILD_TESTS)
 
   add_executable(xenon_cpu_tests tests/cpu/ppc/cpu_tests.cpp)
   target_link_libraries(xenon_cpu_tests PRIVATE xenon_cpu)
-  target_include_directories(xenon_cpu_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ppc")
+  target_include_directories(xenon_cpu_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/ppc/decoder")
   xenon_enable_test_asserts(xenon_cpu_tests)
   add_test(NAME xenon_cpu_tests COMMAND xenon_cpu_tests)
 
