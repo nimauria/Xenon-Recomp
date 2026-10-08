@@ -136,6 +136,19 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                                     const RenderTargetImage* target) {
     return target->height();
   }
+  void forget_backend_render_targets() { dummy_render_targets.clear(); }
+  bool initialize_mirror(memory::AddressSpace& guest_memory) {
+    return mirror.initialize(context.device(), queue, guest_memory);
+  }
+  bool bind_guest_memory() {
+    return resources.bind_guest_memory(mirror.resource(),
+                                       memory::kPhysicalMemorySize);
+  }
+  std::uint64_t pipeline_cache_misses() const { return pipeline_states.size(); }
+  void add_backend_unsupported_counters(GpuUnsupportedCounters& counters) const {
+    counters.unsupported_sampler_behaviors +=
+        resources.unsupported_sampler_behaviors();
+  }
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
     return queue.execute_async([&](ID3D12GraphicsCommandList* list,
                                    std::uint32_t frame_index,
@@ -264,73 +277,16 @@ bool Backend::configure_presentation(void* native_window,
 }
 
 void Backend::begin_submission(memory::AddressSpace& memory, Edram& edram) {
-  impl_->submission_started = std::chrono::steady_clock::now();
-  ++impl_->performance.submissions;
-  impl_->command_count = 0;
-  impl_->draw_count = 0;
-  impl_->compiled_shader_count = 0;
-  if (!impl_->ready) return;
-  if ((impl_->edram && impl_->edram != &edram) ||
-      (impl_->memory && impl_->memory != &memory)) {
-    if (!impl_->queue.wait_idle()) {
-      impl_->error = impl_->queue.error();
-      impl_->ready = false;
-      return;
-    }
-  }
-  if (impl_->edram != &edram) {
-    impl_->render_targets.clear();
-    impl_->dummy_render_targets.clear();
-    impl_->depth_targets.clear();
-    impl_->render_target_owners.clear();
-    impl_->depth_target_owners.clear();
-    impl_->owner_render_targets.clear();
-    impl_->owner_depth_targets.clear();
-    impl_->edram_ownership.reset();
-    impl_->next_edram_owner = 1;
-    impl_->edram = &edram;
-  }
-  if (impl_->memory != &memory) {
-    impl_->textures.clear();
-    impl_->texture_dirty.clear();
-    if (!impl_->mirror.initialize(impl_->context.device(), impl_->queue,
-                                  memory)) {
-      impl_->error = impl_->mirror.error();
-      impl_->ready = false;
-      return;
-    }
-    impl_->memory = &memory;
-    if (!impl_->resources.bind_guest_memory(impl_->mirror.resource(),
-                                            memory::kPhysicalMemorySize)) {
-      impl_->error = impl_->resources.error();
-      impl_->ready = false;
-      return;
-    }
-  }
+  impl_->begin_submission(memory, edram);
 }
-
 void Backend::consume(const ir::Command& command) {
   impl_->consume(command);
 }
 
-void Backend::end_submission() {
-  impl_->performance.submission_time_ns += static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - impl_->submission_started).count());
-  if (!impl_->ready) return;
-  if (!impl_->queue.flush()) {
-    impl_->error = impl_->queue.error();
-    impl_->ready = false;
-  }
-}
+void Backend::end_submission() { impl_->end_submission(); }
 bool Backend::make_guest_memory_cpu_visible(std::uint32_t physical_address,
                                             std::uint32_t size) {
-  if (!impl_->ready || !impl_->memory) return false;
-  if (!impl_->mirror.make_cpu_visible(physical_address, size)) {
-    impl_->error = impl_->mirror.error();
-    return false;
-  }
-  return true;
+  return impl_->make_guest_memory_cpu_visible(physical_address, size);
 }
 
 bool Backend::make_edram_canonical() {
@@ -340,119 +296,30 @@ bool Backend::make_edram_canonical() {
 }
 
 bool Backend::invalidate_edram_native_state() {
-  if (!impl_->ready || !impl_->edram) return false;
-  if (!impl_->queue.wait_idle()) {
-    impl_->error = impl_->queue.error();
-    impl_->ready = false;
-    return false;
-  }
-  // A portable capture has replaced the canonical byte store externally.
-  // Forget only ownership: cached native images may be retained, but no tile
-  // may remain authoritative until it is explicitly reacquired from canonical
-  // EDRAM on the next draw/resolve.
-  impl_->edram_ownership.reset();
-  return true;
+  return impl_->invalidate_edram_native_state();
 }
 
-
 PresentStatus Backend::present(const PresentationFrame& frame) {
-  if (!impl_->presentation.ready()) return PresentStatus::NotConfigured;
-  if (!impl_->ready || !impl_->memory) return PresentStatus::Error;
-  TextureDescriptor descriptor = frame.texture;
-  descriptor.mip_min_level = 0;
-  descriptor.mip_max_level = 0;
-  descriptor.packed_mips = false;
-  const auto layout = build_texture_layout(descriptor);
-  if (!layout.valid) {
-    impl_->error = layout.error;
-    return PresentStatus::Error;
-  }
-  for (const auto& subresource : layout.subresources) {
-    if (subresource.guest_size_bytes > UINT32_MAX ||
-        !impl_->mirror.make_cpu_visible(
-            subresource.guest_address,
-            static_cast<std::uint32_t>(subresource.guest_size_bytes),
-            memory::GpuRangeUsage::RenderReadback)) {
-      impl_->error = impl_->mirror.error().empty()
-                         ? "D3D12 scanout source range is invalid"
-                         : impl_->mirror.error();
-      return PresentStatus::Error;
-    }
-  }
-  std::uint32_t presentation_snapshot_base = memory::kPhysicalMemorySize;
-  std::uint64_t presentation_snapshot_end = 0u;
-  for (const auto& subresource : layout.subresources) {
-    presentation_snapshot_base =
-        (std::min)(presentation_snapshot_base, subresource.guest_address);
-    presentation_snapshot_end = (std::max)(
-        presentation_snapshot_end,
-        std::uint64_t{subresource.guest_address} +
-            subresource.guest_size_bytes);
-  }
-  if (presentation_snapshot_base >= memory::kPhysicalMemorySize ||
-      presentation_snapshot_end > memory::kPhysicalMemorySize ||
-      presentation_snapshot_end <= presentation_snapshot_base) {
-    impl_->error = "D3D12 presentation snapshot range is invalid";
-    return PresentStatus::Error;
-  }
-  std::vector<std::byte> presentation_snapshot(
-      static_cast<std::size_t>(presentation_snapshot_end -
-                               presentation_snapshot_base));
-  if (!impl_->memory->copy_physical_range(presentation_snapshot_base,
-                                           presentation_snapshot)) {
-    impl_->error = "D3D12 presentation snapshot failed";
-    return PresentStatus::Error;
-  }
-  const auto prepared = prepare_presentation_frame(
-      frame, presentation_snapshot, impl_->presentation.width(),
-      impl_->presentation.height(),
-      impl_->presentation.config().preserve_aspect_ratio,
-      presentation_snapshot_base);
-  if (!prepared.valid) {
-    impl_->error = prepared.error;
-    return PresentStatus::Unsupported;
-  }
-  const auto status = impl_->presentation.present(prepared);
-  if (status == PresentStatus::Error || status == PresentStatus::SurfaceLost)
-    impl_->error = impl_->presentation.error();
-  return status;
+  return impl_->present(frame);
 }
 
 bool Backend::resize_presentation(std::uint32_t width, std::uint32_t height) {
-  if (!impl_->presentation.resize(width, height)) {
-    impl_->error = impl_->presentation.error();
-    return false;
-  }
-  return true;
+  return impl_->resize_presentation(width, height);
 }
 
 bool Backend::presentation_ready() const noexcept {
   return impl_->presentation.ready();
 }
 GpuPerformanceCounters Backend::performance_counters() const noexcept {
-  auto result = impl_->performance;
-  result.shader_cache_misses = impl_->compiled_shader_count;
-  result.pipeline_cache_misses = impl_->pipeline_states.size();
-  return result;
+  return impl_->performance_counters();
 }
 
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
-  auto result = impl_->unsupported;
-  result.unsupported_sampler_behaviors += impl_->resources.unsupported_sampler_behaviors();
-  return result;
+  return impl_->unsupported_counters();
 }
 
 GpuShaderCoverage Backend::shader_coverage() const noexcept {
-  GpuShaderCoverage coverage{};
-  coverage.shaders_discovered = impl_->decoded_shaders.size();
-  coverage.translation_failures = impl_->shader_translation_failures;
-  coverage.shaders_translated =
-      coverage.shaders_discovered >= coverage.translation_failures
-          ? coverage.shaders_discovered - coverage.translation_failures
-          : 0u;
-  coverage.cache_hits = impl_->shader_cache.hits();
-  coverage.cache_misses = impl_->shader_cache.misses();
-  return coverage;
+  return impl_->shader_coverage();
 }
 bool Backend::ready() const noexcept { return impl_->ready; }
 std::size_t Backend::command_count() const noexcept { return impl_->command_count; }

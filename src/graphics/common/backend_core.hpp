@@ -50,6 +50,7 @@
 #include "xenon/gpu/edram_ownership.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 #include "xenon/gpu/ir.hpp"
+#include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/texture.hpp"
@@ -92,6 +93,11 @@ class BackendCore {
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
   //   bool record_draw(const DrawRecording&, bool& record_failed);
+  //   void forget_backend_render_targets();      // EDRAM was rebound
+  //   bool initialize_mirror(memory::AddressSpace&);
+  //   bool bind_guest_memory();                  // mirror -> descriptor layout
+  //   std::uint64_t pipeline_cache_misses() const;
+  //   void add_backend_unsupported_counters(GpuUnsupportedCounters&) const;
 
   // Everything a backend needs to record one draw. Built after the pipeline
   // is resolved; references stay valid for the record_draw() call only.
@@ -112,7 +118,17 @@ class BackendCore {
     std::int32_t scissor_bottom;
   };
 
+  void begin_submission(memory::AddressSpace& new_memory, Edram& new_edram);
   void consume(const ir::Command& command);
+  void end_submission();
+  bool make_guest_memory_cpu_visible(std::uint32_t physical_address,
+                                     std::uint32_t size);
+  bool invalidate_edram_native_state();
+  PresentStatus present(const PresentationFrame& frame);
+  bool resize_presentation(std::uint32_t width, std::uint32_t height);
+  GpuPerformanceCounters performance_counters() const noexcept;
+  GpuUnsupportedCounters unsupported_counters() const noexcept;
+  GpuShaderCoverage shader_coverage() const noexcept;
 
   static std::string named(std::string_view message) {
     std::string result(Api::kName);
@@ -465,6 +481,7 @@ class BackendCore {
 
  private:
   Derived& self() { return static_cast<Derived&>(*this); }
+  const Derived& self() const { return static_cast<const Derived&>(*this); }
   void consume_resolve(const DrawResourceState& state);
   void consume_draw(const ir::DrawPacket* draw, const DrawResourceState& state);
   void consume_shader_load(const ir::ShaderLoad* load);
@@ -474,3 +491,4 @@ class BackendCore {
 
 #include "graphics/common/backend_core_consume.hpp"
 #include "graphics/common/backend_core_draw.hpp"
+#include "graphics/common/backend_core_submission.hpp"
