@@ -69,17 +69,17 @@ Title-specific symbols, patches, hooks, workarounds, artwork, manifests, compati
 
 ## Current state
 
-This README reflects the source tree in the repository snapshot dated **26 September 2026**.
+This README reflects the source tree on the `development-restructure` branch as of **8 October 2026**.
 
 | Area | Status | Current state |
 | --- | --- | --- |
 | CPU V2 | Advanced | PPC/VMX/VMX128 decoding, lifting, Xenon IR, optimisation, native C++ AOT generation, compiled-function lookup, and extensive validation infrastructure are present. Real-title execution validation remains ongoing. |
 | Memory V2 | Advanced / production foundation | Unified 512 MiB physical RAM model, Xbox address-space aliases, page protections, MMIO, reservations, host-VM integration, DMA/GPU write notification, and CPU/GPU coherency infrastructure are implemented. |
 | XEX Loader V2 | Implemented foundation | Parses XEX1/XEX2 metadata/security structures, handles encrypted/compressed images, maps PE sections into Memory V2, exposes imports/exports/TLS/relocation metadata, and contains title-update/delta support. Retail-title qualification remains ongoing. |
-| Recompilation pipeline | Implemented foundation | `recomp-driver`, `ppc-disasm`, `ir-dump`, `import-scanner`, and `module-inspector` provide analysis and generated native build input for title modules. |
+| Recompilation pipeline | Implemented foundation | `recomp-driver`, `ppc-disasm`, `ir-dump`, `import-scanner`, and `module-inspector` provide analysis and generated native build input for title modules; `xenon-prepare` runs analysis, generation and the native build automatically for the launcher. |
 | Runtime session | Integrated | `XenonSession` coordinates memory, CPU, filesystem, kernel I/O, input, XEX loading, exports, native compiled registries, lifecycle, and execution state. |
 | Runtime host | Integrated | `xenon_runtime_host` runs separately from the launcher and supervises one game session through an explicit file-based launch/status contract. |
-| GPU V1 | Correctness foundation complete | Shared Xenos semantics, canonical EDRAM ownership, shader translation, texture/resource handling, resolves, captures, Vulkan, and D3D12 backends are implemented. Retail capture/replay and longer hardware qualification remain. |
+| GPU V1 | Correctness foundation complete | Shared Xenos semantics, canonical EDRAM ownership, shader translation, texture/resource handling, resolves, captures, Vulkan, and D3D12 backends are implemented. Both backends share one command-handling core (`src/graphics/common/`). Retail capture/replay and longer hardware qualification remain. |
 | Filesystem | Advanced | Host paths, VFS, GDFX/STFS content sources, Xbox path semantics, kernel I/O integration, Memory V2 guest marshalling, and recompiled-title import dispatch are present. |
 | Kernel V1 | Implemented foundation | Handles, objects, file I/O, threads, synchronization, timers, waits, time services, memory integration, modules, process state, and exception foundations are present. |
 | XAM | Active | Offline user/profile, locale, content, notifications, achievements, storage/content services, and export infrastructure are present. Save/data and title-specific validation still need further integration. |
@@ -129,6 +129,7 @@ ppc-disasm
 ir-dump
 import-scanner
 module-inspector
+xenon-prepare        automatic game preparation, driven by the launcher
 ```
 
 The recompilation driver can analyse executable ranges, discover functions, build a function database, record unresolved control flow, apply module hints, generate native source shards, create a compiled-function registry, and emit CMake build input for a game module.
@@ -241,7 +242,7 @@ canonical Xenon graphics representation
    Vulkan       D3D12
 ```
 
-The native backends are not separate Xenos emulators. Shared code owns the guest-visible behaviour; host backends consume normalized state.
+The native backends are not separate Xenos emulators. Shared code owns the guest-visible behaviour; host backends consume normalized state. Command handling above the native API (EDRAM ownership, resolves, draw setup, shader variants, pipelines, submission and presentation) lives once in `src/graphics/common/`, and each backend supplies only the native calls.
 
 ### Shared Xenos layer
 
@@ -653,32 +654,38 @@ Xenon-Recomp/
 ├─ docs/                   Architecture, subsystem and validation documentation
 ├─ examples/               Runtime/module integration examples
 ├─ include/xenon/          Public Xenon interfaces
+│  ├─ audio/
 │  ├─ core/
 │  ├─ cpu/
 │  ├─ filesystem/
 │  ├─ gpu/
 │  ├─ input/
 │  ├─ kernel/
+│  ├─ logging/
 │  ├─ memory/
 │  ├─ modules/
+│  ├─ network/
 │  ├─ recomp/
 │  ├─ xam/
 │  └─ xbox/
 ├─ src/
-│  ├─ core/                Runtime/session/export/call bridge
-│  ├─ cpu/                 PPC frontend, IR, optimizer and AOT backend
+│  ├─ audio/               Audio mixer, SDL output and XMA decoding
+│  ├─ core/                XenonSession (session/), export registry, call bridge
+│  ├─ cpu/                 PPC frontend, IR, optimizer, AOT codegen, fallback
 │  ├─ filesystem/          VFS and content providers
-│  ├─ graphics/            Xenos frontend + Vulkan/D3D12/DXC
+│  ├─ graphics/            Xenos frontend, shared backend core, Vulkan/D3D12/DXC
 │  ├─ input/               Host and guest input stack
 │  ├─ kernel/              Kernel objects, I/O and execution services
+│  ├─ logging/             Logging
 │  ├─ memory/              Production guest address space
-│  ├─ recomp/              Whole-game recompilation driver
-│  ├─ xam/                 XAM/offline/content services
-│  └─ xbox/                Xbox import/XEX infrastructure
+│  ├─ network/             Xenon Network client
+│  ├─ recomp/              Whole-game recompilation driver and analysis
+│  ├─ xam/                 XAM/offline/content services and exports
+│  └─ xbox/                Xbox exports, imports and the XEX loader
 ├─ launcher/               Qt 6 multi-game launcher
 ├─ runtime_host/           Separate game/runtime process
-├─ tests/                  CPU, memory, GPU, filesystem, input, XEX and runtime tests
-├─ tools/                  Recompilation and inspection tools
+├─ tests/                  Tests by subsystem; tests/support/ holds shared test helpers
+├─ tools/                  Recompilation tools, xenon-prepare, dependency and release tooling
 ├─ CMakeLists.txt
 └─ CMakePresets.json
 ```
@@ -689,7 +696,10 @@ Xenon-Recomp/
 
 Useful starting points:
 
-- [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) — dependency and ownership rules
+- [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) — dependency and ownership rules, and where each subsystem's code lives
+- [`docs/development/TESTING.md`](docs/development/TESTING.md) — running the tests, headless Vulkan, and checking Windows code on Linux
+- [`docs/development/RESTRUCTURE_FINDINGS.md`](docs/development/RESTRUCTURE_FINDINGS.md) — defects and backend differences found during the structural refactor
+- [`docs/development/GAME_PREPARATION.md`](docs/development/GAME_PREPARATION.md) — automatic game preparation (`xenon-prepare`)
 - [`docs/recomp/RECOMPILATION_PIPELINE.md`](docs/recomp/RECOMPILATION_PIPELINE.md) — static recompilation pipeline
 - [`docs/xbox/XEX_LOADER_V2.md`](docs/xbox/XEX_LOADER_V2.md) — retail XEX loading pipeline
 - [`docs/runtime/RUNTIME_SESSION.md`](docs/runtime/RUNTIME_SESSION.md) — unified runtime lifecycle
@@ -729,7 +739,9 @@ The repository contains dedicated coverage for areas including:
 - Xenon Network offline behavior, endpoint policy, strict protocol parsing,
   retries/cancellation, realtime limits, and loopback HTTP transport.
 
-Native backend tests are conditional on the corresponding host SDK/runtime being available.
+Native backend tests are conditional on the corresponding host SDK/runtime being available, and skip their device checks on machines without a Vulkan device or a D3D12 hardware adapter (such as GitHub's Windows runners). Linux CI runs the Vulkan tests on Mesa's llvmpipe.
+
+GitHub Actions (`.github/workflows/ci.yml`) builds and runs the full test suite on Linux and Windows, runs a focused set of memory, fallback, kernel, GPU-frontend and recompiler tests under ASan/UBSan, and audits source ownership. See [`docs/development/TESTING.md`](docs/development/TESTING.md) for running the tests locally, including on a machine without a GPU.
 
 Real-title validation remains essential: portable tests catch regressions, but captured command streams and game execution are what ultimately reveal incorrect Xbox assumptions.
 
