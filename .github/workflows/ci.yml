@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - dev
-      - refactor/architecture-cleanup
+      - development-restructure
   pull_request:
     branches:
       - dev
