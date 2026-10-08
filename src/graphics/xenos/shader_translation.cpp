@@ -370,7 +370,8 @@ float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
   return v.xxxx;
 }
 
-// Xenos endian swap modes applied to fetched 32-bit words: 1 = 8-in-16,
+)hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
+R"hlsl(// Xenos endian swap modes applied to fetched 32-bit words: 1 = 8-in-16,
 // 2 = 8-in-32, 3 = 16-in-32 (8-in-32 is both of the others combined).
 uint4 xenon_endian_swap(uint4 value, uint endian) {
   if (endian == 1u || endian == 2u)
