@@ -12,7 +12,7 @@ The dashboard still treats unassessed entries as unknown. A registered handler, 
 
 ## Remaining metadata gaps
 
-- Reconcile the source-declared kernel list with a complete, versioned console export table, including exports Xenon does not register and reserved ordinals. This audit establishes no percentage against that external universe.
+- The [pinned research-table reconciliation](KERNEL_REFERENCE.md) now checks every statically recoverable Xenon registration against Xenia's ordinal/name/kind table. Its 922-entry denominator is not a complete, version-qualified console export specification. Identify console-version differences, reserved ordinals, dynamic registrations, and which of the 668 unmatched entries matter to titles.
 - Add machine-readable per-opcode lift, fallback, and behavior-test links for the PPC catalog. The decoder catalog alone has no execution-status field.
 - Give shader ALU/fetch forms named metadata and tests that assert lowering behavior per form; numerical bounds only show which forms the frontend accepts.
 - Track PM4 parsing, normalized IR, backend effect, and test evidence as separate stages. A type-3 enum member may only reach passthrough IR.

@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = Path(__file__).with_name("coverage.json")
 SVG = ROOT / "docs" / "coverage" / "dashboard.svg"
 REPORT = ROOT / "docs" / "coverage" / "REPORT.md"
+KERNEL_REFERENCE = Path(__file__).with_name("reference") / "xenia_xboxkrnl_997d055.json"
+KERNEL_REFERENCE_REPORT = ROOT / "docs" / "coverage" / "KERNEL_REFERENCE.md"
 STATES = {"verified", "implemented_unverified", "partial", "unimplemented", "unassessed"}
 COLORS = {
     "verified": "#3dbb79",
@@ -71,7 +73,7 @@ def kernel_group(name: str, path: str) -> str:
     return "Other"
 
 
-def kernel_inventory() -> list[Item]:
+def kernel_registration_rows() -> dict[str, tuple[int, str]]:
     """Read statically recoverable xboxkrnl registrations from source."""
     paths = sorted((ROOT / "src/xbox/exports").glob("xboxkrnl_*.cpp"))
     paths += sorted((ROOT / "src/core/session/exports").glob("*.cpp"))
@@ -128,7 +130,12 @@ def kernel_inventory() -> list[Item]:
         if name not in rows or rows[name][0] != int(ordinal, 16):
             raise CoverageError(f"diagnostic metadata disagrees with registration: {name}")
 
+    return rows
+
+
+def kernel_inventory() -> list[Item]:
     items = []
+    rows = kernel_registration_rows()
     for name, (_, path) in sorted(rows.items()):
         group = kernel_group(name, path)
         ident = (f"kernel:time:{name}" if path.endswith("xboxkrnl_time_exports.cpp")
@@ -136,6 +143,83 @@ def kernel_inventory() -> list[Item]:
                  else f"kernel:registered:{name}")
         items.append(Item(ident, "kernel", f"xboxkrnl.exe / {group}", name, path))
     return items
+
+
+def load_kernel_reference(path: Path = KERNEL_REFERENCE) -> tuple[dict, list[dict]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CoverageError(f"cannot load kernel reference: {exc}") from exc
+    provenance = raw.get("provenance") if isinstance(raw, dict) else None
+    rows = raw.get("exports") if isinstance(raw, dict) else None
+    if (not isinstance(raw, dict) or raw.get("schema") != 1 or
+            not isinstance(provenance, dict) or not isinstance(rows, list) or not rows):
+        raise CoverageError("kernel reference requires schema 1, provenance, and exports")
+    commit = provenance.get("commit")
+    url = provenance.get("source")
+    if (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit) or
+            not isinstance(url, str) or commit not in url):
+        raise CoverageError("kernel reference provenance must pin a commit")
+    seen_names: set[str] = set()
+    seen_ordinals: set[int] = set()
+    previous = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            raise CoverageError("kernel reference contains a non-object export")
+        ordinal, name, kind = row.get("ordinal"), row.get("name"), row.get("kind")
+        if (type(ordinal) is not int or ordinal <= previous or ordinal > 0xFFFF or
+                not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*", name) or
+                kind not in {"function", "variable"}):
+            raise CoverageError(f"invalid or unsorted kernel reference entry: {row}")
+        if name in seen_names or ordinal in seen_ordinals:
+            raise CoverageError(f"duplicate kernel reference name or ordinal: {name}")
+        seen_names.add(name)
+        seen_ordinals.add(ordinal)
+        previous = ordinal
+    return provenance, rows
+
+
+def reconcile_kernel_reference(rows: list[dict],
+                               registrations: dict[str, tuple[int, str]]) -> dict:
+    reference_by_name = {row["name"]: row for row in rows}
+    reference_by_ordinal = {row["ordinal"]: row for row in rows}
+    conflicts: list[str] = []
+    matched: set[str] = set()
+    for name, (ordinal, path) in sorted(registrations.items()):
+        expected_kind = "variable" if path.endswith("kernel_variables.cpp") else "function"
+        by_name = reference_by_name.get(name)
+        by_ordinal = reference_by_ordinal.get(ordinal)
+        if (by_name and by_name["ordinal"] == ordinal and by_name["kind"] == expected_kind):
+            matched.add(name)
+        else:
+            detail = (f"{name} at 0x{ordinal:04X} ({expected_kind}, {path}); "
+                      f"reference name={by_name}, ordinal={by_ordinal}")
+            conflicts.append(detail)
+    if conflicts:
+        raise CoverageError("kernel reference disagreement:\n  " + "\n  ".join(conflicts))
+    missing = [row for row in rows if row["name"] not in matched]
+    return {"matched": matched, "missing": missing}
+
+
+def render_kernel_reference_report(provenance: dict, rows: list[dict],
+                                   reconciliation: dict) -> str:
+    matched = reconciliation["matched"]
+    missing = reconciliation["missing"]
+    by_group: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        group = "Variables" if row["kind"] == "variable" else kernel_group(row["name"], "")
+        by_group[group].append(row)
+    lines = ["# Xbox kernel export reference reconciliation", "",
+             f"Reference: [Xenia xboxkrnl table at `{provenance['commit'][:7]}`]({provenance['source']}). This is a pinned research inventory, not an official Microsoft ABI specification or a version-qualified Xbox 360 kernel guarantee.",
+             "", f"**{len(rows)} reference entries:** {len(matched)} exact Xenon source registrations ({percent(len(matched), len(rows))}); {len(missing)} entries have no matching Xenon source registration. These are registration counts, not implementation or game-compatibility percentages.",
+             "", "| Subsystem | Reference entries | Exact Xenon registrations | No matching source registration |", "| --- | ---: | ---: | ---: |"]
+    for group, members in sorted(by_group.items()):
+        present = sum(row["name"] in matched for row in members)
+        lines.append(f"| {group} | {len(members)} | {present} | {len(members)-present} |")
+    lines += ["", "The absence of a matching registration means this source audit found no handler; it does not establish that the export is needed by a title, unsupported on every kernel version, or absent from a dynamic path. Optional audio registration is build-conditional. The source-derived [dashboard](README.md) keeps its own denominator and audited behavior states.",
+              "", "First unmatched entries by ordinal: " + ", ".join(
+                  f"`0x{row['ordinal']:04X} {row['name']}`" for row in missing[:16]) + ".", ""]
+    return "\n".join(lines)
 
 
 def inventory() -> list[Item]:
@@ -373,7 +457,11 @@ def main() -> int:
     try:
         items = inventory()
         entries = load_manifest(args.manifest, items)
-        products = {SVG: render_svg(items, entries), REPORT: render_report(items, entries)}
+        provenance, reference = load_kernel_reference()
+        reconciliation = reconcile_kernel_reference(reference, kernel_registration_rows())
+        products = {SVG: render_svg(items, entries), REPORT: render_report(items, entries),
+                    KERNEL_REFERENCE_REPORT: render_kernel_reference_report(
+                        provenance, reference, reconciliation)}
         if args.check:
             stale = [str(path.relative_to(ROOT)) for path, data in products.items()
                      if not path.is_file() or path.read_text(encoding="utf-8") != data]
@@ -385,6 +473,7 @@ def main() -> int:
                 path.write_text(data, encoding="utf-8")
         for category in ("kernel", "ppc", "shader", "pm4"):
             print(f"{category}: {summary([i for i in items if i.category == category], entries)}")
+        print(f"kernel reference: {len(reconciliation['matched'])}/{len(reference)} exact registrations")
         return 0
     except CoverageError as exc:
         print(f"coverage error: {exc}", file=sys.stderr)

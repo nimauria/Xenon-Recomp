@@ -63,6 +63,55 @@ class CoverageTests(unittest.TestCase):
             with self.assertRaisesRegex(generate.CoverageError, "audio export name/ordinal symbol mismatch"):
                 generate.kernel_inventory()
 
+    def test_pinned_kernel_reference_reconciliation(self):
+        provenance, rows = generate.load_kernel_reference()
+        self.assertEqual(provenance["commit"], "997d0555dbd6358dffd2950097424993763051af")
+        self.assertEqual(len(rows), 922)
+        self.assertEqual(sum(row["kind"] == "variable" for row in rows), 35)
+        self.assertEqual((rows[0]["ordinal"], rows[-1]["ordinal"]), (1, 931))
+        result = generate.reconcile_kernel_reference(rows, generate.kernel_registration_rows())
+        self.assertEqual(len(result["matched"]), 254)
+        self.assertEqual(len(result["missing"]), 668)
+        report = generate.render_kernel_reference_report(provenance, rows, result)
+        self.assertEqual(report, generate.render_kernel_reference_report(provenance, rows, result))
+        self.assertIn("254 exact Xenon source registrations (27.5%)", report)
+        self.assertIn("not implementation or game-compatibility percentages", report)
+
+    def test_invalid_kernel_reference_rows(self):
+        raw = json.loads(generate.KERNEL_REFERENCE.read_text(encoding="utf-8"))
+        for change in (
+            lambda data: data["exports"].append(dict(data["exports"][-1])),
+            lambda data: data["exports"][1].update(name=data["exports"][0]["name"]),
+            lambda data: data["exports"][1].update(kind="unknown"),
+            lambda data: data["exports"][1].update(ordinal="2"),
+            lambda data: data["exports"].reverse(),
+            lambda data: data["provenance"].update(commit="unversioned"),
+        ):
+            with self.subTest(change=change.__code__.co_firstlineno):
+                data = json.loads(json.dumps(raw))
+                change(data)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "reference.json"
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    with self.assertRaises(generate.CoverageError):
+                        generate.load_kernel_reference(path)
+
+    def test_kernel_reference_disagrees_with_registration(self):
+        _, rows = generate.load_kernel_reference()
+        registration = generate.kernel_registration_rows()
+        name = "RtlInitAnsiString"
+        ordinal, path = registration[name]
+        for changed in ((ordinal + 1, path), (ordinal, "kernel_variables.cpp")):
+            with self.subTest(changed=changed):
+                altered = dict(registration)
+                altered[name] = changed
+                with self.assertRaisesRegex(generate.CoverageError, "kernel reference disagreement"):
+                    generate.reconcile_kernel_reference(rows, altered)
+        altered = dict(registration)
+        altered["NonexistentKernelExport"] = (0xFFFF, path)
+        with self.assertRaisesRegex(generate.CoverageError, "kernel reference disagreement"):
+            generate.reconcile_kernel_reference(rows, altered)
+
     def test_percentage_and_empty_category(self):
         self.assertEqual(generate.percent(1, 4), "25.0%")
         self.assertEqual(generate.percent(0, 0), "unknown")
