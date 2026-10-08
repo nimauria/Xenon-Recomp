@@ -10,6 +10,8 @@
 # if the launcher process exits or crashes.
 add_executable(xenon_runtime_host
   src/main.cpp
+  src/host_setup.cpp
+  src/host_setup.hpp
   src/content_source.cpp
   src/content_source.hpp
   src/launch_config.cpp
