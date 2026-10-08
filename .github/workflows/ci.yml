@@ -18,6 +18,15 @@ env:
   QT_VERSION: "6.10.3"
 
 jobs:
+  coverage-dashboard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test coverage tooling
+        run: python3 -m unittest discover -s tools/coverage -p 'test_*.py' -v
+      - name: Check generated coverage assets
+        run: python3 tools/coverage/generate.py --check
+
   linux:
     runs-on: ubuntu-24.04
     steps:

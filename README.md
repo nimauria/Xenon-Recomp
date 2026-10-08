@@ -1,5 +1,11 @@
 # Xenon Recomp
 
+[![Xenon CI: Windows MSVC/CL, Linux, and tests](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml/badge.svg?branch=development-restructure)](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml?query=branch%3Adevelopment-restructure)
+
+**Windows MSVC / CL build and tests** | **Linux build and tests** | **Automated tests** — all are required jobs in [Xenon CI](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml). The badge reports the combined workflow status.
+
+[Detailed implementation coverage dashboard](docs/coverage/README.md) · [SVG treemaps](docs/coverage/dashboard.svg)
+
 **Xenon Recomp** is an experimental, modular Xbox 360 static-recompilation platform and native runtime for modern systems.
 
 The project is designed so multiple game recompilation projects can share one implementation of the Xbox 360 execution environment instead of rebuilding CPU, memory, graphics, filesystem, input, kernel services, content handling, and launcher infrastructure for every title.

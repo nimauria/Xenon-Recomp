@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "scope": "Source-declared Xenon operations; an audit lower bound, not Xbox 360 hardware or game compatibility coverage",
+  "exclusions": [
+    {"id": "shader:scalar:41", "kind": "reserved", "source": "src/graphics/xenos/shader_translation.cpp", "token": "alu.scalar_opcode == 41"},
+    {"id": "pm4:type3:0x64", "kind": "host_extension", "source": "include/xenon/gpu/types.hpp", "token": "0x64 is a host-emulator extension"}
+  ],
+  "entries": [
+    {"id": "kernel:time:KeQueryPerformanceFrequency", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_query_performance_frequency"},
+    {"id": "kernel:time:KeQuerySystemTime", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_query_system_time"},
+    {"id": "kernel:time:KeDelayExecutionThread", "state": "partial", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_delay_execution_thread", "note": "Relative delay is tested; alertable/APC semantics are explicitly ignored"},
+    {"id": "kernel:time:KeStallExecutionProcessor", "state": "verified", "implementation": "src/xbox/exports/xboxkrnl_time_exports.cpp", "test": "tests/xbox/time_export_tests.cpp", "test_token": "test_ke_stall_execution_processor"},
+    {"id": "kernel:crypto:XeKeysConsolePrivateKeySign", "state": "partial", "kind": "stub", "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp", "note": "Registered success stub; no console private key or signature"},
+    {"id": "kernel:crypto:XeKeysConsoleSignatureVerification", "state": "partial", "kind": "stub", "implementation": "src/xbox/exports/xboxkrnl_misc_exports.cpp", "note": "Registered success stub; no signature verification"},
+    {"id": "ppc:addi", "state": "verified", "implementation": "src/cpu/ppc/lifter/integer.cpp", "test": "tests/cpu/x86_64/native_smoke.cpp", "test_token": "smoke_addi3"},
+    {"id": "shader:control:ExecEnd", "state": "verified", "implementation": "src/graphics/xenos/shader_translation.cpp", "test": "tests/graphics/xenos/shader_lowering.cpp", "test_token": "ControlFlowOpcode::ExecEnd"},
+    {"id": "shader:vector:0", "state": "implemented_unverified", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "if (op == 0) return a + b;", "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"},
+    {"id": "shader:scalar:50", "state": "implemented_unverified", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "op==50) return previous", "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"},
+    {"id": "shader:texture:16", "state": "unimplemented", "implementation": "src/graphics/xenos/shader_translation.cpp", "implementation_token": "getTextureBorderColorFrac has no lowering implementation", "note": "Explicitly rejected by the lowerer"},
+    {"id": "pm4:header:Type0", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type0"},
+    {"id": "pm4:header:Type1", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type1"},
+    {"id": "pm4:header:Type2", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type2"},
+    {"id": "pm4:header:Type3", "state": "verified", "implementation": "include/xenon/gpu/types.hpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "make_packet_type3"},
+    {"id": "pm4:type3:RegRmw", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::RegRmw"},
+    {"id": "pm4:type3:CondExec", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::CondExec"},
+    {"id": "pm4:type3:MemWrite", "state": "verified", "implementation": "src/graphics/xenos/command_processor.cpp", "test": "tests/graphics/xenos/gpu_frontend.cpp", "test_token": "Type3Opcode::MemWrite"}
+  ]
+}

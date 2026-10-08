@@ -79,6 +79,8 @@ compile_commands.json
 *.gcno
 *.gcov
 coverage/
+!/tools/coverage/
+!/docs/coverage/
 
 # Test output & cache
 .cache/
