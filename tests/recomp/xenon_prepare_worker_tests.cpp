@@ -18,6 +18,10 @@
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
+
 #include "xenon/core/json.hpp"
 #include "xenon/recomp/analysis_schema_json.hpp"
 #include "xenon/recomp/artifact_cache.hpp"
@@ -116,7 +120,10 @@ int run_system(const std::string& command) {
 #if defined(_WIN32)
   return std::system(("\"" + command + "\"").c_str());
 #else
-  return std::system(command.c_str());
+  const auto status = std::system(command.c_str());
+  // POSIX system() returns a wait status, not the child's exit code.
+  if (status >= 0 && WIFEXITED(status)) return WEXITSTATUS(status);
+  return status;
 #endif
 }
 

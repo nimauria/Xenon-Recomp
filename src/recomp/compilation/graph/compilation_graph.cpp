@@ -93,7 +93,11 @@ std::string preparation_identity(const std::filesystem::path& source_root,
   add_file(source_root / "CMakeLists.txt");
   add_file(source_root / "tools/compilation_cache.py");
   add_file(cmake_command);
-  add_tree(native_compiler.parent_path());
+  // A compiler's neighbours are not build inputs. On Linux this used to hash
+  // all of /usr/bin (hundreds of megabytes) on every preparation; installing
+  // an unrelated tool also invalidated every prepared module. The compiler
+  // executable itself, including a symlink's resolved contents, is the input.
+  add_file(native_compiler);
   // System headers and import libraries are semantic toolchain inputs too.
   for (const auto* name : {"INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "CXXFLAGS", "LDFLAGS", "PATH"}) {
     const auto* value = std::getenv(name);
@@ -104,7 +108,7 @@ std::string preparation_identity(const std::filesystem::path& source_root,
       while (std::getline(paths, path, ';')) if (!path.empty()) add_tree(path);
     }
   }
-  Node node{"prepared-environment", "prepare-10", std::move(files), {}};
+  Node node{"prepared-environment", "prepare-11", std::move(files), {}};
   return node.key();
 }
 std::string Node::canonical() const {

@@ -1,8 +1,7 @@
 # Findings from the structural refactor
 
-The `development-restructure` branch changes structure only. Defects found
-while moving code are left as they were and listed here for the bug-fixing
-stage. Each entry says how it was observed.
+This note records defects exposed during the structural refactor. Open
+findings remain below; resolved findings record the observed cause and fix.
 
 ## Build and test defects
 
@@ -25,15 +24,17 @@ stage. Each entry says how it was observed.
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
-4. **Preparation identity hashes the whole compiler directory.**
-   `graph::preparation_identity()` (`src/recomp/compilation/graph/compilation_graph.cpp`)
-   fingerprints every file under `native_compiler.parent_path()`, recursively.
-   On Linux that is all of `/usr/bin`: about 550 MB in this Codespace, read
-   byte by byte through `istreambuf_iterator`. In a Debug build one identity
-   takes many minutes, which is why `xenon_prepare_worker_tests` exceeds its
-   900 s CTest timeout here. `xenon-prepare` computes the same identity on every
-   preparation, and installing unrelated packages into `/usr/bin` changes the
-   identity.
+## Resolved build and test defects
+
+**Preparation identity hashed the whole compiler directory.**
+`graph::preparation_identity()` (`src/recomp/compilation/graph/compilation_graph.cpp`)
+fingerprinted every file under `native_compiler.parent_path()` recursively.
+On Linux that included about 550 MB in `/usr/bin`, making preparation slow
+and invalidating cached modules when unrelated tools were installed. The
+preparation key now hashes the compiler executable and increments its
+producer version. `compilation_graph_tests` checks that changing an unrelated
+neighbouring file leaves the key stable while changing the compiler changes
+it.
 
 ## Runtime observations
 

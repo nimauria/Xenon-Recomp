@@ -279,6 +279,29 @@ int main() {
   namespace g = xenon::recomp::graph;
   assert(g::digest("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   assert(g::digest("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  {
+    const auto root = std::filesystem::temp_directory_path() / "xenon_preparation_identity_inputs";
+    std::filesystem::remove_all(root);
+    const auto source = root / "source";
+    const auto toolchain = root / "toolchain";
+    for (const auto* dir : {"include", "src", "cmake", "tools"})
+      std::filesystem::create_directories(source / dir);
+    std::filesystem::create_directories(toolchain);
+    std::ofstream(source / "CMakeLists.txt") << "cmake_minimum_required(VERSION 3.25)\n";
+    std::ofstream(source / "tools/compilation_cache.py") << "# fixture\n";
+    const auto cmake = toolchain / "cmake";
+    const auto compiler = toolchain / "compiler";
+    const auto unrelated = toolchain / "unrelated-tool";
+    std::ofstream(cmake) << "cmake v1\n";
+    std::ofstream(compiler) << "compiler v1\n";
+    std::ofstream(unrelated) << "unrelated v1\n";
+    const auto first = g::preparation_identity(source, cmake, compiler);
+    std::ofstream(unrelated) << "unrelated v2\n";
+    assert(g::preparation_identity(source, cmake, compiler) == first);
+    std::ofstream(compiler) << "compiler v2\n";
+    assert(g::preparation_identity(source, cmake, compiler) != first);
+    std::filesystem::remove_all(root);
+  }
   const auto fixture = make_fixture("incremental",make_xex({branch_word(12,true),branch_word(16,true),kBlr,0x38600001,kBlr,0x38600002,kBlr},0x40));
   g::Store store(fixture.root/"cas");
   g::Node n{"source","test",{{"a","b"}}, {}};
