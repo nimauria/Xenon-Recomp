@@ -5,11 +5,26 @@ resource state, EDRAM semantics and guest physical memory in the common
 graphics layer. Vulkan and Direct3D 12 consume that host-independent state as
 native renderers; neither backend contains an Xbox GPU command processor.
 
+## Code layout
+
+The handling both backends share above the native API lives once in
+`src/graphics/common/`: `backend_core.hpp` (backend state, EDRAM ownership
+transfers, resolve clears), `backend_core_consume.hpp` (command dispatch,
+resolves, shader loads), `backend_core_draw.hpp` (render and depth targets,
+textures, shader variants, pipelines) and `backend_core_submission.hpp`
+(submission, presentation, counters). Each backend's `Backend::Impl` derives
+from `BackendCore<Impl, Api>`; `Api` supplies native types and constants, and
+`Impl` supplies the steps whose native calls differ, such as creating render
+targets, binding textures and recording a draw. Where the backends behave
+differently the hooks keep each backend's behaviour; those differences are
+listed in `docs/development/RESTRUCTURE_FINDINGS.md`.
+
 ## Runtime and development discovery
 
 `discover_backend_capabilities` distinguishes an installed graphics runtime
-from development files. On Windows it probes the Vulkan loader/API version and
-independently checks hardware D3D12 feature-level 12_0 support. The Vulkan
+from development files. On Windows it probes the Vulkan loader (`vulkan-1.dll`)
+and its API version and independently checks hardware D3D12 feature-level 12_0
+support; on Linux it probes `libvulkan.so.1` the same way. The Vulkan
 target is built only when CMake finds the Vulkan SDK. End users need the loader
 and a Vulkan-capable driver, while developers need the SDK headers/import
 library. D3D12 uses the Windows SDK.
@@ -147,9 +162,9 @@ for a backend that does not override it, e.g. `NullBackend`) and is published
 as `XenonSession::capability_report()`'s `"gpu"` section whenever a GPU
 backend exists — the section is omitted entirely, not reported as zero, when
 no backend exists, so "not measured" stays distinguishable from "measured and
-clean". Both `d3d12::Backend` and `vulkan::Backend` implement
-`unsupported_counters()` identically, incrementing the shared counters at the
-exact point each category is detected:
+clean". Both backends share one `unsupported_counters()` in `BackendCore`,
+incrementing the shared counters at the exact point each category is detected
+(D3D12 adds the sampler count its descriptor layout accumulates):
 
 - **`unknownPackets`** — a guard at the top of `consume()` counts and logs
   (category `"gpu"`, `Logger::Level::Warning`) any `ir::Command` variant other
