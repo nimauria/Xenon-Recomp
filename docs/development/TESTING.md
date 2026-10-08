@@ -21,12 +21,12 @@ python3 tools/development/build_accountability.py check --build-dir build/linux-
 The audit reads the configured CMake File API graph. It reports production
 sources without a target, test programs without a CTest entry, and explicit
 platform or dependency exclusions. Run it after each configuration whose
-source coverage matters. CI runs it on Linux and Windows.
+source coverage matters.
 
 ## Vulkan tests on headless Linux
 
 Vulkan backend tests need a Vulkan device. On a machine without a GPU,
-Mesa's software rasterizer provides one, as in CI:
+Mesa's software rasterizer provides one:
 
 ```sh
 sudo apt-get install mesa-vulkan-drivers vulkan-tools
