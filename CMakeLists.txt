@@ -433,11 +433,27 @@ if(XENON_ENABLE_MEMORY)
     set(XENON_HOST_VM_SOURCE src/memory/mapping/host_vm_fallback.cpp)
   endif()
   add_library(xenon_memory STATIC
+    # AddressSpace: construction, page table, virtual and physical
+    # allocation, the guest access path, reservations and diagnostics.
     src/memory/guest/address_space.cpp
+    src/memory/guest/page_table/hot_page_table.cpp
+    src/memory/guest/virtual/virtual_allocation.cpp
+    src/memory/guest/virtual/virtual_mapping.cpp
+    src/memory/guest/physical/physical_allocation.cpp
+    src/memory/guest/physical/physical_aliases.cpp
+    src/memory/guest/physical/physical_writes.cpp
+    src/memory/guest/access/guest_access.cpp
+    src/memory/guest/access/mmio_registration.cpp
+    src/memory/guest/reservations/reservations.cpp
+    src/memory/guest/coherency/memory_ordering.cpp
+    src/memory/guest/diagnostics/fault_reporting.cpp
+    src/memory/guest/diagnostics/invariants.cpp
     ${XENON_HOST_VM_SOURCE}
   )
   target_link_libraries(xenon_memory PUBLIC xenon_cpu)
-  target_include_directories(xenon_memory PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_include_directories(xenon_memory
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_compile_features(xenon_memory PUBLIC cxx_std_20)
   target_compile_definitions(xenon_memory PUBLIC
     XENON_MEMORY_DEFAULT_DIRECT_APERTURE=$<BOOL:${XENON_MEMORY_DEFAULT_DIRECT_APERTURE}>)
