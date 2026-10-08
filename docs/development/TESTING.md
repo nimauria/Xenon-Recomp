@@ -23,6 +23,35 @@ sources without a target, test programs without a CTest entry, and explicit
 platform or dependency exclusions. Run it after each configuration whose
 source coverage matters. CI runs it on Linux and Windows.
 
+## Vulkan tests on headless Linux
+
+Vulkan backend tests need a Vulkan device. On a machine without a GPU,
+Mesa's software rasterizer provides one, as in CI:
+
+```sh
+sudo apt-get install mesa-vulkan-drivers vulkan-tools
+vulkaninfo --summary   # expect deviceName = llvmpipe
+```
+
+## Checking Windows graphics code on Linux
+
+D3D12 sources cannot be built on Linux, but they can be syntax-checked with
+MinGW GCC and Microsoft's DirectX-Headers (MIT licensed, not vendored):
+
+```sh
+sudo apt-get install g++-mingw-w64-x86-64
+git clone --depth 1 --branch v1.614.1 https://github.com/microsoft/DirectX-Headers.git /tmp/directx-headers
+x86_64-w64-mingw32-g++-posix -std=c++20 -fsyntax-only -DWIN32_LEAN_AND_MEAN -DNOMINMAX \
+  -D__REQUIRED_RPCNDR_H_VERSION__=475 -DXENON_HAS_DXC=1 \
+  -I /tmp/directx-headers/include/directx -I /tmp/directx-headers/include \
+  -I include -I src src/graphics/d3d12/<file>.cpp
+```
+
+MinGW returns COM structs differently from MSVC, so every call to
+`GetCPUDescriptorHandleForHeapStart()`, `GetGPUDescriptorHandleForHeapStart()`
+or `ID3D12Resource::GetDesc()` is reported as an error. Treat that set as the
+baseline and compare it before and after a change. Any other error is real.
+
 `linux-x64-sanitizers` is a smaller Linux configuration for host-independent
 memory, CPU, kernel, graphics frontend, and recomp tests. It compiles with
 AddressSanitizer and UndefinedBehaviorSanitizer. LeakSanitizer may require a
