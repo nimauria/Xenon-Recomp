@@ -19,8 +19,13 @@ target_sources(xenon_core PRIVATE
   xam_notification_exports.cpp
   xam_achievement_exports.cpp
   xam_system_exports.cpp
-  xam_net_exports.cpp
-  # xam_socket_manager.cpp backs XamSocketManager (used by xam_net_exports.cpp
+  net/xam_net_exports.cpp
+  net/socket_setup.cpp
+  net/transfer.cpp
+  net/listen.cpp
+  net/xnet.cpp
+  net/xam_net_internal.hpp
+  # xam_socket_manager.cpp backs XamSocketManager (used by net/xam_net_exports.cpp
   # since that file's std::make_shared<XamSocketManager>() call), but was
   # missing from this source list - any executable linking xenon_core that
   # actually instantiates a session (and therefore register_net_exports())

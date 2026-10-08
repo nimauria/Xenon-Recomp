@@ -68,7 +68,7 @@ endif()
 if(TARGET xenon_xbox_kernel_io)
   target_link_libraries(xenon_core PUBLIC xenon_xbox_kernel_io)
 endif()
-# src/xam/xam_net_exports.cpp calls the real host WSAStartup/WSACleanup for
+# src/xam/net/xam_net_exports.cpp calls the real host WSAStartup/WSACleanup for
 # NetDll_WSAStartup/NetDll_WSACleanup (see that file for why this is a real
 # implementation, not a stub).
 if(WIN32)
