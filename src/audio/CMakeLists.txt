@@ -60,9 +60,15 @@ if(XENON_ENABLE_AUDIO)
     backend_sdl.cpp
     mixer.cpp
     system.cpp
-    xma.cpp
+    xma/decoder.cpp
+    xma/decode.cpp
+    xma/mmio.cpp
+    xma/packet.cpp
+    xma/xma_internal.hpp
   )
-  target_include_directories(xenon_audio PUBLIC "${XENON_SOURCE_DIR}/include")
+  target_include_directories(xenon_audio
+    PUBLIC "${XENON_SOURCE_DIR}/include"
+    PRIVATE "${XENON_SOURCE_DIR}/src")
   target_link_libraries(xenon_audio
     PUBLIC xenon_memory
     PRIVATE ${XENON_AUDIO_SDL_TARGET} ${XENON_AUDIO_FFMPEG_TARGET})
