@@ -69,6 +69,27 @@ return either neighbouring integer when the scaled value is not exact, so the
 test now accepts one unit of D24S8 depth error; stencil and D24FS8 depth still
 compare exactly.
 
+**The Windows build and tests had never completed in CI.** Once the pinned
+FFmpeg built (MSYS2 tools first on `PATH`), each later Windows stage exposed a
+defect that predates the refactor:
+
+- `src/graphics/xenos/shader_translation.cpp` held a 17,345-byte HLSL raw
+  string, past MSVC's 16 KB per-literal limit (C2026). It is now two adjacent
+  literals with byte-identical content.
+- The runtime host linked with `/MAP:launcher/xenon_runtime_host.map`, a path
+  relative to the build root that exists only when the launcher is built
+  (LNK1104). Plain `/MAP` writes the map beside the executable.
+- `tools/deps/bootstrap.py` compared a resolved patch path with an unresolved
+  root; on Windows `resolve()` expands 8.3 short names, so patches under a
+  temp directory were rejected.
+- `xenon-prepare` named its build workspace with a 64-hex-digit digest, which
+  pushed nested object paths past the 260-character `MAX_PATH` (C1083). The
+  name is now the first 16 digits.
+- GitHub's Windows runners have a Vulkan loader but no Vulkan driver and no
+  hardware D3D12 adapter. Tests now skip device checks where no device exists,
+  using a loader-level probe (`tests/support/vulkan_probe.hpp`) so a Xenon
+  regression still fails where a device is present.
+
 ## Runtime observations
 
 See `docs/runtime/AC6_RUNTIME_INVESTIGATION.md`. In short:
