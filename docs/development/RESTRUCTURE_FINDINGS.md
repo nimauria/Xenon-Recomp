@@ -25,6 +25,16 @@ stage. Each entry says how it was observed.
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
+4. **Preparation identity hashes the whole compiler directory.**
+   `graph::preparation_identity()` (`src/recomp/compilation/graph/compilation_graph.cpp`)
+   fingerprints every file under `native_compiler.parent_path()`, recursively.
+   On Linux that is all of `/usr/bin`: about 550 MB in this Codespace, read
+   byte by byte through `istreambuf_iterator`. In a Debug build one identity
+   takes many minutes, which is why `xenon_prepare_worker_tests` exceeds its
+   900 s CTest timeout here. `xenon-prepare` computes the same identity on every
+   preparation, and installing unrelated packages into `/usr/bin` changes the
+   identity.
+
 ## Runtime observations
 
 See `docs/runtime/AC6_RUNTIME_INVESTIGATION.md`. In short:
