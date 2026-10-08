@@ -7,12 +7,48 @@
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
 #endif
 
+#include <cstdint>
 #include <sstream>
 #include <utility>
 
 namespace xenon::gpu {
+
+#if defined(_WIN32) || defined(__linux__)
+namespace {
+
+// A loader without vkEnumerateInstanceVersion is a Vulkan 1.0 loader.
+template <typename EnumerateInstanceVersion>
+void query_vulkan_loader(BackendCapability& vulkan,
+                         EnumerateInstanceVersion enumerate) {
+  std::uint32_t version = (1u << 22);
+  if (!enumerate || enumerate(&version) == 0) {
+    vulkan.runtime_available = true;
+    vulkan.api_version = version;
+    std::ostringstream detail;
+    detail << "Vulkan loader " << (version >> 22) << '.'
+           << ((version >> 12) & 0x3FFu) << '.' << (version & 0xFFFu);
+    vulkan.detail = detail.str();
+  } else {
+    vulkan.detail = "Vulkan loader version query failed";
+  }
+}
+
+void record_vulkan_sdk(BackendCapability& vulkan) {
+#if defined(XENON_HAS_VULKAN_SDK)
+  vulkan.development_files_available = true;
+#else
+  if (vulkan.runtime_available) {
+    vulkan.detail += "; Vulkan SDK headers/import library not found";
+  }
+#endif
+}
+
+}  // namespace
+#endif
 
 std::vector<BackendCapability> discover_backend_capabilities() {
   std::vector<BackendCapability> result;
@@ -23,28 +59,12 @@ std::vector<BackendCapability> discover_backend_capabilities() {
     using EnumerateInstanceVersion = long(__stdcall*)(std::uint32_t*);
     const auto enumerate = reinterpret_cast<EnumerateInstanceVersion>(
         GetProcAddress(loader, "vkEnumerateInstanceVersion"));
-    std::uint32_t version = (1u << 22);
-    if (!enumerate || enumerate(&version) == 0) {
-      vulkan.runtime_available = true;
-      vulkan.api_version = version;
-      std::ostringstream detail;
-      detail << "Vulkan loader " << (version >> 22) << '.'
-             << ((version >> 12) & 0x3FFu) << '.' << (version & 0xFFFu);
-      vulkan.detail = detail.str();
-    } else {
-      vulkan.detail = "Vulkan loader version query failed";
-    }
+    query_vulkan_loader(vulkan, enumerate);
     FreeLibrary(loader);
   } else {
     vulkan.detail = "vulkan-1.dll is not installed";
   }
-#if defined(XENON_HAS_VULKAN_SDK)
-  vulkan.development_files_available = true;
-#else
-  if (vulkan.runtime_available) {
-    vulkan.detail += "; Vulkan SDK headers/import library not found";
-  }
-#endif
+  record_vulkan_sdk(vulkan);
 
   IDXGIFactory6* factory = nullptr;
   if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
@@ -78,8 +98,20 @@ std::vector<BackendCapability> discover_backend_capabilities() {
   if (!d3d12.runtime_available) {
     d3d12.detail = "no hardware adapter supports D3D feature level 12_0";
   }
+#elif defined(__linux__)
+  if (void* loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL)) {
+    using EnumerateInstanceVersion = int (*)(std::uint32_t*);
+    const auto enumerate = reinterpret_cast<EnumerateInstanceVersion>(
+        dlsym(loader, "vkEnumerateInstanceVersion"));
+    query_vulkan_loader(vulkan, enumerate);
+    dlclose(loader);
+  } else {
+    vulkan.detail = "libvulkan.so.1 is not installed";
+  }
+  record_vulkan_sdk(vulkan);
+  d3d12.detail = "Direct3D 12 is available only on Windows";
 #else
-  vulkan.detail = "runtime discovery is implemented for Windows in this phase";
+  vulkan.detail = "Vulkan runtime discovery is unavailable on this platform";
   d3d12.detail = "Direct3D 12 is available only on Windows";
 #endif
   result.push_back(std::move(vulkan));

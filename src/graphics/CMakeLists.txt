@@ -22,6 +22,9 @@ if(XENON_ENABLE_GRAPHICS)
     windows/backend_capabilities.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
+  if(CMAKE_DL_LIBS)
+    target_link_libraries(xenon_graphics PRIVATE ${CMAKE_DL_LIBS})
+  endif()
   if(WIN32)
     # Runtime capability discovery lives in the common layer and calls DXGI
     # and D3D12 even when the optional renderer target is disabled.
