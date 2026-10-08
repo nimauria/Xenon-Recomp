@@ -72,8 +72,11 @@ if(XENON_ENABLE_GRAPHICS)
         vulkan/depth_target.cpp
         vulkan/texture.cpp
         vulkan/presentation.cpp
-        vulkan/backend.cpp)
-      target_include_directories(xenon_graphics_vulkan PUBLIC "${XENON_SOURCE_DIR}/include")
+        vulkan/backend.cpp
+        common/backend_core.hpp)
+      target_include_directories(xenon_graphics_vulkan
+        PUBLIC "${XENON_SOURCE_DIR}/include"
+        PRIVATE "${XENON_SOURCE_DIR}/src")
       target_link_libraries(xenon_graphics_vulkan PUBLIC xenon_graphics ${XENON_VULKAN_TARGET})
       if(TARGET xenon_graphics_dxc)
         target_link_libraries(xenon_graphics_vulkan PRIVATE xenon_graphics_dxc)
@@ -99,8 +102,11 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/depth_target.cpp
       d3d12/texture.cpp
       d3d12/presentation.cpp
-      d3d12/backend.cpp)
-    target_include_directories(xenon_graphics_d3d12 PUBLIC "${XENON_SOURCE_DIR}/include")
+      d3d12/backend.cpp
+      common/backend_core.hpp)
+    target_include_directories(xenon_graphics_d3d12
+      PUBLIC "${XENON_SOURCE_DIR}/include"
+      PRIVATE "${XENON_SOURCE_DIR}/src")
     target_link_libraries(xenon_graphics_d3d12 PUBLIC xenon_graphics d3d12 dxgi dxguid)
     if(TARGET xenon_graphics_dxc)
       target_link_libraries(xenon_graphics_d3d12 PRIVATE xenon_graphics_dxc)
