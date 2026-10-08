@@ -55,6 +55,7 @@
 #include "xenon/gpu/vulkan/render_target.hpp"
 #include "xenon/gpu/vulkan/texture.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "../../support/vulkan_probe.hpp"
 #endif
 
 #if defined(_WIN32) && (defined(XENON_TEST_D3D12) || defined(XENON_TEST_VULKAN))
@@ -308,7 +309,9 @@ int main() {
     assert(capabilities[0].api_version != 0);
 #endif
 #if defined(XENON_TEST_VULKAN)
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "Vulkan: no Vulkan device on this machine; Vulkan checks skipped\n";
+  } else {
   assert(capabilities[0].runtime_available);
   assert(capabilities[0].development_files_available);
   xenon::gpu::vulkan::Context vulkan_context;

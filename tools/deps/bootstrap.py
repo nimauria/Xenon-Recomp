@@ -507,8 +507,11 @@ def _prepare_ffmpeg_source(source: Path, build: Path, entry: dict, quiet: bool) 
     if not (configured_source / "Makefile").is_file():
         raise BootstrapError("Pinned FFmpeg source copy is missing Makefile")
     for patch in entry.get("patches", []):
+        # Compare resolved paths: on Windows resolve() expands 8.3 short names
+        # (such as RUNNER~1 in a temp directory), so an unresolved root would
+        # reject a patch that is inside it.
         patch_path = (SCRIPT_DIR / patch["path"]).resolve()
-        if not patch_path.is_relative_to(SCRIPT_DIR) or not patch_path.is_file():
+        if not patch_path.is_relative_to(SCRIPT_DIR.resolve()) or not patch_path.is_file():
             raise BootstrapError(f"Invalid pinned FFmpeg patch path: {patch['path']}")
         if hashlib.sha256(patch_path.read_bytes()).hexdigest() != patch["sha256"]:
             raise BootstrapError(f"Pinned FFmpeg patch hash mismatch: {patch_path}")

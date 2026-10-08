@@ -12,6 +12,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#if defined(XENON_HAS_VULKAN)
+#include "../support/vulkan_probe.hpp"
+#endif
 
 // Same pattern as tests/core/thread_creation_tests.cpp's own independently
 // defined SessionExecutionTestAccess (each test executable is a separate
@@ -455,15 +458,26 @@ int main() {
     config.enable_input = false;
 
     auto result = session.initialize(config);
-    assert(result.success && "Automatic graphics backend should select a real native backend");
-    assert(session.gpu() != nullptr);
+#if !defined(XENON_HAS_D3D12)
+    if (!xenon::test::vulkan_device_present()) {
+      // Vulkan is the only native backend in this build and the machine has
+      // no Vulkan device: the contract is an outright failure.
+      assert(!result.success && session.gpu() == nullptr);
+    } else
+#endif
+    {
+      assert(result.success && "Automatic graphics backend should select a real native backend");
+      assert(session.gpu() != nullptr);
+    }
     session.shutdown();
   }
 #endif
 
 #if defined(XENON_HAS_VULKAN)
   // Test: explicit Vulkan backend selection.
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "  (explicit Vulkan backend check skipped: no Vulkan device)\n";
+  } else {
     xenon::core::XenonSession session;
     xenon::core::SessionConfig config{};
     config.enable_logging = false;
