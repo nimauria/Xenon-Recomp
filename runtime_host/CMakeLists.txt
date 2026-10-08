@@ -31,8 +31,10 @@ if(MSVC)
   # Diagnostic-only: emit real debug info (PDB) and a MAP file so a live
   # debugger (cdb/windbg) can resolve this binary's own stack frames to
   # function names even in this Release build. Safe to remove once no
-  # longer needed; does not affect optimization/codegen.
-  target_link_options(xenon_runtime_host PRIVATE /DEBUG /MAP:launcher/xenon_runtime_host.map)
+  # longer needed; does not affect optimization/codegen. /MAP without a path
+  # writes xenon_runtime_host.map beside the executable, which also works
+  # when the launcher (and its output directory) is not built.
+  target_link_options(xenon_runtime_host PRIVATE /DEBUG /MAP)
 endif()
 
 # The game window belongs to this process (see presentation_host.hpp), reusing
