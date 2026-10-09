@@ -55,6 +55,14 @@ jobs:
         run: cmake --build build/linux-x64-debug --target xenon_graphics_vulkan xenon_runtime_host xenon_launcher
       - name: Test
         run: ctest --test-dir build/linux-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
+      - name: Keep CTest results for the coverage audit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-results-linux
+          path: build/linux-x64-debug/ctest-results.xml
+          if-no-files-found: warn
+          retention-days: 30
       - name: Require every registered test to run
         run: python3 tools/coverage/check_ctest.py build/linux-x64-debug/ctest-results.xml
       - name: Audit source ownership
