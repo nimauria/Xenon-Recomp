@@ -4,7 +4,7 @@
 
 [![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/dashboard.svg)
 
-[View the detailed dashboard](docs/coverage/README.md) · [Read the coverage report](docs/coverage/REPORT.md)
+[View the detailed dashboard](docs/coverage/README.md) · [Read the coverage report](docs/coverage/REPORT.md) · [Review audit candidates](docs/coverage/AUDIT.md)
 
 **Xenon Recomp** is an experimental, modular Xbox 360 static-recompilation platform and native runtime for modern systems.
 

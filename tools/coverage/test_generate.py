@@ -241,7 +241,7 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(first.count("<title>"), len(self.items))
         compact = generate.render_summary_svg(self.items, self.entries)
         self.assertEqual(compact, generate.render_summary_svg(self.items, self.entries))
-        self.assertEqual(ET.fromstring(compact).attrib["viewBox"], "0 0 1200 650")
+        self.assertEqual(ET.fromstring(compact).attrib["viewBox"], "0 0 1200 700")
         self.assertIn("Xbox 360 kernel exports", compact)
         self.assertIn("GPU PM4 packets", compact)
         for svg in (first, compact):
@@ -280,8 +280,9 @@ class CoverageTests(unittest.TestCase):
                      "docs/coverage/README.md", "docs/coverage/REPORT.md"):
             self.assertTrue((generate.ROOT / link).is_file(), link)
         self.assertTrue(generate.SUMMARY_SVG.is_file())
-        self.assertEqual(generate.SUMMARY_SVG.read_text(), generate.render_summary_svg(self.items, self.entries))
-        self.assertEqual(generate.SVG.read_text(), generate.render_svg(self.items, self.entries))
+        _, _, outputs = generate.generate()
+        blocking, _ = generate.classify_drift(outputs)
+        self.assertEqual(blocking, [], "committed dashboard assets are stale")
 
     def test_ctest_report_and_platform_gate(self):
         with tempfile.TemporaryDirectory() as directory:

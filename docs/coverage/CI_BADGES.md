@@ -8,6 +8,8 @@ GitHub Actions badges report a workflow, not an individual job. The README there
 | Linux | `.github/workflows/linux.yml` | Pinned dependency bootstrap, CMake configure/build, Vulkan and runtime/launcher targets, full CTest run, source ownership audit |
 | Overall CI | `.github/workflows/ci.yml` | Coverage tooling and stale assets, focused ASan/UBSan tests, and same-commit Windows/Linux results |
 
+The separate `.github/workflows/coverage-refresh.yml` has no badge and does not affect these three. It reads the platform workflows' existing CTest results to refresh the coverage dashboard by bot pull request ([automation](AUTOMATION.md)). It never reports a test as passing unless it read that test's actual result.
+
 The platform workflows each run the native build once. The overall workflow queries GitHub's Actions API for the corresponding platform workflow runs with the same event, branch, and source commit (`pull_request.head.sha` for PRs). It succeeds only after both complete successfully and their required native jobs report success. Missing, skipped, failed, cancelled, or timed-out platform runs never count as passing. A manual dispatch of overall CI needs matching manual platform runs at the same commit; otherwise it times out and fails.
 
 CTest writes a JUnit file. `tools/coverage/check_ctest.py` checks that it contains at least one case and no skipped, failed, or errored cases. CTest itself fails on test assertions and timeouts; neither workflow filters out the documented intermittent SList/threading hang.

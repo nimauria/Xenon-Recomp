@@ -1,145 +1,194 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
 <title id="title">Xenon implementation coverage summary</title>
 <desc id="desc">Source-listed operations grouped by subsystem. Coloured bars show audited states; unassessed operations remain unknown.</desc>
-<rect width="1200" height="650" fill="#101721"/>
+<rect width="1200" height="700" fill="#101721"/>
 <text x="30" y="48" fill="#f4f7fb" font-size="29" font-weight="700" font-family="sans-serif">XENON  /  IMPLEMENTATION COVERAGE</text>
-<text x="30" y="77" fill="#c5d1dd" font-size="16" font-family="sans-serif">29/864 verified by tests (≥3.4%)  ·  45/864 audited  ·  source-listed scope</text>
-<rect x="30" y="102" width="555" height="244" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="30" y="77" fill="#c5d1dd" font-size="16" font-family="sans-serif">29/864 verified by tests (≥3.4%)  ·  45/864 classified  ·  source-listed scope</text>
+<text x="1170" y="48" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 5c71e55</text>
+<rect x="30" y="102" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="132" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox 360 kernel exports</text>
-<text x="46" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">254 listed  ·  33 audited  ·  20 verified (≥7.9%)</text>
-<text x="46" y="183" fill="#dce7f2" font-size="11" font-family="sans-serif">Audio</text>
-<rect x="159" y="172" width="115" height="13" fill="#514c72"><title>Audio: 24 unassessed</title></rect>
-<text x="299" y="183" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">24</text>
-<text x="46" y="206" fill="#dce7f2" font-size="11" font-family="sans-serif">Crypto</text>
-<rect x="159" y="195" width="76" height="13" fill="#d98b6a"><title>Crypto: 2 stub</title></rect>
-<rect x="235" y="195" width="39" height="13" fill="#514c72"><title>Crypto: 1 unassessed</title></rect>
-<text x="299" y="206" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
-<text x="46" y="229" fill="#dce7f2" font-size="11" font-family="sans-serif">Debug</text>
-<rect x="159" y="218" width="115" height="13" fill="#514c72"><title>Debug: 3 unassessed</title></rect>
-<text x="299" y="229" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
-<text x="46" y="252" fill="#dce7f2" font-size="11" font-family="sans-serif">Executive</text>
-<rect x="159" y="241" width="115" height="13" fill="#514c72"><title>Executive: 15 unassessed</title></rect>
-<text x="299" y="252" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">15</text>
-<text x="46" y="275" fill="#dce7f2" font-size="11" font-family="sans-serif">Kernel</text>
-<rect x="159" y="264" width="25" height="13" fill="#3dbb79"><title>Kernel: 9 verified</title></rect>
-<rect x="184" y="264" width="4" height="13" fill="#55a6e9"><title>Kernel: 1 implemented_unverified</title></rect>
-<rect x="188" y="264" width="4" height="13" fill="#f2bc5a"><title>Kernel: 1 partial</title></rect>
-<rect x="192" y="264" width="82" height="13" fill="#514c72"><title>Kernel: 29 unassessed</title></rect>
-<text x="299" y="275" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">40</text>
-<text x="46" y="298" fill="#dce7f2" font-size="11" font-family="sans-serif">Memory</text>
-<rect x="159" y="287" width="115" height="13" fill="#514c72"><title>Memory: 12 unassessed</title></rect>
-<text x="299" y="298" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">12</text>
-<text x="46" y="321" fill="#dce7f2" font-size="11" font-family="sans-serif">Modules</text>
-<rect x="159" y="310" width="115" height="13" fill="#514c72"><title>Modules: 3 unassessed</title></rect>
-<text x="299" y="321" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
-<text x="310" y="183" fill="#dce7f2" font-size="11" font-family="sans-serif">NT / I/O</text>
-<rect x="423" y="172" width="3" height="13" fill="#f2bc5a"><title>NT / I/O: 1 partial</title></rect>
-<rect x="426" y="172" width="112" height="13" fill="#514c72"><title>NT / I/O: 39 unassessed</title></rect>
-<text x="563" y="183" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">40</text>
-<text x="310" y="206" fill="#dce7f2" font-size="11" font-family="sans-serif">Objects</text>
-<rect x="423" y="195" width="115" height="13" fill="#514c72"><title>Objects: 4 unassessed</title></rect>
-<text x="563" y="206" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
-<text x="310" y="229" fill="#dce7f2" font-size="11" font-family="sans-serif">Other</text>
-<rect x="423" y="218" width="6" height="13" fill="#d98b6a"><title>Other: 1 stub</title></rect>
-<rect x="429" y="218" width="109" height="13" fill="#514c72"><title>Other: 20 unassessed</title></rect>
-<text x="563" y="229" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">21</text>
-<text x="310" y="252" fill="#dce7f2" font-size="11" font-family="sans-serif">RTL</text>
-<rect x="423" y="241" width="30" height="13" fill="#3dbb79"><title>RTL: 10 verified</title></rect>
-<rect x="453" y="241" width="4" height="13" fill="#55a6e9"><title>RTL: 1 implemented_unverified</title></rect>
-<rect x="457" y="241" width="4" height="13" fill="#d98b6a"><title>RTL: 1 stub</title></rect>
-<rect x="461" y="241" width="77" height="13" fill="#514c72"><title>RTL: 26 unassessed</title></rect>
-<text x="563" y="252" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">38</text>
-<text x="310" y="275" fill="#dce7f2" font-size="11" font-family="sans-serif">Variables</text>
-<rect x="423" y="264" width="115" height="13" fill="#514c72"><title>Variables: 10 unassessed</title></rect>
-<text x="563" y="275" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">10</text>
-<text x="310" y="298" fill="#dce7f2" font-size="11" font-family="sans-serif">Video</text>
-<rect x="423" y="287" width="6" height="13" fill="#3dbb79"><title>Video: 1 verified</title></rect>
-<rect x="429" y="287" width="29" height="13" fill="#f2bc5a"><title>Video: 5 partial</title></rect>
-<rect x="458" y="287" width="80" height="13" fill="#514c72"><title>Video: 14 unassessed</title></rect>
-<text x="563" y="298" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">20</text>
-<text x="310" y="321" fill="#dce7f2" font-size="11" font-family="sans-serif">XMA</text>
-<rect x="423" y="310" width="115" height="13" fill="#514c72"><title>XMA: 21 unassessed</title></rect>
-<text x="563" y="321" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">21</text>
-<rect x="615" y="102" width="555" height="244" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="46" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">254 listed  ·  33 classified  ·  20 verified (≥7.9%)</text>
+<rect x="46.0" y="169" width="9" height="9" fill="#3dbb79"/>
+<text x="59.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">20 verified</text>
+<rect x="135.0" y="169" width="9" height="9" fill="#55a6e9"/>
+<text x="148.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">2 unverified</text>
+<rect x="230.0" y="169" width="9" height="9" fill="#f2bc5a"/>
+<text x="243.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">7 partial</text>
+<rect x="307.0" y="169" width="9" height="9" fill="#d98b6a"/>
+<text x="320.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">4 stub</text>
+<rect x="366.0" y="169" width="9" height="9" fill="#88919e"/>
+<text x="379.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="479.0" y="169" width="9" height="9" fill="#514c72"/>
+<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">221 unassessed</text>
+<text x="46" y="205" fill="#dce7f2" font-size="11" font-family="sans-serif">Audio</text>
+<rect x="159" y="194" width="115" height="13" fill="#514c72"><title>Audio: 24 unassessed</title></rect>
+<text x="299" y="205" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">24</text>
+<text x="46" y="228" fill="#dce7f2" font-size="11" font-family="sans-serif">Crypto</text>
+<rect x="159" y="217" width="76" height="13" fill="#d98b6a"><title>Crypto: 2 stub</title></rect>
+<rect x="235" y="217" width="39" height="13" fill="#514c72"><title>Crypto: 1 unassessed</title></rect>
+<text x="299" y="228" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
+<text x="46" y="251" fill="#dce7f2" font-size="11" font-family="sans-serif">Debug</text>
+<rect x="159" y="240" width="115" height="13" fill="#514c72"><title>Debug: 3 unassessed</title></rect>
+<text x="299" y="251" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
+<text x="46" y="274" fill="#dce7f2" font-size="11" font-family="sans-serif">Executive</text>
+<rect x="159" y="263" width="115" height="13" fill="#514c72"><title>Executive: 15 unassessed</title></rect>
+<text x="299" y="274" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">15</text>
+<text x="46" y="297" fill="#dce7f2" font-size="11" font-family="sans-serif">Kernel</text>
+<rect x="159" y="286" width="25" height="13" fill="#3dbb79"><title>Kernel: 9 verified</title></rect>
+<rect x="184" y="286" width="4" height="13" fill="#55a6e9"><title>Kernel: 1 implemented_unverified</title></rect>
+<rect x="188" y="286" width="4" height="13" fill="#f2bc5a"><title>Kernel: 1 partial</title></rect>
+<rect x="192" y="286" width="82" height="13" fill="#514c72"><title>Kernel: 29 unassessed</title></rect>
+<text x="299" y="297" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">40</text>
+<text x="46" y="320" fill="#dce7f2" font-size="11" font-family="sans-serif">Memory</text>
+<rect x="159" y="309" width="115" height="13" fill="#514c72"><title>Memory: 12 unassessed</title></rect>
+<text x="299" y="320" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">12</text>
+<text x="46" y="343" fill="#dce7f2" font-size="11" font-family="sans-serif">Modules</text>
+<rect x="159" y="332" width="115" height="13" fill="#514c72"><title>Modules: 3 unassessed</title></rect>
+<text x="299" y="343" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">3</text>
+<text x="310" y="205" fill="#dce7f2" font-size="11" font-family="sans-serif">NT / I/O</text>
+<rect x="423" y="194" width="3" height="13" fill="#f2bc5a"><title>NT / I/O: 1 partial</title></rect>
+<rect x="426" y="194" width="112" height="13" fill="#514c72"><title>NT / I/O: 39 unassessed</title></rect>
+<text x="563" y="205" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">40</text>
+<text x="310" y="228" fill="#dce7f2" font-size="11" font-family="sans-serif">Objects</text>
+<rect x="423" y="217" width="115" height="13" fill="#514c72"><title>Objects: 4 unassessed</title></rect>
+<text x="563" y="228" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
+<text x="310" y="251" fill="#dce7f2" font-size="11" font-family="sans-serif">Other</text>
+<rect x="423" y="240" width="6" height="13" fill="#d98b6a"><title>Other: 1 stub</title></rect>
+<rect x="429" y="240" width="109" height="13" fill="#514c72"><title>Other: 20 unassessed</title></rect>
+<text x="563" y="251" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">21</text>
+<text x="310" y="274" fill="#dce7f2" font-size="11" font-family="sans-serif">RTL</text>
+<rect x="423" y="263" width="30" height="13" fill="#3dbb79"><title>RTL: 10 verified</title></rect>
+<rect x="453" y="263" width="4" height="13" fill="#55a6e9"><title>RTL: 1 implemented_unverified</title></rect>
+<rect x="457" y="263" width="4" height="13" fill="#d98b6a"><title>RTL: 1 stub</title></rect>
+<rect x="461" y="263" width="77" height="13" fill="#514c72"><title>RTL: 26 unassessed</title></rect>
+<text x="563" y="274" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">38</text>
+<text x="310" y="297" fill="#dce7f2" font-size="11" font-family="sans-serif">Variables</text>
+<rect x="423" y="286" width="115" height="13" fill="#514c72"><title>Variables: 10 unassessed</title></rect>
+<text x="563" y="297" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">10</text>
+<text x="310" y="320" fill="#dce7f2" font-size="11" font-family="sans-serif">Video</text>
+<rect x="423" y="309" width="6" height="13" fill="#3dbb79"><title>Video: 1 verified</title></rect>
+<rect x="429" y="309" width="29" height="13" fill="#f2bc5a"><title>Video: 5 partial</title></rect>
+<rect x="458" y="309" width="80" height="13" fill="#514c72"><title>Video: 14 unassessed</title></rect>
+<text x="563" y="320" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">20</text>
+<text x="310" y="343" fill="#dce7f2" font-size="11" font-family="sans-serif">XMA</text>
+<rect x="423" y="332" width="115" height="13" fill="#514c72"><title>XMA: 21 unassessed</title></rect>
+<text x="563" y="343" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">21</text>
+<rect x="615" y="102" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="631" y="132" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">PowerPC instructions</text>
-<text x="631" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">455 listed  ·  1 audited  ·  1 verified (≥0.2%)</text>
-<text x="631" y="183" fill="#dce7f2" font-size="11" font-family="sans-serif">Branch</text>
-<rect x="744" y="172" width="115" height="13" fill="#514c72"><title>Branch: 9 unassessed</title></rect>
-<text x="884" y="183" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">9</text>
-<text x="631" y="206" fill="#dce7f2" font-size="11" font-family="sans-serif">Control</text>
-<rect x="744" y="195" width="115" height="13" fill="#514c72"><title>Control: 26 unassessed</title></rect>
-<text x="884" y="206" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">26</text>
-<text x="631" y="229" fill="#dce7f2" font-size="11" font-family="sans-serif">Floating point</text>
-<rect x="744" y="218" width="115" height="13" fill="#514c72"><title>Floating point: 33 unassessed</title></rect>
-<text x="884" y="229" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">33</text>
-<text x="631" y="252" fill="#dce7f2" font-size="11" font-family="sans-serif">Integer</text>
-<rect x="744" y="241" width="2" height="13" fill="#3dbb79"><title>Integer: 1 verified</title></rect>
-<rect x="746" y="241" width="113" height="13" fill="#514c72"><title>Integer: 69 unassessed</title></rect>
-<text x="884" y="252" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">70</text>
-<text x="631" y="275" fill="#dce7f2" font-size="11" font-family="sans-serif">Memory</text>
-<rect x="744" y="264" width="115" height="13" fill="#514c72"><title>Memory: 112 unassessed</title></rect>
-<text x="884" y="275" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">112</text>
-<text x="631" y="298" fill="#dce7f2" font-size="11" font-family="sans-serif">Vector</text>
-<rect x="744" y="287" width="115" height="13" fill="#514c72"><title>Vector: 205 unassessed</title></rect>
-<text x="884" y="298" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">205</text>
-<rect x="30" y="362" width="555" height="244" rx="8" fill="#1b2634" stroke="#405168"/>
-<text x="46" y="392" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xenos shader instructions</text>
-<text x="46" y="415" fill="#c5d1dd" font-size="13" font-family="sans-serif">105 listed  ·  4 audited  ·  1 verified (≥1.0%)</text>
-<text x="46" y="443" fill="#dce7f2" font-size="11" font-family="sans-serif">Control flow</text>
-<rect x="159" y="432" width="8" height="13" fill="#3dbb79"><title>Control flow: 1 verified</title></rect>
-<rect x="167" y="432" width="107" height="13" fill="#514c72"><title>Control flow: 15 unassessed</title></rect>
-<text x="299" y="443" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">16</text>
-<text x="46" y="466" fill="#dce7f2" font-size="11" font-family="sans-serif">Scalar ALU</text>
-<rect x="159" y="455" width="3" height="13" fill="#55a6e9"><title>Scalar ALU: 1 implemented_unverified</title></rect>
-<rect x="162" y="455" width="112" height="13" fill="#514c72"><title>Scalar ALU: 49 unassessed</title></rect>
-<text x="299" y="466" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">50</text>
-<text x="46" y="489" fill="#dce7f2" font-size="11" font-family="sans-serif">Texture fetch</text>
-<rect x="159" y="478" width="15" height="13" fill="#88919e"><title>Texture fetch: 1 unimplemented</title></rect>
-<rect x="174" y="478" width="100" height="13" fill="#514c72"><title>Texture fetch: 7 unassessed</title></rect>
-<text x="299" y="489" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">8</text>
-<text x="46" y="512" fill="#dce7f2" font-size="11" font-family="sans-serif">Vector ALU</text>
-<rect x="159" y="501" width="4" height="13" fill="#55a6e9"><title>Vector ALU: 1 implemented_unverified</title></rect>
-<rect x="163" y="501" width="111" height="13" fill="#514c72"><title>Vector ALU: 29 unassessed</title></rect>
-<text x="299" y="512" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">30</text>
-<text x="46" y="535" fill="#dce7f2" font-size="11" font-family="sans-serif">Vertex fetch</text>
-<rect x="159" y="524" width="115" height="13" fill="#514c72"><title>Vertex fetch: 1 unassessed</title></rect>
-<text x="299" y="535" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">1</text>
-<rect x="615" y="362" width="555" height="244" rx="8" fill="#1b2634" stroke="#405168"/>
-<text x="631" y="392" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">GPU PM4 packets</text>
-<text x="631" y="415" fill="#c5d1dd" font-size="13" font-family="sans-serif">50 listed  ·  7 audited  ·  7 verified (≥14.0%)</text>
-<text x="631" y="443" fill="#dce7f2" font-size="11" font-family="sans-serif">Draw</text>
-<rect x="744" y="432" width="115" height="13" fill="#514c72"><title>Draw: 4 unassessed</title></rect>
-<text x="884" y="443" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
-<text x="631" y="466" fill="#dce7f2" font-size="11" font-family="sans-serif">Event</text>
-<rect x="744" y="455" width="115" height="13" fill="#514c72"><title>Event: 7 unassessed</title></rect>
-<text x="884" y="466" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">7</text>
-<text x="631" y="489" fill="#dce7f2" font-size="11" font-family="sans-serif">Other / passth…</text>
-<rect x="744" y="478" width="19" height="13" fill="#3dbb79"><title>Other / passthrough: 1 verified</title></rect>
-<rect x="763" y="478" width="96" height="13" fill="#514c72"><title>Other / passthrough: 5 unassessed</title></rect>
-<text x="884" y="489" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
-<text x="631" y="512" fill="#dce7f2" font-size="11" font-family="sans-serif">Packet headers</text>
-<rect x="744" y="501" width="115" height="13" fill="#3dbb79"><title>Packet headers: 4 verified</title></rect>
-<text x="884" y="512" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
-<text x="631" y="535" fill="#dce7f2" font-size="11" font-family="sans-serif">Shader</text>
-<rect x="744" y="524" width="115" height="13" fill="#514c72"><title>Shader: 5 unassessed</title></rect>
-<text x="884" y="535" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">5</text>
-<text x="631" y="558" fill="#dce7f2" font-size="11" font-family="sans-serif">State</text>
-<rect x="744" y="547" width="13" height="13" fill="#3dbb79"><title>State: 2 verified</title></rect>
-<rect x="757" y="547" width="102" height="13" fill="#514c72"><title>State: 16 unassessed</title></rect>
-<text x="884" y="558" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">18</text>
-<text x="631" y="581" fill="#dce7f2" font-size="11" font-family="sans-serif">Synchronization</text>
-<rect x="744" y="570" width="115" height="13" fill="#514c72"><title>Synchronization: 6 unassessed</title></rect>
-<text x="884" y="581" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
-<rect x="30" y="607" width="17" height="17" fill="#3dbb79"/>
-<text x="55" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Verified</text>
-<rect x="223" y="607" width="17" height="17" fill="#55a6e9"/>
-<text x="248" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Implemented, unverified</text>
-<rect x="416" y="607" width="17" height="17" fill="#f2bc5a"/>
-<text x="441" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Partial</text>
-<rect x="609" y="607" width="17" height="17" fill="#d98b6a"/>
-<text x="634" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Stub</text>
-<rect x="802" y="607" width="17" height="17" fill="#88919e"/>
-<text x="827" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Unimplemented</text>
-<rect x="995" y="607" width="17" height="17" fill="#514c72"/>
-<text x="1020" y="621" fill="#e5edf6" font-size="13" font-family="sans-serif">Unassessed</text>
+<text x="631" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">455 listed  ·  1 classified  ·  1 verified (≥0.2%)</text>
+<rect x="631.0" y="169" width="9" height="9" fill="#3dbb79"/>
+<text x="644.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 verified</text>
+<rect x="714.0" y="169" width="9" height="9" fill="#55a6e9"/>
+<text x="727.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unverified</text>
+<rect x="809.0" y="169" width="9" height="9" fill="#f2bc5a"/>
+<text x="822.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="886.0" y="169" width="9" height="9" fill="#d98b6a"/>
+<text x="899.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="945.0" y="169" width="9" height="9" fill="#88919e"/>
+<text x="958.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="1058.0" y="169" width="9" height="9" fill="#514c72"/>
+<text x="1071.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">454 unassessed</text>
+<text x="631" y="205" fill="#dce7f2" font-size="11" font-family="sans-serif">Branch</text>
+<rect x="744" y="194" width="115" height="13" fill="#514c72"><title>Branch: 9 unassessed</title></rect>
+<text x="884" y="205" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">9</text>
+<text x="631" y="228" fill="#dce7f2" font-size="11" font-family="sans-serif">Control</text>
+<rect x="744" y="217" width="115" height="13" fill="#514c72"><title>Control: 26 unassessed</title></rect>
+<text x="884" y="228" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">26</text>
+<text x="631" y="251" fill="#dce7f2" font-size="11" font-family="sans-serif">Floating point</text>
+<rect x="744" y="240" width="115" height="13" fill="#514c72"><title>Floating point: 33 unassessed</title></rect>
+<text x="884" y="251" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">33</text>
+<text x="631" y="274" fill="#dce7f2" font-size="11" font-family="sans-serif">Integer</text>
+<rect x="744" y="263" width="2" height="13" fill="#3dbb79"><title>Integer: 1 verified</title></rect>
+<rect x="746" y="263" width="113" height="13" fill="#514c72"><title>Integer: 69 unassessed</title></rect>
+<text x="884" y="274" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">70</text>
+<text x="631" y="297" fill="#dce7f2" font-size="11" font-family="sans-serif">Memory</text>
+<rect x="744" y="286" width="115" height="13" fill="#514c72"><title>Memory: 112 unassessed</title></rect>
+<text x="884" y="297" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">112</text>
+<text x="631" y="320" fill="#dce7f2" font-size="11" font-family="sans-serif">Vector</text>
+<rect x="744" y="309" width="115" height="13" fill="#514c72"><title>Vector: 205 unassessed</title></rect>
+<text x="884" y="320" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">205</text>
+<rect x="30" y="384" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="46" y="414" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xenos shader instructions</text>
+<text x="46" y="437" fill="#c5d1dd" font-size="13" font-family="sans-serif">105 listed  ·  4 classified  ·  1 verified (≥1.0%)</text>
+<rect x="46.0" y="451" width="9" height="9" fill="#3dbb79"/>
+<text x="59.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 verified</text>
+<rect x="129.0" y="451" width="9" height="9" fill="#55a6e9"/>
+<text x="142.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">2 unverified</text>
+<rect x="224.0" y="451" width="9" height="9" fill="#f2bc5a"/>
+<text x="237.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="301.0" y="451" width="9" height="9" fill="#d98b6a"/>
+<text x="314.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="360.0" y="451" width="9" height="9" fill="#88919e"/>
+<text x="373.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 unimplemented</text>
+<rect x="473.0" y="451" width="9" height="9" fill="#514c72"/>
+<text x="486.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">101 unassessed</text>
+<text x="46" y="487" fill="#dce7f2" font-size="11" font-family="sans-serif">Control flow</text>
+<rect x="159" y="476" width="8" height="13" fill="#3dbb79"><title>Control flow: 1 verified</title></rect>
+<rect x="167" y="476" width="107" height="13" fill="#514c72"><title>Control flow: 15 unassessed</title></rect>
+<text x="299" y="487" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">16</text>
+<text x="46" y="510" fill="#dce7f2" font-size="11" font-family="sans-serif">Scalar ALU</text>
+<rect x="159" y="499" width="3" height="13" fill="#55a6e9"><title>Scalar ALU: 1 implemented_unverified</title></rect>
+<rect x="162" y="499" width="112" height="13" fill="#514c72"><title>Scalar ALU: 49 unassessed</title></rect>
+<text x="299" y="510" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">50</text>
+<text x="46" y="533" fill="#dce7f2" font-size="11" font-family="sans-serif">Texture fetch</text>
+<rect x="159" y="522" width="15" height="13" fill="#88919e"><title>Texture fetch: 1 unimplemented</title></rect>
+<rect x="174" y="522" width="100" height="13" fill="#514c72"><title>Texture fetch: 7 unassessed</title></rect>
+<text x="299" y="533" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">8</text>
+<text x="46" y="556" fill="#dce7f2" font-size="11" font-family="sans-serif">Vector ALU</text>
+<rect x="159" y="545" width="4" height="13" fill="#55a6e9"><title>Vector ALU: 1 implemented_unverified</title></rect>
+<rect x="163" y="545" width="111" height="13" fill="#514c72"><title>Vector ALU: 29 unassessed</title></rect>
+<text x="299" y="556" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">30</text>
+<text x="46" y="579" fill="#dce7f2" font-size="11" font-family="sans-serif">Vertex fetch</text>
+<rect x="159" y="568" width="115" height="13" fill="#514c72"><title>Vertex fetch: 1 unassessed</title></rect>
+<text x="299" y="579" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">1</text>
+<rect x="615" y="384" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="631" y="414" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">GPU PM4 packets</text>
+<text x="631" y="437" fill="#c5d1dd" font-size="13" font-family="sans-serif">50 listed  ·  7 classified  ·  7 verified (≥14.0%)</text>
+<rect x="631.0" y="451" width="9" height="9" fill="#3dbb79"/>
+<text x="644.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">7 verified</text>
+<rect x="714.0" y="451" width="9" height="9" fill="#55a6e9"/>
+<text x="727.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unverified</text>
+<rect x="809.0" y="451" width="9" height="9" fill="#f2bc5a"/>
+<text x="822.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="886.0" y="451" width="9" height="9" fill="#d98b6a"/>
+<text x="899.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="945.0" y="451" width="9" height="9" fill="#88919e"/>
+<text x="958.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="1058.0" y="451" width="9" height="9" fill="#514c72"/>
+<text x="1071.0" y="459" fill="#c5d1dd" font-size="10" font-family="sans-serif">43 unassessed</text>
+<text x="631" y="487" fill="#dce7f2" font-size="11" font-family="sans-serif">Draw</text>
+<rect x="744" y="476" width="115" height="13" fill="#514c72"><title>Draw: 4 unassessed</title></rect>
+<text x="884" y="487" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
+<text x="631" y="510" fill="#dce7f2" font-size="11" font-family="sans-serif">Event</text>
+<rect x="744" y="499" width="115" height="13" fill="#514c72"><title>Event: 7 unassessed</title></rect>
+<text x="884" y="510" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">7</text>
+<text x="631" y="533" fill="#dce7f2" font-size="11" font-family="sans-serif">Other / passth…</text>
+<rect x="744" y="522" width="19" height="13" fill="#3dbb79"><title>Other / passthrough: 1 verified</title></rect>
+<rect x="763" y="522" width="96" height="13" fill="#514c72"><title>Other / passthrough: 5 unassessed</title></rect>
+<text x="884" y="533" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
+<text x="631" y="556" fill="#dce7f2" font-size="11" font-family="sans-serif">Packet headers</text>
+<rect x="744" y="545" width="115" height="13" fill="#3dbb79"><title>Packet headers: 4 verified</title></rect>
+<text x="884" y="556" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
+<text x="631" y="579" fill="#dce7f2" font-size="11" font-family="sans-serif">Shader</text>
+<rect x="744" y="568" width="115" height="13" fill="#514c72"><title>Shader: 5 unassessed</title></rect>
+<text x="884" y="579" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">5</text>
+<text x="631" y="602" fill="#dce7f2" font-size="11" font-family="sans-serif">State</text>
+<rect x="744" y="591" width="13" height="13" fill="#3dbb79"><title>State: 2 verified</title></rect>
+<rect x="757" y="591" width="102" height="13" fill="#514c72"><title>State: 16 unassessed</title></rect>
+<text x="884" y="602" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">18</text>
+<text x="631" y="625" fill="#dce7f2" font-size="11" font-family="sans-serif">Synchronization</text>
+<rect x="744" y="614" width="115" height="13" fill="#514c72"><title>Synchronization: 6 unassessed</title></rect>
+<text x="884" y="625" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
+<rect x="30" y="657" width="17" height="17" fill="#3dbb79"/>
+<text x="55" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Verified</text>
+<rect x="223" y="657" width="17" height="17" fill="#55a6e9"/>
+<text x="248" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Implemented, unverified</text>
+<rect x="416" y="657" width="17" height="17" fill="#f2bc5a"/>
+<text x="441" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Partial</text>
+<rect x="609" y="657" width="17" height="17" fill="#d98b6a"/>
+<text x="634" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Stub</text>
+<rect x="802" y="657" width="17" height="17" fill="#88919e"/>
+<text x="827" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Unimplemented</text>
+<rect x="995" y="657" width="17" height="17" fill="#514c72"/>
+<text x="1020" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Unassessed</text>
 </svg>
