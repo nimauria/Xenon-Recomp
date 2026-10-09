@@ -36,7 +36,9 @@ builds and works. Documentation does not override those sources of truth.
 | Host kernel mechanisms | `include/xenon/kernel/` | `src/kernel/` | `xenon_kernel` |
 | XEX format: parse, decrypt, decompress, title updates | `include/xenon/xbox/xex_*.hpp` | `src/xbox/xex/` | `xenon_xex` |
 | XEX image mapping into guest memory | `include/xenon/xbox/xex_loader.hpp` | `src/xbox/xex/loading/` | `xenon_xex_loading` |
-| Xbox guest exports, imports, module registry, guest I/O | `include/xenon/xbox/` | `src/xbox/` | `xenon_xbox_kernel_io` |
+| Xbox guest import tables | `include/xenon/xbox/imports.hpp` | `src/xbox/imports/` | `xenon_xbox_imports` |
+| Guest I/O bridge (`GuestIoBridge`) | `include/xenon/kernel/xbox_io_guest.hpp` | `src/xbox/guest_io/` | `xenon_xbox_guest_io` |
+| Xbox guest exports, module registry, RTL and string support | `include/xenon/xbox/` | `src/xbox/`, `src/xbox/exports/` | `xenon_xbox_kernel_io` |
 | XAM services and exports | `include/xenon/xam/` | `src/xam/` | `xenon_core` |
 | Filesystem and content | `include/xenon/filesystem/` | `src/filesystem/` | `xenon_filesystem` |
 | Graphics frontend and common data | `include/xenon/gpu/` | `src/graphics/xenos/`, `src/graphics/common/` | `xenon_graphics` |
@@ -83,7 +85,8 @@ and `xenon_kernel` (its runtime helpers use guest heaps, its intake reads GDFX
 images), not the guest export bridge, so `xenon-prepare`, `recomp-driver` and
 `module-inspector` no longer link it. The guest I/O bridge (`GuestIoBridge`,
 which publishes host I/O results into guest memory) is implemented in
-`src/xbox/guest_io/` and built into `xenon_xbox_kernel_io`; its public header
+`src/xbox/guest_io/` as `xenon_xbox_guest_io` (host kernel and guest memory
+only); its public header
 is still `include/xenon/kernel/xbox_io_guest.hpp` in namespace
 `xenon::kernel::xbox`, because `XenonSession`'s public header exposes it.
 The export registry is its own target, `xenon_export_registry`, linked by

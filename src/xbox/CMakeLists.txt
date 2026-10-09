@@ -33,13 +33,36 @@ if(XENON_ENABLE_MEMORY)
   add_library(Xenon::XexLoading ALIAS xenon_xex_loading)
 endif()
 
-# Guest xboxkrnl ABI bridge: exports, import and module registries and guest
-# I/O. Kept separate so Xenon::Kernel can still be built/tested without guest
-# memory.
+# Guest import tables: thunk/variable import records resolved against the
+# export registry by the session. Needs only guest memory.
+if(XENON_ENABLE_MEMORY)
+  add_library(xenon_xbox_imports STATIC imports/import_registry.cpp)
+  target_link_libraries(xenon_xbox_imports PUBLIC xenon_memory)
+  target_include_directories(xenon_xbox_imports
+    PUBLIC "${XENON_SOURCE_DIR}/include"
+    PRIVATE "${XENON_SOURCE_DIR}/src")
+  target_compile_features(xenon_xbox_imports PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_xbox_imports)
+  add_library(Xenon::XboxImports ALIAS xenon_xbox_imports)
+endif()
+
 if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
+  # Guest I/O bridge (GuestIoBridge): publishes host kernel I/O results into
+  # guest memory. Needs the host kernel and guest memory, nothing Xbox-side.
+  add_library(xenon_xbox_guest_io STATIC guest_io/xbox_io_guest.cpp)
+  target_link_libraries(xenon_xbox_guest_io PUBLIC xenon_kernel xenon_memory)
+  target_include_directories(xenon_xbox_guest_io
+    PUBLIC "${XENON_SOURCE_DIR}/include"
+    PRIVATE "${XENON_SOURCE_DIR}/src")
+  target_compile_features(xenon_xbox_guest_io PUBLIC cxx_std_20)
+  xenon_enable_warnings(xenon_xbox_guest_io)
+  add_library(Xenon::XboxGuestIo ALIAS xenon_xbox_guest_io)
+
+  # Guest xboxkrnl export bridge: export handlers and the module registry,
+  # RTL, string-format and time support they share. Links the import, guest
+  # I/O and XEX targets publicly so existing consumers (xenon_core, tests,
+  # generated projects via Xenon::XboxKernelIo) are unchanged.
   add_library(xenon_xbox_kernel_io STATIC
-    guest_io/xbox_io_guest.cpp
-    imports/import_registry.cpp
     exports/xboxkrnl_io_exports.cpp
     exports/xboxkrnl_memory_exports.cpp
     exports/xboxkrnl_process_exports.cpp
@@ -68,7 +91,7 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
   )
   target_link_libraries(xenon_xbox_kernel_io
     PUBLIC xenon_kernel xenon_memory xenon_xex xenon_xex_loading
-           xenon_export_registry)
+           xenon_export_registry xenon_xbox_imports xenon_xbox_guest_io)
   target_include_directories(xenon_xbox_kernel_io
     PUBLIC "${XENON_SOURCE_DIR}/include"
     PRIVATE "${XENON_SOURCE_DIR}/src")
