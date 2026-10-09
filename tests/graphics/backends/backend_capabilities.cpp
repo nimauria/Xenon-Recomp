@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -302,6 +303,55 @@ void validate_depth_sample_transfer_matrix(
 
 namespace {
 bool g_test_finished = false;
+
+#if defined(_WIN32)
+// DirectX debug layers deliver a message to an attached debugger by raising
+// one of these codes. With no debugger, the exception is unhandled and ends
+// the process silently, so CI saw only "Failed". Report each one with any
+// readable (length, text) parameter pair, continue so later steps still run,
+// and fail the test at the end: a debug-layer message is never a pass.
+std::atomic<int> g_directx_debug_notifications{0};
+
+bool readable(ULONG_PTR address, ULONG_PTR length) {
+  MEMORY_BASIC_INFORMATION info{};
+  if (!address || !length ||
+      VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0)
+    return false;
+  constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                              PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                              PAGE_EXECUTE_WRITECOPY;
+  const auto end = reinterpret_cast<ULONG_PTR>(info.BaseAddress) + info.RegionSize;
+  return info.State == MEM_COMMIT && (info.Protect & kReadable) != 0 &&
+         (info.Protect & PAGE_GUARD) == 0 && address + length <= end;
+}
+
+LONG CALLBACK report_directx_debug_notification(EXCEPTION_POINTERS* info) {
+  const auto* record = info->ExceptionRecord;
+  if (record->ExceptionCode < 0x87Au || record->ExceptionCode > 0x87Fu)
+    return EXCEPTION_CONTINUE_SEARCH;
+  ++g_directx_debug_notifications;
+  std::fprintf(stderr, "DirectX debug-layer notification 0x%08lX, parameters:",
+               static_cast<unsigned long>(record->ExceptionCode));
+  for (DWORD i = 0; i < record->NumberParameters; ++i)
+    std::fprintf(stderr, " 0x%llX",
+                 static_cast<unsigned long long>(record->ExceptionInformation[i]));
+  std::fputc('\n', stderr);
+  for (DWORD i = 0; i + 1 < record->NumberParameters; ++i) {
+    const auto length = record->ExceptionInformation[i];
+    const auto address = record->ExceptionInformation[i + 1];
+    if (length == 0 || length > 4096) continue;
+    if (readable(address, length)) {
+      std::fprintf(stderr, "  text[%lu]: %.*s\n", static_cast<unsigned long>(i),
+                   static_cast<int>(length), reinterpret_cast<const char*>(address));
+    }
+    if (readable(address, length * sizeof(wchar_t))) {
+      std::fprintf(stderr, "  wide[%lu]: %.*ls\n", static_cast<unsigned long>(i),
+                   static_cast<int>(length), reinterpret_cast<const wchar_t*>(address));
+    }
+  }
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+#endif
 }  // namespace
 
 int main() {
@@ -324,6 +374,7 @@ int main() {
   std::atexit([] {
     if (!g_test_finished) std::fputs("process exited before the test finished\n", stderr);
   });
+  AddVectoredExceptionHandler(1, report_directx_debug_notification);
 #endif
   // This is a rendered-pixel validation, not merely API capability discovery.
   const auto capabilities = xenon::gpu::discover_backend_capabilities();
@@ -1275,5 +1326,11 @@ int main() {
   }
 #endif
   g_test_finished = true;
+#if defined(_WIN32)
+  if (const int notifications = g_directx_debug_notifications.load()) {
+    std::cerr << notifications << " DirectX debug-layer notification(s); failing\n";
+    return 1;
+  }
+#endif
   std::cout << "xenon_backend_capability_tests: ok\n";
 }
