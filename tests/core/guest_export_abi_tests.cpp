@@ -576,7 +576,7 @@ int main() {
                          " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("guest_export_abi"));
   assert(std::system(configure.c_str()) == 0);
   const auto compile_cmd =
-      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug";
+      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug --parallel 4";
   assert(std::system(compile_cmd.c_str()) == 0);
 
   // Also build the STATIC xenon_game target from the very same generated
@@ -588,7 +588,7 @@ int main() {
   // was ever produced, since archiving never needs to resolve the mismatched
   // symbol references.
   const auto compile_static_cmd =
-      "cmake --build " + quote(build_dir) + " --target xenon_game --config Debug";
+      "cmake --build " + quote(build_dir) + " --target xenon_game --config Debug --parallel 4";
   assert(std::system(compile_static_cmd.c_str()) == 0);
 
   // Locate the built shared library (name/location varies by generator).

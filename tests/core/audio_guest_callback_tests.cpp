@@ -296,7 +296,7 @@ int main() {
                          " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("audio_guest_callback"));
   assert(std::system(configure.c_str()) == 0);
   const auto compile_cmd =
-      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug";
+      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug --parallel 4";
   assert(std::system(compile_cmd.c_str()) == 0);
 
   std::filesystem::path module_path;
