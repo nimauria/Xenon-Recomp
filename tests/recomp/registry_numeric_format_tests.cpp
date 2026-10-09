@@ -396,7 +396,10 @@ int main() {
     const auto configure = "cmake -S " + quote(project.fixture.output) + " -B " + quote(build) +
                            " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("registry_numeric_format"));
     assert(std::system(configure.c_str()) == 0);
-    const auto compile = "cmake --build " + quote(build) + " --target xenon_game";
+    // Parallel like recomp_driver_tests' identical nested build: a serial
+    // build of the snapshot's ~170 sources (MSBuild without /m under the
+    // Visual Studio generator) ran past CTest's 900 s timeout on Windows CI.
+    const auto compile = "cmake --build " + quote(build) + " --target xenon_game --parallel 4";
     assert(std::system(compile.c_str()) == 0);
     std::filesystem::remove_all(project.fixture.root);
   }
