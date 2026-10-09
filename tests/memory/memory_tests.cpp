@@ -3,6 +3,8 @@
 #include <atomic>
 #include <bit>
 #include <cassert>
+#include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <thread>
@@ -656,6 +658,77 @@ int main() {
     }
     for (auto& worker : workers) worker.join();
     assert(mem.read32_be(kCounter) == kHardwareThreads * kIterations);
+  }
+
+  // Conditional stores racing plain stores to the same reservation granule
+  // must keep making progress. A conditional store holds the reservation
+  // commit gate while it waits for in-flight writers to drain, so a plain
+  // writer must never wait for that gate while it is counted as in flight
+  // (that wait previously deadlocked both sides; the interlocked SList export
+  // hit it because entries share a granule with the list header). A stalled
+  // run fails here with a diagnostic instead of hanging the suite.
+  {
+    constexpr unsigned kConditionalThreads = 3;
+    constexpr unsigned kPlainWriters = 3;
+    constexpr std::uint64_t kIncrements = 2000;
+    constexpr std::uint32_t kPlainWrites = 2000;
+    constexpr GuestAddress kHeader = 0x00100D00u;
+    constexpr GuestAddress kNeighbour = kHeader + 0x40u;  // same 128-byte granule
+    static_assert(kHeader / kReservationGranuleSize ==
+                  kNeighbour / kReservationGranuleSize);
+    mem.write64_be(kHeader, 0u);
+    std::atomic<std::uint64_t> progress{0};
+    std::atomic<unsigned> conditional_done{0};
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < kConditionalThreads; ++t) {
+      threads.emplace_back([&] {
+        for (std::uint64_t i = 0; i < kIncrements; ++i) {
+          for (;;) {
+            std::uint64_t observed{};
+            const auto token = mem.reserve64(kHeader, observed);
+            if (token && mem.store_conditional64(kHeader, token, observed + 1u)) break;
+            std::this_thread::yield();
+          }
+          progress.fetch_add(1u, std::memory_order_relaxed);
+        }
+        conditional_done.fetch_add(1u, std::memory_order_release);
+      });
+    }
+    std::atomic<unsigned> plain_done{0};
+    for (unsigned t = 0; t < kPlainWriters; ++t) {
+      threads.emplace_back([&, t] {
+        for (std::uint32_t i = 0; i < kPlainWrites; ++i) {
+          mem.write32_be(kNeighbour, i * kPlainWriters + t);
+          progress.fetch_add(1u, std::memory_order_relaxed);
+          std::this_thread::yield();
+        }
+        plain_done.fetch_add(1u, std::memory_order_release);
+      });
+    }
+    const auto all_done = [&] {
+      return conditional_done.load(std::memory_order_acquire) == kConditionalThreads &&
+             plain_done.load(std::memory_order_acquire) == kPlainWriters;
+    };
+    auto last_progress = progress.load();
+    auto last_change = std::chrono::steady_clock::now();
+    while (!all_done()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      const auto now_progress = progress.load();
+      const auto now = std::chrono::steady_clock::now();
+      if (now_progress != last_progress) {
+        last_progress = now_progress;
+        last_change = now;
+      } else if (now - last_change > std::chrono::seconds(20)) {
+        std::cerr << "reservation monitor stalled: no conditional or plain store "
+                     "completed for 20 s (conditional threads done: "
+                  << conditional_done.load() << "/" << kConditionalThreads
+                  << ", plain writers done: " << plain_done.load() << "/"
+                  << kPlainWriters << ")\n";
+        std::_Exit(1);
+      }
+    }
+    for (auto& thread : threads) thread.join();
+    assert(mem.read64_be(kHeader) == kConditionalThreads * kIncrements);
   }
 
   // Explicit physical allocation can be mapped into a virtual range for GPU/APU sharing.

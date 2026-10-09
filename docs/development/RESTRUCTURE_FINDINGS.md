@@ -18,18 +18,6 @@ findings remain below; resolved findings record the observed cause and fix.
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
-3. **`xenon_xbox_threading_exports_tests` hangs intermittently.** Its
-   `slist_concurrent` case (four threads pushing 1,200 entries through
-   `InterlockedPushEntrySList` while four pop them) occasionally never sees all
-   entries popped, so the poppers spin until CTest's 900 s timeout. Locally the
-   test hung in 2 of 15 runs on this branch and 4 of 30 runs built from
-   `780d017`, before any code moved, so the defect predates the refactor.
-   The SList exports (`src/xbox/exports/xboxkrnl_threading_exports.cpp`) rely
-   on `AddressSpace::reserve64()`/`store_conditional64()`
-   (`src/memory/guest/reservations/reservations.cpp`) to reject a store over a
-   header another thread changed; a lost entry points at a
-   window where a stale reservation still commits.
-
 ## Differences between the Vulkan and D3D12 backends
 
 Both backends now share `src/graphics/common/backend_core*.hpp`. Where their
@@ -101,6 +89,26 @@ defect that predates the refactor:
   hardware D3D12 adapter. Tests now skip device checks where no device exists,
   using a loader-level probe (`tests/support/vulkan_probe.hpp`) so a Xenon
   regression still fails where a device is present.
+
+**`xenon_xbox_threading_exports_tests` hung intermittently.** Its
+`slist_concurrent` case hung in about 1 of 40 local runs and timed out on
+every recent Windows CI run; it predates the refactor (4 of 30 runs built from
+`780d017`). The cause was a lock-order inversion in the guest reservation
+monitor, not the SList algorithm. `store_conditional{32,64}()` (and
+`physical_write_window()`) take the reservation commit gate and then wait for
+`active_coherency_writers` to drain. A plain store in
+`reservation_monitor_detail::enter_write()` (`include/xenon/cpu/memory_port.hpp`)
+counted itself as an active writer first and then, when its 128-byte granule
+had ever held a reservation, waited for that gate to be released. Each side
+waited for the other forever. `InterlockedPushEntrySList` writes
+`entry->Next` with a plain store, and the test's entries share a granule with
+the list header, so pushers and conditional stores met in exactly this state.
+Thread stacks of a stalled run showed one thread in `store_conditional64()`
+and the plain writers in `enter_write()`'s gate wait. A writer now waits for
+either gate only while uncounted, backing out both counts if a gate was
+raised after it counted itself. `xenon_memory_tests` races conditional and
+plain stores in one granule under a no-progress watchdog: it stalled in 5 of
+5 runs before the fix and passes after it.
 
 ## Runtime observations
 

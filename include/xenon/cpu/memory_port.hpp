@@ -908,40 +908,47 @@ inline void cancel_reservation(const FastMemoryView& fast,
   // granules that have ever hosted a reservation participate in the LR/SC
   // commit gate. The boolean return is carried to finish_write so a sticky-bit
   // transition while the store is in flight cannot unbalance the counter.
-  if (fast.active_coherency_writers) {
-    for (;;) {
-      if (fast.coherency_commit_gate) {
-        while (fast.coherency_commit_gate->load(std::memory_order_acquire) !=
-               0u) {
-          std::this_thread::yield();
-        }
+  //
+  // A writer waits for either gate only while it is NOT counted. A conditional
+  // store (and physical_write_window) holds the reservation commit gate while
+  // it waits for active_coherency_writers to drain, so a writer that stayed
+  // counted while waiting for that gate would deadlock with it. When either
+  // gate is raised after the writer counted itself, both counts are backed out
+  // before waiting.
+  bool reservation_participant = false;
+  for (;;) {
+    if (fast.active_coherency_writers && fast.coherency_commit_gate) {
+      while (fast.coherency_commit_gate->load(std::memory_order_acquire) !=
+             0u) {
+        std::this_thread::yield();
       }
+    }
+    if (fast.active_coherency_writers) {
       fast.active_coherency_writers->fetch_add(1u,
                                                 std::memory_order_acq_rel);
-      if (!fast.coherency_commit_gate ||
-          fast.coherency_commit_gate->load(std::memory_order_acquire) == 0u) {
-        break;
-      }
+    }
+    reservation_participant =
+        range_has_seen_reservation(fast, physical_address, width) &&
+        fast.active_reservation_ops;
+    if (reservation_participant) {
+      fast.active_reservation_ops->fetch_add(1u, std::memory_order_acq_rel);
+    }
+    const bool coherency_blocked =
+        fast.active_coherency_writers && fast.coherency_commit_gate &&
+        fast.coherency_commit_gate->load(std::memory_order_acquire) != 0u;
+    const bool reservation_blocked =
+        reservation_participant && fast.reservation_commit_gate &&
+        fast.reservation_commit_gate->held();
+    if (!coherency_blocked && !reservation_blocked) break;
+    if (reservation_participant) {
+      fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
+    }
+    if (fast.active_coherency_writers) {
       fast.active_coherency_writers->fetch_sub(1u,
                                                 std::memory_order_release);
     }
-  }
-
-  const bool reservation_participant =
-      range_has_seen_reservation(fast, physical_address, width) &&
-      fast.active_reservation_ops;
-  if (reservation_participant) {
-    for (;;) {
-      if (fast.reservation_commit_gate) {
-        while (fast.reservation_commit_gate->held()) {
-          std::this_thread::yield();
-        }
-      }
-      fast.active_reservation_ops->fetch_add(1u, std::memory_order_acq_rel);
-      if (!fast.reservation_commit_gate || !fast.reservation_commit_gate->held()) {
-        break;
-      }
-      fast.active_reservation_ops->fetch_sub(1u, std::memory_order_release);
+    if (reservation_blocked) {
+      while (fast.reservation_commit_gate->held()) std::this_thread::yield();
     }
   }
 
