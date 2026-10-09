@@ -298,6 +298,9 @@ void validate_depth_sample_transfer_matrix(
 #endif
 
 int main() {
+  // Flush every line: a GPU runtime that ends the process abnormally must not
+  // take the record of how far the test got with it.
+  std::cout << std::unitbuf;
   // This is a rendered-pixel validation, not merely API capability discovery.
   const auto capabilities = xenon::gpu::discover_backend_capabilities();
   assert(capabilities.size() == 2);
@@ -1024,6 +1027,7 @@ int main() {
     if (!d3d_pipeline_ready)
       std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
     assert(d3d_pipeline_ready);
+    std::cout << "D3D12 pipeline ready\n";
     resources.prepare_draw(0, 0);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());
@@ -1171,6 +1175,7 @@ int main() {
 
 #if defined(_WIN32) && defined(XENON_TEST_D3D12)
   {
+    std::cout << "D3D12 presentation\n";
     HWND window = create_presentation_test_window(96, 64);
     assert(window != nullptr);
     {
@@ -1198,7 +1203,10 @@ int main() {
 #endif
 
 #if defined(_WIN32) && defined(XENON_TEST_VULKAN)
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "Vulkan presentation: no Vulkan device on this machine; skipped\n";
+  } else {
+    std::cout << "Vulkan presentation\n";
     HWND window = create_presentation_test_window(96, 64);
     assert(window != nullptr);
     {
