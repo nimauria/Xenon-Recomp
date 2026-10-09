@@ -38,7 +38,7 @@ endif()
 # memory.
 if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
   add_library(xenon_xbox_kernel_io STATIC
-    ${XENON_SOURCE_DIR}/src/kernel/xboxkrnl/xbox_io_guest.cpp
+    guest_io/xbox_io_guest.cpp
     imports/import_registry.cpp
     exports/xboxkrnl_io_exports.cpp
     exports/xboxkrnl_memory_exports.cpp

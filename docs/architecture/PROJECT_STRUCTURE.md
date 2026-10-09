@@ -80,7 +80,12 @@ the guest ABI bridge and links both XEX targets publicly, so its consumers,
 including generated projects, are unchanged. `xenon_recomp` links `xenon_xex`
 and `xenon_kernel` (its runtime helpers use guest heaps, its intake reads GDFX
 images), not the guest export bridge, so `xenon-prepare`, `recomp-driver` and
-`module-inspector` no longer link it. `src/xam/` owns XAM services
+`module-inspector` no longer link it. The guest I/O bridge (`GuestIoBridge`,
+which publishes host I/O results into guest memory) is implemented in
+`src/xbox/guest_io/` and built into `xenon_xbox_kernel_io`; its public header
+is still `include/xenon/kernel/xbox_io_guest.hpp` in namespace
+`xenon::kernel::xbox`, because `XenonSession`'s public header exposes it.
+`src/xam/` owns XAM services
 and their guest export registration. Export tests should invoke the production
 registry with guest memory and actual ordinals.
 
