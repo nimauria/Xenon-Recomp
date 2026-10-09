@@ -89,6 +89,24 @@ std::string preparation_identity(const std::filesystem::path& source_root,
     for (const auto& e : std::filesystem::recursive_directory_iterator(p))
       if (e.is_regular_file()) add_file(e.path());
   };
+  // The header and import-library directories INCLUDE and LIB name hold
+  // gigabytes under an MSVC developer environment (MSVC, ATL/MFC, NETFX and
+  // Windows SDK trees). Reading and hashing all of it on every call took
+  // longer than CTest's 900 s timeout in a debug build, and xenon-prepare pays
+  // it once per module. Like ccache's default compiler_check=mtime, these
+  // trees are fingerprinted by each file's path, size and last-write time; a
+  // toolchain or SDK update rewrites the files it changes, so the identity
+  // still changes with it. Xenon's own sources, CMake and the compiler remain
+  // content-hashed.
+  const auto add_tree_metadata = [&](const std::filesystem::path& p) {
+    if (!std::filesystem::exists(p)) return;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(p)) {
+      if (!e.is_regular_file()) continue;
+      files["metadata:" + e.path().generic_string()] =
+          std::to_string(e.file_size()) + ":" +
+          std::to_string(e.last_write_time().time_since_epoch().count());
+    }
+  };
   for (const auto* dir : {"include", "src", "cmake"}) add_tree(source_root / dir);
   add_file(source_root / "CMakeLists.txt");
   add_file(source_root / "tools/compilation_cache.py");
@@ -105,10 +123,10 @@ std::string preparation_identity(const std::filesystem::path& source_root,
     if (value && (std::string_view(name) == "INCLUDE" || std::string_view(name) == "LIB")) {
       std::istringstream paths(value);
       std::string path;
-      while (std::getline(paths, path, ';')) if (!path.empty()) add_tree(path);
+      while (std::getline(paths, path, ';')) if (!path.empty()) add_tree_metadata(path);
     }
   }
-  Node node{"prepared-environment", "prepare-11", std::move(files), {}};
+  Node node{"prepared-environment", "prepare-12", std::move(files), {}};
   return node.key();
 }
 std::string Node::canonical() const {

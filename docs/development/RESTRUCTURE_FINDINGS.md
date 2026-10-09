@@ -57,6 +57,19 @@ producer version. `compilation_graph_tests` checks that changing an unrelated
 neighbouring file leaves the key stable while changing the compiler changes
 it.
 
+**Preparation identity read the whole Windows SDK.** On Windows CI
+`xenon_compilation_graph_tests` timed out at 900 s; on Linux it takes under a
+second. `graph::preparation_identity()` also content-hashed every file under
+the directories `INCLUDE` and `LIB` name, which under the MSVC developer
+environment are the MSVC, ATL/MFC, NETFX and Windows SDK header and library
+trees. The test computes the identity three times in a debug build;
+locally, pointing `INCLUDE` at 88 MB of headers alone added 64 s.
+`xenon-prepare` paid the same cost once per module. Those system trees are
+now fingerprinted by path, size and last-write time (producer `prepare-12`);
+Xenon's sources, CMake and the compiler are still content-hashed. With
+`INCLUDE` and `LIB` covering 862 MB the test takes 1.6 s, and it checks that
+size, timestamp and added-file changes still change the identity.
+
 **`xenon_backend_capability_tests` could not pass on Linux.**
 `discover_backend_capabilities()` (now `src/graphics/common/backend_capabilities.cpp`)
 set `runtime_available` only on the `_WIN32` path, so the test aborted on

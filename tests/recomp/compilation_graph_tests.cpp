@@ -22,6 +22,7 @@
 #include <cassert>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -158,6 +159,16 @@ std::string read_all_shards(const std::filesystem::path& output) {
     text.append(std::istreambuf_iterator<char>(source), {});
   }
   return text;
+}
+
+// Sets (or, for nullptr, removes) an environment variable for this process.
+void set_environment(const char* name, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(name, value ? value : "");
+#else
+  if (value) setenv(name, value, 1);
+  else unsetenv(name);
+#endif
 }
 
 struct Fixture {
@@ -300,6 +311,40 @@ int main() {
     assert(g::preparation_identity(source, cmake, compiler) == first);
     std::ofstream(compiler) << "compiler v2\n";
     assert(g::preparation_identity(source, cmake, compiler) != first);
+
+    // Header/library trees named by INCLUDE and LIB are fingerprinted by
+    // path, size and last-write time, not read: under an MSVC environment
+    // they hold gigabytes, and hashing their contents exceeded the CTest
+    // timeout on Windows CI.
+    const auto* saved_include_env = std::getenv("INCLUDE");
+    const std::string saved_include = saved_include_env ? saved_include_env : "";
+    const auto sdk = root / "sdk include";
+    std::filesystem::create_directories(sdk / "nested");
+    const auto header_path = sdk / "nested" / "sdk.h";
+    std::ofstream(header_path) << "#define SDK 1\n";
+    set_environment("INCLUDE", (sdk.string() + ";").c_str());
+    const auto with_sdk = g::preparation_identity(source, cmake, compiler);
+    assert(g::preparation_identity(source, cmake, compiler) == with_sdk);
+    const auto stamp = std::filesystem::last_write_time(header_path);
+    std::ofstream(header_path) << "#define SDK 22\n";  // size changes
+    std::filesystem::last_write_time(header_path, stamp);
+    const auto resized = g::preparation_identity(source, cmake, compiler);
+    assert(resized != with_sdk);
+    std::filesystem::last_write_time(header_path, stamp + std::chrono::seconds(10));
+    assert(g::preparation_identity(source, cmake, compiler) != resized);
+    std::ofstream(sdk / "added.h") << "\n";
+    const auto with_added = g::preparation_identity(source, cmake, compiler);
+    assert(with_added != resized);
+#if !defined(_WIN32)
+    // An unreadable SDK file is still fingerprinted, which shows contents are
+    // never read. Skipped when the process can read it anyway (root).
+    std::filesystem::permissions(sdk / "added.h", std::filesystem::perms::none);
+    if (!std::ifstream(sdk / "added.h")) {
+      assert(g::preparation_identity(source, cmake, compiler) == with_added);
+    }
+    std::filesystem::permissions(sdk / "added.h", std::filesystem::perms::owner_all);
+#endif
+    set_environment("INCLUDE", saved_include_env ? saved_include.c_str() : nullptr);
     std::filesystem::remove_all(root);
   }
   const auto fixture = make_fixture("incremental",make_xex({branch_word(12,true),branch_word(16,true),kBlr,0x38600001,kBlr,0x38600002,kBlr},0x40));

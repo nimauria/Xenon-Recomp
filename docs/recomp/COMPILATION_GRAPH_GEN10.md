@@ -171,8 +171,11 @@ trustworthy rather than merely "probably fine."
 key) over Xenon's own `include/`, `src/`, `cmake/` trees, `CMakeLists.txt`
 and `tools/compilation_cache.py`, the exact `cmake` binary, the exact
 compiler binary and its directory, and toolchain-relevant environment
-variables (`INCLUDE`/`LIB`/`LIBPATH` directories are walked and hashed too,
-not just read as opaque strings). A prepared native module now cannot survive
+variables. Every file under the `INCLUDE`/`LIB` directories is walked too,
+not just the variables read as opaque strings; those system trees are
+fingerprinted by path, size and last-write time rather than content, because
+under an MSVC environment they hold gigabytes (as with ccache's default
+`compiler_check=mtime`). A prepared native module now cannot survive
 a toolchain or Xenon-source upgrade by accident — the whole-module artifact
 cache and the fine-grained compilation graph agree on when the ground has
 shifted under them. `kArtifactAbiVersion` was bumped to 4 to invalidate
