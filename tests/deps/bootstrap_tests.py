@@ -127,7 +127,10 @@ class DependencyBootstrapTests(unittest.TestCase):
                 fromfile="a/libavcodec/x86/mathops.h", tofile="b/libavcodec/x86/mathops.h",
             ))
             patch_file = root / "mathops.patch"
-            patch_file.write_text(patch_text)
+            # Pinned patches are LF on every host (.gitattributes eol=lf);
+            # write_text() would translate to CRLF on Windows, producing a
+            # patch that no checkout matches.
+            patch_file.write_bytes(patch_text.encode())
             entry = {"patches": [{
                 "path": patch_file.name,
                 "sha256": hashlib.sha256(patch_file.read_bytes()).hexdigest(),
