@@ -16,6 +16,7 @@ if(XENON_BUILD_TESTS)
   target_compile_definitions(xenon_recomp_driver_tests PRIVATE
     XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
   xenon_enable_test_asserts(xenon_recomp_driver_tests)
+  xenon_test_uses_nested_cmake(xenon_recomp_driver_tests)
   add_test(NAME xenon_recomp_driver_tests COMMAND xenon_recomp_driver_tests)
 
   # Generic worker pool (Part 3 of the Recomp Analysis V2 pass): correctness
@@ -150,6 +151,7 @@ if(XENON_BUILD_TESTS)
   target_compile_definitions(xenon_registry_numeric_format_tests PRIVATE
     XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
   xenon_enable_test_asserts(xenon_registry_numeric_format_tests)
+  xenon_test_uses_nested_cmake(xenon_registry_numeric_format_tests)
   add_test(NAME xenon_registry_numeric_format_tests COMMAND xenon_registry_numeric_format_tests)
 
   # Import-thunk static-analysis misclassification fix: an XEX-native

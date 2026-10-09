@@ -11,6 +11,16 @@ if(XENON_BUILD_TESTS)
     add_test(NAME ${target} COMMAND ${target})
   endfunction()
 
+  # Tests that configure and build a generated project use this build's
+  # generator and C++ compiler for it (tests/support/nested_cmake.hpp).
+  function(xenon_test_uses_nested_cmake target)
+    target_compile_definitions(${target} PRIVATE
+      XENON_TEST_CMAKE_GENERATOR="${CMAKE_GENERATOR}"
+      XENON_TEST_CMAKE_GENERATOR_PLATFORM="${CMAKE_GENERATOR_PLATFORM}"
+      XENON_TEST_CMAKE_MAKE_PROGRAM="${CMAKE_MAKE_PROGRAM}"
+      XENON_TEST_CXX_COMPILER="${CMAKE_CXX_COMPILER}")
+  endfunction()
+
   find_package(Python3 3.9 QUIET COMPONENTS Interpreter)
 endif()
 

@@ -9,6 +9,7 @@
 
 #include "xenon/recomp/driver.hpp"
 #include "../support/source_snapshot.hpp"
+#include "../support/nested_cmake.hpp"
 
 namespace {
 
@@ -123,7 +124,8 @@ int main() {
     return std::string("\"") + value.string() + "\"";
   };
   const auto configure = "cmake -S " + quote(output) + " -B " + quote(build) +
-                         " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("recomp_driver"));
+                         " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("recomp_driver")) +
+                         xenon::test::nested_cmake_toolchain_args();
   assert(std::system(configure.c_str()) == 0);
   const auto compile = "cmake --build " + quote(build) + " --target xenon_game --parallel 4";
   assert(std::system(compile.c_str()) == 0);

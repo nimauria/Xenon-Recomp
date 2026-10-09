@@ -39,6 +39,7 @@
 
 #include "xenon/recomp/driver.hpp"
 #include "../support/source_snapshot.hpp"
+#include "../support/nested_cmake.hpp"
 
 using namespace xenon::recomp;
 
@@ -394,7 +395,8 @@ int main() {
       return std::string("\"") + value.string() + "\"";
     };
     const auto configure = "cmake -S " + quote(project.fixture.output) + " -B " + quote(build) +
-                           " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("registry_numeric_format"));
+                           " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("registry_numeric_format")) +
+                         xenon::test::nested_cmake_toolchain_args();
     assert(std::system(configure.c_str()) == 0);
     // Parallel like recomp_driver_tests' identical nested build: a serial
     // build of the snapshot's ~170 sources (MSBuild without /m under the

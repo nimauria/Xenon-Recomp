@@ -65,6 +65,7 @@ if(XENON_BUILD_TESTS)
     target_compile_definitions(xenon_guest_export_abi_tests PRIVATE
       XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
     xenon_enable_test_asserts(xenon_guest_export_abi_tests)
+    xenon_test_uses_nested_cmake(xenon_guest_export_abi_tests)
     add_test(NAME xenon_guest_export_abi_tests COMMAND xenon_guest_export_abi_tests)
   endif()
 
@@ -78,6 +79,7 @@ if(XENON_BUILD_TESTS)
     target_compile_definitions(xenon_audio_guest_callback_tests PRIVATE
       XENON_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
     xenon_enable_test_asserts(xenon_audio_guest_callback_tests)
+    xenon_test_uses_nested_cmake(xenon_audio_guest_callback_tests)
     add_test(NAME xenon_audio_guest_callback_tests COMMAND xenon_audio_guest_callback_tests)
     set_tests_properties(
       xenon_thread_creation_tests

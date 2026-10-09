@@ -83,6 +83,7 @@
 #include "xenon/core/session.hpp"
 #include "xenon/recomp/driver.hpp"
 #include "../support/source_snapshot.hpp"
+#include "../support/nested_cmake.hpp"
 
 // This test's session config requests enable_audio=true and expects the real
 // Audio V1 XAudioGetUnderrunCount export to actually run - see the "Critical
@@ -573,7 +574,8 @@ int main() {
     return std::string("\"") + value.string() + "\"";
   };
   const auto configure = "cmake -S " + quote(output) + " -B " + quote(build_dir) +
-                         " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("guest_export_abi"));
+                         " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("guest_export_abi")) +
+                         xenon::test::nested_cmake_toolchain_args();
   assert(std::system(configure.c_str()) == 0);
   const auto compile_cmd =
       "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug --parallel 4";
