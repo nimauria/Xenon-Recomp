@@ -1,6 +1,7 @@
 #include "xenon/gpu/d3d12/pipeline.hpp"
 
 #include <cmath>
+#include <cstdio>
 
 namespace xenon::gpu::d3d12 {
 namespace {
@@ -54,6 +55,27 @@ struct GraphicsPipelineStream {
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
+
+// The DEPTH_STENCIL2 subobject (independent front/back stencil masks) is only
+// understood by runtimes that report OPTIONS14
+// IndependentFrontAndBackStencilRefMaskSupported: Agility SDK 1.610+ or the
+// Windows 11 24H2 inbox runtime. Windows 10 and Server 2022 expose
+// ID3D12Device2 but reject a stream that contains it, so the stream path must
+// be gated on this capability rather than on the device interface.
+bool independent_stencil_masks_supported(ID3D12Device* device) {
+  D3D12_FEATURE_DATA_D3D12_OPTIONS14 options{};
+  return SUCCEEDED(device->CheckFeatureSupport(
+             D3D12_FEATURE_D3D12_OPTIONS14, &options, sizeof(options))) &&
+         options.IndependentFrontAndBackStencilRefMaskSupported;
+}
+
+std::string failure_text(const char* call, HRESULT result) {
+  char code[16]{};
+  std::snprintf(code, sizeof(code), "0x%08lX",
+                static_cast<unsigned long>(result));
+  return std::string(call) + " failed (" + code +
+         ") for translated Xenos shaders";
+}
 
 D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type(HostPrimitiveTopology topology) {
   switch (topology) {
@@ -252,7 +274,8 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
   desc.DSVFormat = depth_format;
   desc.SampleDesc.Count = sample_count(samples);
   Microsoft::WRL::ComPtr<ID3D12Device2> device2;
-  if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device2)))) {
+  if (independent_stencil_masks_supported(device) &&
+      SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device2)))) {
     GraphicsPipelineStream stream{};
     stream.root.value = root_signature;
     stream.vs.value = desc.VS;
@@ -286,9 +309,10 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
     stream.sample_desc.value = desc.SampleDesc;
     const D3D12_PIPELINE_STATE_STREAM_DESC stream_desc{
         sizeof(stream), &stream};
-    if (FAILED(device2->CreatePipelineState(&stream_desc,
-                                            IID_PPV_ARGS(&pipeline_)))) {
-      error_ = "CreatePipelineState failed for translated Xenos shaders";
+    const HRESULT result =
+        device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pipeline_));
+    if (FAILED(result)) {
+      error_ = failure_text("CreatePipelineState", result);
       return false;
     }
   } else if (depth_state && depth_state->stencil_enabled &&
@@ -299,9 +323,10 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
                   depth_state->stencil_back_write_mask)) {
     error_ = "D3D12 device lacks independent front/back stencil-mask support";
     return false;
-  } else if (FAILED(device->CreateGraphicsPipelineState(
-                 &desc, IID_PPV_ARGS(&pipeline_)))) {
-    error_ = "CreateGraphicsPipelineState failed for translated Xenos shaders";
+  } else if (const HRESULT result = device->CreateGraphicsPipelineState(
+                 &desc, IID_PPV_ARGS(&pipeline_));
+             FAILED(result)) {
+    error_ = failure_text("CreateGraphicsPipelineState", result);
     return false;
   }
   topology_ = command_topology(topology);

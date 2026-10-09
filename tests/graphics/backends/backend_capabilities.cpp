@@ -1004,12 +1004,26 @@ int main() {
     d3d_depth_state.test_enabled = true;
     d3d_depth_state.write_enabled = true;
     d3d_depth_state.function = xenon::gpu::CompareFunction::Less;
-    assert(d3d_pipeline.initialize(
+    // Runtimes without OPTIONS14 (Windows 10, Server 2022) must still build
+    // this pipeline through the legacy description; report which path ran.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS14 d3d_options14{};
+    const bool d3d_independent_stencil_masks =
+        SUCCEEDED(context.device()->CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS14, &d3d_options14,
+            sizeof(d3d_options14))) &&
+        d3d_options14.IndependentFrontAndBackStencilRefMaskSupported;
+    std::cout << "D3D12 independent front/back stencil masks: "
+              << (d3d_independent_stencil_masks ? "supported" : "unsupported")
+              << '\n';
+    const bool d3d_pipeline_ready = d3d_pipeline.initialize(
         context.device(), resources.root_signature(), d3d_vs, d3d_ps,
         nullptr, d3d_formats, xenon::gpu::MsaaSamples::X1,
         xenon::gpu::HostPrimitiveTopology::TriangleList, d3d_raster,
         d3d_write_masks, d3d_blend_states, d3d_depth.format(),
-        &d3d_depth_state));
+        &d3d_depth_state);
+    if (!d3d_pipeline_ready)
+      std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
+    assert(d3d_pipeline_ready);
     resources.prepare_draw(0, 0);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());
