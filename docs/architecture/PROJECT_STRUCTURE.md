@@ -33,7 +33,9 @@ builds and works. Documentation does not override those sources of truth.
 | CPU decode, IR, optimization, AOT | `include/xenon/cpu/` | `src/cpu/` | `xenon_cpu` |
 | Guest address space and host VM | `include/xenon/memory/` | `src/memory/` | `xenon_memory` |
 | Host kernel mechanisms | `include/xenon/kernel/` | `src/kernel/` | `xenon_kernel` |
-| Xbox exports, imports, XEX support | `include/xenon/xbox/` | `src/xbox/` | `xenon_xbox_kernel_io` |
+| XEX format: parse, decrypt, decompress, title updates | `include/xenon/xbox/xex_*.hpp` | `src/xbox/xex/` | `xenon_xex` |
+| XEX image mapping into guest memory | `include/xenon/xbox/xex_loader.hpp` | `src/xbox/xex/loading/` | `xenon_xex_loading` |
+| Xbox guest exports, imports, module registry, guest I/O | `include/xenon/xbox/` | `src/xbox/` | `xenon_xbox_kernel_io` |
 | XAM services and exports | `include/xenon/xam/` | `src/xam/` | `xenon_core` |
 | Filesystem and content | `include/xenon/filesystem/` | `src/filesystem/` | `xenon_filesystem` |
 | Graphics frontend and common data | `include/xenon/gpu/` | `src/graphics/xenos/`, `src/graphics/common/` | `xenon_graphics` |
@@ -70,7 +72,15 @@ copy of guest RAM.
 integration, and I/O mechanisms. `src/xbox/` owns guest-facing Xbox exports,
 import resolution, and XEX/module compatibility; the XEX loader is split by
 stage under `src/xbox/xex/` (`format/`, `security/`, `compression/`, `image/`,
-`imports/`, `loading/`, `title_updates/`). `src/xam/` owns XAM services
+`imports/`, `loading/`, `title_updates/`). XEX format work is its own
+target, `xenon_xex`, which links no guest kernel or guest memory library and
+builds with both disabled; only `loading/` (`map_xex_image()`, `load_xex()`)
+needs guest memory and forms `xenon_xex_loading`. `xenon_xbox_kernel_io` keeps
+the guest ABI bridge and links both XEX targets publicly, so its consumers,
+including generated projects, are unchanged. `xenon_recomp` links `xenon_xex`
+and `xenon_kernel` (its runtime helpers use guest heaps, its intake reads GDFX
+images), not the guest export bridge, so `xenon-prepare`, `recomp-driver` and
+`module-inspector` no longer link it. `src/xam/` owns XAM services
 and their guest export registration. Export tests should invoke the production
 registry with guest memory and actual ordinals.
 

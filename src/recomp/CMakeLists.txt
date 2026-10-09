@@ -87,7 +87,11 @@ target_include_directories(xenon_recomp
   PUBLIC "${XENON_SOURCE_DIR}/include"
   # Private headers are included as "recomp/<area>/<header>.hpp".
   PRIVATE "${XENON_SOURCE_DIR}/src")
-target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xbox_kernel_io Threads::Threads)
+# XEX parsing comes from xenon_xex. runtime/ (helpers and native replacements
+# called by generated modules) uses kernel::KernelProcess and its guest heaps,
+# and intake/ reads GDFX images through the filesystem, so xenon_kernel is a
+# direct dependency. The guest export bridge (xenon_xbox_kernel_io) is not.
+target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xex xenon_kernel Threads::Threads)
 target_compile_features(xenon_recomp PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_recomp)
 add_library(Xenon::Recomp ALIAS xenon_recomp)
