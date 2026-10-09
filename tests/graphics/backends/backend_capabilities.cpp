@@ -12,7 +12,10 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <span>
 #include <string>
@@ -297,10 +300,31 @@ void validate_depth_sample_transfer_matrix(
 }  // namespace
 #endif
 
+namespace {
+bool g_test_finished = false;
+}  // namespace
+
 int main() {
   // Flush every line: a GPU runtime that ends the process abnormally must not
   // take the record of how far the test got with it.
   std::cout << std::unitbuf;
+#if defined(_WIN32)
+  // Name the way the process ends when a native GPU runtime takes it down:
+  // a structured exception, std::terminate, or an exit() before the end.
+  SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* info) -> LONG {
+    std::fprintf(stderr, "unhandled exception 0x%08lX at %p\n",
+                 static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode),
+                 info->ExceptionRecord->ExceptionAddress);
+    return EXCEPTION_CONTINUE_SEARCH;
+  });
+  std::set_terminate([] {
+    std::fputs("std::terminate called\n", stderr);
+    std::abort();
+  });
+  std::atexit([] {
+    if (!g_test_finished) std::fputs("process exited before the test finished\n", stderr);
+  });
+#endif
   // This is a rendered-pixel validation, not merely API capability discovery.
   const auto capabilities = xenon::gpu::discover_backend_capabilities();
   assert(capabilities.size() == 2);
@@ -1185,20 +1209,26 @@ int main() {
       xenon::gpu::Edram edram;
       xenon::gpu::d3d12::Backend backend;
       assert(backend.initialize());
+      std::cout << "D3D12 presentation: backend initialized\n";
       backend.begin_submission(memory, edram);
       backend.end_submission();
+      std::cout << "D3D12 presentation: submission bracketed\n";
       xenon::gpu::PresentationConfig config{};
       config.width = 96;
       config.height = 64;
       config.vsync = false;
       assert(backend.configure_presentation(window, config));
       assert(backend.presentation_ready());
+      std::cout << "D3D12 presentation: swapchain configured\n";
       assert(acceptable_present_status(backend.present(frame)));
+      std::cout << "D3D12 presentation: first present\n";
       MoveWindow(window, 0, 0, 128, 72, FALSE);
       assert(backend.resize_presentation(128, 72));
       assert(acceptable_present_status(backend.present(frame)));
+      std::cout << "D3D12 presentation: resized present\n";
     }
     DestroyWindow(window);
+    std::cout << "D3D12 presentation: torn down\n";
   }
 #endif
 
@@ -1244,5 +1274,6 @@ int main() {
     DestroyWindow(window);
   }
 #endif
+  g_test_finished = true;
   std::cout << "xenon_backend_capability_tests: ok\n";
 }
