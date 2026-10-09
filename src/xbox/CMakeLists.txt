@@ -67,7 +67,8 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     export_metadata.cpp
   )
   target_link_libraries(xenon_xbox_kernel_io
-    PUBLIC xenon_kernel xenon_memory xenon_xex xenon_xex_loading)
+    PUBLIC xenon_kernel xenon_memory xenon_xex xenon_xex_loading
+           xenon_export_registry)
   target_include_directories(xenon_xbox_kernel_io
     PUBLIC "${XENON_SOURCE_DIR}/include"
     PRIVATE "${XENON_SOURCE_DIR}/src")

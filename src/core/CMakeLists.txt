@@ -1,4 +1,16 @@
 # -----------------------------------------------------------------------------
+# Guest export registry: name/ordinal to handler and variable tables. It needs
+# only CPU state and memory-port types (headers), no Xenon library, so the
+# Xbox export bridge can register exports without depending on xenon_core,
+# which itself links that bridge.
+add_library(xenon_export_registry STATIC export_registry.cpp)
+target_include_directories(xenon_export_registry
+  PUBLIC "${XENON_SOURCE_DIR}/include")
+target_compile_features(xenon_export_registry PUBLIC cxx_std_20)
+xenon_enable_warnings(xenon_export_registry)
+add_library(Xenon::ExportRegistry ALIAS xenon_export_registry)
+
+# -----------------------------------------------------------------------------
 # Core runtime
 add_library(xenon_core STATIC
   runtime.cpp
@@ -30,7 +42,6 @@ add_library(xenon_core STATIC
   session/diagnostics/stop_report.cpp
   session/diagnostics/title_probes.cpp
   guest_thread_context.cpp
-  export_registry.cpp
   call_bridge.cpp
   run_fingerprint.cpp
   capability_report.cpp
@@ -49,5 +60,5 @@ xenon_enable_warnings(xenon_core)
 # subdirectories, so the `if(TARGET ...)`-guarded links live at the end of
 # src/CMakeLists.txt. Placed here, every check would see an undefined target
 # and silently link nothing.
-target_link_libraries(xenon_core PUBLIC xenon_logging)
+target_link_libraries(xenon_core PUBLIC xenon_logging xenon_export_registry)
 add_library(Xenon::Core ALIAS xenon_core)

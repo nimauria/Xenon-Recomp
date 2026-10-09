@@ -30,6 +30,7 @@ builds and works. Documentation does not override those sources of truth.
 | --- | --- | --- | --- |
 | Logging | `include/xenon/logging/` | `src/logging/` | `xenon_logging` |
 | Core session, dispatch, diagnostics | `include/xenon/core/` | `src/core/` | `xenon_core` |
+| Guest export registry (name/ordinal tables) | `include/xenon/core/export_registry.hpp` | `src/core/export_registry.cpp` | `xenon_export_registry` |
 | CPU decode, IR, optimization, AOT | `include/xenon/cpu/` | `src/cpu/` | `xenon_cpu` |
 | Guest address space and host VM | `include/xenon/memory/` | `src/memory/` | `xenon_memory` |
 | Host kernel mechanisms | `include/xenon/kernel/` | `src/kernel/` | `xenon_kernel` |
@@ -85,6 +86,11 @@ which publishes host I/O results into guest memory) is implemented in
 `src/xbox/guest_io/` and built into `xenon_xbox_kernel_io`; its public header
 is still `include/xenon/kernel/xbox_io_guest.hpp` in namespace
 `xenon::kernel::xbox`, because `XenonSession`'s public header exposes it.
+The export registry is its own target, `xenon_export_registry`, linked by
+both `xenon_core` and `xenon_xbox_kernel_io`; the bridge registers its exports
+through it and no longer depends on `xenon_core`, which links the bridge.
+Tests that still link `xenon_core` only to reach the registry can link the
+bridge directly; narrowing them is left to the build-ownership pass.
 `src/xam/` owns XAM services
 and their guest export registration. Export tests should invoke the production
 registry with guest memory and actual ordinals.
