@@ -6,6 +6,7 @@ class ExportRegistry;
 }
 namespace xenon::xbox {
 struct XexImage;
+class GuestModuleRegistry;
 }
 
 namespace xenon::xbox {
@@ -25,6 +26,14 @@ namespace xenon::xbox {
 // perform.
 [[nodiscard]] bool xex_check_executable_privilege_export(const XexImage& image,
                                                           core::ExportCallContext& context);
+
+// XexGetModuleHandle (0x195) and XexGetProcedureAddress (0x197): see the
+// definitions for the guest ABI. Both are backed by GuestModuleRegistry, which
+// owns the guest-visible module records and the dynamic export thunks.
+[[nodiscard]] bool xex_get_module_handle_export(GuestModuleRegistry& registry,
+                                                core::ExportCallContext& context);
+[[nodiscard]] bool xex_get_procedure_address_export(GuestModuleRegistry& registry,
+                                                    core::ExportCallContext& context);
 
 // Convenience registrar for callers (tests/tools) that already have a
 // constructed XexImage. XenonSession::init_exports() instead registers a

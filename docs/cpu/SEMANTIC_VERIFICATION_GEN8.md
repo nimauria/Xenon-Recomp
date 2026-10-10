@@ -177,3 +177,37 @@ every Xenon opcode has already received an independent second implementation.
 The important architectural change is that semantic correctness now has a
 repeatable, fuzzable, replayable proof surface which future opcode work can
 extend without changing the runtime.
+
+## Why no differential execution-checkpoint system (deferred work)
+
+An "AC6 Runtime Readiness" pass considered building a differential
+execution-checkpoint system that would hash and diff live boot/gameplay state
+at each `BootCheckpoint` against an independent oracle, the same way Gen 8
+diffs generated AOT code against the independent PPC reference model above.
+It was deliberately **not** built, and the reasoning is recorded here so it
+is not re-litigated:
+
+Gen 8's differential model is tractable only because it is scoped to
+synthetic, randomized instruction streams with a trusted independent
+reference implementation on the other side of the diff. A live title boot/
+gameplay run has no equivalent oracle — there is no second, trusted
+implementation of "what Xbox 360 AC6 does at boot checkpoint N" to compare
+against. Building a checkpoint-hashing system with nothing genuine to diff
+against would produce only descriptive telemetry (a state fingerprint per
+checkpoint), not an actual differential correctness check, which would be
+paper-completion rather than real verification.
+
+A real version of that system would need one of:
+
+- a second, independently-implemented Xbox 360 execution path (e.g. an
+  interpreter-mode fallback broad enough to run real guest code, not just
+  Gen 8's synthetic streams) to diff the AOT path against at each
+  `BootCheckpoint`; or
+- a captured reference trace from real Xbox 360 hardware, or from another
+  mature Xbox 360 emulator/recomp project's verified-correct run, to diff
+  against (subject to this project's research/licensing rule — not
+  something to copy wholesale even if available).
+
+Neither prerequisite exists in this repository. This remains a concrete,
+identified blocking gap rather than a scheduling deferral; no stub, interface,
+or partial checkpoint system was added in its place.

@@ -1,5 +1,5 @@
 // End-to-end tests for the xenon-prepare automatic game preparation worker
-// (tools/xenon_prepare.cpp): first-Play build, no-rebuild on a second Play,
+// (tools/xenon_prepare/): first-Play build, no-rebuild on a second Play,
 // rebuild when a module's analysis hints actually change (while the
 // superseded entry's absence is verified without disturbing anything else),
 // and deterministic cancellation. Mirrors tests/recomp/recomp_driver_tests.cpp
@@ -18,12 +18,17 @@
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
+
 #include "xenon/core/json.hpp"
 #include "xenon/recomp/analysis_schema_json.hpp"
 #include "xenon/recomp/artifact_cache.hpp"
 #include "xenon/recomp/compilation_graph.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
+#include "../support/source_snapshot.hpp"
 
 using namespace xenon::recomp;
 using namespace xenon::recomp::analysis;
@@ -116,7 +121,10 @@ int run_system(const std::string& command) {
 #if defined(_WIN32)
   return std::system(("\"" + command + "\"").c_str());
 #else
-  return std::system(command.c_str());
+  const auto status = std::system(command.c_str());
+  // POSIX system() returns a wait status, not the child's exit code.
+  if (status >= 0 && WIFEXITED(status)) return WEXITSTATUS(status);
+  return status;
 #endif
 }
 
@@ -149,7 +157,8 @@ std::string default_target_arch() {
 #endif
 }
 
-ArtifactCacheKey expected_key(const xbox::XexEffectiveIdentity& identity,
+ArtifactCacheKey expected_key(const std::filesystem::path& source_root,
+                             const xbox::XexEffectiveIdentity& identity,
                              const AnalysisHintSetV2& hints) {
   ArtifactCacheKey key;
   key.title_id = identity.title_id;
@@ -160,7 +169,7 @@ ArtifactCacheKey expected_key(const xbox::XexEffectiveIdentity& identity,
   key.module_compatibility_version = "1";
   key.hint_set_hash = hash_hint_set(hints);
   key.preparation_identity = xenon::recomp::graph::preparation_identity(
-      std::filesystem::path(XENON_SOURCE_ROOT), XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
+      source_root, XENON_CMAKE_COMMAND, XENON_NATIVE_COMPILER);
   key.target_arch = default_target_arch();
   key.build_config = "Release";
   return key;
@@ -178,6 +187,9 @@ int main() {
   const auto root = std::filesystem::temp_directory_path() / "xenon_prepare_worker_test";
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
+  // xenon-prepare folds the tree into the preparation identity, and the
+  // second preparation below must find it unchanged.
+  const auto source_root = xenon::test::snapshot_source_tree("prepare_worker");
 
   const auto content_dir = root / "content";
   std::filesystem::create_directories(content_dir);
@@ -214,7 +226,7 @@ int main() {
     command << quote(prepare_exe) << " --content " << quote(content_dir) << " --module "
             << quote(module_dir) << " --module-id xenon_test_module --cache-root "
             << quote(cache_root) << " --status-file " << quote(status_file) << " --recomp-root "
-            << quote(std::filesystem::path(XENON_SOURCE_ROOT));
+            << quote(source_root);
     if (query) command << " --query";
     if (force) command << " --force";
     return run_system(command.str());
@@ -226,7 +238,7 @@ int main() {
   std::cout << "  [PASS] First preparation with no cached artifact builds successfully\n";
 
   ArtifactCacheStore store(cache_root);
-  const auto key_v1 = expected_key(identity, hints_v1);
+  const auto key_v1 = expected_key(source_root, identity, hints_v1);
   const auto entry_v1 = store.lookup(key_v1);
   assert(entry_v1.status == ArtifactCacheStatus::Fresh);
   assert(std::filesystem::exists(entry_v1.native_extension_path));
@@ -261,7 +273,7 @@ int main() {
   const auto third_result = run_prepare(/*query=*/false, /*force=*/false);
   assert(third_result == 0);
 
-  const auto key_v2 = expected_key(identity, hints_v2);
+  const auto key_v2 = expected_key(source_root, identity, hints_v2);
   assert(key_v2.digest() != key_v1.digest() &&
         "changing analysis hint content must change the artifact cache key");
   const auto entry_v2 = store.lookup(key_v2);
@@ -288,7 +300,7 @@ int main() {
     command << quote(prepare_exe) << " --content " << quote(content_dir) << " --module "
             << quote(module_dir) << " --module-id xenon_test_module --cache-root "
             << quote(cache_root) << " --status-file " << quote(status_file) << " --recomp-root "
-            << quote(std::filesystem::path(XENON_SOURCE_ROOT)) << " --stop-signal "
+            << quote(source_root) << " --stop-signal "
             << quote(stop_signal) << " --force";
     const auto result = run_system(command.str());
     assert(result == 7 && "a pre-signalled cancellation must exit with the documented code 7");
@@ -335,7 +347,7 @@ int main() {
       std::ostringstream command;
       command << quote(prepare_exe) << " --content " << quote(multi_content) << " --cache-root "
               << quote(multi_cache) << " --status-file " << quote(multi_status) << " --recomp-root "
-              << quote(std::filesystem::path(XENON_SOURCE_ROOT));
+              << quote(source_root);
       if (query) command << " --query";
       return run_system(command.str());
     };

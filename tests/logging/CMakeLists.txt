@@ -1,0 +1,7 @@
+if(XENON_BUILD_TESTS)
+
+  add_executable(xenon_logger_stream_mutex_tests logger_stream_mutex_tests.cpp)
+  target_link_libraries(xenon_logger_stream_mutex_tests PRIVATE xenon_logging)
+  xenon_enable_test_asserts(xenon_logger_stream_mutex_tests)
+  add_test(NAME xenon_logger_stream_mutex_tests COMMAND xenon_logger_stream_mutex_tests)
+endif()

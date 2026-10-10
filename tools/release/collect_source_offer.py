@@ -78,6 +78,7 @@ def build_bundle(output: Path, version: str, cache: Path) -> None:
     cache.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, str]] = []
     source_files: list[Path] = []
+    patch_files: list[tuple[Path, str]] = []
     for item in offer["qt_sources"]:
         filename = Path(item["url"]).name
         path = cache / filename
@@ -110,6 +111,24 @@ def build_bundle(output: Path, version: str, cache: Path) -> None:
             "upstream": ffmpeg["repository"],
         }
     )
+    for patch in ffmpeg.get("patches", []):
+        path = (DEPS_MANIFEST.parent / patch["path"]).resolve()
+        if not path.is_relative_to(DEPS_MANIFEST.parent) or not path.is_file():
+            raise SourceOfferError(f"invalid FFmpeg build patch: {patch['path']}")
+        actual = sha256(path)
+        if actual != patch["sha256"]:
+            raise SourceOfferError(f"FFmpeg build patch hash mismatch: {path}")
+        archive_name = f"patches/{path.name}"
+        patch_files.append((path, archive_name))
+        entries.append(
+            {
+                "component": "xenia-ffmpeg build patch",
+                "version": ffmpeg["version"],
+                "file": archive_name,
+                "sha256": actual,
+                "upstream_commit": patch["upstream_commit"],
+            }
+        )
 
     manifest = {
         "schema": 1,
@@ -123,6 +142,8 @@ def build_bundle(output: Path, version: str, cache: Path) -> None:
         zf.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
         for source in source_files:
             zf.write(source, f"sources/{source.name}")
+        for patch, archive_name in patch_files:
+            zf.write(patch, archive_name)
 
 
 def main() -> int:

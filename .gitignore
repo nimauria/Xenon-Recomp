@@ -4,6 +4,9 @@ Build/
 build-*/
 out/
 
+# Gen 10 content-addressed codegen cache
+generated/
+
 # Ninja
 *.ninja_log
 .ninja_deps
@@ -76,6 +79,8 @@ compile_commands.json
 *.gcno
 *.gcov
 coverage/
+!/tools/coverage/
+!/docs/coverage/
 
 # Test output & cache
 .cache/

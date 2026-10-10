@@ -1,8 +1,16 @@
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <set>
 #include <string>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
@@ -31,20 +39,33 @@ constexpr std::uint32_t kOwningThreadOffset = 0x18u;
 // own critical section's spin count back sees the real, expected value.
 constexpr std::uint32_t kSpinCountByteOffset = 0x1u;
 
-// Xenon's chosen "owning thread" identity for a critical section:
-// ExportCallContext::thread_id, the same real, stable, nonzero-for-every-
-// real-guest-thread identifier KeWaitForSingleObject/mutant ownership
-// already use (kernel::KernelThread's thread_id_ counter starts at 1, so 0
-// is never a real thread's id and unambiguously means "unlocked" here).
-// This is Xenon's own internal thread identity, not literally the real
-// hardware's guest PKTHREAD pointer (xenia's XThread::GetCurrentThread()->
-// guest_object()) - no evidence any title inspects this field's exact bit
-// pattern (it is real kernel-internal Windows CRITICAL_SECTION-equivalent
-// bookkeeping on real hardware too), and using a value already proven
-// unique-and-stable per guest thread elsewhere in this codebase is more
-// robust than fabricating a synthetic guest-visible thread-object address
-// with no real backing structure.
+// X_KPCR.prcb_data.current_thread - see core::GuestKpcrLayout::kCurrentThreadOffset
+// (xenon_core's KPCR layout; this library cannot depend on xenon_core).
+constexpr std::uint32_t kKpcrCurrentThreadOffset = 0x100u;
+
+// The "owning thread" identity written to a critical section, matching the
+// real kernel: the calling thread's guest KTHREAD pointer, read through r13
+// (KPCR) -> current_thread exactly as compiled guest code does (xenia's
+// XThread::GetCurrentThread()->guest_object()). Every Xenon guest thread
+// (main, ExCreateThread, audio callback, GPU interrupt) runs with r13 at its
+// own KPCR whose current_thread is a distinct, never-zero KTHREAD, so the
+// marker is unique per thread and equal to what guest code compares
+// OwningThread against when checking its own ownership.
+//
+// Previously this was ExportCallContext::thread_id, which is 0 whenever the
+// calling host thread has no registered KernelThread. A free critical
+// section also has OwningThread 0, so such a caller matched the
+// `owner == self` recursive-acquire branch on a FREE lock: it bumped the
+// counts without taking ownership, and the next contending thread waited
+// forever on an owner that did not exist (AC6: thread 22 blocked on
+// "owner_thread=0"). thread_id remains only as the fallback for a caller
+// with no KPCR at all (host-side unit-test contexts).
 std::uint32_t owning_thread_marker(const ExportCallContext& context) {
+  const auto kpcr = static_cast<cpu::GuestAddress>(context.cpu.gpr[13]);
+  if (kpcr != 0u) {
+    const auto kthread = context.memory.read32_be(kpcr + kKpcrCurrentThreadOffset);
+    if (kthread != 0u) return kthread;
+  }
   return context.thread_id;
 }
 
@@ -133,58 +154,74 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
   const auto cs = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   if (cs == 0u) return true;
   const auto self = owning_thread_marker(context);
+#ifdef _WIN32
+  const auto _os_tid = static_cast<unsigned long>(GetCurrentThreadId());
+#else
+  const unsigned long _os_tid = 0;
+#endif
 
-  for (;;) {
-    bool acquired = false;
-    bool must_wait = false;
-    {
-      std::lock_guard<std::mutex> lock(process.critical_section_mutex());
-      const auto owner = context.memory.read32_be(cs + kOwningThreadOffset);
-      if (owner == self) {
-        // Already ours - recursive acquire.
-        context.memory.write32_be(
-            cs + kRecursionCountOffset,
-            context.memory.read32_be(cs + kRecursionCountOffset) + 1u);
-        context.memory.write32_be(
-            cs + kLockCountOffset, context.memory.read32_be(cs + kLockCountOffset) + 1u);
-        acquired = true;
-      } else if (owner == 0u) {
-        // Uncontended - take it.
-        context.memory.write32_be(cs + kOwningThreadOffset, self);
-        context.memory.write32_be(cs + kRecursionCountOffset, 1u);
-        context.memory.write32_be(cs + kLockCountOffset, 0u);
-        acquired = true;
-      } else {
-        // Contended - register as a waiter and block below, outside the lock.
-        context.memory.write32_be(
-            cs + kLockCountOffset, context.memory.read32_be(cs + kLockCountOffset) + 1u);
-        must_wait = true;
-      }
-    }
-    if (acquired) return true;
-    if (!must_wait) continue;  // unreachable, kept for clarity
-
-    auto event = resolve_wait_event(process, context, cs, "RtlEnterCriticalSection");
-    if (!event) {
-      // Cannot resolve a real wait object - fail safe by treating this as an
-      // immediate (unsynchronized) acquire rather than hanging the guest
-      // thread forever, and undo the waiter registration above.
-      std::lock_guard<std::mutex> lock(process.critical_section_mutex());
-      context.memory.write32_be(
-          cs + kLockCountOffset, context.memory.read32_be(cs + kLockCountOffset) - 1u);
-      context.memory.write32_be(cs + kOwningThreadOffset, self);
-      context.memory.write32_be(cs + kRecursionCountOffset, 1u);
+  // NT protocol (LockCount: -1 = free, 0 = held without waiters, n = held with n
+  // registered waiters):
+  //   Enter:  ++LockCount; 0 means we own it, anything else registers us as a waiter.
+  //   Leave:  --LockCount; if still >= 0 a registered waiter exists, so signal it.
+  //   A woken waiter inherits ownership *without touching LockCount* - its own
+  //   registration is what the count already includes. Resetting the count here
+  //   (as an earlier version did) drops every other waiter's registration, so the
+  //   next Leave sees "no waiters" and never signals them: they sleep forever.
+  //   Because a registered waiter keeps LockCount >= 0 across the hand-off, a
+  //   third thread arriving in the window cannot barge in either.
+  {
+    std::lock_guard<std::mutex> lock(process.critical_section_mutex());
+    const auto owner = context.memory.read32_be(cs + kOwningThreadOffset);
+    const auto lock_count =
+        static_cast<std::int32_t>(context.memory.read32_be(cs + kLockCountOffset));
+    context.memory.write32_be(cs + kLockCountOffset, static_cast<std::uint32_t>(lock_count + 1));
+    if (owner == self) {
+      // Already ours - recursive acquire.
+      context.memory.write32_be(cs + kRecursionCountOffset,
+                                context.memory.read32_be(cs + kRecursionCountOffset) + 1u);
       return true;
     }
-    // The exact WaitResult is intentionally not branched on: the loop
-    // re-validates ownership under the lock regardless of how the wait
-    // ended (Success, or the practically-unreachable-with-an-infinite-
-    // timeout Timeout/Abandoned/Failed), rather than assuming ownership
-    // transferred cleanly, since another thread's fresh (non-waiting) Enter
-    // could have raced in first.
-    static_cast<void>(
-        kernel::wait_for_single_object(event, xbox_infinite_timeout(), context.thread_id));
+    if (lock_count == -1) {
+      // Uncontended - take it.
+      context.memory.write32_be(cs + kOwningThreadOffset, self);
+      context.memory.write32_be(cs + kRecursionCountOffset, 1u);
+      if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
+        std::fprintf(_d, "ENTER UNCONTENDED: cs=0x%08X new_owner=%u os_tid=%lu\n",
+                     (unsigned)cs, (unsigned)self, _os_tid);
+        std::fclose(_d);
+      }
+      return true;
+    }
+    // Contended: registered as a waiter above; block below, outside the lock.
+    if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
+      std::fprintf(_d, "ENTER CONTENDED: cs=0x%08X self_thread=%u owner_thread=%u lock_count_after=%d os_tid=%lu\n",
+                   (unsigned)cs, (unsigned)self, (unsigned)owner, lock_count + 1, _os_tid);
+      std::fclose(_d);
+    }
   }
+
+  auto event = resolve_wait_event(process, context, cs, "RtlEnterCriticalSection");
+  if (!event) {
+    // Cannot resolve a real wait object - fail safe by treating this as an
+    // immediate (unsynchronized) acquire rather than hanging the guest
+    // thread forever, and undo the waiter registration above.
+    std::lock_guard<std::mutex> lock(process.critical_section_mutex());
+    context.memory.write32_be(
+        cs + kLockCountOffset, context.memory.read32_be(cs + kLockCountOffset) - 1u);
+    context.memory.write32_be(cs + kOwningThreadOffset, self);
+    context.memory.write32_be(cs + kRecursionCountOffset, 1u);
+    return true;
+  }
+  // Auto-reset event: one Leave() releases exactly one waiter, which now owns the
+  // section. The wait result is not branched on: with an infinite timeout the only
+  // other way out is a stopping session, and the count must stay consistent then too.
+  static_cast<void>(
+      kernel::wait_for_single_object(event, xbox_infinite_timeout(), context.thread_id));
+  std::lock_guard<std::mutex> lock(process.critical_section_mutex());
+  context.memory.write32_be(cs + kOwningThreadOffset, self);
+  context.memory.write32_be(cs + kRecursionCountOffset, 1u);
+  return true;
 }
 
 // RtlTryEnterCriticalSection (ordinal 0x141)
@@ -201,7 +238,11 @@ bool rtl_try_enter_critical_section_export(kernel::KernelProcess& process,
 
   std::lock_guard<std::mutex> lock(process.critical_section_mutex());
   const auto owner = context.memory.read32_be(cs + kOwningThreadOffset);
-  if (owner == 0u) {
+  // Free means LockCount == -1 (real hardware's cmpxchg -1 -> 0). owner == 0 alone is
+  // not enough: between a Leave() and the woken waiter taking over, the section is
+  // unowned but still committed to that waiter.
+  const auto lock_count = static_cast<std::int32_t>(context.memory.read32_be(cs + kLockCountOffset));
+  if (owner == 0u && lock_count == -1) {
     context.memory.write32_be(cs + kOwningThreadOffset, self);
     context.memory.write32_be(cs + kRecursionCountOffset, 1u);
     context.memory.write32_be(cs + kLockCountOffset, 0u);
@@ -244,6 +285,16 @@ bool rtl_leave_critical_section_export(kernel::KernelProcess& process,
         static_cast<std::int32_t>(context.memory.read32_be(cs + kLockCountOffset)) - 1;
     context.memory.write32_be(cs + kLockCountOffset, static_cast<std::uint32_t>(new_lock_count));
     should_wake = new_lock_count != -1;  // -1 means no waiters were registered
+    if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
+#ifdef _WIN32
+      const auto _leave_os_tid = static_cast<unsigned long>(GetCurrentThreadId());
+#else
+      const unsigned long _leave_os_tid = 0;
+#endif
+      std::fprintf(_d, "LEAVE: cs=0x%08X former_owner_thread=%u new_lock_count=%d should_wake=%d os_tid=%lu\n",
+                   (unsigned)cs, (unsigned)context.thread_id, new_lock_count, (int)should_wake, _leave_os_tid);
+      std::fclose(_d);
+    }
   }
   if (should_wake) {
     if (auto event = resolve_wait_event(process, context, cs, "RtlLeaveCriticalSection")) {

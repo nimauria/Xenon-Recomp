@@ -1,0 +1,33 @@
+name: Research note or proposal
+description: Share Xbox 360 behaviour research, or propose a change before working on it.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for hardware or system-software research, documentation corrections, or a proposed change you would like to discuss before opening a pull request. Large or architectural changes should start here.
+
+        Do not include proprietary content such as game executables, disassembly dumps of commercial titles, firmware or keys.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What behaviour, problem or change is this about?
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: The behaviour or proposal in detail, including the Xenon subsystem it affects (see docs/architecture/PROJECT_STRUCTURE.md).
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Sources and provenance
+      description: Where the information comes from, such as public documentation, reference projects (with revision) or your own hardware tests. Third-party sources are recorded in docs/development/RESEARCH_PROVENANCE.md.
+  - type: textarea
+    id: testing
+    attributes:
+      label: How could it be tested?
+      description: A regression test or validation that would demonstrate the behaviour, if you have one in mind.

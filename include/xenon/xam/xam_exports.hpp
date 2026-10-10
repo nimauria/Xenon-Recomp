@@ -153,6 +153,162 @@ constexpr std::uint32_t XamUserCreateStatsEnumerator = 0x02F7;
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamGetExecutionId = 0x0280;
 
+// ---------------------------------------------------------------------------
+// System information (xam_table.inc 0x282)
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamGetSystemVersion = 0x0282;
+constexpr std::uint32_t XGetGameRegion = 0x03CC;
+// XGetAVPack/XGetLanguage/XGetVideoMode (xam_table.inc 0x3CB/0x3CD/0x3D1) are
+// real, separate, non-"Xam"-prefixed xam.xex exports - distinct identities
+// from XamGetLanguage (0x3D2, already implemented) and from xboxkrnl's own
+// VdQueryVideoMode. Verified against rexglue-sdk's xam_info.cpp/xam_video.cpp
+// (itself crediting xenia), which is also where every titled used them
+// during early boot to learn the AV cable type and negotiate display mode
+// before issuing any video presentation calls.
+constexpr std::uint32_t XGetAVPack = 0x03CB;
+constexpr std::uint32_t XGetLanguage = 0x03CD;
+constexpr std::uint32_t XGetVideoMode = 0x03D1;
+
+// ---------------------------------------------------------------------------
+// XAM heap (xam_table.inc 0x1EA/0x1EC) - a kernel-managed heap distinct from
+// the title's own CRT heap; backed here by KernelMemory's ordinary guest
+// virtual allocator, matching real hardware's "separate heap, same
+// allocator primitive" relationship.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamAlloc = 0x01EA;
+constexpr std::uint32_t XamFree = 0x01EC;
+
+// ---------------------------------------------------------------------------
+// Title loader control (xam_table.inc 0x1A4/0x1A9) - both terminate the
+// running title on real hardware (LaunchTitle additionally stages a new
+// title to launch next, which Xenon's single-title session does not model).
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamLoaderLaunchTitle = 0x01A4;
+constexpr std::uint32_t XamLoaderTerminateTitle = 0x01A9;
+
+// ---------------------------------------------------------------------------
+// Voice/headset (xam_table.inc 0x30C-0x30F) - no voice headset hardware is
+// modeled, so these report "no device" consistently rather than fabricating
+// a working voice channel.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamVoiceCreate = 0x030C;
+constexpr std::uint32_t XamVoiceClose = 0x030D;
+constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030E;
+constexpr std::uint32_t XamVoiceSubmitPacket = 0x030F;
+
+// ---------------------------------------------------------------------------
+// XAM background tasks (xam_table.inc 0x1AF/0x1B1/0x1B3) - XamTaskSchedule
+// spawns a real guest-executing thread running the given callback, the same
+// primitive ExCreateThread uses (see XenonSession::export_xam_task_schedule).
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamTaskSchedule = 0x01AF;
+constexpr std::uint32_t XamTaskCloseHandle = 0x01B1;
+constexpr std::uint32_t XamTaskShouldExit = 0x01B3;
+
+// ---------------------------------------------------------------------------
+// XMsg* app-message IPC (xam_table.inc 0x1F4/0x1F7/0x1F8/0x1FC) - routes
+// through a registered in-process "XAM app" dispatcher (dashboard blades,
+// content apps). Xenon has no such app registry, so every call resolves to
+// the real "app undefined" outcome real hardware itself reports for an
+// unregistered app id - not a fabricated success.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XMsgInProcessCall = 0x01F4;
+constexpr std::uint32_t XMsgStartIORequest = 0x01F7;
+constexpr std::uint32_t XMsgCancelIORequest = 0x01F8;
+constexpr std::uint32_t XMsgStartIORequestEx = 0x01FC;
+
+// ---------------------------------------------------------------------------
+// Generic enumerator walk (xam_table.inc 0x250) - walks a handle produced by
+// one of the XamContentCreateEnumerator/XamUserCreate*Enumerator family.
+// Those producers are themselves still fake-handle stubs in this codebase
+// (see xam_content_exports.cpp), so this honestly reports "invalid handle"
+// for any handle it is actually given, rather than pretending to walk a real
+// enumerator that was never backed by real items.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamEnumerate = 0x0250;
+
+// ---------------------------------------------------------------------------
+// Session handles (xam_table.inc 0x316/0x317) - Xbox Live multiplayer
+// session objects. Xenon implements no session subsystem; matches xenia/
+// rexglue-sdk's own identical fixed-sentinel-handle precedent (nothing else
+// in any available reference backs these with a real object either).
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamSessionCreateHandle = 0x0316;
+constexpr std::uint32_t XamSessionRefObjByHandle = 0x0317;
+
+// ---------------------------------------------------------------------------
+// System UI additions (xam_table.inc 0x2BF/0x2C6/0x2D5/0x2DC) - the rest of
+// the XamShow* family declared above. No dashboard/overlay UI is
+// implemented, so each reports the real "function failed"/"cancelled"
+// outcome real hardware gives when the shell UI is unavailable, matching
+// XamShowPartyUI/XamShowCommunitySessionsUI's existing precedent rather than
+// leaving guest state untouched.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamShowFriendsUI = 0x02BF;
+constexpr std::uint32_t XamShowPlayerReviewUI = 0x02C6;
+constexpr std::uint32_t XamShowGamerCardUIForXUID = 0x02D5;
+constexpr std::uint32_t XamShowDirtyDiscErrorUI = 0x02D9;
+constexpr std::uint32_t XamShowMessageBoxUIEx = 0x02DC;
+
+// ---------------------------------------------------------------------------
+// User profile additions (xam_table.inc 0x219) and gamer tile (0x2F0)
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamUserReadProfileSettings = 0x0219;
+constexpr std::uint32_t XamWriteGamerTile = 0x02F0;
+
+// ---------------------------------------------------------------------------
+// Content additions (xam_table.inc 0x260/0x265)
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t XamContentSetThumbnail = 0x0260;
+constexpr std::uint32_t XamContentGetDeviceState = 0x0265;
+
+// ---------------------------------------------------------------------------
+// NetDll_* (XNet/Winsock guest ABI, xam_table.inc 0x33-0x34). The generic
+// Xbox Live/system-link network stack every title links against through
+// xam.xex - distinct from the unrelated, future Xenon Network client. Only
+// the small subset actually reachable during offline boot is modeled here;
+// see docs/xam/XAM_V1.md for the rest of this ordinal range's status.
+// ---------------------------------------------------------------------------
+constexpr std::uint32_t NetDll_WSAStartup = 0x0001;
+constexpr std::uint32_t NetDll_WSACleanup = 0x0002;
+constexpr std::uint32_t NetDll_socket = 0x0003;
+constexpr std::uint32_t NetDll_closesocket = 0x0004;
+constexpr std::uint32_t NetDll_shutdown = 0x0005;
+constexpr std::uint32_t NetDll_ioctlsocket = 0x0006;
+constexpr std::uint32_t NetDll_setsockopt = 0x0007;
+constexpr std::uint32_t NetDll_getsockopt = 0x0008;
+constexpr std::uint32_t NetDll_getsockname = 0x0009;
+constexpr std::uint32_t NetDll_listen = 0x000D;
+constexpr std::uint32_t NetDll_accept = 0x000E;
+constexpr std::uint32_t NetDll_bind = 0x000B;
+constexpr std::uint32_t NetDll_connect = 0x000C;
+constexpr std::uint32_t NetDll_select = 0x000F;
+constexpr std::uint32_t NetDll_recv = 0x0012;
+constexpr std::uint32_t NetDll_recvfrom = 0x0014;
+constexpr std::uint32_t NetDll_send = 0x0016;
+constexpr std::uint32_t NetDll_sendto = 0x0018;
+constexpr std::uint32_t NetDll_inet_addr = 0x001A;
+constexpr std::uint32_t NetDll_WSAGetLastError = 0x001B;
+constexpr std::uint32_t NetDll_WSASetLastError = 0x001C;
+constexpr std::uint32_t NetDll___WSAFDIsSet = 0x0022;
+constexpr std::uint32_t NetDll_XNetStartup = 0x0033;
+constexpr std::uint32_t NetDll_XNetCleanup = 0x0034;
+// XNet address/QoS/key helpers (xam_table.inc 0x35-0x49). XNetRandom is a
+// genuine local CSPRNG call (fully implementable); the XnAddr<->InAddr
+// translators and QoS lookups require a real Xbox Live secure-session layer
+// Xenon does not implement, so those report the real "no such service"
+// outcome rather than fabricating network data - see xam_net_exports.cpp.
+constexpr std::uint32_t NetDll_XNetRandom = 0x0035;
+constexpr std::uint32_t NetDll_XNetCreateKey = 0x0036;
+constexpr std::uint32_t NetDll_XNetRegisterKey = 0x0037;
+constexpr std::uint32_t NetDll_XNetXnAddrToInAddr = 0x0039;
+constexpr std::uint32_t NetDll_XNetInAddrToXnAddr = 0x003C;
+constexpr std::uint32_t NetDll_XNetQosListen = 0x0045;
+constexpr std::uint32_t NetDll_XNetQosLookup = 0x0046;
+constexpr std::uint32_t NetDll_XNetQosServiceLookup = 0x0047;
+constexpr std::uint32_t NetDll_XNetQosRelease = 0x0048;
+constexpr std::uint32_t NetDll_XNetGetTitleXnAddr = 0x0049;
+
 }  // namespace ordinal
 
 }  // namespace xenon::xam

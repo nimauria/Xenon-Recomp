@@ -54,6 +54,10 @@ struct GuestKpcrLayout {
   static constexpr std::uint32_t kStackBaseOffset = 0x070;  // high address
   static constexpr std::uint32_t kStackLimitOffset = 0x074;  // low address
   static constexpr std::uint32_t kCurrentThreadOffset = 0x100;
+  // Byte holding the number (0..5) of the hardware thread the guest is running on
+  // (X_KPCR.current_cpu). Kernel and title code read it via r13+0x10C; e.g. the
+  // graphics interrupt handler clears this CPU's bit in the GPU fence word.
+  static constexpr std::uint32_t kCurrentCpuOffset = 0x10C;
 };
 
 // Field layout of the guest-visible KTHREAD block `current_thread` points

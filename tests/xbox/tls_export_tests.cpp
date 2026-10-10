@@ -5,7 +5,7 @@
 // Real-world context: KeTlsAlloc is the next real export AC6's boot path
 // calls once XexCheckExecutablePrivilege was fixed (real guest address
 // 0x8238378c) - a correctly-recognized-but-previously-unimplemented import,
-// per src/core/session.cpp's Trap path (STATUS_PROCEDURE_NOT_FOUND).
+// per src/core/session/execution/runtime_services.cpp's Trap path (STATUS_PROCEDURE_NOT_FOUND).
 
 #include <cassert>
 #include <cstdint>

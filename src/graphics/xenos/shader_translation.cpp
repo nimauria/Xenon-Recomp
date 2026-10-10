@@ -124,7 +124,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
     if (fetch.source_relative) out << " + ar";
     out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "]);\n"
         << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
-        << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
+        << ", " << unsigned(fetch.fetch_constant_select) << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
         << fetch.offset_dwords << ", " << unsigned(fetch.data_format) << ", "
         << (fetch.signed_data ? "true" : "false") << ", "
         << (fetch.normalized ? "true" : "false") << ");\n"
@@ -134,28 +134,61 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
         << "        }\n";
   } else {
     const auto& fetch = instruction.texture_fetch;
+    const auto offsets = [&] {
+      std::ostringstream o;
+      o << "float3(" << (float(fetch.offsets_half_texels[0]) / 2.0f) << ","
+        << (float(fetch.offsets_half_texels[1]) / 2.0f) << ","
+        << (float(fetch.offsets_half_texels[2]) / 2.0f) << ")";
+      return o.str();
+    };
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
         << "          float4 coord = r[(" << unsigned(fetch.source_register);
     if (fetch.source_relative) out << " + ar";
-    out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n"
-        << "          float4 grad_h = r[(" << unsigned(fetch.source_register + 1u)
-        << ") & 63];\n"
-        << "          float4 grad_v = r[(" << unsigned(fetch.source_register + 2u)
-        << ") & 63];\n"
-        << "          float4 fetched = xenon_texture_fetch(" << unsigned(fetch.fetch_constant)
-        << ", " << unsigned(fetch.opcode) << ", " << unsigned(fetch.dimension)
-        << ", coord, " << (float(fetch.lod_bias_sixteenths) / 16.0f)
-        << ", " << (fetch.use_computed_lod ? "true" : "false")
-        << ", " << (fetch.use_register_lod ? "true" : "false")
-        << ", " << (fetch.use_register_gradients ? "true" : "false")
-        << ", grad_h, grad_v, "
-        << (fetch.unnormalized_coordinates ? "true" : "false") << ", float3("
-        << (float(fetch.offsets_half_texels[0]) / 2.0f) << ","
-        << (float(fetch.offsets_half_texels[1]) / 2.0f) << ","
-        << (float(fetch.offsets_half_texels[2]) / 2.0f) << "));\n"
-        << "          fetched = xenon_apply_texture_exp_adjust("
-        << unsigned(fetch.fetch_constant) << ", fetched);\n"
-        << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
+    out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n";
+    // Xenos setTextureLod / setTextureGradientsHorz / setTextureGradientsVert
+    // write per-shader-invocation state that later tfetches read when their
+    // use_register_lod / use_register_gradients flags are set.
+    switch (fetch.opcode) {
+      case 24:
+        out << "          xenon_register_lod = coord.x;\n        }\n";
+        return;
+      case 25:
+        out << "          xenon_grad_h = float4(coord.xyz, 0.0);\n        }\n";
+        return;
+      case 26:
+        out << "          xenon_grad_v = float4(coord.xyz, 0.0);\n        }\n";
+        return;
+      default:
+        break;
+    }
+    const float lod_bias = float(fetch.lod_bias_sixteenths) / 16.0f;
+    if (fetch.opcode == 1) {
+      out << "          float4 fetched = xenon_texture_fetch(" << unsigned(fetch.fetch_constant)
+          << ", " << unsigned(fetch.dimension) << ", coord, " << lod_bias << ", "
+          << (fetch.use_computed_lod ? "true" : "false") << ", "
+          << (fetch.use_register_lod ? "true" : "false") << ", "
+          << (fetch.use_register_gradients ? "true" : "false")
+          << ", xenon_grad_h, xenon_grad_v, xenon_register_lod, "
+          << (fetch.unnormalized_coordinates ? "true" : "false") << ", " << offsets()
+          << ");\n"
+          << "          fetched = xenon_apply_texture_exp_adjust("
+          << unsigned(fetch.fetch_constant) << ", fetched);\n";
+    } else if (fetch.opcode == 17) {
+      out << "          float4 fetched = xenon_texture_computed_lod("
+          << unsigned(fetch.fetch_constant) << ", " << unsigned(fetch.dimension)
+          << ", coord, " << lod_bias << ", "
+          << (fetch.unnormalized_coordinates ? "true" : "false") << ");\n";
+    } else if (fetch.opcode == 18) {
+      // getTextureGradients: (ddx(s), ddy(s), ddx(t), ddy(t)).
+      out << "          float4 fetched = float4(ddx_coarse(coord.x), ddy_coarse(coord.x), "
+             "ddx_coarse(coord.y), ddy_coarse(coord.y));\n";
+    } else {
+      out << "          float4 fetched = xenon_texture_weights("
+          << unsigned(fetch.fetch_constant) << ", " << unsigned(fetch.dimension)
+          << ", coord, " << (fetch.unnormalized_coordinates ? "true" : "false") << ", "
+          << offsets() << ");\n";
+    }
+    out << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
     if (fetch.destination_relative) out << " + ar";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
         << "        }\n";
@@ -337,11 +370,25 @@ float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
   return v.xxxx;
 }
 
-float4 xenon_vertex_fetch(uint fetch_constant, uint index, uint stride, int offset,
-                          uint format, bool is_signed, bool normalized) {
-  uint base = XenonVertexFetchConstants[fetch_constant & 31].x;
-  uint address = base + 4 * (index * stride + offset);
-  uint4 raw = XenonGuestMemory.Load4(address);
+)hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
+R"hlsl(// Xenos endian swap modes applied to fetched 32-bit words: 1 = 8-in-16,
+// 2 = 8-in-32, 3 = 16-in-32 (8-in-32 is both of the others combined).
+uint4 xenon_endian_swap(uint4 value, uint endian) {
+  if (endian == 1u || endian == 2u)
+    value = ((value & 0x00FF00FFu) << 8u) | ((value >> 8u) & 0x00FF00FFu);
+  if (endian == 2u || endian == 3u)
+    value = (value << 16u) | (value >> 16u);
+  return value;
+}
+
+float4 xenon_vertex_fetch(uint fetch_constant, uint select, uint index, uint stride,
+                          int offset, uint format, bool is_signed, bool normalized) {
+  // Three vertex fetch constants share each fetch slot, packed by the host as
+  // (dword address << 2) | endian in .x/.z/.w for selects 0/1/2.
+  uint4 slot = XenonVertexFetchConstants[fetch_constant & 31];
+  uint packed = select == 0u ? slot.x : (select == 1u ? slot.z : slot.w);
+  uint address = (packed & ~3u) + 4 * (index * stride + offset);
+  uint4 raw = xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u);
   if (format == 36) return asfloat(raw.x).xxxx;
   if (format == 37) return float4(asfloat(raw.xy), 0.0, 1.0);
   if (format == 57) return float4(asfloat(raw.xyz), 1.0);
@@ -359,6 +406,14 @@ float4 xenon_vertex_fetch(uint fetch_constant, uint index, uint stride, int offs
   } else if (format == 7) {
     u=uint4(raw.x&1023,(raw.x>>10)&1023,(raw.x>>20)&1023,raw.x>>30); maximum=uint4(1023,1023,1023,3);
     s=int4((int)(u.x<<22)>>22,(int)(u.y<<22)>>22,(int)(u.z<<22)>>22,(int)(u.w<<30)>>30);
+  } else if (format == 16) {
+    // 10_11_11: X 11 bits, Y 11 bits, Z 10 bits; W defaults to 1.
+    u=uint4(raw.x&2047,(raw.x>>11)&2047,raw.x>>22,1); maximum=uint4(2047,2047,1023,1);
+    s=int4((int)(u.x<<21)>>21,(int)(u.y<<21)>>21,(int)(u.z<<22)>>22,1);
+  } else if (format == 17) {
+    // 11_11_10: X 10 bits, Y 11 bits, Z 11 bits; W defaults to 1.
+    u=uint4(raw.x&1023,(raw.x>>10)&2047,raw.x>>21,1); maximum=uint4(1023,2047,2047,1);
+    s=int4((int)(u.x<<22)>>22,(int)(u.y<<21)>>21,(int)(u.z<<21)>>21,1);
   } else if (format == 25 || format == 26) {
     u=uint4(raw.x&65535,raw.x>>16,raw.y&65535,raw.y>>16); maximum=65535;
     s=(int4)(u<<16)>>16;
@@ -367,44 +422,150 @@ float4 xenon_vertex_fetch(uint fetch_constant, uint index, uint stride, int offs
   if (normalized) return is_signed ? max(float4(s) / float4(max(maximum >> 1, 1)), -1.0) : float4(u) / float4(maximum);
   return is_signed ? float4(s) : float4(u);
 }
-float4 xenon_texture_fetch(uint fetch_constant, uint opcode, uint dimension,
-                           float4 coord, float lod_bias, bool computed_lod,
+// Texture fetch constant scalars packed by the host into .y: the signed
+// result exponent adjustment (low 16 bits) and the fetch-constant LOD bias in
+// 1/32 units (high 16 bits).
+int xenon_texture_exp_adjust(uint fetch_constant) {
+  return (asint(XenonVertexFetchConstants[fetch_constant & 31].y) << 16) >> 16;
+}
+float xenon_texture_constant_lod_bias(uint fetch_constant) {
+  return float(asint(XenonVertexFetchConstants[fetch_constant & 31].y) >> 16) / 32.0;
+}
+// Xenos texel offsets are in texel units, so for normalized coordinates they
+// are divided by the size. The small epsilon (1.5/1024 of a texel, as in
+// Xenia) resolves point-sampling ambiguity for coordinates exactly between
+// texels.
+static const float XENON_TEXEL_ROUNDING = 1.5 / 1024.0;
+
+float4 xenon_texture_fetch(uint fetch_constant, uint dimension, float4 coord,
+                           float instruction_lod_bias, bool computed_lod,
                            bool register_lod, bool register_gradients,
-                           float4 grad_h, float4 grad_v, bool unnormalized,
-                           float3 offset) {
+                           float4 grad_h, float4 grad_v, float register_lod_value,
+                           bool unnormalized, float3 offset) {
   uint slot=fetch_constant & 31;
-  float gradient_scale=exp2(lod_bias);
+  // Explicit LOD sources, in D3D order: fetch constant + instruction + register.
+  float lod=xenon_texture_constant_lod_bias(fetch_constant) + instruction_lod_bias +
+            (register_lod ? register_lod_value : 0.0);
+#ifdef XENON_PIXEL_SHADER
+  bool gradients=computed_lod;
+#else
+  // Implicit derivatives do not exist outside pixel shaders.
+  bool gradients=computed_lod && register_gradients;
+#endif
+  float scale=exp2(lod);
   if (dimension==0) {
     uint width, levels; XenonTextures1D[slot].GetDimensions(0,width,levels);
-    float c=coord.x+offset.x; float gh=grad_h.x; float gv=grad_v.x;
-    if (unnormalized) { c/=max(width,1); gh/=max(width,1); gv/=max(width,1); }
-    if (register_gradients) return XenonTextures1D[slot].SampleGrad(XenonSamplers[slot],c,gh*gradient_scale,gv*gradient_scale);
-    if (register_lod || !computed_lod) return XenonTextures1D[slot].SampleLevel(XenonSamplers[slot],c,coord.w+lod_bias);
-    return XenonTextures1D[slot].SampleBias(XenonSamplers[slot],c,lod_bias);
+    float size=max(width,1);
+    float t=offset.x + XENON_TEXEL_ROUNDING;
+    float c=unnormalized ? (coord.x + t) / size : coord.x + t / size;
+    float gh=grad_h.x, gv=grad_v.x;
+    if (unnormalized) { gh/=size; gv/=size; }
+    if (gradients) {
+      if (register_gradients) return XenonTextures1D[slot].SampleGrad(XenonSamplers[slot],c,gh*scale,gv*scale);
+#ifdef XENON_PIXEL_SHADER
+      return XenonTextures1D[slot].SampleBias(XenonSamplers[slot],c,lod);
+#endif
+    }
+    return XenonTextures1D[slot].SampleLevel(XenonSamplers[slot],c,lod);
   }
   if (dimension==1) {
     uint width,height,levels; XenonTextures2D[slot].GetDimensions(0,width,height,levels);
-    float2 c=coord.xy+offset.xy; float2 gh=grad_h.xy; float2 gv=grad_v.xy;
-    if (unnormalized) { float2 size=max(float2(width,height),1.0); c/=size; gh/=size; gv/=size; }
-    if (register_gradients) return XenonTextures2D[slot].SampleGrad(XenonSamplers[slot],c,gh*gradient_scale,gv*gradient_scale);
-    if (register_lod || !computed_lod) return XenonTextures2D[slot].SampleLevel(XenonSamplers[slot],c,coord.w+lod_bias);
-    return XenonTextures2D[slot].SampleBias(XenonSamplers[slot],c,lod_bias);
+    float2 size=max(float2(width,height),1.0);
+    float2 t=offset.xy + XENON_TEXEL_ROUNDING;
+    float2 c=unnormalized ? (coord.xy + t) / size : coord.xy + t / size;
+    float2 gh=grad_h.xy, gv=grad_v.xy;
+    if (unnormalized) { gh/=size; gv/=size; }
+    if (gradients) {
+      if (register_gradients) return XenonTextures2D[slot].SampleGrad(XenonSamplers[slot],c,gh*scale,gv*scale);
+#ifdef XENON_PIXEL_SHADER
+      return XenonTextures2D[slot].SampleBias(XenonSamplers[slot],c,lod);
+#endif
+    }
+    return XenonTextures2D[slot].SampleLevel(XenonSamplers[slot],c,lod);
   }
   if (dimension==2) {
     uint width,height,depth,levels; XenonTextures3D[slot].GetDimensions(0,width,height,depth,levels);
-    float3 c=coord.xyz+offset; float3 gh=grad_h.xyz; float3 gv=grad_v.xyz;
-    if (unnormalized) { float3 size=max(float3(width,height,depth),1.0); c/=size; gh/=size; gv/=size; }
-    if (register_gradients) return XenonTextures3D[slot].SampleGrad(XenonSamplers[slot],c,gh*gradient_scale,gv*gradient_scale);
-    if (register_lod || !computed_lod) return XenonTextures3D[slot].SampleLevel(XenonSamplers[slot],c,coord.w+lod_bias);
-    return XenonTextures3D[slot].SampleBias(XenonSamplers[slot],c,lod_bias);
+    float3 size=max(float3(width,height,depth),1.0);
+    float3 t=offset + XENON_TEXEL_ROUNDING;
+    float3 c=unnormalized ? (coord.xyz + t) / size : coord.xyz + t / size;
+    float3 gh=grad_h.xyz, gv=grad_v.xyz;
+    if (unnormalized) { gh/=size; gv/=size; }
+    if (gradients) {
+      if (register_gradients) return XenonTextures3D[slot].SampleGrad(XenonSamplers[slot],c,gh*scale,gv*scale);
+#ifdef XENON_PIXEL_SHADER
+      return XenonTextures3D[slot].SampleBias(XenonSamplers[slot],c,lod);
+#endif
+    }
+    return XenonTextures3D[slot].SampleLevel(XenonSamplers[slot],c,lod);
   }
+  // Cube: register gradients are already in cube space.
   float3 cube_coord=coord.xyz;
-  if (register_gradients) return XenonTexturesCube[slot].SampleGrad(XenonSamplers[slot],cube_coord,grad_h.xyz*gradient_scale,grad_v.xyz*gradient_scale);
-  if (register_lod || !computed_lod) return XenonTexturesCube[slot].SampleLevel(XenonSamplers[slot],cube_coord,coord.w+lod_bias);
-  return XenonTexturesCube[slot].SampleBias(XenonSamplers[slot],cube_coord,lod_bias);
+  if (gradients) {
+    if (register_gradients) return XenonTexturesCube[slot].SampleGrad(XenonSamplers[slot],cube_coord,grad_h.xyz*scale,grad_v.xyz*scale);
+#ifdef XENON_PIXEL_SHADER
+    return XenonTexturesCube[slot].SampleBias(XenonSamplers[slot],cube_coord,lod);
+#endif
+  }
+  return XenonTexturesCube[slot].SampleLevel(XenonSamplers[slot],cube_coord,lod);
 }
+
+// getTextureComputedLod: the LOD a computed-LOD fetch at these coordinates
+// would use (implicit derivatives, so pixel shaders only - lowering rejects it
+// elsewhere), including the fetch-constant and instruction biases.
+float4 xenon_texture_computed_lod(uint fetch_constant, uint dimension, float4 coord,
+                                  float instruction_lod_bias, bool unnormalized) {
+  float lod=0.0;
+#ifdef XENON_PIXEL_SHADER
+  uint slot=fetch_constant & 31;
+  if (dimension==0) {
+    uint width,levels; XenonTextures1D[slot].GetDimensions(0,width,levels);
+    float c=unnormalized ? coord.x / max(width,1) : coord.x;
+    lod=XenonTextures1D[slot].CalculateLevelOfDetailUnclamped(XenonSamplers[slot],c);
+  } else if (dimension==1) {
+    uint width,height,levels; XenonTextures2D[slot].GetDimensions(0,width,height,levels);
+    float2 c=unnormalized ? coord.xy / max(float2(width,height),1.0) : coord.xy;
+    lod=XenonTextures2D[slot].CalculateLevelOfDetailUnclamped(XenonSamplers[slot],c);
+  } else if (dimension==2) {
+    uint width,height,depth,levels; XenonTextures3D[slot].GetDimensions(0,width,height,depth,levels);
+    float3 c=unnormalized ? coord.xyz / max(float3(width,height,depth),1.0) : coord.xyz;
+    lod=XenonTextures3D[slot].CalculateLevelOfDetailUnclamped(XenonSamplers[slot],c);
+  } else {
+    lod=XenonTexturesCube[slot].CalculateLevelOfDetailUnclamped(XenonSamplers[slot],coord.xyz);
+  }
+#endif
+  lod+=xenon_texture_constant_lod_bias(fetch_constant) + instruction_lod_bias;
+  return float4(lod, 0.0, 0.0, 0.0);
+}
+
+// getTextureWeights: bilinear lerp factors, frac(texel - 0.5) per axis, at
+// LOD 0 (W, the mip lerp factor, is 0 - Xenia does not model it either).
+// Cube maps use the same ST logic on their face coordinates.
+float4 xenon_texture_weights(uint fetch_constant, uint dimension, float4 coord,
+                             bool unnormalized, float3 offset) {
+  uint slot=fetch_constant & 31;
+  float3 size=1.0;
+  if (dimension==0) {
+    uint width,levels; XenonTextures1D[slot].GetDimensions(0,width,levels);
+    size=float3(width,1,1);
+  } else if (dimension==1) {
+    uint width,height,levels; XenonTextures2D[slot].GetDimensions(0,width,height,levels);
+    size=float3(width,height,1);
+  } else if (dimension==2) {
+    uint width,height,depth,levels; XenonTextures3D[slot].GetDimensions(0,width,height,depth,levels);
+    size=float3(width,height,depth);
+  } else {
+    uint width,height,levels; XenonTexturesCube[slot].GetDimensions(0,width,height,levels);
+    size=float3(width,height,1);
+  }
+  float3 texel=unnormalized ? coord.xyz : coord.xyz * size;
+  float3 weights=frac(texel + offset + XENON_TEXEL_ROUNDING - 0.5);
+  if (dimension==0) weights.yz=0.0;
+  else if (dimension!=2) weights.z=0.0;
+  return float4(weights, 0.0);
+}
+
 float4 xenon_apply_texture_exp_adjust(uint fetch_constant, float4 value) {
-  int adjustment=asint(XenonVertexFetchConstants[fetch_constant & 31].y);
+  int adjustment=xenon_texture_exp_adjust(fetch_constant);
   return ldexp(value, int4(adjustment,adjustment,adjustment,adjustment));
 }
 void xenon_write_fetch(inout float4 dest, float4 value, uint swizzle) {
@@ -665,8 +826,8 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     return result;
   }
 
-  static constexpr std::array<std::uint8_t, 11> supported_vertex_formats{
-      6, 7, 25, 26, 31, 32, 33, 34, 35, 36, 37};
+  static constexpr std::array<std::uint8_t, 13> supported_vertex_formats{
+      6, 7, 16, 17, 25, 26, 31, 32, 33, 34, 35, 36, 37};
   for (const auto& instruction : shader.instructions) {
     if (instruction.kind == ShaderInstructionKind::Alu) {
       const auto& alu = instruction.alu;
@@ -691,10 +852,31 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       }
     } else {
       const auto& fetch = instruction.texture_fetch;
-      if (fetch.opcode != 1) {
-        result.diagnostics.emplace_back(
-            "texture state/query opcode requires a lowering implementation");
-        ++result.unsupported_fetch_formats;
+      switch (fetch.opcode) {
+        case 1:   // tfetch
+        case 19:  // getTextureWeights
+        case 24:  // setTextureLod
+        case 25:  // setTextureGradientsHorz
+        case 26:  // setTextureGradientsVert
+          break;
+        case 17:  // getTextureComputedLod
+        case 18:  // getTextureGradients
+          if (shader.stage != ShaderStage::Pixel) {
+            result.diagnostics.emplace_back(
+                "texture LOD/gradient query needs implicit derivatives, which only "
+                "exist in pixel shaders");
+            ++result.unsupported_fetch_formats;
+          }
+          break;
+        case 16:  // getTextureBorderColorFrac
+          result.diagnostics.emplace_back(
+              "getTextureBorderColorFrac has no lowering implementation");
+          ++result.unsupported_fetch_formats;
+          break;
+        default:
+          result.diagnostics.emplace_back("unknown Xenos texture fetch opcode");
+          ++result.unsupported_fetch_formats;
+          break;
       }
     }
   }
@@ -725,6 +907,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   const bool memexport_enabled = shader.reflection.memory_exports != 0;
   const bool guest_memory_rw =
       memexport_enabled || options.force_guest_memory_rw;
+  if (shader.stage == ShaderStage::Pixel) out << "#define XENON_PIXEL_SHADER 1\n";
   emit_prelude(out, guest_memory_rw, memexport_enabled);
   if (shader.stage == ShaderStage::Vertex) {
     out << "struct XenonOutput { float4 position : SV_Position;";
@@ -744,6 +927,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   out << "  float4 r[64]; float4 e[64];\n"
       << "  [unroll] for (uint i=0;i<64;++i) { r[i]=0.0.xxxx; e[i]=0.0.xxxx; }\n"
       << "  bool p0=false; int a0=0; int aL=0; float4 ps=0.0.xxxx;\n"
+      << "  float4 xenon_grad_h=0.0.xxxx, xenon_grad_v=0.0.xxxx; float xenon_register_lod=0.0;\n"
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";

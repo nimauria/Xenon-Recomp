@@ -55,10 +55,88 @@ int main(int argc, char** argv) {
                                                      "  only when every import is a complete IMPLEMENTED. Exits nonzero only\n"
                                                      "  on FAIL. --json emits the same data as JSON. Used by Project\n"
                                                      "  Gracemeria to audit a title's imports before the expensive native\n"
-                                                     "  module build.\n";
+                                                     "  module build.\n"
+                                                     "usage: import-scanner --registry\n"
+                                                     "  Dumps every function and variable export the production registry\n"
+                                                     "  holds as TSV (library, ordinal, name, kind, requirement, partial,\n"
+                                                     "  note) for export-parity audits against reference ordinal tables.\n";
     else std::cout << "usage: module-inspector <game.xex> [--json]\n";
     return argc < 2 ? 1 : 0;
   }
+#if defined(XENON_TOOL_HAS_CORE)
+  if (tool == "import-scanner" && std::string(argv[1]) == "--registry") {
+    // Dumps every function and variable export the production registry holds,
+    // as TSV (library, ordinal, name, kind, requirement, partial, note), so an
+    // export-parity audit against a reference table diffs Xenon's *actual*
+    // registered state instead of grepping source. The session is created
+    // with every subsystem this build compiled in, most-complete first: a
+    // subsystem whose host backend cannot start in this environment (no audio
+    // device, no GPU) is dropped, and the fallback is reported on stderr -
+    // never silently, because the dump would then omit that subsystem's
+    // exports.
+    struct Attempt {
+      const char* label;
+      bool graphics, input, audio, network;
+    };
+    static constexpr Attempt kAttempts[] = {
+        {"graphics+input+audio+network", true, true, true, true},
+        {"graphics+input+network (no audio)", true, true, false, true},
+        {"input+network (no graphics/audio)", false, true, false, true},
+        {"network only", false, false, false, true},
+    };
+    xenon::core::XenonSession session;
+    bool ready = false;
+    for (const auto& attempt : kAttempts) {
+      xenon::core::SessionConfig config{};
+      config.enable_logging = false;
+      config.enable_graphics = attempt.graphics;
+      config.enable_input = attempt.input;
+      config.enable_audio = attempt.audio;
+      config.enable_network = attempt.network;
+      const auto initialized = session.initialize(config);
+      if (initialized.success) {
+        std::cerr << tool << ": registry dumped from a session with " << attempt.label << "\n";
+        ready = true;
+        break;
+      }
+      std::cerr << tool << ": session with " << attempt.label
+                << " failed to initialize (" << initialized.message << "); trying a smaller set\n";
+      session.shutdown();
+    }
+    if (!ready) {
+      std::cerr << tool << ": could not initialize any XenonSession configuration\n";
+      return 2;
+    }
+    std::cout << "library\tordinal\tname\tkind\trequirement\tpartial\tnote\n";
+    const auto requirement_name = [](xenon::core::ExportRequirement requirement) {
+      switch (requirement) {
+        case xenon::core::ExportRequirement::Required: return "required";
+        case xenon::core::ExportRequirement::Stubbed: return "stubbed";
+        case xenon::core::ExportRequirement::Optional: return "optional";
+        case xenon::core::ExportRequirement::DiagnosticOnly: return "diagnostic";
+      }
+      return "unknown";
+    };
+    auto functions = session.exports()->enumerate();
+    std::sort(functions.begin(), functions.end(), [](const auto& a, const auto& b) {
+      return a.library != b.library ? a.library < b.library : a.ordinal < b.ordinal;
+    });
+    for (const auto& item : functions) {
+      std::cout << item.library << '\t' << item.ordinal << '\t' << item.name << "\tfunction\t"
+                << requirement_name(item.requirement) << '\t' << (item.partial ? 1 : 0) << '\t'
+                << item.partial_note << '\n';
+    }
+    auto variables = session.exports()->enumerate_variables();
+    std::sort(variables.begin(), variables.end(), [](const auto& a, const auto& b) {
+      return a.library != b.library ? a.library < b.library : a.ordinal < b.ordinal;
+    });
+    for (const auto& item : variables) {
+      std::cout << item.library << '\t' << item.ordinal << '\t' << item.name
+                << "\tvariable\trequired\t0\t\n";
+    }
+    return 0;
+  }
+#endif
   xenon::recomp::DriverOptions options;
   options.input = argv[1];
   std::unique_ptr<xenon::recomp::FileModuleHintProvider> module_provider;
@@ -184,7 +262,22 @@ int main(int argc, char** argv) {
                           static_cast<std::uint32_t>(std::to_integer<unsigned char>(section.bytes[index * 4 + 3]));
         const auto instruction = decoder.decode(section.virtual_address + static_cast<std::uint32_t>(index * 4u), word);
         std::cout << "0x" << std::hex << instruction.address << ": 0x" << word << " "
-                  << (instruction.valid() ? instruction.mnemonic() : "invalid") << "\n";
+                  << (instruction.valid() ? instruction.mnemonic() : "invalid");
+        if (instruction.valid()) {
+          std::cout << " rt=r" << std::dec << instruction.rt() << " ra=r" << instruction.ra()
+                    << " rb=r" << instruction.rb() << " simm16=" << instruction.simm16()
+                    << " uimm16=0x" << std::hex << instruction.uimm16()
+                    << " bo=" << std::dec << instruction.bo() << " bi=" << instruction.bi()
+                    << " crfd=" << instruction.crfd() << " aa=" << instruction.aa()
+                    << " lk=" << instruction.lk() << " rc=" << instruction.rc()
+                    << " sh32=" << instruction.sh32() << " mb32=" << instruction.mb32()
+                    << " me32=" << instruction.me32()
+                    << " branch_i_target=0x" << std::hex
+                    << (instruction.address + static_cast<std::uint32_t>(instruction.branch_i_displacement()))
+                    << " branch_b_target=0x" << std::hex
+                    << (instruction.address + static_cast<std::uint32_t>(instruction.branch_b_displacement()));
+        }
+        std::cout << "\n";
       }
     }
   } else if (tool == "import-scanner") {

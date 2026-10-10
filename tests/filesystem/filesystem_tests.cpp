@@ -930,7 +930,7 @@ void test_gdfx_image_source_and_vfs() {
   // read_all() (the primitive the automatic game preparation pipeline uses
   // to pull a whole default.xex out of a mounted disc image with no
   // extraction to a temporary file - see xenon/recomp/artifact_cache.hpp and
-  // tools/xenon_prepare.cpp) must return exactly the file's full, correct
+  // tools/xenon_prepare/) must return exactly the file's full, correct
   // contents.
   {
     std::vector<std::byte> whole_file;

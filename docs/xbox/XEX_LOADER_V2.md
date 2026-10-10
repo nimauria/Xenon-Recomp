@@ -2,7 +2,7 @@
 
 ## Purpose
 
-XEX Loader V2 replaces the metadata-first XEX loader (`docs/xbox/XEX_LOADER.md`) with a
+XEX Loader V2 replaces the old metadata-first XEX loader design with a
 production pipeline that takes a real retail (or devkit) Xbox 360 XEX1/XEX2 file all the
 way to the effective executable/data image Xenon's native recompilation and CPU V2/Memory
 V2 runtime needs:
@@ -266,6 +266,41 @@ this to the rest of Xenon without introducing a second XEXP implementation:
   production flow (`ContentManager` selects -> `XenonSession::load_game()`
   applies -> effective image is what actually runs).
 
+## Title-update fidelity report ("titleUpdate" capability section)
+
+A dedicated audit of the full title-update path (base XEX -> TU discovery ->
+TU identity -> header delta -> image delta -> effective image -> analysis ->
+codegen -> cache key -> runtime metadata) confirmed analysis and native
+artifacts are already keyed to the effective post-TU image with no base/TU
+cross-contamination — `effective_identity()` is what native-extension module
+compatibility gating and `xenon::recomp::generate_project()`'s emitted
+`Xenon_SupportedExecutableRevisions()` declaration both key off, and a
+malformed/incompatible update is rejected as a hard `load_game()` failure,
+never a silent fallback to the base XEX.
+
+That audit added the report itself. `XexEffectiveIdentity` gained
+`base_image_hash` (computed in `compute_effective_identity()`, equal to
+`effective_image_hash` exactly when no update was applied) alongside the
+existing `effective_image_hash`, and `capability_report()` gained a
+`"titleUpdate"` section (omitted until a title is loaded, matching the
+`"gpu"`/`"shader"` sections' convention):
+
+- `baseSha1` / `effectiveSha1` — the base and effective image hashes;
+- `titleUpdateApplied` — whether a title update was applied;
+- `tuIdentity` — `"<base_version>+<effective_version>"`, or `"none"` when no
+  update was applied, matching `RunFingerprint`'s existing convention;
+- `effectiveVersion` — the version of the image that actually runs.
+
+This is deliberately a separate section from `RunFingerprint`'s own
+`effective_xex_sha1`/`tu_identity` fields: `RunFingerprint` describes what
+actually ran, for tracing a checkpoint/crash report back to an exact input
+combination, while `"titleUpdate"` is the explicit base-vs-effective
+two-hash comparison. Tested in
+`tests/core/title_update_integration_tests.cpp`:
+`test_base_only_launch` asserts `baseSha1 == effectiveSha1` and
+`tuIdentity == "none"`; `test_valid_title_update_applied` asserts
+`baseSha1 != effectiveSha1` against independently-computed reference hashes.
+
 ## Imports / exports / TLS / relocations
 
 After decryption/decompression, the effective image uses loaded-image semantics:
@@ -368,5 +403,5 @@ and title updates without the loader hard-coding any of that policy itself.
 
 - `include/xenon/xbox/xex_loader.hpp`, `src/xbox/xex/xex_loader.cpp` - header/security/
   compression/PE orchestration, `load_xex()`, `apply_title_update()`.
-- `include/xenon/xbox/xex_crypto.hpp`, `src/xbox/xex/xex_crypto.cpp` - AES-128, SHA-1.
-- `include/xenon/xbox/xex_lzx.hpp`, `src/xbox/xex/xex_lzx.cpp` - LZX/LZXDELTA decoder.
+- `include/xenon/xbox/xex_crypto.hpp`, `src/xbox/xex/security/xex_crypto.cpp` - AES-128, SHA-1.
+- `include/xenon/xbox/xex_lzx.hpp`, `src/xbox/xex/compression/xex_lzx.cpp` - LZX/LZXDELTA decoder.

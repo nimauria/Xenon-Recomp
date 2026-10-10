@@ -46,6 +46,37 @@ The Xenos 24/8 depth encodings deliberately remain unsupported as sampled
 images here: their exact conversion and EDRAM interaction belong to GPU 10,
 rather than being misrepresented as a bit-compatible host depth image.
 
+## CPU-write to GPU-sample coherency
+
+CPU-write -> GPU-sample coherency is owned by `TextureDirtyTracker`
+(`include/xenon/gpu/texture.hpp`), keyed by `memory::GuestMemoryCoherency`
+epochs rather than a global RAM lock. It is wired into both backends'
+draw-time texture-bind path: a texture already present in the backend's
+texture cache is re-validated via `consume_dirty(key, coherency,
+dirty_epoch)` before every draw that samples it, and is only re-decoded and
+re-uploaded from guest memory when a real CPU write landed in its range since
+the last upload. This is per-texture, lock-free epoch tracking. The
+GPU-write-then-CPU-read direction is handled separately by
+`GuestMemoryMirror::make_cpu_visible`, and EDRAM ownership handoff/aliasing is
+owned by `EdramOwnershipTracker` (see `docs/graphics/EDRAM_RENDERING.md`).
+
+Both backends distinguish "first-time upload" from "re-upload because the
+cache was found stale" via named `already_cached`/`dirty` locals, and
+increment `GpuPerformanceCounters::texture_cache_invalidations` exactly when
+`dirty` is true (behavior-preserving: `consume_dirty` is still only called
+when `already_cached`). The counter is surfaced as `textureCacheInvalidations`
+in `capability_report()`'s `"gpu"` section alongside `GpuUnsupportedCounters`
+(see `docs/graphics/NATIVE_BACKENDS.md`).
+
+No test currently exercises this counter's nonzero case end-to-end: that
+needs a texture actually sampled by a real draw followed by a second CPU
+write and a second draw — the same "needs a real guest pixel shader"
+constraint tracked as scenarios 5 and 7 in
+`docs/graphics/EDRAM_RENDERING.md`'s resolve-correctness-audit section. The
+zero-default case is tested (`NullBackend`, fresh session), and the
+underlying `TextureDirtyTracker` hash+epoch logic is unit-tested in isolation
+in `tests/graphics/xenos/texture.cpp`.
+
 ## Next boundary
 
 GPU 10 owns EDRAM color/depth surfaces, MSAA, clears and resolves; concrete

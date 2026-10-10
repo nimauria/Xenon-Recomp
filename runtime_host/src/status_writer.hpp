@@ -47,7 +47,14 @@ class StatusWriter {
   void write_fatal(const std::string& message,
                    LaunchFailureCategory category = LaunchFailureCategory::None);
 
+  // Publishes XenonSession::capability_report() (run fingerprint, CPU
+  // fallback, and live GPU backend counters - draws, submissions, and every
+  // unsupported-operation counter) as capability-report.json beside
+  // status.json, using the same atomic temp-file + rename publish.
+  void write_capability_report(core::XenonSession& session);
+
   [[nodiscard]] std::string status_path() const;
+  [[nodiscard]] std::string capability_report_path() const;
   [[nodiscard]] std::string stop_signal_path() const;
   [[nodiscard]] bool stop_requested() const;
 

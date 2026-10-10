@@ -80,6 +80,10 @@ void test_ordinals_are_registered() {
   assert(f.registry.contains("xboxkrnl", "NtCancelTimer"));
   assert(f.registry.contains("xboxkrnl", 0x0FAu));
   assert(f.registry.contains("xboxkrnl", "NtSetTimerEx"));
+  assert(f.registry.contains("xboxkrnl", 0x0E2u));
+  assert(f.registry.contains("xboxkrnl", "NtPulseEvent"));
+  assert(f.registry.contains("xboxkrnl", 0x019u));
+  assert(f.registry.contains("xboxkrnl", "ExTerminateThread"));
 }
 
 void test_nt_create_event_and_wait_single() {
@@ -119,6 +123,84 @@ void test_nt_create_event_and_wait_single() {
   result = f.invoke(0x0FDu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+}
+
+void test_nt_pulse_event_signals_then_resets() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+
+  cpu::CpuState create{};
+  create.gpr[3] = handle_out;
+  create.gpr[4] = 0;  // object attributes (unnamed)
+  create.gpr[5] = 1;  // EVENT_TYPE::SynchronizationEvent (auto-reset)
+  create.gpr[6] = 0;  // initial state: not signaled
+  assert(f.invoke(0x0D1u, create).success);
+  const auto handle = f.address_space->read32_be(handle_out);
+  assert(handle != 0u);
+
+  // Signal it directly (KeSetEvent is out of scope this file - same
+  // approach test_nt_create_event_and_wait_single uses above), then pulse:
+  // the previous-state out-param must report it was signaled, and a
+  // zero-timeout wait immediately afterward must time out, proving pulse
+  // actually reset the event rather than leaving it signaled like NtSetEvent
+  // would.
+  kernel::HandleView view{};
+  assert(f.process->handle_table().lookup(handle, view) == kernel::KernelIoCode::Success);
+  static_cast<kernel::KernelEvent&>(*view.object).set();
+
+  const auto previous_out = f.alloc32();
+  f.address_space->write32_be(previous_out, 0xDEADBEEFu);
+  cpu::CpuState pulse{};
+  pulse.gpr[3] = handle;
+  pulse.gpr[4] = previous_out;
+  auto pulse_result = f.invoke(0x0E2u, pulse);
+  assert(pulse_result.handled && pulse_result.success);
+  assert(pulse.gpr[3] == 0u);  // STATUS_SUCCESS
+  assert(f.address_space->read32_be(previous_out) == 1u);
+
+  cpu::CpuState wait{};
+  wait.gpr[3] = handle;
+  wait.gpr[6] = f.alloc64();  // timeout pointer: 0 relative ms
+  f.address_space->write64_be(wait.gpr[6], 0);
+  auto wait_result = f.invoke(0x0FDu, wait);
+  assert(wait_result.handled && wait_result.success);
+  assert(wait.gpr[3] == 0x00000102u);  // STATUS_TIMEOUT: pulse reset it
+
+  // Invalid handle: NTSTATUS from the handle lookup, not a crash.
+  cpu::CpuState invalid{};
+  invalid.gpr[3] = 0xFFFFu;
+  auto invalid_result = f.invoke(0x0E2u, invalid);
+  assert(invalid_result.handled && invalid_result.success);
+  assert(invalid.gpr[3] == 0xC0000008u);  // STATUS_INVALID_HANDLE
+}
+
+void test_ex_terminate_thread_sets_state_and_exit_code() {
+  // ExTerminateThread operates on ThreadManager::current_thread() (a
+  // thread-local), so this test must set it up as the calling test thread's
+  // "current thread" the same way a real guest thread dispatch would.
+  Fixture f;
+  kernel::ThreadCreationParams params{};
+  params.create_suspended = true;
+  auto thread = f.process->thread_manager().create_thread([] { return 0u; }, params);
+  f.process->thread_manager().set_current_thread(thread);
+  assert(!thread->is_terminated());
+
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = 0x2A9Cu;  // arbitrary exit code
+  auto result = f.invoke(0x019u, cpu);
+  assert(result.handled);
+
+  assert(thread->is_terminated());
+  assert(thread->exit_code() == 0x2A9Cu);
+
+  // A second call on an already-terminated thread must not crash or
+  // overwrite the first exit code (KernelThread::terminate() returns false
+  // and leaves state untouched once already Terminated).
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 0xFFu;
+  auto second = f.invoke(0x019u, cpu);
+  assert(second.handled);
+  assert(thread->exit_code() == 0x2A9Cu);
 }
 
 void test_nt_create_semaphore_release_and_limit() {
@@ -308,6 +390,38 @@ void test_nt_create_timer_set_and_cancel() {
   assert(result.handled && result.success && cpu.gpr[3] == 0u);
 }
 
+void test_nt_signal_and_wait_signals_then_waits() {
+  Fixture f;
+
+  // Create a manual-reset event, initially unset, to use as both the signal
+  // and wait object - NtSignalAndWaitForSingleObjectEx must observe its own
+  // signal, not just whatever state existed before the call.
+  const auto handle_out = f.alloc32();
+  cpu::CpuState create_cpu{};
+  create_cpu.gpr[3] = handle_out;
+  create_cpu.gpr[5] = 0u;  // manual reset
+  create_cpu.gpr[6] = 0u;  // initially unset
+  auto create_result = f.invoke(0x0D1u, create_cpu);
+  assert(create_result.handled && create_result.success);
+  const auto handle = f.address_space->read32_be(handle_out);
+
+  cpu::CpuState signal_wait_cpu{};
+  signal_wait_cpu.gpr[3] = handle;  // signal handle
+  signal_wait_cpu.gpr[4] = handle;  // wait handle (same object)
+  signal_wait_cpu.gpr[7] = 0u;      // no timeout pointer -> infinite, fine since it's signaled
+  auto result = f.invoke(0x0FBu, signal_wait_cpu);
+  assert(result.handled && result.success);
+  assert(signal_wait_cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+
+  // An unrecognized handle must produce STATUS_INVALID_HANDLE, not a crash.
+  cpu::CpuState bad_cpu{};
+  bad_cpu.gpr[3] = 0xDEADu;
+  bad_cpu.gpr[4] = handle;
+  auto bad_result = f.invoke(0x0FBu, bad_cpu);
+  assert(bad_result.handled && bad_result.success);
+  assert(bad_result.success && bad_cpu.gpr[3] != 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -315,10 +429,13 @@ int main() {
 
   test_ordinals_are_registered();
   test_nt_create_event_and_wait_single();
+  test_nt_pulse_event_signals_then_resets();
+  test_ex_terminate_thread_sets_state_and_exit_code();
   test_nt_create_semaphore_release_and_limit();
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
   test_nt_wait_for_multiple_objects_any_and_all();
   test_nt_create_timer_set_and_cancel();
+  test_nt_signal_and_wait_signals_then_waits();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";
   return 0;

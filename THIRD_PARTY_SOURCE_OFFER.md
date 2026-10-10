@@ -9,6 +9,9 @@ For every official binary release, the same GitHub release must include a
 source archives for the LGPL components shipped by that release, plus a machine
 readable manifest of their versions and hashes.
 
+The Xenia FFmpeg source archive is accompanied by the exact build patch applied
+to its pinned revision, so the shared XMA-capable libraries can be reproduced.
+
 The release automation treats this source bundle as a required release artifact.
 A binary release should not be published if generation of the matching source
 bundle fails.

@@ -141,6 +141,21 @@ struct PhysicalAllocationInfo {
   Protect current_protect{kReadWrite};
 };
 
+// One lock-consistent snapshot of Memory V2's existing page metadata. This
+// deliberately aggregates the authoritative page tables rather than adding a
+// second allocation database for Xbox-facing statistics exports.
+struct MemoryStatistics {
+  std::uint32_t total_physical_pages{};
+  std::uint32_t available_physical_pages{};
+  std::uint32_t system_physical_pages{};
+  std::uint32_t anonymous_physical_pages{};
+  std::uint32_t explicit_physical_pages{};
+  std::uint32_t retired_physical_pages{};
+  std::uint32_t reserved_virtual_pages{};
+  std::uint32_t committed_virtual_pages{};
+  std::uint32_t image_pages{};
+};
+
 // Canonical Xbox-visible memory type. This is deliberately separate from host
 // page-cache attributes: Xenon may translate a guest cache policy into ordering,
 // coherency and access-path rules when the host cannot safely create an alias

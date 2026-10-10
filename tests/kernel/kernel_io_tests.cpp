@@ -605,6 +605,51 @@ void test_xbox_facade_async_contract_and_event_signal() {
   assert(io.close(event) == kernel::KernelIoCode::Success);
 }
 
+// Regression (Ace Combat 6 could not read a single file): NtCreateEvent publishes
+// its handle in the process handle table, while the I/O manager used to keep a
+// private table of its own. NtReadFile(file, event, ...) then rejected the title's
+// event handle as invalid, the read failed, and the title gave up and exited.
+// With the I/O manager on the process table there is one handle namespace.
+void test_shared_handle_table_is_one_namespace() {
+  TempDirectory temp;
+  write_text(temp.path() / "shared.bin", "wxyz");
+  kernel::HandleTable process_table;
+  kernel::KernelIoManager io(make_vfs(temp.path()));
+  io.share_handle_table(&process_table);
+  kernel::xbox::IoFacade xbox(io);
+
+  // An event made by some other kernel component (the NtCreateEvent export).
+  auto title_event = std::make_shared<kernel::KernelEvent>(/*manual_reset=*/false, false);
+  kernel::Handle event_handle{};
+  assert(process_table.insert(title_event, 0xFFFFFFFFu, kernel::HandleFlags::None,
+                              event_handle) == kernel::KernelIoCode::Success);
+
+  kernel::xbox::CreateFileRequest request{};
+  request.path = "game:\\shared.bin";
+  request.desired_access = kernel::xbox::access::GenericRead;
+  request.share_access = kernel::xbox::share::All;
+  request.creation_disposition = 1;
+  request.create_options = kernel::xbox::create_option::NonDirectoryFile;
+  kernel::Handle file{};
+  kernel::xbox::IoStatusBlock iosb{};
+  assert(xbox.create_file(request, file, iosb) == kernel::xbox::status::Success);
+  assert(file != event_handle && "one table hands out distinct handles");
+  assert(process_table.size() == 2u && "the file lives in the process table too");
+
+  std::array<std::byte, 4> buffer{};
+  const auto returned = xbox.read_file(file, buffer, {}, iosb, event_handle, 0);
+  assert(returned != kernel::xbox::status::InvalidHandle &&
+         "an event created outside the I/O manager must be accepted");
+  assert(iosb.information == 4 && buffer[0] == std::byte{'w'} && buffer[3] == std::byte{'z'});
+  assert(title_event->wait_for(std::chrono::milliseconds{0}) &&
+         "the read must signal the title's own event");
+
+  // A generic close through the process table (what NtClose does) closes the file.
+  assert(process_table.close(file) == kernel::KernelIoCode::Success);
+  assert(io.close(file) == kernel::KernelIoCode::InvalidHandle);
+  assert(process_table.close(event_handle) == kernel::KernelIoCode::Success);
+}
+
 void test_xbox_facade_information_volume_and_rooted_attributes() {
   TempDirectory temp;
   std::filesystem::create_directories(temp.path() / "Root");
@@ -726,6 +771,7 @@ int main() {
   test_kernel_events_manual_and_auto_reset();
   test_xbox_facade_rexglue_compatible_create_and_status();
   test_xbox_facade_async_contract_and_event_signal();
+  test_shared_handle_table_is_one_namespace();
   test_xbox_facade_information_volume_and_rooted_attributes();
   test_xbox_facade_directory_query_and_path_validation();
   return 0;

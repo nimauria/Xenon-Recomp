@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Can I play a game with Xenon yet?
+    url: https://github.com/nimauria/Xenon-Recomp#current-milestone-project-gracemeria
+    about: Not yet. No commercial Xbox 360 title is confirmed playable. The README's current milestone section explains where development stands.
+  - name: Security vulnerability
+    url: https://github.com/nimauria/Xenon-Recomp/blob/main/SECURITY.md
+    about: Please report security issues privately as described in SECURITY.md, not in a public issue.

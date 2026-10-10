@@ -1,0 +1,135 @@
+if(XENON_BUILD_TESTS)
+
+  if(XENON_ENABLE_GRAPHICS)
+    add_executable(xenon_backend_capability_tests
+      backends/backend_capabilities.cpp)
+    set_target_properties(xenon_backend_capability_tests PROPERTIES
+      OUTPUT_NAME xenon_native_backend_gpu10_tests)
+    target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_backend_capability_tests PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_backend_capability_tests PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      target_link_libraries(xenon_backend_capability_tests PRIVATE xenon_graphics_dxc)
+      target_compile_definitions(xenon_backend_capability_tests PRIVATE XENON_TEST_DXC=1)
+      xenon_stage_runtime_dependencies(xenon_backend_capability_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_backend_capability_tests)
+    add_test(NAME xenon_backend_capability_tests COMMAND xenon_backend_capability_tests)
+    add_executable(xenon_backend_ownership_integration_tests
+      backends/backend_ownership_integration.cpp)
+    target_link_libraries(xenon_backend_ownership_integration_tests
+      PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_backend_ownership_integration_tests
+        PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_backend_ownership_integration_tests
+        PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_backend_ownership_integration_tests
+        PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_backend_ownership_integration_tests
+        PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_backend_ownership_integration_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
+    add_test(NAME xenon_backend_ownership_integration_tests
+      COMMAND xenon_backend_ownership_integration_tests)
+    add_executable(xenon_cross_backend_canonical_tests
+      backends/cross_backend_canonical.cpp)
+    target_link_libraries(xenon_cross_backend_canonical_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_cross_backend_canonical_tests
+        PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_cross_backend_canonical_tests
+        PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_cross_backend_canonical_tests
+        PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_cross_backend_canonical_tests
+        PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_cross_backend_canonical_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_cross_backend_canonical_tests)
+    add_test(NAME xenon_cross_backend_canonical_tests
+      COMMAND xenon_cross_backend_canonical_tests)
+    add_executable(xenon_shader_decoder_tests xenos/shader_decoder.cpp)
+    set_target_properties(xenon_shader_decoder_tests PROPERTIES
+      OUTPUT_NAME xenon_shader_decoder_gpu09_tests)
+    target_link_libraries(xenon_shader_decoder_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_shader_decoder_tests)
+    add_test(NAME xenon_shader_decoder_tests COMMAND xenon_shader_decoder_tests)
+    add_executable(xenon_depth_format_tests xenos/depth_format.cpp)
+    target_link_libraries(xenon_depth_format_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_depth_format_tests)
+    add_test(NAME xenon_depth_format_tests COMMAND xenon_depth_format_tests)
+    add_executable(xenon_shader_lowering_tests
+      xenos/shader_lowering.cpp)
+    target_link_libraries(xenon_shader_lowering_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_shader_lowering_tests)
+    add_test(NAME xenon_shader_lowering_tests COMMAND xenon_shader_lowering_tests)
+    add_executable(xenon_resource_ir_tests xenos/resource_ir.cpp)
+    target_link_libraries(xenon_resource_ir_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_resource_ir_tests)
+    add_test(NAME xenon_resource_ir_tests COMMAND xenon_resource_ir_tests)
+    add_executable(xenon_resource_barrier_tests
+      xenos/resource_barrier.cpp)
+    target_link_libraries(xenon_resource_barrier_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_resource_barrier_tests)
+    add_test(NAME xenon_resource_barrier_tests COMMAND xenon_resource_barrier_tests)
+    add_executable(xenon_texture_tests xenos/texture.cpp)
+    target_link_libraries(xenon_texture_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_texture_tests)
+    add_test(NAME xenon_texture_tests COMMAND xenon_texture_tests)
+    add_executable(xenon_presentation_tests xenos/presentation.cpp)
+    target_link_libraries(xenon_presentation_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_presentation_tests)
+    add_test(NAME xenon_presentation_tests COMMAND xenon_presentation_tests)
+    add_executable(xenon_edram_surface_tests
+      xenos/edram_surface.cpp)
+    target_link_libraries(xenon_edram_surface_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_edram_surface_tests)
+    add_test(NAME xenon_edram_surface_tests COMMAND xenon_edram_surface_tests)
+    add_executable(xenon_edram_ownership_tests
+      xenos/edram_ownership.cpp)
+    target_link_libraries(xenon_edram_ownership_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_edram_ownership_tests)
+    add_test(NAME xenon_edram_ownership_tests COMMAND xenon_edram_ownership_tests)
+    add_executable(xenon_primitive_processor_tests
+      xenos/primitive_processor.cpp)
+    target_link_libraries(xenon_primitive_processor_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_primitive_processor_tests)
+    add_test(NAME xenon_primitive_processor_tests COMMAND xenon_primitive_processor_tests)
+    if(TARGET xenon_graphics_dxc)
+      add_executable(xenon_shader_translation_tests
+        xenos/shader_translation.cpp)
+      set_target_properties(xenon_shader_translation_tests PROPERTIES
+        OUTPUT_NAME xenon_shader_translation_gpu07_tests)
+      target_link_libraries(xenon_shader_translation_tests PRIVATE xenon_graphics_dxc)
+      xenon_enable_test_asserts(xenon_shader_translation_tests)
+      xenon_stage_runtime_dependencies(xenon_shader_translation_tests)
+      add_test(NAME xenon_shader_translation_tests COMMAND xenon_shader_translation_tests)
+    endif()
+    add_executable(xenon_gpu_frontend_tests xenos/gpu_frontend.cpp)
+    set_target_properties(xenon_gpu_frontend_tests PROPERTIES
+      OUTPUT_NAME xenon_gpu_frontend_gpu08_tests)
+    target_link_libraries(xenon_gpu_frontend_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_gpu_frontend_tests)
+    add_test(NAME xenon_gpu_frontend_tests COMMAND xenon_gpu_frontend_tests)
+  endif()
+  if(TARGET xenon_graphics)
+    xenon_add_standalone_test(xenon_xenos_register_aperture_tests
+      xenos/register_aperture_tests.cpp xenon_graphics xenon_memory)
+  endif()
+endif()

@@ -40,8 +40,8 @@ void test_title_update_manager() {
   tu_manager.initialize();
   
   // Test version comparison
-  filesystem::XexVersion v1{.major = 1, .minor = 2, .build = 0, .qfe = 0};
-  filesystem::XexVersion v2{.major = 1, .minor = 3, .build = 0, .qfe = 0};
+  xenon::filesystem::XexVersion v1{.major = 1, .minor = 2, .build = 0, .qfe = 0};
+  xenon::filesystem::XexVersion v2{.major = 1, .minor = 3, .build = 0, .qfe = 0};
   
   assert(TitleUpdateManager::is_newer_version(v2, v1));
   assert(!TitleUpdateManager::is_newer_version(v1, v2));

@@ -21,7 +21,7 @@ class PathService final {
   // logs, shader cache) never lives here - see cachePath()/preparationCachePath().
   [[nodiscard]] QString defaultLibraryRootPath() const;
   [[nodiscard]] QString libraryRootPath() const;
-  // Where the automatic game-preparation pipeline (tools/xenon_prepare.cpp)
+  // Where the automatic game-preparation pipeline (tools/xenon_prepare/)
   // stages generated source, nested builds, and the prepared native-module
   // artifact cache. Always under cachePath(), deliberately never under the
   // library root - a prepared module is disposable/regeneratable, not user

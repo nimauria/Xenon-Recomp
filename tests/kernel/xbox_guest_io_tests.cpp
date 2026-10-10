@@ -192,6 +192,55 @@ void test_create_read_write_query_and_rooted_open() {
   assert(contents == "aZZdef");
 }
 
+// Regression (AC6 bring-up): the title builds ByteOffset from an OVERLAPPED whose
+// OffsetHigh it never initialised (the whole structure is 0x2A-filled). The kernel
+// only honours the low dword, so the read must land at the low offset instead of
+// ~3e18 bytes past EOF (which returned nothing and starved the streaming loader).
+void test_byte_offset_high_dword_is_ignored_and_pointer_sentinels() {
+  TempDirectory temp;
+  write_file(temp.path() / "offset.bin", "0123456789");
+
+  memory::AddressSpace mem(memory::GuestTranslationMode::Compact);
+  assert(mem.initialize());
+  assert(mem.commit_fixed(kGuestBase, 0x10000u, memory::kReadWrite));
+  kernel::KernelIoManager io(make_vfs(temp.path()));
+  xbox::GuestIoBridge bridge(mem, io);
+
+  const auto file = open_guest_file(
+      bridge, mem, "game:\\offset.bin", xbox::access::GenericRead,
+      xbox::create_option::SynchronousIoNonAlert);
+
+  mem.fill_bytes(kBuffer, 16, 0);
+  mem.write32_be(kInfo, 0x2A2A2A2Au);      // garbage OffsetHigh
+  mem.write32_be(kInfo + 4, 4u);           // Offset
+  auto status = bridge.nt_read_file(file, kernel::kInvalidHandle, 0, 0, kIosb,
+                                    kBuffer, 3, kInfo);
+  assert(status == xbox::status::Success);
+  assert(mem.read32_be(kIosb + 4) == 3);
+  assert(read_guest_string(mem, kBuffer, 3) == "456");
+
+  // {0xFFFFFFFF,0xFFFFFFFF} and FILE_USE_FILE_POINTER_POSITION both continue at
+  // the current position (7 after the read above).
+  for (const std::uint32_t low : {0xFFFFFFFFu, 0xFFFFFFFEu}) {
+    mem.write32_be(kInfo, 0xFFFFFFFFu);
+    mem.write32_be(kInfo + 4, low);
+    mem.fill_bytes(kBuffer, 16, 0);
+    status = bridge.nt_read_file(file, kernel::kInvalidHandle, 0, 0, kIosb,
+                                 kBuffer, 1, kInfo);
+    assert(status == xbox::status::Success);
+    assert(mem.read32_be(kIosb + 4) == 1);
+    assert(read_guest_string(mem, kBuffer, 1) == (low == 0xFFFFFFFFu ? "7" : "8"));
+  }
+
+  // A low offset past EOF is still EOF (the fix must not turn errors into data).
+  mem.write32_be(kInfo, 0x2A2A2A2Au);
+  mem.write32_be(kInfo + 4, 100u);
+  status = bridge.nt_read_file(file, kernel::kInvalidHandle, 0, 0, kIosb,
+                               kBuffer, 3, kInfo);
+  assert(status == xbox::status::EndOfFile);
+  assert(io.close(file) == kernel::KernelIoCode::Success);
+}
+
 void test_async_apc_memory_fault_and_scatter() {
   TempDirectory temp;
   std::string payload(5000, 'A');
@@ -304,6 +353,7 @@ void test_directory_and_volume_marshalling() {
 
 int main() {
   test_create_read_write_query_and_rooted_open();
+  test_byte_offset_high_dword_is_ignored_and_pointer_sentinels();
   test_async_apc_memory_fault_and_scatter();
   test_directory_and_volume_marshalling();
   return 0;

@@ -5,6 +5,16 @@ Xenon Recomp itself is licensed under the MIT License. Components under
 licenses. Official packages install the corresponding license texts under
 `share/licenses/Xenon`.
 
+## Xenia xboxkrnl export reference data
+
+`tools/coverage/reference/xenia_xboxkrnl_997d055.json` contains ordinal, name, and
+kind facts transcribed from the [Xenia xboxkrnl table at revision
+`997d0555dbd6358dffd2950097424993763051af`](https://github.com/xenia-project/xenia/blob/997d0555dbd6358dffd2950097424993763051af/src/xenia/kernel/xboxkrnl/xboxkrnl_table.inc).
+The Xenia project is credited to Copyright (c) 2015, Ben Vanik, and is
+distributed under the [BSD 3-Clause license at that revision](https://github.com/xenia-project/xenia/blob/997d0555dbd6358dffd2950097424993763051af/LICENSE).
+This reference data supports a development audit and does not establish an
+official or version-qualified Xbox 360 kernel ABI.
+
 ## Xenia-maintained FFmpeg / XMA decoder support
 
 Audio V1 links dynamically to `libavcodec` and `libavutil` built from the

@@ -167,7 +167,7 @@ ExecutionResult tls_isolation_probe_entry(ExecutionContext& context) {
 // increment unrelated to real elapsed time; read_spr()/write_spr() silently
 // no-opped every SPR). Dispatched through the exact real production
 // RuntimeServices interface a real AOT-compiled Op::ReadTimeBase/ReadSPR/
-// WriteSPR would use (see src/cpu/codegen/backend_cpp_aot.cpp), not called
+// WriteSPR would use (see src/cpu/codegen/emission/backend_cpp_aot.cpp), not called
 // directly on XenonSession.
 std::atomic<std::uint64_t> g_timebase_probe_first{0};
 std::atomic<std::uint64_t> g_timebase_probe_second{0};
@@ -291,7 +291,9 @@ void test_ex_create_thread_honors_create_suspended() {
   cpu.gpr[3] = handle_out;
   cpu.gpr[7] = 0x3000u;
   cpu.gpr[8] = 0;
-  cpu.gpr[9] = 0x4u;  // CREATE_SUSPENDED
+  // ExCreateThread's own flag word (what the title's XAPI CreateThread builds
+  // from Win32 CREATE_SUSPENDED): bit 0 = suspended, bits 24..31 = processor.
+  cpu.gpr[9] = 0x01000001u;
   auto call = make_call(cpu, *harness.session.memory());
 
   assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
@@ -309,6 +311,32 @@ void test_ex_create_thread_honors_create_suspended() {
 
   assert(thread.resume());
   assert(thread.join(2000));
+  assert(g_entry_ran.load());
+}
+
+// Regression (Ace Combat 6 worker pool): a processor number in the top byte with
+// the suspend bit clear must start the thread immediately, and the suspend bit
+// must be bit 0 - not Win32's 0x4, which is never what ExCreateThread receives.
+void test_ex_create_thread_affinity_alone_does_not_suspend() {
+  g_entry_ran.store(false);
+  ThreadCreationHarness harness(&echo_increment_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  cpu.gpr[9] = 0x02000000u;  // run on processor 2, not suspended
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  const auto handle = harness.session.memory()->read32_be(handle_out);
+
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000) && "an unsuspended thread runs without being resumed");
   assert(g_entry_ran.load());
 }
 
@@ -873,6 +901,7 @@ int main() {
 
   test_ex_create_thread_runs_and_propagates_start_context_and_exit_code();
   test_ex_create_thread_honors_create_suspended();
+  test_ex_create_thread_affinity_alone_does_not_suspend();
   test_preemptive_safepoint_terminates_a_running_created_thread();
   test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread();
   test_two_concurrent_created_threads_have_independent_tls();

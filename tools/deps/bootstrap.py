@@ -40,6 +40,11 @@ REPO_ROOT = SCRIPT_DIR.parent.parent
 MANIFEST_PATH = SCRIPT_DIR / "manifest.json"
 DEFAULT_MANAGED_BASE = REPO_ROOT / ".xenon" / "deps"
 STAMP_NAME = ".xenon-dependency.json"
+DXC_WIN_ADAPTER_URL = (
+    "https://raw.githubusercontent.com/microsoft/DirectXShaderCompiler/"
+    "v1.9.2607/include/dxc/WinAdapter.h"
+)
+DXC_WIN_ADAPTER_SHA256 = "f5688a1408a8de8c0c35176bc900f21d7679d492215da94da4ab643cb66867f4"
 
 
 class BootstrapError(RuntimeError):
@@ -368,9 +373,16 @@ def _build_vulkan_loader(source: Path, build: Path, prefix: Path, headers_prefix
         f"-DVULKAN_HEADERS_INSTALL_DIR={headers_prefix}",
         "-DBUILD_TESTS=OFF", "-DLOADER_CODEGEN=OFF",
     ]
-    # Keep the Linux loader feature-complete. These may require the normal X11/
-    # Wayland development packages on the RELEASE BUILD MACHINE only; they are
-    # not end-user installer prerequisites.
+    if sys.platform.startswith("linux"):
+        # The loader can still serve XCB/Xlib without optional Xrandr or
+        # Wayland headers. Keep each WSI integration enabled when its package
+        # is available on the build host.
+        for package, option in (
+            ("xrandr", "BUILD_WSI_XLIB_XRANDR_SUPPORT"),
+            ("wayland-client", "BUILD_WSI_WAYLAND_SUPPORT"),
+        ):
+            if subprocess.run(["pkg-config", "--exists", package], check=False).returncode != 0:
+                cmd.append(f"-D{option}=OFF")
     _run(cmd, quiet=quiet)
     _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
@@ -483,6 +495,43 @@ def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool)
     _run([_cmake_executable(), "--build", str(build), "--config", "Release", "--target", "install", "--parallel", str(jobs)], quiet=quiet)
 
 
+def _prepare_ffmpeg_source(source: Path, build: Path, entry: dict, quiet: bool) -> Path:
+    # This fork tracks a premake config.h, which prevents an out-of-tree
+    # configure. Keep the pinned checkout untouched and put the configured
+    # copy beside the build directory, never inside it. FFmpeg's configure
+    # writes build files and source links relative to its working directory.
+    configured_source = build.with_name(build.name + "-source")
+    shutil.rmtree(configured_source, ignore_errors=True)
+    shutil.copytree(source, configured_source,
+                    ignore=shutil.ignore_patterns(".git", "config.h"))
+    if not (configured_source / "Makefile").is_file():
+        raise BootstrapError("Pinned FFmpeg source copy is missing Makefile")
+    for patch in entry.get("patches", []):
+        # Compare resolved paths: on Windows resolve() expands 8.3 short names
+        # (such as RUNNER~1 in a temp directory), so an unresolved root would
+        # reject a patch that is inside it.
+        patch_path = (SCRIPT_DIR / patch["path"]).resolve()
+        if not patch_path.is_relative_to(SCRIPT_DIR.resolve()) or not patch_path.is_file():
+            raise BootstrapError(f"Invalid pinned FFmpeg patch path: {patch['path']}")
+        if hashlib.sha256(patch_path.read_bytes()).hexdigest() != patch["sha256"]:
+            raise BootstrapError(f"Pinned FFmpeg patch hash mismatch: {patch_path}")
+        source_file = configured_source / patch["source_file"]
+        if not source_file.is_file():
+            raise BootstrapError(f"Pinned FFmpeg patch source mismatch: {source_file}")
+        # Git for Windows may check out this upstream C header with CRLF.
+        # Normalize only the isolated copy so the source hash and patch apply
+        # against the same bytes on every host.
+        source_bytes = source_file.read_bytes()
+        normalized_bytes = source_bytes.replace(b"\r\n", b"\n")
+        if hashlib.sha256(normalized_bytes).hexdigest() != patch["source_sha256"]:
+            raise BootstrapError(f"Pinned FFmpeg patch source mismatch: {source_file}")
+        if normalized_bytes != source_bytes:
+            source_file.write_bytes(normalized_bytes)
+        _run(["git", "apply", "--check", str(patch_path)], cwd=configured_source, quiet=quiet)
+        _run(["git", "apply", str(patch_path)], cwd=configured_source, quiet=quiet)
+    return configured_source
+
+
 def _find_msys_bash() -> str | None:
     explicit = os.environ.get("XENON_MSYS2_BASH")
     candidates = [
@@ -517,15 +566,19 @@ def _ffmpeg_configure_args(prefix: Path, *, windows: bool, have_nasm: bool) -> l
     if not windows:
         args.append("--enable-pic")
     if not have_nasm:
-        args.append("--disable-x86asm")
+        # This fork's old inline x86 assembly also fails with current GNU
+        # assemblers. Disabling only the external NASM sources is insufficient.
+        args.append("--disable-asm")
     if windows:
         args.extend(["--toolchain=msvc", "--target-os=win64", "--arch=x86_64"])
     return args
 
 
-def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
+def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, entry: dict,
+                        jobs: int, quiet: bool) -> None:
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
+    source = _prepare_ffmpeg_source(source, build, entry, quiet)
     configure = source / "configure"
     if not configure.is_file():
         raise BootstrapError(f"FFmpeg configure script missing: {configure}")
@@ -538,7 +591,8 @@ def _build_ffmpeg_posix(source: Path, build: Path, prefix: Path, jobs: int, quie
     _run([make, "install"], cwd=build, quiet=quiet)
 
 
-def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
+def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, entry: dict,
+                          jobs: int, quiet: bool) -> None:
     # Xenia's FFmpeg fork uses the normal FFmpeg configure/make build. Native
     # MSVC is supported, but configure/make need an MSYS2 shell. The compiler
     # environment (cl/link) must be visible to this process; official CI should
@@ -556,13 +610,7 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, qu
         )
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
-
-    # This pinned fork tracks config.h for its premake build. FFmpeg's
-    # configure refuses an out-of-tree build when that file is present.
-    # Use an isolated source copy, preserving the pinned checkout verbatim.
-    configured_source = build / "source"
-    shutil.copytree(source, configured_source, ignore=shutil.ignore_patterns(".git", "config.h"))
-    source = configured_source
+    source = _prepare_ffmpeg_source(source, build, entry, quiet)
 
     # Convert Windows paths to MSYS-style paths without requiring cygpath.
     def msys_path(p: Path) -> str:
@@ -577,12 +625,24 @@ def _build_ffmpeg_windows(source: Path, build: Path, prefix: Path, jobs: int, qu
     have_nasm = bool(shutil.which("nasm.exe") or shutil.which("nasm"))
     args = _ffmpeg_configure_args(Path(prefix_msys), windows=True, have_nasm=have_nasm)
     quoted = " ".join(_shell_quote(x) for x in args)
+    # bash is started as a non-login shell, so PATH is the inherited Windows
+    # PATH and tools such as awk resolve to whichever copy comes first. On
+    # GitHub runners that is Git for Windows' usr/bin, a separate MSYS runtime;
+    # passing FFmpeg's MSVC dependency command across runtimes collapses its
+    # `gsub(/\\/, "/")` to `gsub(/\/, "/")`, an awk syntax error. Put this
+    # MSYS2's tools first, as a login shell would. MSVC's link.exe is still
+    # found: FFmpeg's compat/windows/mslink resolves it beside cl.exe.
     script = (
         f"set -euo pipefail\n"
+        f"export PATH=\"/usr/bin:$PATH\"\n"
         f"cd {_shell_quote(build_msys)}\n"
+        f"test -f {_shell_quote(src_msys + '/Makefile')} || "
+        f"{{ echo 'Pinned FFmpeg source Makefile is missing' >&2; exit 2; }}\n"
         f"{_shell_quote(src_msys + '/configure')} {quoted}\n"
-        f"make -j{jobs}\n"
-        f"make install\n"
+        f"test -f {_shell_quote(src_msys + '/Makefile')} || "
+        f"{{ echo 'FFmpeg configure removed the source Makefile' >&2; exit 2; }}\n"
+        f"/usr/bin/make -j{jobs}\n"
+        f"/usr/bin/make install\n"
     )
     script_path = build / "xenon-build-ffmpeg.sh"
     script_path.write_text(script, encoding="utf-8", newline="\n")
@@ -703,6 +763,8 @@ def verify_dependency(key: str, entry: dict, root: Path, triplet: str) -> tuple[
     if key == "dxc":
         if not (prefix / "include" / "dxc" / "dxcapi.h").is_file():
             return False, "dxcapi.h not installed"
+        if triplet.startswith("linux-") and not (prefix / "include" / "dxc" / "WinAdapter.h").is_file():
+            return False, "WinAdapter.h not installed"
         runtime = prefix / "runtime"
         if triplet.startswith("windows-"):
             if not (prefix / "lib" / "dxcompiler.lib").is_file():
@@ -759,6 +821,18 @@ def ensure_dependency(key: str, entry: dict, *, root: Path, cache_base: Path, tr
         _safe_extract_archive(archive, extracted)
         if key == "dxc":
             _install_dxc_archive(extracted, prefix, triplet)
+            if triplet.startswith("linux-"):
+                # The official Linux archive omits this header even though its
+                # dxcapi.h includes it. Fetch the matching tagged source file.
+                header = _download_archive(
+                    "dxc-WinAdapter",
+                    {"version": entry["version"], "assets": {triplet: {
+                        "url": DXC_WIN_ADAPTER_URL,
+                        "sha256": DXC_WIN_ADAPTER_SHA256,
+                    }}},
+                    cache_base, triplet, offline=offline, quiet=quiet,
+                )
+                _copy_file(header, prefix / "include" / "dxc" / "WinAdapter.h")
         else:
             raise BootstrapError(f"No archive installer implemented for dependency {key}")
     else:
@@ -767,9 +841,9 @@ def ensure_dependency(key: str, entry: dict, *, root: Path, cache_base: Path, tr
             _build_sdl2(source, build, prefix, jobs, quiet)
         elif key == "xenia-ffmpeg":
             if sys.platform.startswith("win"):
-                _build_ffmpeg_windows(source, build, prefix, jobs, quiet)
+                _build_ffmpeg_windows(source, build, prefix, entry, jobs, quiet)
             else:
-                _build_ffmpeg_posix(source, build, prefix, jobs, quiet)
+                _build_ffmpeg_posix(source, build, prefix, entry, jobs, quiet)
         elif key == "vulkan-headers":
             _build_vulkan_headers(source, build, prefix, jobs, quiet)
         elif key == "vulkan-loader":

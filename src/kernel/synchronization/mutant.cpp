@@ -1,5 +1,7 @@
 #include "xenon/kernel/mutant.hpp"
 
+#include "xenon/kernel/wait_util.hpp"
+
 namespace xenon::kernel {
 
 KernelMutant::KernelMutant(bool initial_owner, std::uint32_t owner_thread_id)
@@ -20,7 +22,7 @@ bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseco
   }
 
   // Wait for the mutant to become available
-  if (!condition_.wait_for(lock, timeout, [&] { return recursion_count_ == 0; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return recursion_count_ == 0; })) {
     return false;
   }
 

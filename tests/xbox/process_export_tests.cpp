@@ -6,7 +6,7 @@
 // next real export AC6's boot path calls once KeFlushUserModeTb,
 // RtlImageXexHeaderField and NtAllocateVirtualMemory were all fixed (real
 // guest address 0x823d03fc) - a correctly-recognized-but-previously-
-// unimplemented import, per src/core/session.cpp's Trap path
+// unimplemented import, per src/core/session/execution/runtime_services.cpp's Trap path
 // (STATUS_PROCEDURE_NOT_FOUND).
 
 #include <cassert>

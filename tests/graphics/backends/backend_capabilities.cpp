@@ -9,10 +9,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <span>
 #include <string>
@@ -55,6 +59,7 @@
 #include "xenon/gpu/vulkan/render_target.hpp"
 #include "xenon/gpu/vulkan/texture.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "../../support/vulkan_probe.hpp"
 #endif
 
 #if defined(_WIN32) && (defined(XENON_TEST_D3D12) || defined(XENON_TEST_VULKAN))
@@ -173,6 +178,34 @@ Output main() {
   return shader;
 }
 
+// Host APIs may round a float-to-UNORM24 depth write to either neighbouring
+// integer when the scaled value is not exact (Vulkan "Conversion from
+// Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875 up to
+// 0xE00000). D24S8 depth therefore allows one unit of error; stencil and
+// D24FS8, which is stored as host float32, must match exactly.
+bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
+                         const std::vector<std::uint32_t>& actual,
+                         const std::vector<std::uint32_t>& expected,
+                         std::string_view backend_label, std::uint32_t sample) {
+  const bool unorm24 = format == xenon::gpu::DepthRenderTargetFormat::D24S8;
+  bool match = actual.size() == expected.size();
+  for (std::size_t pixel = 0; match && pixel < actual.size(); ++pixel) {
+    const auto a = actual[pixel], e = expected[pixel];
+    const auto a_depth = a & 0x00FFFFFFu, e_depth = e & 0x00FFFFFFu;
+    const auto depth_error = a_depth > e_depth ? a_depth - e_depth : e_depth - a_depth;
+    if ((a >> 24u) == (e >> 24u) && depth_error <= (unorm24 ? 1u : 0u)) continue;
+    std::cerr << backend_label << " depth mismatch: format="
+              << static_cast<unsigned>(format) << " sample=" << sample
+              << " pixel=" << pixel << " expected=0x" << std::hex << e
+              << " actual=0x" << a << std::dec << '\n';
+    match = false;
+  }
+  if (actual.size() != expected.size())
+    std::cerr << backend_label << " depth readback returned " << actual.size()
+              << " pixels, expected " << expected.size() << '\n';
+  return match;
+}
+
 template <typename DepthTarget, typename Queue>
 void validate_depth_sample_transfer_matrix(
     DepthTarget& target, Queue& queue,
@@ -218,7 +251,9 @@ void validate_depth_sample_transfer_matrix(
       std::cerr << backend_label << " depth readback failed: "
                 << target.error() << '\n';
     assert(read);
-    assert(pitch == kWidth * 4u && returned == expected[sample]);
+    assert(pitch == kWidth * 4u);
+    assert(depth_samples_match(depth_format, returned, expected[sample],
+                               backend_label, sample));
   }
 
   const auto read_native = [&](std::uint32_t host_sample,
@@ -227,7 +262,9 @@ void validate_depth_sample_transfer_matrix(
     std::uint32_t pitch{};
     assert(target.readback_native_sample(
         queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
-    assert(pitch == kWidth * 4u && returned == wanted);
+    assert(pitch == kWidth * 4u);
+    assert(depth_samples_match(depth_format, returned, wanted, backend_label,
+                               host_sample));
   };
 
   if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
@@ -264,7 +301,81 @@ void validate_depth_sample_transfer_matrix(
 }  // namespace
 #endif
 
+namespace {
+bool g_test_finished = false;
+
+#if defined(_WIN32)
+// DirectX debug layers deliver a message to an attached debugger by raising
+// one of these codes. With no debugger, the exception is unhandled and ends
+// the process silently, so CI saw only "Failed". Report each one with any
+// readable (length, text) parameter pair, continue so later steps still run,
+// and fail the test at the end: a debug-layer message is never a pass.
+std::atomic<int> g_directx_debug_notifications{0};
+
+bool readable(ULONG_PTR address, ULONG_PTR length) {
+  MEMORY_BASIC_INFORMATION info{};
+  if (!address || !length ||
+      VirtualQuery(reinterpret_cast<const void*>(address), &info, sizeof(info)) == 0)
+    return false;
+  constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                              PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                              PAGE_EXECUTE_WRITECOPY;
+  const auto end = reinterpret_cast<ULONG_PTR>(info.BaseAddress) + info.RegionSize;
+  return info.State == MEM_COMMIT && (info.Protect & kReadable) != 0 &&
+         (info.Protect & PAGE_GUARD) == 0 && address + length <= end;
+}
+
+LONG CALLBACK report_directx_debug_notification(EXCEPTION_POINTERS* info) {
+  const auto* record = info->ExceptionRecord;
+  if (record->ExceptionCode < 0x87Au || record->ExceptionCode > 0x87Fu)
+    return EXCEPTION_CONTINUE_SEARCH;
+  ++g_directx_debug_notifications;
+  std::fprintf(stderr, "DirectX debug-layer notification 0x%08lX, parameters:",
+               static_cast<unsigned long>(record->ExceptionCode));
+  for (DWORD i = 0; i < record->NumberParameters; ++i)
+    std::fprintf(stderr, " 0x%llX",
+                 static_cast<unsigned long long>(record->ExceptionInformation[i]));
+  std::fputc('\n', stderr);
+  for (DWORD i = 0; i + 1 < record->NumberParameters; ++i) {
+    const auto length = record->ExceptionInformation[i];
+    const auto address = record->ExceptionInformation[i + 1];
+    if (length == 0 || length > 4096) continue;
+    if (readable(address, length)) {
+      std::fprintf(stderr, "  text[%lu]: %.*s\n", static_cast<unsigned long>(i),
+                   static_cast<int>(length), reinterpret_cast<const char*>(address));
+    }
+    if (readable(address, length * sizeof(wchar_t))) {
+      std::fprintf(stderr, "  wide[%lu]: %.*ls\n", static_cast<unsigned long>(i),
+                   static_cast<int>(length), reinterpret_cast<const wchar_t*>(address));
+    }
+  }
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+#endif
+}  // namespace
+
 int main() {
+  // Flush every line: a GPU runtime that ends the process abnormally must not
+  // take the record of how far the test got with it.
+  std::cout << std::unitbuf;
+#if defined(_WIN32)
+  // Name the way the process ends when a native GPU runtime takes it down:
+  // a structured exception, std::terminate, or an exit() before the end.
+  SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* info) -> LONG {
+    std::fprintf(stderr, "unhandled exception 0x%08lX at %p\n",
+                 static_cast<unsigned long>(info->ExceptionRecord->ExceptionCode),
+                 info->ExceptionRecord->ExceptionAddress);
+    return EXCEPTION_CONTINUE_SEARCH;
+  });
+  std::set_terminate([] {
+    std::fputs("std::terminate called\n", stderr);
+    std::abort();
+  });
+  std::atexit([] {
+    if (!g_test_finished) std::fputs("process exited before the test finished\n", stderr);
+  });
+  AddVectoredExceptionHandler(1, report_directx_debug_notification);
+#endif
   // This is a rendered-pixel validation, not merely API capability discovery.
   const auto capabilities = xenon::gpu::discover_backend_capabilities();
   assert(capabilities.size() == 2);
@@ -276,7 +387,9 @@ int main() {
     assert(capabilities[0].api_version != 0);
 #endif
 #if defined(XENON_TEST_VULKAN)
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "Vulkan: no Vulkan device on this machine; Vulkan checks skipped\n";
+  } else {
   assert(capabilities[0].runtime_available);
   assert(capabilities[0].development_files_available);
   xenon::gpu::vulkan::Context vulkan_context;
@@ -969,12 +1082,27 @@ int main() {
     d3d_depth_state.test_enabled = true;
     d3d_depth_state.write_enabled = true;
     d3d_depth_state.function = xenon::gpu::CompareFunction::Less;
-    assert(d3d_pipeline.initialize(
+    // Runtimes without OPTIONS14 (Windows 10, Server 2022) must still build
+    // this pipeline through the legacy description; report which path ran.
+    D3D12_FEATURE_DATA_D3D12_OPTIONS14 d3d_options14{};
+    const bool d3d_independent_stencil_masks =
+        SUCCEEDED(context.device()->CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS14, &d3d_options14,
+            sizeof(d3d_options14))) &&
+        d3d_options14.IndependentFrontAndBackStencilRefMaskSupported;
+    std::cout << "D3D12 independent front/back stencil masks: "
+              << (d3d_independent_stencil_masks ? "supported" : "unsupported")
+              << '\n';
+    const bool d3d_pipeline_ready = d3d_pipeline.initialize(
         context.device(), resources.root_signature(), d3d_vs, d3d_ps,
         nullptr, d3d_formats, xenon::gpu::MsaaSamples::X1,
         xenon::gpu::HostPrimitiveTopology::TriangleList, d3d_raster,
         d3d_write_masks, d3d_blend_states, d3d_depth.format(),
-        &d3d_depth_state));
+        &d3d_depth_state);
+    if (!d3d_pipeline_ready)
+      std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
+    assert(d3d_pipeline_ready);
+    std::cout << "D3D12 pipeline ready\n";
     resources.prepare_draw(0, 0);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());
@@ -1122,6 +1250,7 @@ int main() {
 
 #if defined(_WIN32) && defined(XENON_TEST_D3D12)
   {
+    std::cout << "D3D12 presentation\n";
     HWND window = create_presentation_test_window(96, 64);
     assert(window != nullptr);
     {
@@ -1131,25 +1260,34 @@ int main() {
       xenon::gpu::Edram edram;
       xenon::gpu::d3d12::Backend backend;
       assert(backend.initialize());
+      std::cout << "D3D12 presentation: backend initialized\n";
       backend.begin_submission(memory, edram);
       backend.end_submission();
+      std::cout << "D3D12 presentation: submission bracketed\n";
       xenon::gpu::PresentationConfig config{};
       config.width = 96;
       config.height = 64;
       config.vsync = false;
       assert(backend.configure_presentation(window, config));
       assert(backend.presentation_ready());
+      std::cout << "D3D12 presentation: swapchain configured\n";
       assert(acceptable_present_status(backend.present(frame)));
+      std::cout << "D3D12 presentation: first present\n";
       MoveWindow(window, 0, 0, 128, 72, FALSE);
       assert(backend.resize_presentation(128, 72));
       assert(acceptable_present_status(backend.present(frame)));
+      std::cout << "D3D12 presentation: resized present\n";
     }
     DestroyWindow(window);
+    std::cout << "D3D12 presentation: torn down\n";
   }
 #endif
 
 #if defined(_WIN32) && defined(XENON_TEST_VULKAN)
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "Vulkan presentation: no Vulkan device on this machine; skipped\n";
+  } else {
+    std::cout << "Vulkan presentation\n";
     HWND window = create_presentation_test_window(96, 64);
     assert(window != nullptr);
     {
@@ -1185,6 +1323,13 @@ int main() {
       assert(acceptable_present_status(backend.present(frame)));
     }
     DestroyWindow(window);
+  }
+#endif
+  g_test_finished = true;
+#if defined(_WIN32)
+  if (const int notifications = g_directx_debug_notifications.load()) {
+    std::cerr << notifications << " DirectX debug-layer notification(s); failing\n";
+    return 1;
   }
 #endif
   std::cout << "xenon_backend_capability_tests: ok\n";

@@ -1,0 +1,69 @@
+name: Xenon Linux
+
+on:
+  push:
+    branches:
+      - dev
+      - development-restructure
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: "6.10.3"
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build nasm pkg-config \
+            libx11-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libxrandr-dev libxcb1-dev libxcb-cursor-dev \
+            libxcb-keysyms1-dev libxcb-xkb-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxcb-sync-dev libxcb-randr0-dev libgl1-mesa-dev mesa-vulkan-drivers \
+            vulkan-validationlayers
+      - name: Install Qt SDK
+        run: |
+          python3 -m pip install --user --upgrade aqtinstall
+          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
+      - uses: actions/cache@v4
+        with:
+          path: .xenon/deps
+          key: xenon-deps-linux-x64-${{ hashFiles('tools/deps/manifest.json', 'tools/deps/bootstrap.py', 'tools/deps/patches/**') }}
+      - name: Provision pinned dependencies
+        run: |
+          python3 tools/deps/bootstrap.py ensure --triplet linux-x64 --jobs 4
+          python3 tools/deps/bootstrap.py verify --triplet linux-x64
+      - name: Configure
+        run: |
+          python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-debug
+          cmake --preset linux-x64-debug -DCMAKE_PREFIX_PATH="$HOME/Qt/$QT_VERSION/gcc_64"
+          grep -q 'set(CMAKE_CXX_COMPILER_ID "GNU")' build/linux-x64-debug/CMakeFiles/*/CMakeCXXCompiler.cmake
+      - name: Build
+        run: cmake --build build/linux-x64-debug --parallel 4
+      - name: Require Vulkan, runtime host, and launcher targets
+        run: cmake --build build/linux-x64-debug --target xenon_graphics_vulkan xenon_runtime_host xenon_launcher
+      - name: Test
+        run: ctest --test-dir build/linux-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
+      - name: Keep CTest results for the coverage audit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-results-linux
+          path: build/linux-x64-debug/ctest-results.xml
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Require every registered test to run
+        run: python3 tools/coverage/check_ctest.py build/linux-x64-debug/ctest-results.xml
+      - name: Audit source ownership
+        run: python3 tools/development/build_accountability.py check --build-dir build/linux-x64-debug

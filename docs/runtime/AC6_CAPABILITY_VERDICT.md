@@ -124,5 +124,6 @@ passes in full, including this new test.
 
 None for Part 17's scope as now completed (CPU/imports/GPU/runtime all
 tied together). The guest timebase/SPR bug noticed during this audit was
-a separate, real Part 6 gap - fixed separately and documented in
-`docs/cpu/GUEST_TIMEBASE_SPR_AUDIT.md`, not left as a footnote here.
+a separate, real Part 6 gap - fixed separately in the CPU timebase/SPR
+handling (see the guest timebase code and its regression tests), not
+left as a footnote here.

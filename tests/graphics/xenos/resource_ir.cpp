@@ -457,8 +457,15 @@ void test_constant_buffer_abi() {
   tracker.apply({0x4400, 0x40000000});
   tracker.apply({0x4900, 0xA5A5A5A5});
   tracker.apply({0x4908, 0x00001234});
+  // Fetch slot 0 as three vertex fetch constants: select 0 = words 0/1,
+  // select 1 = words 2/3, select 2 = words 4/5. Word 0 carries type (3) in
+  // its low bits; word 1's low two bits are the endian swap mode.
   tracker.apply({0x4800, 0xABCDEF03});
-  tracker.apply({0x4803, 0x3Du << 13});
+  tracker.apply({0x4801, 2u | (16u << 2)});  // 8-in-32, 16 dwords
+  tracker.apply({0x4802, 0x12340003});
+  tracker.apply({0x4803, 0x3Du << 13});      // endian 0; also texture exp_adjust
+  tracker.apply({0x4804, 0x56780003});
+  tracker.apply({0x4805, 1u | (8u << 2)});   // 8-in-16
   tracker.apply({0x2000, 1u << 16});
   tracker.apply({0x210E, std::bit_cast<std::uint32_t>(0.5f)});
   tracker.apply({0x2202, 6u | (1u << 3) | (1u << 4) | (2u << 24) |
@@ -474,8 +481,15 @@ void test_constant_buffer_abi() {
   assert(word(4096) == 0x40000000);
   assert(word(8192) == 0xA5A5A5A5);
   assert(word(8320) == 0x00001234);
-  assert(word(8832) == 0xABCDEF03);
-  assert(word(8836) == 0xFFFFFFFDu);
+  // Vertex fetch constants: dword-aligned base with the type bits replaced
+  // by that constant's endian mode, selects 0/1/2 in .x/.z/.w.
+  assert(word(8832) == (0xABCDEF00u | 2u));
+  // .y: texture exp_adjust (-3, word 3 bits 13:18) in the low 16 bits and
+  // the fetch-constant LOD bias (word 4 = 0x56780003, bits 12:21 = 0x380 =
+  // -128/32 as a signed 10-bit value) in the high 16 bits.
+  assert(word(8836) == ((static_cast<std::uint32_t>(-128) << 16) | 0xFFFDu));
+  assert(word(8840) == (0x12340000u | 0u));
+  assert(word(8844) == (0x56780000u | 1u));
   assert(word(9344) == 3u);
   assert(word(9348) == static_cast<std::uint32_t>(CompareFunction::GreaterEqual));
   assert(word(9352) == 2u);

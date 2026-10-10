@@ -1,10 +1,14 @@
 # Automatic Game Preparation (Disc Import → First-Play Build → Cache)
 
-This document describes Xenon's end-to-end consumer workflow for turning a
-legally-owned Xbox 360 disc image into a running game, with no manual
-`default.xex` extraction and no manual invocation of the recompiler. It
-covers: disc mounting, the managed game library, the artifact cache, the
-`xenon-prepare` worker, and the launcher-side wiring. It supersedes any
+This document describes Xenon's automatic preparation workflow, which takes a
+legally owned Xbox 360 disc image to a cached native game module ready for the
+runtime, with no manual `default.xex` extraction and no manual invocation of
+the recompiler. It does not mean the game will run: preparation can succeed
+for a title the runtime cannot yet execute correctly, and no commercial title
+is confirmed playable (see the README's current milestone). It also still
+requires a local C++ toolchain (section 7). It covers: disc mounting, the
+managed game library, the artifact cache, the `xenon-prepare` worker, and the
+launcher-side wiring. It supersedes any
 assumption that Xenon requires a loose `default.xex` as the only supported
 input.
 
@@ -128,7 +132,7 @@ never inferred from a filename.
 
 ## 3. The prepared-module artifact cache
 
-`include/xenon/recomp/artifact_cache.hpp` / `src/recomp/artifact_cache.cpp`
+`include/xenon/recomp/artifact_cache.hpp` / `src/recomp/caching/artifact_cache.cpp`
 (target `xenon_recomp`). A content-addressed store for compiled
 `xenon_game_module` shared libraries.
 
@@ -188,7 +192,7 @@ change without disturbing the prior entry, deterministic cancellation).
 
 ## 4. The `xenon-prepare` worker
 
-`tools/xenon_prepare.cpp` → executable `xenon-prepare`. Runs **out of
+`tools/xenon_prepare/` → executable `xenon-prepare`. Runs **out of
 process** from the launcher (Part 10) — the launcher UI thread never blocks
 on compilation, and a worker crash cannot crash the launcher.
 

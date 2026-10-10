@@ -856,17 +856,29 @@ bool ResourceStateTracker::write_constant_buffer(
     std::memcpy(destination.data() + 8320 + i * 16,
                 registers_.data() + 0x4908 + i, sizeof(std::uint32_t));
   }
-  // The base dword is used by vertex fetches. Texture fetches dynamically use
-  // the signed result exponent adjustment from word 3 bits 13:18; it is kept
-  // separate from the unrelated LOD bias in word 4.
+  // Each 6-dword fetch-constant slot holds either one texture fetch constant
+  // or three 2-dword vertex fetch constants (selected by a vertex fetch's
+  // const_index_sel). Vertex fetch constant n's word 0 is type:2 | dword
+  // address:30 and word 1 starts with its 2-bit endian swap mode. Since the
+  // base address is dword-aligned, each vertex fetch constant is packed as
+  // (word0 & ~3) | endian, for selects 0/1/2 in .x/.z/.w respectively.
+  // .y holds the texture fetch's two signed scalars: the result exponent
+  // adjustment (word 3 bits 13:18) in its low 16 bits and the fetch-constant
+  // LOD bias (word 4 bits 12:21, in 1/32 units) in its high 16 bits.
   for (std::size_t i = 0; i < 32; ++i) {
-    std::memcpy(destination.data() + 8832 + i * 16,
-                registers_.data() + kFetchConstantBase + i * 6,
-                sizeof(std::uint32_t));
-    const auto exp_adjust = static_cast<std::int32_t>(signed_bits(
-        registers_[kFetchConstantBase + i * 6 + 3], 13, 6));
-    std::memcpy(destination.data() + 8832 + i * 16 + 4,
-                &exp_adjust, sizeof(exp_adjust));
+    const auto slot = kFetchConstantBase + i * 6;
+    const auto pack_vertex = [&](std::size_t select) -> std::uint32_t {
+      return (registers_[slot + select * 2u] & ~3u) |
+             (registers_[slot + select * 2u + 1u] & 3u);
+    };
+    const auto exp_adjust = signed_bits(registers_[slot + 3], 13, 6);
+    const auto lod_bias = signed_bits(registers_[slot + 4], 12, 10);
+    const std::array<std::uint32_t, 4> packed{
+        pack_vertex(0u),
+        (static_cast<std::uint32_t>(exp_adjust) & 0xFFFFu) |
+            (static_cast<std::uint32_t>(lod_bias) << 16u),
+        pack_vertex(1u), pack_vertex(2u)};
+    std::memcpy(destination.data() + 8832 + i * 16, packed.data(), sizeof(packed));
   }
   // The final 128 bytes of the stable constant ABI are per-draw native
   // translation state. Keep this generic rather than specializing shaders for

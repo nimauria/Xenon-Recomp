@@ -2,8 +2,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -17,6 +19,8 @@
 #include "xenon/core/boot_checkpoints.hpp"
 #include "xenon/core/capability_report.hpp"
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/export_trace.hpp"
+#include "xenon/core/guest_memory_watch.hpp"
 #include "xenon/core/guest_thread_context.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
 #include "xenon/cpu/executable_code_cache.hpp"
@@ -26,6 +30,7 @@
 #include "xenon/filesystem/virtual_file_system.hpp"
 #include "xenon/gpu/backend.hpp"
 #include "xenon/gpu/graphics_system.hpp"
+#include "xenon/gpu/register_aperture.hpp"
 #include "xenon/input/system.hpp"
 #include "xenon/input/xam_guest.hpp"
 #include "xenon/kernel/exception.hpp"
@@ -36,6 +41,7 @@
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/xam_session.hpp"
 #include "xenon/xbox/imports.hpp"
+#include "xenon/xbox/module_registry.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
 namespace xenon::audio {
@@ -95,6 +101,22 @@ struct SessionConfig {
   // lifecycle lines (see runtime_host/src/main.cpp).
   bool verbose_logging{false};
   bool enable_export_diagnostics{true};
+  // Fixed-capacity export history used only for post-fault diagnostics.
+  // Kept separate from general diagnostics so normal embedders pay no
+  // per-export locking cost unless they explicitly opt in.
+  bool enable_export_trace{false};
+
+  // Optional diagnostic history of 32-bit big-endian guest words (see
+  // GuestMemoryWatch). Empty disables the facility entirely. Each change is
+  // logged when it is observed and the retained history is dumped in the stop
+  // report. The words are sampled at kernel-call and compiled-dispatch
+  // boundaries plus by a background poll thread, never by hooking guest stores,
+  // so a change is attributed to the observer, not to the storing instruction.
+  std::vector<std::uint32_t> memory_watch_addresses{};
+  std::uint32_t memory_watch_history{static_cast<std::uint32_t>(GuestMemoryWatch::kDefaultCapacity)};
+  // Poll thread period in milliseconds; 0 disables the poll thread (boundary
+  // sampling alone still runs).
+  std::uint32_t memory_watch_poll_ms{1};
 
   // Optional newline-delimited adaptive-analysis trace. Every compiled-code
   // lookup miss records the exact target, current guest CIA and whether the
@@ -274,6 +296,19 @@ class XenonSession final : public cpu::RuntimeServices {
   }
   [[nodiscard]] xam::XamSession* xam() noexcept { return xam_.get(); }
   [[nodiscard]] ExportRegistry* exports() noexcept { return &export_registry_; }
+  // History of the words named by SessionConfig::memory_watch_addresses. Inactive
+  // (and empty) when none were configured.
+  [[nodiscard]] const GuestMemoryWatch& memory_watch() const noexcept { return memory_watch_; }
+  // Replaces the watched set (see SessionConfig::memory_watch_addresses), clearing
+  // history. Takes effect for boundary sampling immediately and for the poll thread
+  // at the next start().
+  void configure_memory_watch(std::vector<std::uint32_t> addresses,
+                              std::size_t history = GuestMemoryWatch::kDefaultCapacity) {
+    memory_watch_.configure(std::move(addresses), history);
+  }
+  // Samples the watched words now, attributing any change to `observer`. Used by
+  // the session's own boundaries; public so embedders/tests can add their own.
+  void sample_memory_watch(const WatchObserver& observer);
   [[nodiscard]] const xbox::LoadedXex* loaded_xex() const noexcept;
   // The content graph built by mount_content_graph(), if any - null before
   // that call succeeds. load_game() reads selected_title_update() from this
@@ -352,6 +387,11 @@ class XenonSession final : public cpu::RuntimeServices {
   bool init_audio();
   bool init_xam();
   bool init_exports();
+  // init_exports() phases, in registration order (src/core/session/exports/).
+  bool register_process_free_kernel_exports();
+  bool register_kernel_object_exports();
+  bool register_session_bound_kernel_exports();
+  bool register_subsystem_bridge_exports();
   bool init_kernel_variable_exports();
   bool bind_xex_variable_imports();
   bool refresh_dynamic_kernel_variables();
@@ -411,7 +451,16 @@ class XenonSession final : public cpu::RuntimeServices {
   // KernelThread yet.
   [[nodiscard]] GuestDispatchOutcome dispatch_guest_thread(
       cpu::CpuState& state, cpu::GuestAddress entry,
-      const std::shared_ptr<kernel::KernelThread>& thread);
+      const std::shared_ptr<kernel::KernelThread>& thread,
+      bool trace_dispatches = true);
+  // Runs a guest callback (vsync interrupt, audio render) to completion on the
+  // calling host thread. A callback is ordinary guest code: it crosses compiled-
+  // function boundaries, so it must be driven through the same dispatch loop as any
+  // thread - running only its first function and stopping at the first handoff
+  // drops the rest of the callback, including the code that releases what it took.
+  // Returns false if the callback trapped or crashed.
+  [[nodiscard]] bool run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,
+                                        const std::shared_ptr<kernel::KernelThread>& thread);
   // Guest execution thread body: builds a CPU V2 ExecutionContext, binds the
   // native extension's compiled registry into it, looks up the entry point,
   // and invokes it via dispatch_guest_thread(), then applies main-thread-only
@@ -440,6 +489,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // NtWaitForSingleObjectEx et al. already use, so a thread handle is
   // waitable like any other kernel object), and starts it.
   [[nodiscard]] bool export_ex_create_thread(ExportCallContext& context);
+  // XamTaskSchedule (xam.xex ordinal 0x01AF): spawns a real guest-executing
+  // thread running the given callback with the given XTASK_MESSAGE* as its
+  // argument - the same create_thread()/run_created_guest_thread() primitive
+  // export_ex_create_thread() above uses, with this session's own default
+  // guest thread stack size (stack_size_) rather than a caller-supplied one,
+  // since XamTaskSchedule's real ABI has no stack-size argument.
+  [[nodiscard]] bool export_xam_task_schedule(ExportCallContext& context);
   static void record_compiled_lookup_miss(void* observer,
                                           cpu::ExecutionContext& context,
                                           cpu::GuestAddress target,
@@ -474,8 +530,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // start_audio_guest_thread()/invoke_audio_callback() above) because vsync
   // also needs to call INTO GUEST CODE (the registered graphics interrupt
   // callback) with a real guest thread identity, not a bare CpuState.
+  // `source` is the interrupt source the title's callback dispatches on: 0 = vertical
+  // sync (the pump's vsync tick), 1 = raised by a PM4_INTERRUPT packet in the
+  // command stream (xenia: DispatchInterruptCallback(1, cpu)).
   [[nodiscard]] bool invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
-                                                   cpu::GuestAddress context);
+                                                   cpu::GuestAddress context,
+                                                   std::uint32_t source = 0u,
+                                                   std::uint32_t cpu = 2u);
   // Creates and starts gpu_pump_thread_ (its own KPCR/static-TLS block,
   // distinct from main_thread_tls_/audio_thread_tls_) and marks the pump
   // loop active. Called once from create_guest_process(), after
@@ -495,8 +556,41 @@ class XenonSession final : public cpu::RuntimeServices {
   void stop_gpu_pump_thread() noexcept;
   void load_native_extension();
   void unload_native_extension() noexcept;
+  void start_memory_watch_poll();
+  void stop_memory_watch_poll() noexcept;
+  // Text describing which guest threads were executing (outside a kernel call)
+  // when the poll thread noticed a change; racy diagnostic read.
+  [[nodiscard]] std::string describe_running_guest_threads() const;
+  // The thread's last `limit` completed kernel calls (oldest first) with their
+  // return addresses; empty when export tracing is off or the thread is unknown.
+  [[nodiscard]] std::string describe_recent_exports(std::uint32_t thread_id,
+                                                    std::size_t limit) const;
+  // Stall evidence logged by stop() when the guest is still executing
+  // (src/core/session/diagnostics/stop_report.cpp).
+  void report_stop_diagnostics();
 
   SessionConfig config_{};
+  GuestMemoryWatch memory_watch_{};
+  std::thread memory_watch_thread_{};
+  std::atomic<bool> memory_watch_poll_running_{false};
+  // Deep enough that a quiet thread's history survives a chatty polling thread.
+  ExportTrace export_trace_{8192};
+  // Kernel calls a guest thread has entered but not yet returned from. The
+  // completed-call trace above cannot show a thread that is blocked forever in
+  // a wait, which is exactly what a stalled title looks like.
+  struct InFlightExport {
+    std::uint32_t ordinal{};
+    // Registry descriptors are immutable once the session is initialized, so the
+    // pointer stays valid for as long as the call is in flight (null = unknown).
+    const ExportDescriptor* descriptor{};
+    std::uint64_t lr{};
+    std::array<std::uint64_t, 4> arguments{};
+    std::chrono::steady_clock::time_point since{};
+  };
+  mutable std::mutex in_flight_exports_mutex_{};
+  std::map<std::uint32_t, InFlightExport> in_flight_exports_{};
+  // Live register files of executing guest threads (guarded by the same mutex).
+  std::map<std::uint32_t, const cpu::CpuState*> guest_thread_states_{};
   mutable std::mutex status_mutex_{};
   // Runtime feedback can be emitted from the main guest thread, audio guest
   // thread, or future worker callbacks. Serialize JSONL append operations so
@@ -543,6 +637,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // See graphics_system()'s doc comment above. Declared after gpu_ (destroyed
   // first) since nothing here holds a reference the other way.
   std::unique_ptr<gpu::GraphicsSystem> graphics_system_{};
+  // Guest-visible Xenos register aperture (0x7FC80000); declared after
+  // graphics_system_ because it references that object's register file.
+  std::unique_ptr<gpu::XenosRegisterAperture> register_aperture_{};
 #if defined(XENON_HAS_AUDIO)
   std::unique_ptr<audio::AudioSystem> audio_{};
 #endif
@@ -550,6 +647,10 @@ class XenonSession final : public cpu::RuntimeServices {
   ExportRegistry export_registry_{};
   cpu::ExternalCallRegistry legacy_call_registry_{};
   std::optional<xbox::LoadedXex> loaded_xex_{};
+  // Guest module records (XexGetModuleHandle) and dynamic export thunks
+  // (XexGetProcedureAddress); consulted by call()/is_recognized_import_thunk()
+  // alongside the loaded XEX's own import thunks. Created by init_exports().
+  std::unique_ptr<xbox::GuestModuleRegistry> module_registry_{};
   std::optional<xbox::XexEffectiveIdentity> effective_identity_{};
   std::unique_ptr<xam::ContentGraph> content_graph_{};
   std::string game_id_{};
@@ -639,6 +740,9 @@ class XenonSession final : public cpu::RuntimeServices {
   std::shared_ptr<kernel::KernelThread> gpu_pump_thread_{};
   GuestThreadTlsContext gpu_pump_thread_tls_{};
   std::atomic<bool> gpu_pump_running_{false};
+  // Vsync interrupt deliveries into the title's registered callback (diagnostics).
+  std::atomic<std::uint64_t> gpu_interrupts_delivered_{0};
+  std::atomic<std::uint64_t> gpu_interrupts_failed_{0};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> execution_active_{false};

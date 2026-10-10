@@ -1,0 +1,67 @@
+name: Xenon CI
+
+on:
+  push:
+    branches:
+      - dev
+      - development-restructure
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  coverage-dashboard:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test coverage tooling
+        run: python3 -m unittest discover -s tools/coverage -p 'test_*.py' -v
+      - name: Check generated coverage assets
+        run: python3 tools/coverage/generate.py --check
+
+  linux-sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ninja-build
+      - name: Configure
+        run: |
+          python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-sanitizers
+          cmake --preset linux-x64-sanitizers
+      - name: Build focused targets
+        run: |
+          cmake --build build/linux-x64-sanitizers --parallel 4 --target \
+            xenon_memory_hardening_tests xenon_dynamic_fallback_tests \
+            xenon_kernel_synchronization_tests xenon_gpu_frontend_tests \
+            xenon_recomp_driver_tests
+      - name: Test with ASan and UBSan
+        run: |
+          ctest --test-dir build/linux-x64-sanitizers --output-on-failure --timeout 900 \
+            --output-junit ctest-results.xml \
+            -R '^(xenon_memory_hardening_tests|xenon_dynamic_fallback_tests|xenon_kernel_synchronization_tests|xenon_gpu_frontend_tests|xenon_recomp_driver_tests)$'
+      - name: Require every selected sanitizer test to run
+        run: python3 tools/coverage/check_ctest.py build/linux-x64-sanitizers/ctest-results.xml
+      - name: Audit source ownership
+        run: python3 tools/development/build_accountability.py check --build-dir build/linux-x64-sanitizers
+
+  platform-results:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require same-commit Windows and Linux results
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          XENON_CI_EVENT: ${{ github.event_name }}
+          XENON_CI_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          XENON_CI_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: python3 tools/coverage/check_ci_platforms.py --wait-seconds 10200

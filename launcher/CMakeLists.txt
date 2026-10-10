@@ -259,8 +259,6 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/modules/package/module_package_installer.hpp
   src/frontend_backend/network/network_feature.cpp
   src/frontend_backend/network/network_feature.hpp
-  src/frontend_backend/network/qt_network_transport.cpp
-  src/frontend_backend/network/qt_network_transport.hpp
   src/frontend_backend/notifications/notification_center_feature.cpp
   src/frontend_backend/notifications/notification_center_feature.hpp
   src/frontend_backend/paths/paths_feature.cpp
@@ -293,6 +291,12 @@ qt_add_library(xenon_launcher_core STATIC
   src/frontend_backend/updates/version/semantic_version.cpp
   src/frontend_backend/updates/version/semantic_version.hpp
 )
+if(TARGET xenon_network)
+  target_sources(xenon_launcher_core PRIVATE
+    src/frontend_backend/network/qt_network_transport.cpp
+    src/frontend_backend/network/qt_network_transport.hpp
+  )
+endif()
 target_include_directories(xenon_launcher_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(xenon_launcher_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network Xenon::Core)
 if(TARGET xenon_filesystem)

@@ -41,8 +41,16 @@ namespace xenon::xbox {
                                          xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_set_event_export(xenon::kernel::KernelProcess& process,
                                        xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_pulse_event_export(xenon::kernel::KernelProcess& process,
+                                         xenon::core::ExportCallContext& context);
+[[nodiscard]] bool ex_terminate_thread_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_resume_thread_export(xenon::kernel::KernelProcess& process,
                                            xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_close_export(xenon::kernel::KernelProcess& process,
+                                   xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_signal_and_wait_for_single_object_ex_export(
+    xenon::kernel::KernelProcess& process, xenon::core::ExportCallContext& context);
 
 // Registers the xboxkrnl handle-based (Nt*) synchronization exports this
 // pass adds: NtCreateEvent, NtCreateSemaphore, NtReleaseSemaphore,

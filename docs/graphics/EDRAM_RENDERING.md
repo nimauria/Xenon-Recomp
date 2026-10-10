@@ -107,6 +107,51 @@ The architecture and rendered-frame path reach 100% only when these gates are
 closed without title-specific hardcoded locations or an emulated Xenos command
 processor inside either host backend.
 
+## Resolve correctness audit — tracked scenario gaps
+
+A correctness audit (AC6 Runtime Readiness pass) checked EDRAM tile
+ownership, color/depth resolve, MSAA, resolve rectangles, format conversion,
+resource aliasing and CPU/GPU coherency against seven specific scenarios.
+Six of seven already had genuine bit-exact regression coverage in
+`tests/graphics/backends/cross_backend_canonical.cpp` and
+`backend_ownership_integration.cpp`: (1) 4x MSAA color/depth resolve, (2)
+bit-exact D24S8/D24FS8 depth resolve, (3) partial rectangle resolve, (4)
+overlapping EDRAM color/depth ownership aliasing, and (6) render → resolve →
+CPU read.
+
+The audit also found and fixed under-coverage of the 2x MSAA color fallback:
+`RenderTargetImage::readback_native_sample()`/`host_msaa()` were added to both
+`d3d12::RenderTargetImage` and `vulkan::RenderTargetImage` (mirroring
+`DepthTargetImage`'s existing API), so the 2x-fallback test can assert that
+the native-4x padding samples (host samples 1/2) remain untouched at the
+clear color instead of only observing the two real guest samples through the
+guest-mapped accessor.
+
+**Tracked, still-untested gaps, by scenario number** (these numbers are
+cross-referenced by `docs/graphics/TEXTURES.md`'s CPU-write to GPU-sample
+coherency section):
+
+- **Scenario 5** (render → resolve → texture sample): no end-to-end test
+  renders, resolves to guest memory, then re-binds that address as a
+  `TextureImage` and samples it through an actual draw with its output read
+  back and compared. This needs either a real guest pixel shader constructed
+  as `DecodedShader` IR directly (bypassing PPC decode) or independent
+  verification of `TextureDescriptor`'s pitch/tiling semantics against a
+  resolve destination's tiled layout before trusting a `decode_texture()`-only
+  round trip.
+- **Scenario 7** (CPU write → GPU sample, cache invalidation): no test writes
+  guest memory after a texture is already uploaded/cached, redraws, and
+  asserts the GPU-visible result reflects the new bytes rather than a stale
+  cached image. `TextureDirtyTracker::consume_dirty()` itself is unit-tested
+  in isolation, but not through this end-to-end path, for the same
+  "needs a real sampling draw" reason as scenario 5.
+
+Additionally, `ResourceBarrierPlanner` correctness beyond the same-tile EDRAM
+color/depth alias case (scenario 4) is untested — general resource aliasing,
+e.g. a texture importing from a resolve destination address overlapping a
+live, different-sized render target, has no correctness assurance beyond
+state-machine bookkeeping tests.
+
 ## Research basis
 
 The tile dimensions, circular addressing, MSAA expansion, 64bpp pitch and

@@ -38,6 +38,17 @@ and translated shader representation.
 - Native command queues use rotating frame contexts with completion-value
   retirement; presentation back buffers and upload allocations are held until
   their associated queue value completes.
+- Every unsupported/silently-approximated GPU operation category is counted
+  and observable, never silently dropped: `GpuUnsupportedCounters`
+  (unknown packets/registers, unsupported fetch formats, shader instructions,
+  shader features, texture formats, sampler behaviors, resolve modes,
+  ownership transitions, fallback shader uses — see
+  `docs/graphics/NATIVE_BACKENDS.md`), `GpuShaderCoverage` (shaders
+  discovered/translated, translation failures, shader-cache hits/misses — see
+  `docs/graphics/HLSL_DXC.md`), and the texture dirty-tracking
+  `texture_cache_invalidations` counter (see `docs/graphics/TEXTURES.md`) are
+  all published through `capability_report()`'s `"gpu"`/`"shader"` sections,
+  omitted (not reported as zero) when no GPU backend exists.
 
 ## Remaining qualification work
 
@@ -53,10 +64,17 @@ alternative GPU semantics:
 - Run long-lived native stress tests on hardware for transient descriptors,
   command allocators, swapchain images, and shader variants. The queue
   implementation already rotates three protected frame contexts.
-- Record release-build backend counters during real workloads. The counters
-  are now available through `Backend::performance_counters()`; texture upload,
-  EDRAM transfer, readback, and barrier-specific attribution remains a
-  workload/trace measurement step.
+- Record release-build backend counters during real workloads. Performance,
+  unsupported-operation and shader-coverage counters are now all available
+  through `Backend::performance_counters()`/`unsupported_counters()`/
+  `shader_coverage()`; texture upload, EDRAM transfer, readback, and
+  barrier-specific attribution remains a workload/trace measurement step, and
+  several unsupported-counter/coverage categories (e.g. a nonzero
+  `texture_cache_invalidations` case, `failedResourceBarriers`,
+  `unhandledDepthStencilPaths`) still have no test or trace that actually
+  drives them nonzero — see `docs/graphics/NATIVE_BACKENDS.md`,
+  `docs/graphics/HLSL_DXC.md` and `docs/graphics/TEXTURES.md` for the tracked
+  per-counter gaps.
 
 Unsupported formats or commands must remain explicit diagnostics. They must not
 be silently treated as a different Xenos operation.

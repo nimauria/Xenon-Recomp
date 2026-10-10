@@ -16,6 +16,7 @@
 
 #include "launch_config.hpp"
 #include "xenon/core/json.hpp"
+#include "xenon/core/session.hpp"
 
 namespace {
 
@@ -121,6 +122,29 @@ int main() {
     }
   }
   std::cout << "  [PASS] Every LaunchFailureCategory has a distinct, non-empty name\n";
+
+  // Test 5: the capability report (GPU/CPU-fallback counters the runtime used
+  // to build but never publish) is written beside status.json as valid JSON,
+  // and a repeated publish replaces it atomically.
+  {
+    xenon::core::XenonSession session;
+    xenon::runtime_host::StatusWriter status(session_dir.string(), launch);
+    status.write_capability_report(session);
+    status.write_capability_report(session);
+
+    const auto path = std::filesystem::path(status.capability_report_path());
+    assert(path.filename() == "capability-report.json");
+    assert(path.parent_path() == session_dir);
+    xenon::core::JsonValue root;
+    std::string parse_error;
+    const auto contents = read_file(path);
+    assert(!contents.empty() && "capability-report.json should have been written");
+    assert(xenon::core::JsonValue::parse(contents, root, &parse_error) &&
+           "capability-report.json must be valid JSON");
+    assert(root.is_object());
+    assert(!std::filesystem::exists(path.string() + ".tmp"));
+  }
+  std::cout << "  [PASS] write_capability_report() publishes valid JSON atomically\n";
 
   std::filesystem::remove_all(session_dir);
   std::cout << "All StatusWriter tests passed!\n";

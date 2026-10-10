@@ -1,8 +1,12 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,9 +31,25 @@ using xenon::kernel::ObjectType;
 
 namespace status = xenon::kernel::xbox::status;
 
+// A guest that retries a failing synchronisation call in a loop would otherwise emit
+// one line per attempt (a 90 second AC6 run wrote 3 GB). Report the first few
+// occurrences of each distinct failure verbatim, then only every 4096th with the
+// running count.
 void log_resolution_failure(std::string_view function, const std::string& error) {
+  constexpr std::uint64_t kVerbatim = 8u;
+  constexpr std::uint64_t kSampleInterval = 4096u;
+  static std::mutex mutex;
+  static std::map<std::string, std::uint64_t> counts;
+  std::uint64_t occurrence = 0;
+  {
+    std::scoped_lock lock(mutex);
+    occurrence = ++counts[std::string(function) + ": " + error];
+  }
+  if (occurrence > kVerbatim && occurrence % kSampleInterval != 0u) return;
   logging::Logger::instance().log_if_enabled(logging::Level::Warning, "ke_sync", [&] {
-    return std::string(function) + ": " + error;
+    auto message = std::string(function) + ": " + error;
+    if (occurrence > kVerbatim) message += " (occurrence " + std::to_string(occurrence) + ")";
+    return message;
   });
 }
 
@@ -90,6 +110,12 @@ bool ke_initialize_semaphore_export(kernel::KernelProcess&, ExportCallContext& c
 // return convention, not an NTSTATUS.
 bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+
+  if (FILE* _d = std::fopen("set_event_all_diag.log", "a")) {
+    std::fprintf(_d, "KeSetEvent: thread_id=%u header=0x%08X\n",
+                 (unsigned)context.thread_id, (unsigned)header_address);
+    std::fclose(_d);
+  }
 
   std::string error;
   auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
@@ -173,9 +199,22 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
     return true;
   }
 
+  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
+    std::fprintf(_d, "KeWaitForSingleObject ENTER: thread_id=%u header=0x%08X type=%d timeout_ptr=0x%08X object_ptr=%p\n",
+                 (unsigned)context.thread_id, (unsigned)header_address, (int)object->type(),
+                 (unsigned)timeout_ptr, (void*)object.get());
+    std::fclose(_d);
+  }
+
   const auto timeout = read_timeout(context, timeout_ptr);
   const auto result = kernel::wait_for_single_object(object, timeout, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+
+  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
+    std::fprintf(_d, "KeWaitForSingleObject RETURNED: thread_id=%u header=0x%08X result=%d\n",
+                 (unsigned)context.thread_id, (unsigned)header_address, (int)result);
+    std::fclose(_d);
+  }
   return true;
 }
 
@@ -207,7 +246,15 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
     std::string error;
     auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
     if (!object) {
-      log_resolution_failure("KeWaitForMultipleObjects", error);
+      std::ostringstream detail;
+      detail << error << " [entry " << i << " of " << count << " at array 0x" << std::hex
+             << std::uppercase << headers_ptr << " header=0x" << header_address
+             << " wait_all=" << (wait_all ? 1 : 0) << " lr=0x" << context.cpu.lr << " entries:";
+      for (std::uint32_t j = 0; j < count; ++j) {
+        detail << " 0x" << context.memory.read32_be(headers_ptr + j * 4u);
+      }
+      detail << ']';
+      log_resolution_failure("KeWaitForMultipleObjects", detail.str());
       context.cpu.gpr[3] = status::InvalidParameter;
       return true;
     }
@@ -261,6 +308,27 @@ bool ke_set_base_priority_thread_export(kernel::KernelProcess& process,
   return true;
 }
 
+// KeQueryBasePriorityThread (ordinal 0x81 / 129)
+// Guest ABI: r3 = guest KTHREAD pointer -> r3 = current base priority (LONG).
+// A pure read of the same priority state KeSetBasePriorityThread writes.
+//
+// Real AC6 repro: reached during startup with no case registered at all.
+bool ke_query_base_priority_thread_export(kernel::KernelProcess& process,
+                                          ExportCallContext& context) {
+  const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+
+  kernel::KernelThread* target = nullptr;
+  for (const auto& thread : process.thread_manager().enumerate_threads()) {
+    if (thread->guest_kthread_address() == thread_ptr) {
+      target = thread.get();
+      break;
+    }
+  }
+  context.cpu.gpr[3] =
+      target ? static_cast<std::uint32_t>(static_cast<std::int32_t>(target->priority())) : 0u;
+  return true;
+}
+
 // KeSetAffinityThread (ordinal 0x97)
 // Guest ABI: r3 = guest KTHREAD pointer, r4 = new affinity mask (nonzero),
 // r5 = optional guest pointer to receive the previous affinity mask ->
@@ -299,6 +367,37 @@ bool ke_set_affinity_thread_export(kernel::KernelProcess& process, ExportCallCon
   return true;
 }
 
+// KeResumeThread (ordinal 0x92)
+// Guest ABI: r3 = guest KTHREAD pointer -> r3 = NTSTATUS. Unlike
+// NtResumeThread (xboxkrnl_sync_exports.cpp, handle-based, returns the
+// previous suspend count through an out-parameter), KeResumeThread's only
+// output is the status code itself - verified against the xenia-project/
+// xenia reference (KeResumeThread_entry resolves the guest pointer to its
+// native thread object and returns X_STATUS_SUCCESS, or X_STATUS_INVALID_
+// HANDLE when the pointer does not resolve to one).
+//
+// Same guest-KTHREAD-pointer resolution as ke_set_base_priority_thread_export
+// above (see its comment).
+bool ke_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto thread_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+
+  kernel::KernelThread* target = nullptr;
+  for (const auto& thread : process.thread_manager().enumerate_threads()) {
+    if (thread->guest_kthread_address() == thread_ptr) {
+      target = thread.get();
+      break;
+    }
+  }
+  if (!target) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+
+  static_cast<void>(target->resume());
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 namespace {
 
 struct KeSyncExportSpec {
@@ -315,7 +414,9 @@ constexpr KeSyncExportSpec kKeSyncExports[] = {
     {0x0AFu, "KeWaitForMultipleObjects"},
     {0x0B0u, "KeWaitForSingleObject"},
     {0x099u, "KeSetBasePriorityThread"},
+    {0x081u, "KeQueryBasePriorityThread"},
     {0x097u, "KeSetAffinityThread"},
+    {0x092u, "KeResumeThread"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -353,10 +454,18 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
       return ke_set_base_priority_thread_export(process, ctx);
     };
   }
+  if (name == "KeQueryBasePriorityThread") {
+    return [&process](ExportCallContext& ctx) {
+      return ke_query_base_priority_thread_export(process, ctx);
+    };
+  }
   if (name == "KeSetAffinityThread") {
     return [&process](ExportCallContext& ctx) {
       return ke_set_affinity_thread_export(process, ctx);
     };
+  }
+  if (name == "KeResumeThread") {
+    return [&process](ExportCallContext& ctx) { return ke_resume_thread_export(process, ctx); };
   }
   return {};
 }

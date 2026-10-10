@@ -45,6 +45,8 @@
 #include "xenon/audio/system.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/recomp/driver.hpp"
+#include "../support/source_snapshot.hpp"
+#include "../support/nested_cmake.hpp"
 
 #if !defined(XENON_HAS_AUDIO)
 #error "audio_guest_callback_tests requires xenon_core built with XENON_HAS_AUDIO (real Audio V1)"
@@ -292,10 +294,11 @@ int main() {
     return std::string("\"") + value.string() + "\"";
   };
   const auto configure = "cmake -S " + quote(output) + " -B " + quote(build_dir) +
-                         " -DXENON_RECOMP_ROOT=" + quote(XENON_SOURCE_ROOT);
+                         " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("audio_guest_callback")) +
+                         xenon::test::nested_cmake_toolchain_args();
   assert(std::system(configure.c_str()) == 0);
   const auto compile_cmd =
-      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug";
+      "cmake --build " + quote(build_dir) + " --target xenon_game_module --config Debug --parallel 4";
   assert(std::system(compile_cmd.c_str()) == 0);
 
   std::filesystem::path module_path;

@@ -320,6 +320,55 @@ int main() {
   }
   std::cout << "  [PASS] Explicit headlessMode=true round-trips\n";
 
+  // Test 13: memoryWatch accepts hex strings, decimal strings and numbers, and
+  // defaults to disabled.
+  {
+    TempFile file("watch.json");
+    file.write(R"json({
+      "sessionDir": "C:/sessions/x",
+      "contentPath": "C:/Games/X",
+      "memoryWatch": ["0x829DDEBC", "2191220416", 2191220420],
+      "memoryWatchHistory": 128,
+      "memoryWatchPollMs": 5
+    })json");
+
+    LaunchConfig config{};
+    std::string error;
+    const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
+    assert(ok);
+    assert(config.memory_watch_addresses.size() == 3u);
+    assert(config.memory_watch_addresses[0] == 0x829DDEBCu);
+    assert(config.memory_watch_addresses[1] == 2191220416u);
+    assert(config.memory_watch_addresses[2] == 2191220420u);
+    assert(config.memory_watch_history == 128u);
+    assert(config.memory_watch_poll_ms == 5u);
+
+    TempFile absent("watch_absent.json");
+    absent.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
+    LaunchConfig defaults{};
+    assert(LaunchConfig::load_from_file(absent.string(), defaults, error));
+    assert(defaults.memory_watch_addresses.empty());
+    assert(defaults.memory_watch_history == 4096u);
+    assert(defaults.memory_watch_poll_ms == 1u);
+  }
+  std::cout << "  [PASS] memoryWatch addresses parse and default to disabled\n";
+
+  // Test 14: malformed memoryWatch entries are rejected rather than ignored.
+  for (const char* bad : {R"json("memoryWatch": "0x1000")json", R"json("memoryWatch": ["nope"])json",
+                          R"json("memoryWatch": ["0x1000zz"])json",
+                          R"json("memoryWatch": ["0x100000000"])json",
+                          R"json("memoryWatch": [-4])json", R"json("memoryWatch": [true])json"}) {
+    TempFile file("watch_bad.json");
+    file.write(std::string(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X", )json") +
+               bad + "}");
+    LaunchConfig config{};
+    std::string error;
+    assert(!LaunchConfig::load_from_file(file.string(), config, error) &&
+           "an invalid memoryWatch must fail the launch config");
+    assert(error.find("memoryWatch") != std::string::npos);
+  }
+  std::cout << "  [PASS] Invalid memoryWatch entries are rejected\n";
+
   std::cout << "All LaunchConfig tests passed!\n";
   return 0;
 }

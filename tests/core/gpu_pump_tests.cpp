@@ -136,6 +136,25 @@ ExecutionResult gpu_interrupt_probe_entry(ExecutionContext& context) {
   return {FlowReason::Return, 0u, 0u};
 }
 
+std::atomic<int> g_handoff_stage_a{0};
+std::atomic<int> g_handoff_stage_b{0};
+
+// First function of a two-function callback: like real compiled code, it ends by
+// branching into a second function (a tail call across a function boundary).
+ExecutionResult handoff_stage_a_entry(ExecutionContext&) {
+  g_handoff_stage_a.fetch_add(1);
+  return {FlowReason::Branch, 0x5100u, 0u};
+}
+
+// The second function - in Ace Combat 6's vsync callback this is where the
+// callback releases the spin lock it took in the first.
+ExecutionResult handoff_stage_b_entry(ExecutionContext& context) {
+  g_handoff_stage_b.fetch_add(1);
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
 struct GpuPumpHarness {
   xenon::core::XenonSession session;
   Registry registry;
@@ -223,6 +242,12 @@ void test_gpu_pump_thread_drains_ring_buffer() {
   auto* kernel_process = harness.session.kernel_process();
   assert(kernel_process != nullptr);
   kernel_process->configure_gpu_ring_buffer(kRingBase, kRingCapacityDwords);
+  // VdEnableRingBufferRPtrWriteBack supplies a PHYSICAL address; the pump must
+  // publish the read pointer there (regression: it used to treat it as a virtual
+  // address, fault on a free page each drain, and never update the guest's copy).
+  constexpr std::uint32_t kWritebackPhysical = 0x2400u;
+  assert(memory->fill_physical(kWritebackPhysical, 4u, std::byte{0xEE}));
+  kernel_process->set_gpu_ring_buffer_rptr_writeback(kWritebackPhysical);
   constexpr std::uint32_t kWriteIndex = 8u;  // 8 dwords available to drain.
   kernel_process->set_gpu_ring_buffer_write_index(kWriteIndex);
 
@@ -234,6 +259,17 @@ void test_gpu_pump_thread_drains_ring_buffer() {
   assert(drained &&
          "the GPU pump thread should advance read_index to match write_index "
          "within a bounded timeout");
+
+  std::array<std::byte, 4> written{};
+  bool published = false;
+  for (int i = 0; i < 200 && !published; ++i) {
+    assert(memory->copy_physical_range(kWritebackPhysical, written));
+    published = written[3] == static_cast<std::byte>(kWriteIndex) &&
+                written[0] == std::byte{0} && written[1] == std::byte{0} &&
+                written[2] == std::byte{0};
+    if (!published) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(published && "the read pointer must be written, big-endian, to the physical writeback");
 
   const bool shutdown_completed = run_with_timeout(
       [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
@@ -281,6 +317,94 @@ void test_gpu_pump_thread_presents_and_fires_interrupt_callback() {
   assert(shutdown_completed);
 }
 
+std::atomic<bool> g_saw_command_stream_interrupt{false};
+std::atomic<std::uint64_t> g_command_stream_interrupt_r4{0};
+std::atomic<std::uint32_t> g_command_stream_interrupt_cpu{0xFFu};
+
+// Records whether the callback was ever entered with source 1 (a PM4_INTERRUPT), as
+// opposed to source 0 (the vsync tick that keeps firing alongside it).
+ExecutionResult interrupt_source_probe_entry(ExecutionContext& context) {
+  if (context.state.gpr[3] == 1u) {
+    g_command_stream_interrupt_r4.store(context.state.gpr[4]);
+    // What the title's own handler reads: the KPCR's current-CPU byte (r13+0x10C).
+    g_command_stream_interrupt_cpu.store(context.memory.read8(context.state.gpr[13] + 0x10Cu));
+    g_saw_command_stream_interrupt.store(true);
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// Regression (Ace Combat 6): PM4_INTERRUPT packets were dropped because nothing
+// installed the command processor's interrupt callback, so the title's graphics
+// interrupt handler - which acknowledges GPU->CPU handshakes - never ran for them.
+void test_pm4_interrupt_reaches_guest_callback_with_source_one() {
+  g_saw_command_stream_interrupt.store(false);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  constexpr std::uint32_t kContext = 0xFEEDF00Du;
+  GpuPumpHarness harness(kCallbackAddr, &interrupt_source_probe_entry);
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  constexpr std::uint32_t kRingCapacityDwords = 16u;
+  assert(memory->fill_physical(kRingBase, kRingCapacityDwords * 4u, std::byte{0}));
+  // Type-3 INTERRUPT (opcode 0x54), one payload dword: CPU mask 0b100 = CPU 2.
+  const std::array<std::byte, 8> packet{std::byte{0xC0}, std::byte{0x00}, std::byte{0x54},
+                                        std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                                        std::byte{0x00}, std::byte{0x04}};
+  assert(memory->write_physical(kRingBase, packet));
+  kernel_process->configure_gpu_ring_buffer(kRingBase, kRingCapacityDwords);
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, kContext);
+  kernel_process->set_gpu_ring_buffer_write_index(2u);
+
+  bool seen = false;
+  for (int i = 0; i < 400 && !seen; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    seen = g_saw_command_stream_interrupt.load();
+  }
+  assert(seen && "a PM4_INTERRUPT must invoke the callback with source 1");
+  assert(g_command_stream_interrupt_r4.load() == kContext);
+  assert(g_command_stream_interrupt_cpu.load() == 2u &&
+         "the handler must see the interrupt's target CPU in the KPCR (its ack clears that CPU's bit)");
+
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
+// Regression (Ace Combat 6 stalled at boot): a vsync callback that crosses a
+// compiled-function boundary must run to completion. The pump used to execute only
+// the callback's first function and count the handoff as success, so the tail of
+// the callback - which released the spin lock the first part took - never ran and
+// the next vsync deadlocked on its own lock.
+void test_interrupt_callback_follows_function_handoffs() {
+  g_handoff_stage_a.store(0);
+  g_handoff_stage_b.store(0);
+
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &handoff_stage_a_entry);
+  harness.registry.entries.emplace(0x5100u, &handoff_stage_b_entry);
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+
+  auto* kernel_process = harness.session.kernel_process();
+  assert(kernel_process != nullptr);
+  kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0x1234u);
+
+  bool finished = false;
+  for (int i = 0; i < 400 && !finished; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    finished = g_handoff_stage_b.load() > 0;
+  }
+  assert(finished && "the second function of the callback must run");
+
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
 }  // namespace
 
 int main() {
@@ -289,6 +413,8 @@ int main() {
   test_gpu_pump_thread_starts_and_stops_cleanly();
   test_gpu_pump_thread_drains_ring_buffer();
   test_gpu_pump_thread_presents_and_fires_interrupt_callback();
+  test_interrupt_callback_follows_function_handoffs();
+  test_pm4_interrupt_reaches_guest_callback_with_source_one();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

@@ -1,0 +1,1008 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1057" viewBox="0 0 1200 1057" role="img" aria-labelledby="title desc">
+<title id="title">Xenon source coverage audit</title>
+<desc id="desc">Treemaps of audited source-declared operations. Percentages are verified lower bounds; unassessed entries remain unknown.</desc>
+<rect width="1200" height="1057" fill="#101721"/>
+<text x="30" y="49" fill="#f4f7fb" font-size="30" font-family="sans-serif" font-weight="700">XENON  /  IMPLEMENTATION AUDIT</text>
+<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/864 (≥3.4%) test verified in the listed source subset • overall hardware coverage unknown</text>
+<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at bc02c44</text>
+<rect x="30" y="105" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="46" y="135" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox kernel exports</text>
+<text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">254 listed · 33 classified · ≥7.9% test verified</text>
+<rect x="46.0" y="169" width="9" height="9" fill="#3dbb79"/>
+<text x="59.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">20 verified</text>
+<rect x="135.0" y="169" width="9" height="9" fill="#55a6e9"/>
+<text x="148.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">2 unverified</text>
+<rect x="230.0" y="169" width="9" height="9" fill="#f2bc5a"/>
+<text x="243.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">7 partial</text>
+<rect x="307.0" y="169" width="9" height="9" fill="#d98b6a"/>
+<text x="320.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">4 stub</text>
+<rect x="366.0" y="169" width="9" height="9" fill="#88919e"/>
+<text x="379.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="479.0" y="169" width="9" height="9" fill="#514c72"/>
+<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">221 unassessed</text>
+<rect x="42" y="189" width="264" height="29" rx="3" fill="#223044"/>
+<text x="46" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Debug  ·  3  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPoint: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="131.33" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPointWithStatus: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="216.67" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgPrompt: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="42" y="221" width="264" height="36" rx="3" fill="#223044"/>
+<text x="46" y="234" fill="#e5edf6" font-size="12" font-family="sans-serif">Kernel  ·  40  ·  9 verified (≥22.5%)</text>
+<rect x="46.00" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="57.13" y="239.00" width="10.13" height="6" fill="#f2bc5a"><title>kernel:time:KeDelayExecutionThread: partial; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="68.26" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnableFpuExceptions: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="79.39" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnterCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="90.52" y="239.00" width="10.13" height="6" fill="#55a6e9"><title>kernel:registered:KeFlushUserModeTb: implemented_unverified; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="101.65" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeGetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
+<rect x="112.78" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeGetImagePageTableEntry: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="123.91" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="135.04" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="146.17" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLeaveCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="157.30" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="168.43" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KePulseEvent: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="179.57" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeQueryBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="190.70" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQueryPerformanceFrequency: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="201.83" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQuerySystemTime: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="212.96" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeRaiseIrqlToDpcLevel: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="224.09" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="235.22" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSpinLockFromRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="246.35" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="257.48" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResumeThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="268.61" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetAffinityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="279.74" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="290.87" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeSetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
+<rect x="46.00" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetDisableBoostThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="57.13" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="68.26" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeStallExecutionProcessor: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="79.39" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="90.52" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsAlloc: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="101.65" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsFree: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="112.78" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsGetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="123.91" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsSetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="135.04" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeTryToAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="146.17" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeUnlockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="157.30" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForMultipleObjects: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="168.43" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForSingleObject: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="179.57" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfAcquireSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="190.70" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfLowerIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="201.83" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfRaiseIrql: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="212.96" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfReleaseSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="224.09" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KiApcNormalRoutineNop: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="42" y="260" width="264" height="29" rx="3" fill="#223044"/>
+<text x="46" y="273" fill="#e5edf6" font-size="12" font-family="sans-serif">Memory  ·  12  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmAllocatePhysicalMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="67.33" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmAllocatePhysicalMemoryEx: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="88.67" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmCreateKernelStack: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="110.00" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmDeleteKernelStack: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="131.33" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmFreePhysicalMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="152.67" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmGetPhysicalAddress: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="174.00" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmIsAddressValid: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="195.33" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmMapIoSpace: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="216.67" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmQueryAddressProtect: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="238.00" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmQueryAllocationSize: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="259.33" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmQueryStatistics: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="280.67" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmSetAddressProtect: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="42" y="292" width="264" height="29" rx="3" fill="#223044"/>
+<text x="46" y="305" fill="#e5edf6" font-size="12" font-family="sans-serif">Objects  ·  4  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="310.00" width="63.00" height="6" fill="#514c72"><title>kernel:registered:ObCreateSymbolicLink: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="110.00" y="310.00" width="63.00" height="6" fill="#514c72"><title>kernel:registered:ObDeleteSymbolicLink: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="174.00" y="310.00" width="63.00" height="6" fill="#514c72"><title>kernel:registered:ObDereferenceObject: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="238.00" y="310.00" width="63.00" height="6" fill="#514c72"><title>kernel:registered:ObReferenceObjectByHandle: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="42" y="324" width="264" height="29" rx="3" fill="#223044"/>
+<text x="46" y="337" fill="#e5edf6" font-size="12" font-family="sans-serif">Other  ·  21  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:FscGetCacheElementCount: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="58.19" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:FscSetCacheElementCount: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="70.38" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:HalReturnToFirmware: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="82.57" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:InterlockedFlushSList: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="94.76" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:InterlockedPopEntrySList: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="106.95" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:InterlockedPushEntrySList: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="119.14" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:StfsControlDevice: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="131.33" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:StfsCreateDevice: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="143.52" y="342.00" width="11.19" height="6" fill="#d98b6a"><title>kernel:registered:__C_specific_handler: stub; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="155.71" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_scprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="167.90" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_scwprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="180.10" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_snprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="192.29" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_snwprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="204.48" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_vscprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="216.67" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_vscwprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="228.86" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_vsnprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="241.05" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:_vsnwprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="253.24" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:sprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="265.43" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:swprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="277.62" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:vsprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="289.81" y="342.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:vswprintf: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="42" y="356" width="264" height="36" rx="3" fill="#223044"/>
+<text x="46" y="369" fill="#e5edf6" font-size="12" font-family="sans-serif">RTL  ·  38  ·  10 verified (≥26.3%)</text>
+<rect x="46.00" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlAnsiStringToUnicodeString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="57.13" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlAppendStringToString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="68.26" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlAppendUnicodeStringToString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="79.39" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlAppendUnicodeToString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="90.52" y="374.00" width="10.13" height="6" fill="#d98b6a"><title>kernel:registered:RtlCaptureContext: stub; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="101.65" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCompareMemory: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="112.78" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlCompareMemoryUlong: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="123.91" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCompareString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="135.04" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCompareStringN: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="146.17" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCompareUnicodeString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="157.30" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCopyString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="168.43" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCopyUnicodeString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="179.57" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlCreateUnicodeString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="190.70" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlDowncaseUnicodeChar: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="201.83" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlEnterCriticalSection: verified; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
+<rect x="212.96" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlFillMemoryUlong: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="224.09" y="374.00" width="10.13" height="6" fill="#55a6e9"><title>kernel:registered:RtlFreeAnsiString: implemented_unverified; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="235.22" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlFreeUnicodeString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="246.35" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlImageXexHeaderField: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="257.48" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlInitAnsiString: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="268.61" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlInitUnicodeString: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="279.74" y="374.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlInitializeCriticalSection: verified; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
+<rect x="290.87" y="374.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlInitializeCriticalSectionAndSpinCount: unassessed; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
+<rect x="46.00" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlLeaveCriticalSection: verified; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
+<rect x="57.13" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlLowerChar: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="68.26" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlMultiByteToUnicodeN: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="79.39" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlMultiByteToUnicodeSize: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="90.52" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlNtStatusToDosError: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="101.65" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlRaiseException: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="112.78" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTimeFieldsToTime: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="123.91" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTimeToTimeFields: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="135.04" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTryEnterCriticalSection: verified; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
+<rect x="146.17" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUnicodeStringToAnsiString: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="157.30" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUnicodeToMultiByteN: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="168.43" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUnicodeToMultiByteSize: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="179.57" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUnwind: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="190.70" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUpcaseUnicodeChar: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="201.83" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlUpperChar: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
+<rect x="42" y="395" width="264" height="29" rx="3" fill="#223044"/>
+<text x="46" y="408" fill="#e5edf6" font-size="12" font-family="sans-serif">Video  ·  20  ·  1 verified (≥5.0%)</text>
+<rect x="46.00" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdCallGraphicsNotificationRoutines: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="58.80" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdEnableDisableClockGating: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="71.60" y="413.00" width="11.80" height="6" fill="#f2bc5a"><title>kernel:registered:VdEnableRingBufferRPtrWriteBack: partial; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="84.40" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdGetCurrentDisplayGamma: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="97.20" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdGetCurrentDisplayInformation: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="110.00" y="413.00" width="11.80" height="6" fill="#3dbb79"><title>kernel:registered:VdGetSystemCommandBuffer: verified; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="122.80" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdInitializeEngines: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="135.60" y="413.00" width="11.80" height="6" fill="#f2bc5a"><title>kernel:registered:VdInitializeRingBuffer: partial; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="148.40" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdInitializeScalerCommandBuffer: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="161.20" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdIsHSIOTrainingSucceeded: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="174.00" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdPersistDisplay: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="186.80" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdQueryVideoFlags: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="199.60" y="413.00" width="11.80" height="6" fill="#f2bc5a"><title>kernel:registered:VdQueryVideoMode: partial; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="212.40" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdRetrainEDRAM: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="225.20" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdRetrainEDRAMWorker: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="238.00" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdSetDisplayMode: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="250.80" y="413.00" width="11.80" height="6" fill="#f2bc5a"><title>kernel:registered:VdSetGraphicsInterruptCallback: partial; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="263.60" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdSetSystemCommandBufferGpuIdentifierAddress: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="276.40" y="413.00" width="11.80" height="6" fill="#514c72"><title>kernel:registered:VdShutdownEngines: unassessed; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="289.20" y="413.00" width="11.80" height="6" fill="#f2bc5a"><title>kernel:registered:VdSwap: partial; src/xbox/exports/xboxkrnl_video_exports.cpp</title></rect>
+<rect x="306" y="189" width="264" height="36" rx="3" fill="#223044"/>
+<text x="310" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Audio  ·  24  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioEnableDucker: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="321.13" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetDuckerAttackTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="332.26" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetDuckerHoldTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="343.39" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetDuckerLevel: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="354.52" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetDuckerReleaseTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="365.65" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetDuckerThreshold: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="376.78" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetRenderDriverTic: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="387.91" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetSpeakerConfig: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="399.04" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetUnderrunCount: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="410.17" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetVoiceCategoryVolume: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="421.30" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioGetVoiceCategoryVolumeChangeMask: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="432.43" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioIsDuckerEnabled: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="443.57" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioRegisterRenderDriverClient: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="454.70" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioRenderDriverInitialize: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="465.83" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetDuckerAttackTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="476.96" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetDuckerHoldTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="488.09" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetDuckerLevel: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="499.22" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetDuckerReleaseTime: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="510.35" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetDuckerThreshold: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="521.48" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetSpeakerConfig: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="532.61" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSetVoiceCategoryVolume: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="543.74" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSubmitRenderDriverFrame: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="554.87" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSuspendRenderDriverClients: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="310.00" y="214.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioUnregisterRenderDriverClient: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="306" y="228" width="264" height="29" rx="3" fill="#223044"/>
+<text x="310" y="241" fill="#e5edf6" font-size="12" font-family="sans-serif">Crypto  ·  3  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="246.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="395.33" y="246.00" width="84.33" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsolePrivateKeySign: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="480.67" y="246.00" width="84.33" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsoleSignatureVerification: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="306" y="260" width="264" height="29" rx="3" fill="#223044"/>
+<text x="310" y="273" fill="#e5edf6" font-size="12" font-family="sans-serif">Executive  ·  15  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="327.07" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="344.13" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="361.20" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolTypeWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="378.27" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="395.33" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExCreateThread: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="412.40" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExFreePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="429.47" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExGetXConfigSetting: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="446.53" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExInitializeReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="463.60" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExQueryPoolBlockSize: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="480.67" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExRegisterTitleTerminateNotification: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="497.73" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExReleaseReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="514.80" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTerminateThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="531.87" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="548.93" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="306" y="292" width="264" height="29" rx="3" fill="#223044"/>
+<text x="310" y="305" fill="#e5edf6" font-size="12" font-family="sans-serif">Modules  ·  3  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="310.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XexCheckExecutablePrivilege: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="395.33" y="310.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XexGetModuleHandle: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="480.67" y="310.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XexGetProcedureAddress: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="306" y="324" width="264" height="36" rx="3" fill="#223044"/>
+<text x="310" y="337" fill="#e5edf6" font-size="12" font-family="sans-serif">NT / I/O  ·  40  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:IoDismountVolume: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="321.13" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:IoDismountVolumeByFileHandle: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="332.26" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtAllocateEncryptedMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="343.39" y="342.00" width="10.13" height="6" fill="#f2bc5a"><title>kernel:registered:NtAllocateVirtualMemory: partial; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="354.52" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCancelTimer: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="365.65" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtClearEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="376.78" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtClose: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="387.91" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCreateEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="399.04" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCreateFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="410.17" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCreateMutant: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="421.30" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCreateSemaphore: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="432.43" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtCreateTimer: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="443.57" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtDeviceIoControlFile: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="454.70" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtDuplicateObject: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="465.83" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtFlushBuffersFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="476.96" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtFreeEncryptedMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="488.09" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtFreeVirtualMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="499.22" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtOpenFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="510.35" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtProtectVirtualMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="521.48" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtPulseEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="532.61" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryDirectoryFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="543.74" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryEvent: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="554.87" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryFullAttributesFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="310.00" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="321.13" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryVirtualMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="332.26" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryVolumeInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="343.39" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="354.52" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFileScatter: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="365.65" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseMutant: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="376.78" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="387.91" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtResumeThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="399.04" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="410.17" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="421.30" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetTimerEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="432.43" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSignalAndWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="443.57" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="454.70" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForMultipleObjectsEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="465.83" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="476.96" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWriteFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="488.09" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtYieldExecution: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="306" y="363" width="264" height="29" rx="3" fill="#223044"/>
+<text x="310" y="376" fill="#e5edf6" font-size="12" font-family="sans-serif">Variables  ·  10  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:ExLoadedCommandLine: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="335.60" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:ExThreadObjectType: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="361.20" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:KeCertMonitorData: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="386.80" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:KeDebugMonitorData: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="412.40" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:KeTimeStampBundle: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="438.00" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:VdGlobalDevice: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="463.60" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:VdGpuClockInMHz: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="489.20" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:VdHSIOCalibrationLock: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="514.80" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:XboxKrnlVersion: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="540.40" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:XexExecutableModuleHandle: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
+<rect x="306" y="395" width="264" height="29" rx="3" fill="#223044"/>
+<text x="310" y="408" fill="#e5edf6" font-size="12" font-family="sans-serif">XMA  ·  21  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMABlockWhileInUse: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="322.19" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMACreateContext: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="334.38" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMADisableContext: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="346.57" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAEnableContext: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="358.76" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAGetInputBufferReadOffset: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="370.95" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAGetOutputBufferReadOffset: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="383.14" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAGetOutputBufferWriteOffset: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="395.33" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAGetPacketMetadata: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="407.52" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAInitializeContext: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="419.71" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAIsInputBuffer0Valid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="431.90" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAIsInputBuffer1Valid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="444.10" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAIsOutputBufferValid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="456.29" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMAReleaseContext: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="468.48" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetInputBuffer0: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="480.67" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetInputBuffer0Valid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="492.86" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetInputBuffer1: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="505.05" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetInputBuffer1Valid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="517.24" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetInputBufferReadOffset: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="529.43" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetLoopData: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="541.62" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetOutputBufferReadOffset: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="553.81" y="413.00" width="11.19" height="6" fill="#514c72"><title>kernel:registered:XMASetOutputBufferValid: unassessed; src/audio/exports.cpp</title></rect>
+<rect x="615" y="105" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="631" y="135" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">PowerPC instructions</text>
+<text x="631" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">455 listed · 1 classified · ≥0.2% test verified</text>
+<rect x="631.0" y="169" width="9" height="9" fill="#3dbb79"/>
+<text x="644.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 verified</text>
+<rect x="714.0" y="169" width="9" height="9" fill="#55a6e9"/>
+<text x="727.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unverified</text>
+<rect x="809.0" y="169" width="9" height="9" fill="#f2bc5a"/>
+<text x="822.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="886.0" y="169" width="9" height="9" fill="#d98b6a"/>
+<text x="899.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="945.0" y="169" width="9" height="9" fill="#88919e"/>
+<text x="958.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="1058.0" y="169" width="9" height="9" fill="#514c72"/>
+<text x="1071.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">454 unassessed</text>
+<rect x="627" y="189" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Branch  ·  9  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:bcctrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:bclrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:bcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:bx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:sc: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:td: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:tdi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:tw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="207.00" width="56.78" height="6" fill="#514c72"><title>ppc:twi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="627" y="221" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="234" fill="#e5edf6" font-size="12" font-family="sans-serif">Control  ·  26  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crand: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="651.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crandc: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="671.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:creqv: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="691.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crnand: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="711.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crnor: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="731.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:cror: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="751.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crorc: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="771.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:crxor: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="791.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mcrf: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="811.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mcrfs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="831.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mcrxr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="851.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mfcr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="871.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mffsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mfmsr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="911.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mfspr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="931.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mftb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="951.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mfvscr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="971.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtcrf: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="991.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtfsb0x: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1011.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtfsb1x: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1031.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtfsfix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1051.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtfsfx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1071.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtmsr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1091.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtmsrd: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1111.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtspr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1131.00" y="239.00" width="19.00" height="6" fill="#514c72"><title>ppc:mtvscr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="627" y="253" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="266" fill="#e5edf6" font-size="12" font-family="sans-serif">FloatingPoint  ·  33  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fabsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="646.76" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:faddsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="662.52" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:faddx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="678.27" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fcfidx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="694.03" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fcmpo: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="709.79" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fcmpu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="725.55" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fctidx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="741.30" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fctidzx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="757.06" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fctiwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="772.82" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fctiwzx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="788.58" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fdivsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fdivx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="820.09" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmaddsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="835.85" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmaddx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="851.61" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="867.36" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmsubsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="883.12" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmsubx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="898.88" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmulsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="914.64" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fmulx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="930.39" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnabsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="946.15" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnegx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="961.91" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnmaddsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnmaddx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="993.42" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnmsubsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1009.18" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fnmsubx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1024.94" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fresx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1040.70" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:frspx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1056.45" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:frsqrtex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1072.21" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fselx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1087.97" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fsqrtsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1103.73" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fsqrtx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1119.48" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fsubsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1135.24" y="271.00" width="14.76" height="6" fill="#514c72"><title>ppc:fsubx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="627" y="285" width="528" height="36" rx="3" fill="#223044"/>
+<text x="631" y="298" fill="#e5edf6" font-size="12" font-family="sans-serif">Integer  ·  70  ·  1 verified (≥1.4%)</text>
+<rect x="631.00" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="303.00" width="13.44" height="6" fill="#3dbb79"><title>ppc:addi: verified; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addic: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addicx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addis: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addmex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:addzex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:andcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:andisx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:andix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:andx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cmp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cmpi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cmpl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cmpli: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cntlzdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:cntlzwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:divdux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:divdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:divwux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:divwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:eieio: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:eqvx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:extsbx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:extshx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:extswx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:isync: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulhdux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulhdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulhwux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulhwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulldx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mulli: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="303.00" width="13.44" height="6" fill="#514c72"><title>ppc:mullwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:nandx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:negx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:norx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:orcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:ori: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:oris: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:orx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldclx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldcrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldiclx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldicrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldicx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rldimix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rlwimix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rlwinmx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:rlwnmx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:sldx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:slwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:sradix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:sradx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:srawix: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:srawx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:srdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:srwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subfcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subfex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subficx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subfmex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subfx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:subfzex: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:sync: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:xori: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:xoris: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="310.00" width="13.44" height="6" fill="#514c72"><title>ppc:xorx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="627" y="324" width="528" height="50" rx="3" fill="#223044"/>
+<text x="631" y="337" fill="#e5edf6" font-size="12" font-family="sans-serif">Memory  ·  112  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbf: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbst: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbt: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbtst: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbz: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:dcbz128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:icbi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lbz: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lbzu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lbzux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lbzx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ld: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ldarx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ldbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ldu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ldux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:ldx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfd: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfdu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfdux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfsu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfsux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lfsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lha: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhau: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhaux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhax: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhz: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhzu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhzux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lhzx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="342.00" width="13.44" height="6" fill="#514c72"><title>ppc:lmw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lswi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lswx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvebx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvehx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvewx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvewx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvlx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvlx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvlxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvlxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvrx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvrxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvrxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwa: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwarx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwaux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwax: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwz: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwzu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwzux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:lwzx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stbu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stbux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stbx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:std: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stdbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stdcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stdu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="349.00" width="13.44" height="6" fill="#514c72"><title>ppc:stdux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfd: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfdu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfdux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfdx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfiwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfsu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfsux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stfsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:sth: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:sthbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:sthu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:sthux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:sthx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stmw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stswi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stswx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvebx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvehx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvewx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvewx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvlx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvlx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvlxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvlxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvrx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvrxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvrxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvx128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvxl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stvxl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="356.00" width="13.44" height="6" fill="#514c72"><title>ppc:stwbrx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="363.00" width="13.44" height="6" fill="#514c72"><title>ppc:stwcx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="363.00" width="13.44" height="6" fill="#514c72"><title>ppc:stwu: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="363.00" width="13.44" height="6" fill="#514c72"><title>ppc:stwux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="363.00" width="13.44" height="6" fill="#514c72"><title>ppc:stwx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="627" y="377" width="528" height="64" rx="3" fill="#223044"/>
+<text x="631" y="390" fill="#e5edf6" font-size="12" font-family="sans-serif">Vector  ·  205  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvsl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvsl128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvsr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:lvsr128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddcuw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddsbs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddshs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddsws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddubm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vaddubs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vadduhm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vadduhs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vadduwm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vadduws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vand: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vand128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vandc: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vandc128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavgsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavgsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavgsw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavgub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavguh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vavguw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcfpsxws128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcfpuxws128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcfsx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcfux: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpbfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpbfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpeqfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpeqfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpequb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="395.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpequh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpequw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpequw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgefp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgefp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtsw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtuh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcmpgtuw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcsxwfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vctsxs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vctuxs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vcuxwfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vexptefp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vexptefp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vlogefp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vlogefp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaddcfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaddfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaddfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxsw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxuh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmaxuw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmhaddshs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmhraddshs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="402.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminsw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminuh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vminuw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmladduhm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrghb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrghh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrghw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrghw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrglb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrglh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrglw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmrglw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsum3fp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsum4fp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsummbm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsumshm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsumshs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsumubm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsumuhm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmsumuhs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulesb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulesh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmuleub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmuleuh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulosb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulosh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmuloub: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vmulouh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vnmsubfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vnmsubfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vnor: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vnor128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="409.00" width="13.44" height="6" fill="#514c72"><title>ppc:vor: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vor128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vperm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vperm128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpermwi128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkd3d128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkpx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkshss: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkshss128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkshus: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkshus128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkswss: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkswss128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkswus: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkswus128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuhum: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuhum128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuhus: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuhus128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuwum: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuwum128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuwus: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vpkuwus128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrefp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrefp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfim: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfim128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfin: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfin128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfip: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfip128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfiz: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrfiz128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrlb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrlh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrlimi128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="416.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrlw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrlw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrsqrtefp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vrsqrtefp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsel: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsel128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsl: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsldoi: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsldoi128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslo: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslo128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vslw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsplth: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltisb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltish: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltisw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltisw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vspltw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsr: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrab: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrah: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="992.11" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsraw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1006.56" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsraw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1021.00" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1035.44" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1049.89" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsro: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1064.33" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsro128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1078.78" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1093.22" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsrw128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1107.67" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubcuw: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1122.11" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubfp: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="1136.56" y="423.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubfp128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="631.00" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubsbs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="645.44" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubshs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="659.89" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubsws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="674.33" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsububm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="688.78" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsububs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="703.22" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubuhm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="717.67" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubuhs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="732.11" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubuwm: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="746.56" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsubuws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="761.00" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsum2sws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="775.44" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsum4sbs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="789.89" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsum4shs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="804.33" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsum4ubs: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="818.78" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vsumsws: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="833.22" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupkd3d128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="847.67" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupkhpx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="862.11" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupkhsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="876.56" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupkhsb128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="891.00" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupkhsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="905.44" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupklpx: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="919.89" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupklsb: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="934.33" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupklsb128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="948.78" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vupklsh: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="963.22" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vxor: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="977.67" y="430.00" width="13.44" height="6" fill="#514c72"><title>ppc:vxor128: unassessed; src/cpu/ppc/decoder/opcode_catalog.inc</title></rect>
+<rect x="30" y="551" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="46" y="581" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xenos shader instructions</text>
+<text x="46" y="603" fill="#bdc9d6" font-size="12" font-family="sans-serif">105 listed · 4 classified · ≥1.0% test verified</text>
+<rect x="46.0" y="615" width="9" height="9" fill="#3dbb79"/>
+<text x="59.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 verified</text>
+<rect x="129.0" y="615" width="9" height="9" fill="#55a6e9"/>
+<text x="142.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">2 unverified</text>
+<rect x="224.0" y="615" width="9" height="9" fill="#f2bc5a"/>
+<text x="237.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="301.0" y="615" width="9" height="9" fill="#d98b6a"/>
+<text x="314.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="360.0" y="615" width="9" height="9" fill="#88919e"/>
+<text x="373.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">1 unimplemented</text>
+<rect x="473.0" y="615" width="9" height="9" fill="#514c72"/>
+<text x="486.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">101 unassessed</text>
+<rect x="42" y="635" width="528" height="29" rx="3" fill="#223044"/>
+<text x="46" y="648" fill="#e5edf6" font-size="12" font-family="sans-serif">Control flow  ·  16  ·  1 verified (≥6.2%)</text>
+<rect x="46.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:Nop: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="78.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:Exec: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="111.00" y="653.00" width="31.50" height="6" fill="#3dbb79"><title>shader:control:ExecEnd: verified; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="143.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExec: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="176.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExecEnd: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="208.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExecPred: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="241.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExecPredEnd: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="273.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:LoopStart: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="306.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:LoopEnd: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="338.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondCall: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="371.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:Return: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="403.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondJump: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="436.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:Alloc: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="468.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExecPredClean: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="501.00" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:CondExecPredCleanEnd: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="533.50" y="653.00" width="31.50" height="6" fill="#514c72"><title>shader:control:MarkVsFetchDone: unassessed; include/xenon/gpu/shader.hpp</title></rect>
+<rect x="42" y="667" width="528" height="36" rx="3" fill="#223044"/>
+<text x="46" y="680" fill="#e5edf6" font-size="12" font-family="sans-serif">Scalar ALU  ·  50  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:0: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="60.44" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:1: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="74.89" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:2: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="89.33" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:3: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="103.78" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:4: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="118.22" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:5: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="132.67" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:6: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="147.11" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:7: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="161.56" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:8: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="176.00" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:9: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="190.44" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:10: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="204.89" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:11: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="219.33" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:12: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="233.78" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:13: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="248.22" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:14: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="262.67" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:15: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="277.11" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:16: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="291.56" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:17: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="306.00" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:18: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="320.44" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:19: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="334.89" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:20: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="349.33" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:21: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="363.78" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:22: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="378.22" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:23: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="392.67" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:24: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="407.11" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:25: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="421.56" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:26: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="436.00" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:27: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="450.44" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:28: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="464.89" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:29: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="479.33" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:30: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="493.78" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:31: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="508.22" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:32: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="522.67" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:33: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="537.11" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:34: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="551.56" y="685.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:35: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="46.00" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:36: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="60.44" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:37: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="74.89" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:38: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="89.33" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:39: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="103.78" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:40: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="118.22" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:42: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="132.67" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:43: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="147.11" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:44: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="161.56" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:45: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="176.00" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:46: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="190.44" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:47: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="204.89" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:48: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="219.33" y="692.00" width="13.44" height="6" fill="#514c72"><title>shader:scalar:49: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="233.78" y="692.00" width="13.44" height="6" fill="#55a6e9"><title>shader:scalar:50: implemented_unverified; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="42" y="706" width="528" height="29" rx="3" fill="#223044"/>
+<text x="46" y="719" fill="#e5edf6" font-size="12" font-family="sans-serif">Texture fetch  ·  8  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:1: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="111.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:19: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="176.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:24: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="241.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:25: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="306.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:26: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="371.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:17: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="436.00" y="724.00" width="64.00" height="6" fill="#514c72"><title>shader:texture:18: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="501.00" y="724.00" width="64.00" height="6" fill="#88919e"><title>shader:texture:16: unimplemented; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="42" y="738" width="528" height="29" rx="3" fill="#223044"/>
+<text x="46" y="751" fill="#e5edf6" font-size="12" font-family="sans-serif">Vector ALU  ·  30  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="756.00" width="16.33" height="6" fill="#55a6e9"><title>shader:vector:0: implemented_unverified; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="63.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:1: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="80.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:2: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="98.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:3: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="115.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:4: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="132.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:5: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="150.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:6: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="167.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:7: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="184.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:8: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="202.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:9: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="219.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:10: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="236.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:11: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="254.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:12: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="271.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:13: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="288.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:14: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="306.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:15: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="323.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:16: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="340.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:17: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="358.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:18: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="375.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:19: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="392.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:20: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="410.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:21: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="427.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:22: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="444.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:23: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="462.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:24: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="479.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:25: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="496.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:26: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="514.00" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:27: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="531.33" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:28: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="548.67" y="756.00" width="16.33" height="6" fill="#514c72"><title>shader:vector:29: unassessed; src/graphics/xenos/shader_translation.cpp</title></rect>
+<rect x="42" y="770" width="528" height="29" rx="3" fill="#223044"/>
+<text x="46" y="783" fill="#e5edf6" font-size="12" font-family="sans-serif">Vertex fetch  ·  1  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="788.00" width="519.00" height="6" fill="#514c72"><title>shader:vertex:0: unassessed; src/graphics/xenos/shader_decoder.cpp</title></rect>
+<rect x="615" y="551" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
+<text x="631" y="581" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">GPU PM4 packets</text>
+<text x="631" y="603" fill="#bdc9d6" font-size="12" font-family="sans-serif">50 listed · 7 classified · ≥14.0% test verified</text>
+<rect x="631.0" y="615" width="9" height="9" fill="#3dbb79"/>
+<text x="644.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">7 verified</text>
+<rect x="714.0" y="615" width="9" height="9" fill="#55a6e9"/>
+<text x="727.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unverified</text>
+<rect x="809.0" y="615" width="9" height="9" fill="#f2bc5a"/>
+<text x="822.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 partial</text>
+<rect x="886.0" y="615" width="9" height="9" fill="#d98b6a"/>
+<text x="899.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 stub</text>
+<rect x="945.0" y="615" width="9" height="9" fill="#88919e"/>
+<text x="958.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
+<rect x="1058.0" y="615" width="9" height="9" fill="#514c72"/>
+<text x="1071.0" y="623" fill="#c5d1dd" font-size="10" font-family="sans-serif">43 unassessed</text>
+<rect x="627" y="635" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="648" fill="#e5edf6" font-size="12" font-family="sans-serif">Draw  ·  4  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndx: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="761.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndxBin: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndx2Bin: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1021.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndx2: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="667" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="680" fill="#e5edf6" font-size="12" font-family="sans-serif">Event  ·  7  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:VizQuery: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="705.29" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="779.57" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:Interrupt: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="853.86" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteShaderDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="928.14" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteCacheFlush: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1002.43" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteExtent: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1076.71" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteZPassDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="699" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="712" fill="#e5edf6" font-size="12" font-family="sans-serif">Other / passthrough  ·  6  ·  1 verified (≥16.7%)</text>
+<rect x="631.00" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:Nop: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="717.67" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBufferPfd: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="717.00" width="85.67" height="6" fill="#3dbb79"><title>pm4:type3:MemWrite: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:RegToMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBuffer: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1064.33" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:MemWriteCounter: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="731" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="744" fill="#e5edf6" font-size="12" font-family="sans-serif">Packet headers  ·  4  ·  4 verified (≥100.0%)</text>
+<rect x="631.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type0: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="761.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type1: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type2: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1021.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type3: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="763" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="776" fill="#e5edf6" font-size="12" font-family="sans-serif">Shader  ·  5  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImLoad: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="735.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImLoadImmediate: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="839.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImStore: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="943.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:SetShaderBases: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1047.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:SetShaderConstants: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="795" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="808" fill="#e5edf6" font-size="12" font-family="sans-serif">State  ·  18  ·  2 verified (≥11.1%)</text>
+<rect x="631.00" y="813.00" width="27.89" height="6" fill="#3dbb79"><title>pm4:type3:RegRmw: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="659.89" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetState: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="688.78" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="717.67" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:LoadConstantContext: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="746.56" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:LoadAluConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="775.44" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:InvalidateState: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="813.00" width="27.89" height="6" fill="#3dbb79"><title>pm4:type3:CondExec: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="833.22" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:CondWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="862.11" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:MeInit: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinBaseOffset: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="919.89" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMask: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="948.78" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelect: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetConstant2: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1006.56" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:ContextUpdate: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1035.44" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1064.33" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1093.22" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1122.11" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="627" y="827" width="528" height="29" rx="3" fill="#223044"/>
+<text x="631" y="840" fill="#e5edf6" font-size="12" font-family="sans-serif">Synchronization  ·  6  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitForIdle: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="717.67" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegEq: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegGte: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitUntilRead: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1064.33" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitIndirectBufferPfdComplete: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="31" y="1015" width="18" height="18" fill="#3dbb79"/>
+<text x="57" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Verified by test</text>
+<rect x="224" y="1015" width="18" height="18" fill="#55a6e9"/>
+<text x="250" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Implemented, unverified</text>
+<rect x="417" y="1015" width="18" height="18" fill="#f2bc5a"/>
+<text x="443" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Partial</text>
+<rect x="610" y="1015" width="18" height="18" fill="#d98b6a"/>
+<text x="636" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Stub</text>
+<rect x="803" y="1015" width="18" height="18" fill="#88919e"/>
+<text x="829" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Unimplemented</text>
+<rect x="996" y="1015" width="18" height="18" fill="#514c72"/>
+<text x="1022" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Unassessed</text>
+</svg>

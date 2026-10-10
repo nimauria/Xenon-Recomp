@@ -1,5 +1,7 @@
 #include "xenon/kernel/timer.hpp"
 
+#include "xenon/kernel/wait_util.hpp"
+
 namespace xenon::kernel {
 
 KernelTimer::KernelTimer(TimerType type)
@@ -48,7 +50,7 @@ bool KernelTimer::cancel() {
 bool KernelTimer::wait_for(std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
   
-  if (!condition_.wait_for(lock, timeout, [&] { return signaled_; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return signaled_; })) {
     return false;
   }
 

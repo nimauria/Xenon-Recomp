@@ -4,7 +4,7 @@
 // Real-world context: RtlInitializeCriticalSection (ordinal 302 / 0x12E) is
 // the next real export AC6's boot path calls once the process-type exports
 // were fixed (real guest address 0x823d009c) - a correctly-recognized-but-
-// previously-unimplemented import, per src/core/session.cpp's Trap path
+// previously-unimplemented import, per src/core/session/execution/runtime_services.cpp's Trap path
 // (STATUS_PROCEDURE_NOT_FOUND).
 
 #include <atomic>
@@ -226,10 +226,173 @@ void test_enter_blocks_and_wakes_across_real_threads() {
   assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 0u);
 }
 
+template <typename Predicate>
+bool wait_until(Predicate&& predicate, std::chrono::milliseconds limit = std::chrono::seconds(10)) {
+  const auto deadline = std::chrono::steady_clock::now() + limit;
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() > deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
+// Regression (AC6 bring-up): a woken waiter used to reset LockCount to 0 when it
+// took the section, dropping every other waiter's registration. With two waiters
+// the first Leave woke one, the second Leave then saw "no waiters" and never
+// signalled the other, which slept forever (the whole test binary hung). NT hands
+// ownership to the woken waiter without touching LockCount.
+void test_lock_count_survives_handoff_with_multiple_waiters() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  const auto lock_count = [&] {
+    return static_cast<std::int32_t>(fixture.address_space->read32_be(cs + kLockCountOffset));
+  };
+
+  cpu::CpuState enter1{};
+  enter1.gpr[3] = cs;
+  assert(fixture.invoke(kOrdEnter, enter1, 1u).success);
+  assert(lock_count() == 0);
+
+  std::atomic<int> acquired{0};
+  std::atomic<int> finished{0};
+  std::atomic<bool> release{false};
+  const auto waiter = [&](std::uint32_t thread_id) {
+    cpu::CpuState enter{};
+    enter.gpr[3] = cs;
+    core::ExportCallContext enter_call{enter, *fixture.address_space, 0, thread_id};
+    assert(fixture.registry.invoke("xboxkrnl", kOrdEnter, enter_call).success);
+    acquired.fetch_add(1);
+    while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    cpu::CpuState leave{};
+    leave.gpr[3] = cs;
+    core::ExportCallContext leave_call{leave, *fixture.address_space, 0, thread_id};
+    assert(fixture.registry.invoke("xboxkrnl", kOrdLeave, leave_call).success);
+    finished.fetch_add(1);
+  };
+  std::thread t2(waiter, 2u);
+  std::thread t3(waiter, 3u);
+  assert(wait_until([&] { return lock_count() == 2; }) && "both waiters must register");
+
+  cpu::CpuState leave1{};
+  leave1.gpr[3] = cs;
+  assert(fixture.invoke(kOrdLeave, leave1, 1u).success);
+  assert(wait_until([&] { return acquired.load() == 1; }));
+  // One waiter owns it now; the other is still registered.
+  assert(lock_count() == 1 && "the remaining waiter's registration must survive the hand-off");
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 1u);
+
+  // While the section is owned and a waiter is registered, TryEnter must fail.
+  cpu::CpuState try_enter{};
+  try_enter.gpr[3] = cs;
+  assert(fixture.invoke(kOrdTryEnter, try_enter, 4u).success);
+  assert(try_enter.gpr[3] == 0u);
+
+  release.store(true);
+  const bool all_done = wait_until([&] { return finished.load() == 2; });
+  if (!all_done) {
+    std::cerr << "a critical-section waiter was never woken (lost wakeup)\n";
+    std::abort();
+  }
+  t2.join();
+  t3.join();
+  assert(lock_count() == -1);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+}
+
+// Between a Leave() and the woken waiter taking over, the section is unowned but
+// still committed to that waiter: TryEnter must not steal it.
+void test_try_enter_does_not_steal_a_pending_handoff() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  // Model "T1 held it, T2 registered as a waiter, T1 left": owner 0, LockCount 0.
+  fixture.address_space->write32_be(cs + kOwningThreadOffset, 0u);
+  fixture.address_space->write32_be(cs + kRecursionCountOffset, 0u);
+  fixture.address_space->write32_be(cs + kLockCountOffset, 0u);
+
+  cpu::CpuState try_enter{};
+  try_enter.gpr[3] = cs;
+  assert(fixture.invoke(kOrdTryEnter, try_enter, 3u).success);
+  assert(try_enter.gpr[3] == 0u && "TryEnter must not take a section that is mid hand-off");
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+}
+
 }  // namespace
+
+// Regression (AC6): ownership must be keyed on the caller's guest KTHREAD
+// (r13 -> KPCR+0x100), exactly as the real kernel stores it. Two guest
+// threads that both lack a registered host KernelThread (thread_id 0) used to
+// share the marker 0 - which is also a free lock's OwningThread - so the
+// first Enter on a free lock took the "recursive" branch without becoming the
+// owner, and the other thread then waited forever on owner 0.
+void test_owner_is_guest_kthread_not_host_thread_id() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState init_cpu{};
+  init_cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, init_cpu).success);
+
+  // Two guest threads, each with its own KPCR whose current_thread points at
+  // its own KTHREAD - and neither with a host thread id.
+  memory::GuestAddress kpcr_a{}, kpcr_b{};
+  assert(fixture.address_space->allocate(0x2D8u, 16u, memory::kReadWrite, false, kpcr_a));
+  assert(fixture.address_space->allocate(0x2D8u, 16u, memory::kReadWrite, false, kpcr_b));
+  constexpr std::uint32_t kKthreadA = 0x80070000u;
+  constexpr std::uint32_t kKthreadB = 0x80071000u;
+  fixture.address_space->write32_be(kpcr_a + 0x100u, kKthreadA);
+  fixture.address_space->write32_be(kpcr_b + 0x100u, kKthreadB);
+
+  cpu::CpuState enter_a{};
+  enter_a.gpr[3] = cs;
+  enter_a.gpr[13] = kpcr_a;
+  assert(fixture.invoke(kOrdEnter, enter_a, /*thread_id=*/0u).success);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadA);
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 1u);
+  assert(static_cast<std::int32_t>(fixture.address_space->read32_be(cs + kLockCountOffset)) == 0);
+
+  // Thread B (also thread_id 0) must see the lock as held by someone else.
+  cpu::CpuState try_b{};
+  try_b.gpr[3] = cs;
+  try_b.gpr[13] = kpcr_b;
+  assert(fixture.invoke(kOrdTryEnter, try_b, /*thread_id=*/0u).success);
+  assert(try_b.gpr[3] == 0u && "a different guest thread must not acquire a held lock");
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadA);
+
+  // Thread A re-entering is a genuine recursive acquire.
+  cpu::CpuState try_a{};
+  try_a.gpr[3] = cs;
+  try_a.gpr[13] = kpcr_a;
+  assert(fixture.invoke(kOrdTryEnter, try_a, /*thread_id=*/0u).success);
+  assert(try_a.gpr[3] == 1u);
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 2u);
+
+  for (int i = 0; i < 2; ++i) {
+    cpu::CpuState leave{};
+    leave.gpr[3] = cs;
+    leave.gpr[13] = kpcr_a;
+    assert(fixture.invoke(kOrdLeave, leave, /*thread_id=*/0u).success);
+  }
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 0u);
+
+  // Now free, thread B acquires it under its own KTHREAD.
+  cpu::CpuState try_b2{};
+  try_b2.gpr[3] = cs;
+  try_b2.gpr[13] = kpcr_b;
+  assert(fixture.invoke(kOrdTryEnter, try_b2, /*thread_id=*/0u).success);
+  assert(try_b2.gpr[3] == 1u);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadB);
+}
 
 int main() {
   std::cout << "Testing xboxkrnl Rtl*CriticalSection exports...\n";
+  test_owner_is_guest_kthread_not_host_thread_id();
 
   test_ordinals_are_registered();
   test_initialize_sets_real_initial_state();
@@ -237,6 +400,8 @@ int main() {
   test_recursive_enter_leave();
   test_try_enter();
   test_enter_blocks_and_wakes_across_real_threads();
+  test_lock_count_survives_handoff_with_multiple_waiters();
+  test_try_enter_does_not_steal_a_pending_handoff();
 
   std::cout << "All Rtl*CriticalSection export tests passed!\n";
   return 0;

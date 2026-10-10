@@ -15,6 +15,9 @@ class KernelEvent final : public KernelObject {
   void set();
   void reset();
   [[nodiscard]] bool signaled() const;
+  // True for a notification (manual-reset) event, false for a synchronization
+  // (auto-reset) event - EVENT_BASIC_INFORMATION's EventType is the inverse.
+  [[nodiscard]] bool manual_reset() const noexcept { return manual_reset_; }
   [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
 
  private:

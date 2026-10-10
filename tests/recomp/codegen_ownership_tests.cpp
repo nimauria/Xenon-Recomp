@@ -229,7 +229,11 @@ int main() {
       // Uppercase hex, matching cpp_name()'s std::uppercase.
       std::string upper = base_symbol;
       std::transform(upper.begin() + 9, upper.end(), upper.begin() + 9, ::toupper);
-      const auto count_v2 = occurrences(generated_source, "ExecutionResult " + upper + "_v2(");
+      // Count DEFINITIONS only: direct calls legitimately add forward
+      // declarations ("ExecutionResult X_v2(ExecutionContext&);") in callers'
+      // shards, which are not bodies and cannot cause C2084.
+      const auto count_v2 = occurrences(
+          generated_source, "ExecutionResult " + upper + "_v2([[maybe_unused]] ExecutionContext& context) {");
       const auto count_base =
           occurrences(generated_source, "ExecutionResult " + upper + "([[maybe_unused]] CpuState");
       assert(count_v2 == 1 &&

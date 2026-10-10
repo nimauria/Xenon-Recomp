@@ -21,6 +21,8 @@
 #include <iostream>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/session.hpp"
+#include "xenon/memory/address_space.hpp"
 #include "xenon/xam/xam_exports.hpp"
 
 using namespace xenon;
@@ -50,7 +52,8 @@ void test_user_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x020Au, "XamUserGetXUID");
   expect_export(registry, 0x0210u, "XamUserGetSigninState");
@@ -75,7 +78,8 @@ void test_locale_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x03D2u, "XamGetLanguage");
   expect_export(registry, 0x04A9u, "XamGetLocale");
@@ -97,7 +101,8 @@ void test_content_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   // XamShowDeviceSelectorUI is part of the XamShow* system-UI family, not
   // content storage, despite being implemented alongside ContentManager.
@@ -107,7 +112,12 @@ void test_content_exports_use_real_ordinals() {
   expect_export(registry, 0x025Eu, "XamContentGetDeviceData");
   expect_export(registry, 0x025Fu, "XamContentGetDeviceName");
 
-  assert(!registry.contains("xam", 0x0250u));
+  // 0x0250 used to be an unimplemented placeholder this test guarded against
+  // a fabricated registration at; it is now the real XamEnumerate export
+  // (xam_enum_exports.cpp), registered at its real xam.xex ordinal - this
+  // replaces the old "must not resolve" guard with a check of the correct,
+  // now-real invariant instead of silently dropping coverage of this ordinal.
+  expect_export(registry, 0x0250u, "XamEnumerate");
   assert(!registry.contains("xam", 0x0234u));
   assert(!registry.contains("xam", 0x0237u));
   assert(!registry.contains("xam", 0x0238u));
@@ -122,7 +132,8 @@ void test_notification_exports_use_real_ordinals() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x028Au, "XamNotifyCreateListener");
   // Real xam.xex identities have no "Xam" prefix at all.
@@ -148,26 +159,124 @@ void test_achievement_exports_use_real_ordinals_and_drop_fabricated_ones() {
   core::ExportRegistry registry;
   xam::XamSession xam;
   assert(xam.initialize());
-  assert(xam.register_exports(registry));
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
 
   expect_export(registry, 0x02EEu, "XamUserCreateAchievementEnumerator");
   expect_export(registry, 0x02F7u, "XamUserCreateStatsEnumerator");
 
   // XamUserWriteAchievements/XamUserReadStats/XamUserWriteStats were
   // invented ordinals with no xam.xex export under any name - they must be
-  // gone entirely, not merely renumbered.
-  assert(!registry.contains("xam", 0x0280u));
-  assert(!registry.contains("xam", 0x0281u));
-  assert(!registry.contains("xam", 0x0282u));
+  // gone entirely, not merely renumbered. 0x0280 and 0x0282 are legitimately
+  // reused by real xam.xex exports (XamGetExecutionId, XamGetSystemVersion -
+  // see test_system_exports_use_real_ordinals), so this only checks that
+  // neither still resolves to the old fabricated achievement/stat names.
   assert(!registry.contains("xam", "XamUserWriteAchievements"));
   assert(!registry.contains("xam", "XamUserReadStats"));
   assert(!registry.contains("xam", "XamUserWriteStats"));
+  assert(registry.resolve("xam", 0x0280u) == nullptr ||
+         registry.resolve("xam", 0x0280u)->name != "XamUserWriteAchievements");
+  assert(registry.resolve("xam", 0x0282u) == nullptr ||
+         registry.resolve("xam", 0x0282u)->name != "XamUserWriteStats");
   // The old (wrong) achievement-enumerator ordinal must not still resolve.
   assert(!registry.contains("xam", 0x0284u));
 
   std::cout << "  \xE2\x9C\x93 Achievement/stats exports match the real xam.xex ordinal table, "
                "fabricated write ordinals removed"
             << std::endl;
+}
+
+void test_system_exports_use_real_ordinals() {
+  std::cout << "[TEST] System-information exports registered under real ordinals..." << std::endl;
+
+  core::ExportRegistry registry;
+  xam::XamSession xam;
+  assert(xam.initialize());
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
+
+  expect_export(registry, 0x0282u, "XamGetSystemVersion");
+
+  // XamGetSystemVersion takes no arguments and must return a value in r3
+  // without touching guest memory - exercise the real handler, not just its
+  // registration, since a real retail default.xex (Ace Combat 6) calls this
+  // ordinal directly during boot and traps (STATUS_PROCEDURE_NOT_FOUND) if
+  // it is only declared but never registered.
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+  cpu::CpuState cpu{};
+  core::ExportCallContext ctx{cpu, address_space};
+  const auto result = registry.invoke("xam", 0x0282u, ctx);
+  assert(result.handled);
+  assert(result.success);
+  assert(cpu.gpr[3] == 0u);
+
+  // XGetGameRegion (0x03CC, decimal 972) - real AC6 repro: called directly during
+  // boot (guest address 0x821BABDC) and trapped the whole session
+  // (STATUS_PROCEDURE_NOT_FOUND) before this export existed.
+  expect_export(registry, 0x03CCu, "XGetGameRegion");
+  cpu::CpuState region_cpu{};
+  core::ExportCallContext region_ctx{region_cpu, address_space};
+  const auto region_result = registry.invoke("xam", 0x03CCu, region_ctx);
+  assert(region_result.handled);
+  assert(region_result.success);
+  assert(region_cpu.gpr[3] == 0xFFFFu &&
+         "XGetGameRegion must report every region bit set (region-free), matching "
+         "xenia's verified xeXGetGameRegion() reference");
+
+  std::cout << "  \xE2\x9C\x93 System exports match the real xam.xex ordinal table" << std::endl;
+}
+
+void test_net_exports_use_real_ordinals() {
+  std::cout << "[TEST] NetDll_* exports registered under real ordinals..." << std::endl;
+
+  core::ExportRegistry registry;
+  xam::XamSession xam;
+  assert(xam.initialize());
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
+
+  expect_export(registry, 0x0001u, "NetDll_WSAStartup");
+  expect_export(registry, 0x0002u, "NetDll_WSACleanup");
+  expect_export(registry, 0x0033u, "NetDll_XNetStartup");
+  expect_export(registry, 0x0034u, "NetDll_XNetCleanup");
+
+  // AC6's boot path calls NetDll_XNetStartup(caller, params) directly (real
+  // guest address 0x821FCD7C) - it must succeed offline, with no signed-in
+  // profile and no network hardware, exactly like real hardware initializing
+  // local XNet state without a cable or Live signin.
+  memory::AddressSpace address_space(memory::GuestTranslationMode::Compact);
+  assert(address_space.initialize());
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = 1u;  // XNCALLER_TITLE
+  cpu.gpr[4] = 0u;  // params == nullptr is a valid call
+  core::ExportCallContext ctx{cpu, address_space};
+  const auto result = registry.invoke("xam", 0x0033u, ctx);
+  assert(result.handled);
+  assert(result.success);
+  assert(cpu.gpr[3] == 0u);
+
+  // NetDll_WSAStartup must round-trip the guest struct's existing
+  // vendor_info_ptr field (offset 0x190) unchanged - some real titles bugcheck
+  // if this value changes across the call (see xam_net_exports.cpp).
+  memory::GuestAddress wsadata{};
+  assert(address_space.allocate(0x200u, 4u, memory::kReadWrite, false, wsadata));
+  constexpr std::uint32_t kSentinelVendorPtr = 0x12345678u;
+  address_space.write32_be(wsadata + 0x190u, kSentinelVendorPtr);
+
+  cpu::CpuState wsa_cpu{};
+  wsa_cpu.gpr[3] = 1u;       // XNCALLER_TITLE
+  wsa_cpu.gpr[4] = 0x0202u;  // requested version 2.2
+  wsa_cpu.gpr[5] = wsadata;
+  core::ExportCallContext wsa_ctx{wsa_cpu, address_space};
+  const auto wsa_result = registry.invoke("xam", 0x0001u, wsa_ctx);
+  assert(wsa_result.handled);
+  assert(wsa_result.success);
+  assert(wsa_cpu.gpr[3] == 0u);
+  assert(address_space.read16_be(wsadata + 0u) == 0x0202u);
+  assert(address_space.read32_be(wsadata + 0x190u) == kSentinelVendorPtr);
+
+  std::cout << "  \xE2\x9C\x93 NetDll_* exports match the real xam.xex ordinal table" << std::endl;
 }
 
 void test_input_ordinals_unchanged() {
@@ -199,6 +308,8 @@ int main() {
   test_content_exports_use_real_ordinals();
   test_notification_exports_use_real_ordinals();
   test_achievement_exports_use_real_ordinals_and_drop_fabricated_ones();
+  test_system_exports_use_real_ordinals();
+  test_net_exports_use_real_ordinals();
   test_input_ordinals_unchanged();
 
   std::cout << "\n\xE2\x9C\x85 All tests passed!" << std::endl;

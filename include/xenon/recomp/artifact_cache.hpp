@@ -16,7 +16,7 @@
 //
 // Deliberately independent of Qt/the launcher: this is a plain xenon_recomp
 // library type, driven by the out-of-process preparation worker
-// (tools/xenon_prepare.cpp) and covered directly by
+// (tools/xenon_prepare/) and covered directly by
 // tests/recomp/artifact_cache_tests.cpp.
 
 #include <cstdint>

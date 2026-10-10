@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "xenon/gpu/backend_capabilities.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 #include "xenon/gpu/ir.hpp"
@@ -16,6 +17,7 @@
 
 #if defined(XENON_TEST_VULKAN)
 #include "xenon/gpu/vulkan/backend.hpp"
+#include "../../support/vulkan_probe.hpp"
 #endif
 
 #if defined(XENON_TEST_D3D12)
@@ -309,7 +311,9 @@ int main() {
   bool ran_backend = false;
 
 #if defined(XENON_TEST_VULKAN)
-  {
+  if (!xenon::test::vulkan_device_present()) {
+    std::cout << "Vulkan: no Vulkan device on this machine; skipped\n";
+  } else {
     xenon::gpu::vulkan::Backend backend;
     if (!backend.initialize({.enable_validation = false})) {
       std::cerr << "Vulkan backend initialization failed: " << backend.error()
@@ -322,7 +326,10 @@ int main() {
 #endif
 
 #if defined(XENON_TEST_D3D12)
-  {
+  // These checks use a hardware adapter only; GPU-less CI runners have none.
+  if (!xenon::gpu::discover_backend_capabilities()[1].runtime_available) {
+    std::cout << "D3D12: no hardware adapter on this machine; skipped\n";
+  } else {
     xenon::gpu::d3d12::Backend backend;
     if (!backend.initialize({.enable_debug_layer = false,
                              .allow_software_adapter = false})) {

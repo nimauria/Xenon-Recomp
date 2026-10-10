@@ -3,7 +3,7 @@
 ## Motivation
 
 A real Ace Combat 6 (Project Gracemeria) analysis run exposed two problems in
-the Recomp Driver (`src/recomp/driver.cpp`):
+the Recomp Driver (`src/recomp/driver/`, with analysis under `src/recomp/analysis/`):
 
 1. **Performance.** `load_and_analyze()`'s function-discovery loop was a
    single sequential `while (!pending.empty())` worklist: pop the next

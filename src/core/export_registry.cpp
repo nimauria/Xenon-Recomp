@@ -214,6 +214,19 @@ std::vector<ExportDescriptor> ExportRegistry::enumerate(
   return result;
 }
 
+std::vector<VariableExportDescriptor> ExportRegistry::enumerate_variables(
+    std::string_view library) const {
+  std::shared_lock lock(mutex_);
+  std::vector<VariableExportDescriptor> result;
+  const auto normalized = library.empty() ? std::string{} : normalize_library(library);
+  for (const auto& [key, desc] : variable_ordinal_map_) {
+    if (library.empty() || normalize_library(desc.library) == normalized) {
+      result.push_back(desc);
+    }
+  }
+  return result;
+}
+
 void ExportRegistry::clear() {
   std::unique_lock lock(mutex_);
   ordinal_map_.clear();

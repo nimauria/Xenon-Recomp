@@ -19,11 +19,14 @@
 
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/gpu/types.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
 
@@ -293,6 +296,11 @@ bool vd_set_graphics_interrupt_callback_export(kernel::KernelProcess& process,
                                                ExportCallContext& context) {
   const auto callback_address = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto callback_context = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  if (FILE* _d = std::fopen("vsync_callback_diag.log", "a")) {
+    std::fprintf(_d, "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
+                 callback_address, callback_context);
+    std::fclose(_d);
+  }
   process.set_gpu_interrupt_callback(callback_address, callback_context);
   context.cpu.gpr[3] = 0u;
   return true;
@@ -379,6 +387,20 @@ bool vd_shutdown_engines_export(kernel::KernelProcess& /*process*/,
 // execute_ring() call has real progress to drain, without claiming a false,
 // byte-exact PM4_XE_SWAP encoding this codebase does not actually produce.
 bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  {
+    static std::atomic<int> _vd_swap_call_count{0};
+    const int _n = _vd_swap_call_count.fetch_add(1) + 1;
+    // First 20 in full, then a running total every 60 swaps (~1 s at 60 Hz).
+    if (_n <= 20 || _n % 60 == 0) {
+      if (FILE* _d = std::fopen("vdswap_calls_diag.log", "a")) {
+        std::fprintf(_d, "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
+                     _n, context.thread_id, (unsigned long long)context.cpu.lr,
+                     (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
+                     (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
+        std::fclose(_d);
+      }
+    }
+  }
   const auto buffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   const auto frontbuffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
   const auto texture_format_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
@@ -409,6 +431,27 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     }
   }
 
+  // The caller reserves 64 dwords (256 bytes) at buffer_ptr for this call to
+  // fill in (matching real XDK VdSwap usage - a scratch region inside the
+  // primary ring the driver writes a texture-fetch-constant register packet
+  // plus its own swap signal into). This implementation does not replay a
+  // byte-exact packet encoding there (see the ring-cursor-advance comment
+  // below), but leaving the region as whatever stale/uninitialized guest
+  // memory happened to precede it is worse than that omission: once the
+  // write cursor advances past it below, the GPU command decoder treats
+  // these bytes as real ring content and will try to parse them as PM4
+  // packets. Fill the whole reserved region with PM4 type-2 (NOP) packets -
+  // the one encoding every PM4 decoder, real or emulated, is guaranteed to
+  // skip harmlessly - so there is never genuinely random data sitting in the
+  // ring's "valid" window.
+  if (buffer_ptr != 0u) {
+    constexpr std::uint32_t kReservedDwords = 64u;
+    constexpr std::uint32_t kNopPacket = gpu::make_packet_type2();
+    for (std::uint32_t i = 0; i < kReservedDwords; ++i) {
+      context.memory.write32_be(buffer_ptr + i * 4u, kNopPacket);
+    }
+  }
+
   // Advance the ring buffer's write cursor by a real, guest-derived amount -
   // see this function's doc comment for why the PM4 bytes themselves are not
   // byte-exact.
@@ -431,6 +474,118 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
   return true;
 }
 
+// VdEnableDisableClockGating (ordinal 0x1B4) - real hardware power
+// management with no software-observable consequence (verified against
+// rexglue-sdk's VdEnableDisableClockGating_entry: "Ignored, as it really
+// doesn't matter" - unconditionally returns 0). Xenon models no clock-gating
+// hardware, so this is a genuine no-op, not a Xenon-specific shortcut.
+bool vd_enable_disable_clock_gating_export(kernel::KernelProcess& /*process*/,
+                                           ExportCallContext& context) {
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+
+// VdGetCurrentDisplayGamma (ordinal 0x1B9) - void VdGetCurrentDisplayGamma(
+// DWORD* type, float* power). Real values verified against rexglue-sdk's
+// VdGetCurrentDisplayGamma_entry: type=2 (TV/BT.709 gamma curve), power =
+// 2.22222233 (the standard ~2.2 TV gamma).
+bool vd_get_current_display_gamma_export(kernel::KernelProcess& /*process*/,
+                                         ExportCallContext& context) {
+  const auto type_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto power_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  constexpr std::uint32_t kDisplayGammaType = 2u;
+  constexpr float kDisplayGammaPower = 2.22222233f;
+  if (type_ptr != 0u) context.memory.write32_be(type_ptr, kDisplayGammaType);
+  if (power_ptr != 0u) {
+    std::uint32_t power_bits{};
+    std::memcpy(&power_bits, &kDisplayGammaPower, sizeof(power_bits));
+    context.memory.write32_be(power_ptr, power_bits);
+  }
+  return true;
+}
+
+// VdQueryVideoFlags (ordinal 0x1C9) - DWORD VdQueryVideoFlags(). Real
+// hardware derives this from VdQueryVideoMode's own reported mode
+// (rexglue-sdk's VdQueryVideoFlags_entry: bit 0 = is_widescreen, bit 1 =
+// display_width>=1024, bit 2 = display_width>=1920) - mirrored here against
+// the exact same fixed 1280x720/widescreen values vd_query_video_mode_export
+// above already reports, rather than duplicated via a second call, so the
+// two exports can never disagree.
+bool vd_query_video_flags_export(kernel::KernelProcess& /*process*/,
+                                 ExportCallContext& context) {
+  constexpr std::uint32_t kIsWidescreen = 1u;
+  constexpr std::uint32_t kDisplayWidth = 1280u;
+  std::uint32_t flags = kIsWidescreen ? 1u : 0u;
+  flags |= (kDisplayWidth >= 1024u) ? 2u : 0u;
+  flags |= (kDisplayWidth >= 1920u) ? 4u : 0u;
+  context.cpu.gpr[3] = flags;
+  return true;
+}
+
+// VdSetDisplayMode (ordinal 0x1D3) - DWORD VdSetDisplayMode(DWORD flags).
+// Real hardware reconfigures the console's own output scaler/encoder;
+// Xenon's presentation resolution is fixed by the host window the runtime
+// host already created (see docs/runtime/RUNTIME_HOST.md - "Display/window
+// settings are not part of the schema yet"), so there is nothing for a
+// guest-requested mode change to apply to. rexglue-sdk's
+// VdSetDisplayMode_entry likewise has no real body beyond accepting the
+// flags. Always succeeds.
+bool vd_set_display_mode_export(kernel::KernelProcess& /*process*/,
+                                ExportCallContext& context) {
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+
+// VdInitializeScalerCommandBuffer (ordinal 0x1C5) - configures the
+// console's hardware output scaler (letterbox/overscan/PIP compositing).
+// Xenon's presentation is a modern host swapchain with no equivalent
+// hardware scaler stage - the host window compositor handles scaling - so
+// there is no real backing state for this to configure. Accepts and ignores
+// the scaler geometry/filter parameters; always succeeds.
+bool vd_initialize_scaler_command_buffer_export(kernel::KernelProcess& /*process*/,
+                                                ExportCallContext& context) {
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+
+// VdPersistDisplay (ordinal 0x1C7) - real hardware
+// allocates a small physical-memory block whose address round-trips through
+// a later MmFreePhysicalMemory(1, *unk1_ptr) call (rexglue-sdk's
+// VdPersistDisplay_entry). Xenon backs this with a real 64-byte guest
+// virtual allocation via KernelMemory so that later free call has a real,
+// valid address to release rather than an invented sentinel.
+bool vd_persist_display_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto out_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  if (out_ptr != 0u) {
+    std::uint32_t allocated_address = 0u;
+    if (process.memory().allocate_virtual(allocated_address, 64u, memory::kReadWrite,
+                                          /*top_down=*/false, /*zero_initialize=*/true)) {
+      context.memory.write32_be(out_ptr, allocated_address);
+    } else {
+      context.memory.write32_be(out_ptr, 0u);
+    }
+  }
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+
+// VdRetrainEDRAM / VdRetrainEDRAMWorker - real hardware EDRAM link
+// retraining (a hardware self-calibration recovery operation). Xenon models
+// EDRAM entirely in software (see docs/graphics/GPU_V1.md's 10 MiB EDRAM
+// model), so there is no real link to retrain; rexglue-sdk's
+// VdRetrainEDRAM_entry/VdRetrainEDRAMWorker_entry likewise just return 0
+// unconditionally. Matches the same "training already succeeded" answer
+// vd_is_hsio_training_succeeded_export above already gives.
+bool vd_retrain_edram_export(kernel::KernelProcess& /*process*/, ExportCallContext& context) {
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+bool vd_retrain_edram_worker_export(kernel::KernelProcess& /*process*/,
+                                    ExportCallContext& context) {
+  context.cpu.gpr[3] = 0u;
+  return true;
+}
+
 bool register_xboxkrnl_video_exports(xenon::core::ExportRegistry& registry,
                                      xenon::kernel::KernelProcess& process) {
   struct Binding {
@@ -447,6 +602,14 @@ bool register_xboxkrnl_video_exports(xenon::core::ExportRegistry& registry,
       {0x1C2u, "VdInitializeEngines", &vd_initialize_engines_export},
       {0x1C3u, "VdInitializeRingBuffer", &vd_initialize_ring_buffer_export},
       {0x1C6u, "VdIsHSIOTrainingSucceeded", &vd_is_hsio_training_succeeded_export},
+      {0x1B4u, "VdEnableDisableClockGating", &vd_enable_disable_clock_gating_export},
+      {0x1B9u, "VdGetCurrentDisplayGamma", &vd_get_current_display_gamma_export},
+      {0x1C9u, "VdQueryVideoFlags", &vd_query_video_flags_export},
+      {0x1D3u, "VdSetDisplayMode", &vd_set_display_mode_export},
+      {0x1C5u, "VdInitializeScalerCommandBuffer", &vd_initialize_scaler_command_buffer_export},
+      {0x1C7u, "VdPersistDisplay", &vd_persist_display_export},
+      {0x269u, "VdRetrainEDRAM", &vd_retrain_edram_export},
+      {0x26Au, "VdRetrainEDRAMWorker", &vd_retrain_edram_worker_export},
       {0x1CAu, "VdQueryVideoMode", &vd_query_video_mode_export},
       {0x1D5u, "VdSetGraphicsInterruptCallback", &vd_set_graphics_interrupt_callback_export},
       {0x1D9u, "VdSetSystemCommandBufferGpuIdentifierAddress",

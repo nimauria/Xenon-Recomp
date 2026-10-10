@@ -107,7 +107,15 @@ class KernelIoManager {
                                         std::chrono::milliseconds timeout,
                                         bool& out_signaled);
 
-  [[nodiscard]] std::size_t handle_count() const { return handles_.size(); }
+  [[nodiscard]] std::size_t handle_count() const { return table().size(); }
+
+  // Makes this manager publish file/event/port handles in `shared` - the owning
+  // process's table - instead of a private one, so every kernel object shares the
+  // single per-process handle namespace real Xbox 360 titles rely on (a title
+  // passes an NtCreateEvent handle to NtReadFile, closes a file with NtClose, ...).
+  // Pass nullptr to go back to the private table. Must be called before any handle
+  // is created (handles do not migrate).
+  void share_handle_table(HandleTable* shared) noexcept { shared_handles_ = shared; }
   [[nodiscard]] std::shared_ptr<filesystem::VirtualFileSystem> vfs() const {
     return vfs_;
   }
@@ -124,7 +132,13 @@ class KernelIoManager {
                                            filesystem::FileAccess required);
 
   std::shared_ptr<filesystem::VirtualFileSystem> vfs_{};
+  [[nodiscard]] HandleTable& table() noexcept { return shared_handles_ ? *shared_handles_ : handles_; }
+  [[nodiscard]] const HandleTable& table() const noexcept {
+    return shared_handles_ ? *shared_handles_ : handles_;
+  }
+
   HandleTable handles_{};
+  HandleTable* shared_handles_{nullptr};
   std::shared_ptr<OpenShareState> share_state_{};
   mutable std::mutex open_mutex_{};
 };

@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 
+#include "xenon/gpu/backend_capabilities.hpp"
 #include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_surface.hpp"
@@ -22,6 +23,9 @@
 
 #if defined(XENON_TEST_D3D12)
 #include "xenon/gpu/d3d12/backend.hpp"
+#if defined(XENON_TEST_VULKAN)
+#include "../../support/vulkan_probe.hpp"
+#endif
 #endif
 
 namespace {
@@ -549,6 +553,12 @@ void run_cross_backend_suite(xenon::gpu::vulkan::Backend& vulkan_backend,
 
 int main() {
 #if defined(XENON_TEST_VULKAN) && defined(XENON_TEST_D3D12)
+  if (!xenon::test::vulkan_device_present() ||
+      !xenon::gpu::discover_backend_capabilities()[1].runtime_available) {
+    std::cout << "xenon_cross_backend_canonical_tests: needs a Vulkan device and "
+                 "a D3D12 hardware adapter; skipped\n";
+    return 0;
+  }
   xenon::gpu::vulkan::Backend vulkan_backend;
   if (!vulkan_backend.initialize({.enable_validation = false})) {
     std::cerr << "Vulkan backend initialization failed: "

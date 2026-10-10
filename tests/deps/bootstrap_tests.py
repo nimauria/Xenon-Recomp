@@ -1,4 +1,6 @@
 import importlib.util
+import difflib
+import hashlib
 import io
 import json
 import os
@@ -9,6 +11,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "deps" / "bootstrap.py"
@@ -53,6 +56,7 @@ class DependencyBootstrapTests(unittest.TestCase):
         elif key == "dxc":
             (prefix / "include" / "dxc").mkdir(parents=True)
             (prefix / "include" / "dxc" / "dxcapi.h").write_text("/* DXC */\n")
+            (prefix / "include" / "dxc" / "WinAdapter.h").write_text("/* DXC Linux adapter */\n")
             (prefix / "lib" / "libdxcompiler.so").write_bytes(b"")
             (prefix / "runtime").mkdir(parents=True)
             (prefix / "runtime" / "libdxcompiler.so").write_bytes(b"")
@@ -85,6 +89,58 @@ class DependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.normalize_arch("x86_64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("AMD64"), "x64")
         self.assertEqual(bootstrap.normalize_arch("aarch64"), "arm64")
+
+    def test_ffmpeg_without_nasm_disables_inline_assembly(self):
+        args = bootstrap._ffmpeg_configure_args(Path("/tmp/ffmpeg"), windows=False, have_nasm=False)
+        self.assertIn("--disable-asm", args)
+
+    def test_ffmpeg_build_preserves_pinned_source_after_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            source.mkdir()
+            (source / "configure").write_text("#!/bin/sh\n")
+            (source / "Makefile").write_text("all:\n")
+            config = source / "config.h"
+            config.write_text("pinned fork config\n")
+            with mock.patch.object(bootstrap, "_run", side_effect=bootstrap.BootstrapError("configure failed")):
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "configure failed"):
+                    bootstrap._build_ffmpeg_posix(source, root / "build", root / "prefix", {}, 1, True)
+            self.assertEqual(config.read_text(), "pinned fork config\n")
+            self.assertFalse((root / "build-source" / "config.h").exists())
+            self.assertEqual((root / "build-source" / "Makefile").read_text(), "all:\n")
+
+    @unittest.skipUnless(shutil.which("git"), "FFmpeg patch test requires Git")
+    def test_ffmpeg_patch_accepts_windows_checkout_line_endings(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            (source / "libavcodec" / "x86").mkdir(parents=True)
+            (source / "Makefile").write_text("all:\n")
+            original = "first\nshift old\nlast\n"
+            revised = "first\nshift fixed\nlast\n"
+            (source / "libavcodec" / "x86" / "mathops.h").write_bytes(
+                original.replace("\n", "\r\n").encode()
+            )
+            patch_text = "".join(difflib.unified_diff(
+                original.splitlines(keepends=True), revised.splitlines(keepends=True),
+                fromfile="a/libavcodec/x86/mathops.h", tofile="b/libavcodec/x86/mathops.h",
+            ))
+            patch_file = root / "mathops.patch"
+            # Pinned patches are LF on every host (.gitattributes eol=lf);
+            # write_text() would translate to CRLF on Windows, producing a
+            # patch that no checkout matches.
+            patch_file.write_bytes(patch_text.encode())
+            entry = {"patches": [{
+                "path": patch_file.name,
+                "sha256": hashlib.sha256(patch_file.read_bytes()).hexdigest(),
+                "source_file": "libavcodec/x86/mathops.h",
+                "source_sha256": hashlib.sha256(original.encode()).hexdigest(),
+            }]}
+            with mock.patch.object(bootstrap, "SCRIPT_DIR", root):
+                copied = bootstrap._prepare_ffmpeg_source(source, root / "build", entry, True)
+            self.assertEqual((copied / "libavcodec" / "x86" / "mathops.h").read_text(), revised)
+            self.assertIn(b"\r\n", (source / "libavcodec" / "x86" / "mathops.h").read_bytes())
 
     def test_visual_studio_generator_detection_prefers_newest(self):
         help_text = """
@@ -145,6 +201,16 @@ class DependencyBootstrapTests(unittest.TestCase):
             ok, detail = bootstrap.verify_dependency("xenia-ffmpeg", entry, root, self.triplet)
             self.assertFalse(ok)
             self.assertIn("avutil", detail)
+
+    def test_verify_requires_linux_dxc_adapter_header(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prefix = self._fake_ready_dependency(root, "dxc")
+            (prefix / "include" / "dxc" / "WinAdapter.h").unlink()
+            entry = self.manifest["dependencies"]["dxc"]
+            ok, detail = bootstrap.verify_dependency("dxc", entry, root, self.triplet)
+            self.assertFalse(ok)
+            self.assertIn("WinAdapter.h", detail)
 
     def test_stale_manifest_stamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:

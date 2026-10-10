@@ -126,6 +126,48 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.audio_latency_profile = root.get_string("audioLatencyProfile");
   out.log_verbose = root.get_bool("logVerbose", false);
 
+  out.memory_watch_addresses.clear();
+  if (const auto* watch = root.find("memoryWatch")) {
+    const auto* watch_array = watch->as_array();
+    if (!watch_array) {
+      error = "Launch configuration field 'memoryWatch' must be an array of guest addresses";
+      return false;
+    }
+    for (const auto& entry : *watch_array) {
+      std::uint64_t address = 0;
+      if (entry.is_string()) {
+        try {
+          std::size_t consumed = 0;
+          const auto& text = entry.as_string();
+          address = std::stoull(text, &consumed, 0);
+          if (consumed != text.size()) throw std::invalid_argument("trailing characters");
+        } catch (const std::exception&) {
+          error = "Launch configuration 'memoryWatch' entry is not a valid address: " +
+                  entry.as_string();
+          return false;
+        }
+      } else if (entry.type() == xenon::core::JsonValue::Type::Number) {
+        const double number = entry.as_number();
+        if (number < 0.0 || number > 4294967295.0) {
+          error = "Launch configuration 'memoryWatch' entry is outside the 32-bit guest space";
+          return false;
+        }
+        address = static_cast<std::uint64_t>(number);
+      } else {
+        error = "Launch configuration 'memoryWatch' entries must be numbers or strings";
+        return false;
+      }
+      if (address > 0xFFFFFFFFull) {
+        error = "Launch configuration 'memoryWatch' entry is outside the 32-bit guest space";
+        return false;
+      }
+      out.memory_watch_addresses.push_back(static_cast<std::uint32_t>(address));
+    }
+  }
+  out.memory_watch_history =
+      static_cast<std::uint32_t>(root.get_number("memoryWatchHistory", 4096));
+  out.memory_watch_poll_ms = static_cast<std::uint32_t>(root.get_number("memoryWatchPollMs", 1));
+
   out.title_update_path = root.get_string("titleUpdatePath");
   out.dlc_root_path = root.get_string("dlcRootPath");
 

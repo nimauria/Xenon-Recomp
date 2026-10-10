@@ -1,0 +1,129 @@
+name: Xenon coverage refresh
+
+# Keeps docs/coverage current without building anything: it scans the source
+# inventories, validates the reviewed manifest, reads the Windows and Linux
+# CTest results that already exist for the commit, and proposes regenerated
+# files as a bot pull request. See docs/coverage/AUTOMATION.md.
+
+on:
+  push:
+    branches:
+      - development-restructure
+    paths:
+      - "src/xbox/exports/**"
+      - "src/xbox/export_metadata.cpp"
+      - "src/core/session/exports/**"
+      - "src/audio/exports.cpp"
+      - "src/cpu/ppc/**"
+      - "src/cpu/codegen/fallback/**"
+      - "include/xenon/gpu/**"
+      - "src/graphics/xenos/**"
+      - "tests/**"
+      - "tools/coverage/**"
+      - "docs/coverage/**"
+      - ".github/workflows/coverage-refresh.yml"
+  schedule:
+    # Scheduled events run this file from the default branch. The jobs below
+    # never use that branch's code: they check out COVERAGE_TARGET_BRANCH.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      ci_wait_minutes:
+        description: Minutes to wait for same-commit Windows/Linux runs to finish
+        required: false
+        default: "30"
+
+permissions: {}
+
+concurrency:
+  group: coverage-refresh
+  cancel-in-progress: true
+
+env:
+  COVERAGE_TARGET_BRANCH: development-restructure
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      changed: ${{ steps.refresh.outputs.changed }}
+      valid: ${{ steps.refresh.outputs.valid }}
+      sha: ${{ steps.checkout.outputs.commit }}
+    steps:
+      - id: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || format('refs/heads/{0}', env.COVERAGE_TARGET_BRANCH) }}
+          persist-credentials: false
+      - name: Confirm the inspected branch revision
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: python3 tools/coverage/refresh.py target --event "$EVENT" --ref "$REF" --sha "$EVENT_SHA" --head "$(git rev-parse HEAD)"
+      - name: Test coverage tooling
+        run: python3 -m unittest discover -s tools/coverage -p 'test_*.py' -v
+      - name: Validate source inventories and the reviewed manifest
+        run: python3 tools/coverage/generate.py --validate
+      - name: Inspect existing Windows and Linux CTest results
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WAIT_MINUTES: ${{ github.event_name == 'push' && '120' || inputs.ci_wait_minutes || '30' }}
+        run: |
+          python3 tools/coverage/collect_ci_evidence.py --branch "$COVERAGE_TARGET_BRANCH" \
+            --sha "$(git rev-parse HEAD)" --wait-minutes "$WAIT_MINUTES" \
+            --out "$RUNNER_TEMP/coverage/ci-evidence.json"
+      - name: Regenerate SVGs, reports and audit candidates
+        id: refresh
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tools/coverage/refresh.py run --out-dir "$RUNNER_TEMP/coverage" \
+            --ci-evidence "$RUNNER_TEMP/coverage/ci-evidence.json" \
+            --source-commit "$(git rev-parse HEAD)" --branch "$COVERAGE_TARGET_BRANCH"
+      - name: Compare generated files with the repository
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tools/coverage/refresh.py patch --out "$RUNNER_TEMP/coverage/proposal.patch"
+          git diff --stat
+      - name: Keep the refresh reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-refresh
+          path: ${{ runner.temp }}/coverage/
+          retention-days: 14
+
+  propose:
+    needs: audit
+    if: ${{ !cancelled() && needs.audit.result == 'success' && needs.audit.outputs.valid == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.audit.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-refresh
+          path: ${{ runner.temp }}/coverage
+      - name: Publish, update or retire the bot pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGED: ${{ needs.audit.outputs.changed }}
+          TARGET_SHA: ${{ needs.audit.outputs.sha }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            python3 tools/coverage/refresh.py propose --branch "$COVERAGE_TARGET_BRANCH" --target-sha "$TARGET_SHA" \
+              --patch "$RUNNER_TEMP/coverage/proposal.patch" --body "$RUNNER_TEMP/coverage/pr-body.md"
+          else
+            python3 tools/coverage/refresh.py propose --branch "$COVERAGE_TARGET_BRANCH" --target-sha "$TARGET_SHA" --retire
+          fi

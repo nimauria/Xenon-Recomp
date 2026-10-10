@@ -14,7 +14,7 @@
 //
 // decoding word 0/1 as PPC produced a false "unsupported"/"invalid PPC
 // encoding" diagnostic at analysis time, even though
-// XenonSession::call() (src/core/session.cpp) already resolves calls to
+// XenonSession::call() (src/core/session/execution/runtime_services.cpp) already resolves calls to
 // that exact address correctly at runtime via XexImage::imports[].
 // guest_thunk matching. The fix (analyze_function_candidate()'s
 // find_callable_import_thunk() short-circuit in driver.cpp) recognizes the

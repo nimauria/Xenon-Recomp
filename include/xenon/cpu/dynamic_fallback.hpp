@@ -60,7 +60,9 @@ struct DynamicFallbackConfig {
   // A missed edge should normally be a small thunk/function fragment. Hard
   // limits guarantee corrupted guest control flow cannot turn the safety net
   // into an unbounded interpreter loop.
-  std::uint32_t max_instructions_per_dispatch{4096u};
+  // Per-dispatch host time slice, not a fault limit: exhausting it yields a
+  // resumable Branch to the next instruction (see DynamicFallbackExecutor::run).
+  std::uint32_t max_instructions_per_dispatch{65536u};
   std::uint32_t max_nested_calls{64u};
 };
 
@@ -128,5 +130,20 @@ class DynamicFallbackExecutor {
   mutable std::mutex pc_hits_mutex_{};
   std::unordered_map<GuestAddress, std::uint64_t> pc_hits_{};
 };
+
+// Whether the fallback interpreter can execute `insn`: control flow it handles
+// inline, or any instruction its simple executor implements. The answer comes from
+// dry-running the instruction on a scratch state (no runtime services, no real
+// guest memory - `scratch_memory` only has to be a valid MemoryPort), so it is the
+// interpreter's own decision and can never drift from a separately maintained
+// list. An instruction that gets far enough to fault on the scratch memory was
+// recognized and counts as supported.
+//
+// Why this exists: code the recompiler never discovered runs in the fallback, and
+// an instruction it cannot execute ends the whole run ("unsupported instruction").
+// The analyzer (recomp::audit_cpu_coverage) and the fallback-vs-lifter parity test
+// use this to find such gaps before a title hits them.
+[[nodiscard]] bool dynamic_fallback_supports(const DecodedInstruction& insn,
+                                             MemoryPort& scratch_memory);
 
 }  // namespace xenon::cpu

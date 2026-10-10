@@ -177,7 +177,17 @@ struct ExecutionContext {
       : state(state_in),
         memory(memory_in),
         runtime(runtime_in),
-        memory_access(memory_in.access_context()) {}
+        memory_access(memory_in.access_context()) {
+    // This context, and memory_access with it, lives for an entire guest
+    // thread's run - not one memory access. Drop the constructor-acquired
+    // standing read guard immediately: MemoryAccessContext's own accessors
+    // each take their own short-lived guard around just their resolve-and-
+    // touch, which is what physical-page reclamation actually needs to see
+    // reach zero. Holding this guard for the thread's whole lifetime would
+    // starve reclaim of every page the guest frees for as long as any guest
+    // thread is alive - i.e. permanently during normal play.
+    memory_access.detach_standing_guard();
+  }
 
   ExecutionContext(const ExecutionContext&) = delete;
   ExecutionContext& operator=(const ExecutionContext&) = delete;

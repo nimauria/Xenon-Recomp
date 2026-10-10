@@ -89,7 +89,7 @@ covers a full round trip plus truncated/out-of-schema rejection).
 
 ## Driver integration
 
-`analyze_function_candidate()` (`src/recomp/driver.cpp`) now calls
+`analyze_function_candidate()` (`src/recomp/analysis/control_flow/candidate_analysis.cpp`) now calls
 `graph::compile_region()` instead of invoking `cpu::StaticFunctionCompiler`
 directly. The region's guest ranges are hashed into the `decoded-region`
 node; the CFG boundary Gen 6 discovery actually proved for that region is the
@@ -167,17 +167,20 @@ trustworthy rather than merely "probably fine."
 
 `ArtifactCacheKey` gained `preparation_identity`: a `graph::Node` digest
 (`xenon::recomp::graph::preparation_identity()`, shared by
-`tools/xenon_prepare.cpp` and by tests that need to reconstruct the identical
+`tools/xenon_prepare/` and by tests that need to reconstruct the identical
 key) over Xenon's own `include/`, `src/`, `cmake/` trees, `CMakeLists.txt`
 and `tools/compilation_cache.py`, the exact `cmake` binary, the exact
 compiler binary and its directory, and toolchain-relevant environment
-variables (`INCLUDE`/`LIB`/`LIBPATH` directories are walked and hashed too,
-not just read as opaque strings). A prepared native module now cannot survive
+variables. Every file under the `INCLUDE`/`LIB` directories is walked too,
+not just the variables read as opaque strings; those system trees are
+fingerprinted by path, size and last-write time rather than content, because
+under an MSVC environment they hold gigabytes (as with ccache's default
+`compiler_check=mtime`). A prepared native module now cannot survive
 a toolchain or Xenon-source upgrade by accident — the whole-module artifact
 cache and the fine-grained compilation graph agree on when the ground has
 shifted under them. `kArtifactAbiVersion` was bumped to 4 to invalidate
 artifacts prepared before this field existed. This function lives in
-`xenon::recomp::graph` (not as a private static in `xenon_prepare.cpp`)
+`xenon::recomp::graph` (not as a private static in `tools/xenon_prepare/`)
 specifically so a second caller — currently `tests/recomp/
 xenon_prepare_worker_tests.cpp`'s independent key reconstruction — can never
 silently drift from what production actually hashes.

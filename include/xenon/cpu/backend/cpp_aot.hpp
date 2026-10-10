@@ -3,6 +3,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "xenon/cpu/ir.hpp"
 
@@ -43,6 +44,14 @@ class CppAotBackend {
       const ir::Function& function, std::string_view function_name,
       std::span<const DirectCallBinding> direct_calls = {},
       std::span<const GuestAddress> alternate_entries = {}) const;
+
+  // Every statically known call target of the function (direct and
+  // conditional calls with a constant target) that is not one of its own
+  // basic blocks - exactly the targets emit_function() would consult
+  // direct_calls for. Sorted and unique, so a caller can bind only these
+  // instead of declaring every compiled symbol in every translation unit.
+  [[nodiscard]] static std::vector<GuestAddress> static_call_targets(
+      const ir::Function& function);
 };
 
 }  // namespace xenon::cpu::backend

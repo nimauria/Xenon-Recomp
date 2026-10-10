@@ -58,6 +58,12 @@ Xenon Audio does not download or run Xenia. XMA packet/context state, looping,
 sample accounting, mixing, memory coherency and xboxkrnl semantics are Xenon
 code. The Xenia-maintained FFmpeg fork is used only for its raw XMA frame codec.
 
+The FFmpeg revision stays pinned. The bootstrap applies the checked and hashed
+upstream FFmpeg `mathops.h` fix for GNU binutils 2.41+ to an isolated build copy;
+it never modifies the cached checkout. That patch is included in the matching
+third-party source bundle. Linux and Windows builds keep the XMA decoder and
+shared avcodec/avutil libraries enabled.
+
 Windows developer `AUTO` builds may use the vetted static FFmpeg developer
 bundle committed under `third_party/xenon-ffmpeg/windows-x64`. Production
 installers never use that fallback: release presets force the managed shared
