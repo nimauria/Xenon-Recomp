@@ -145,6 +145,12 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "project(xenon_game_generated LANGUAGES CXX)\n"
            "set(CMAKE_CXX_STANDARD 20)\n"
            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+           // Every Xenon static library below is linked into the shared
+           // xenon_game_module, so it must be position-independent. Without
+           // this, a Xenon library that references its own global data fails
+           // to link into the module ("can not be used when making a shared
+           // object; recompile with -fPIC").
+           "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n"
            "set(XENON_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)\n"
            "set(XENON_BUILD_BENCHMARKS OFF CACHE BOOL \"\" FORCE)\n"
            "set(XENON_BUILD_LAUNCHER OFF CACHE BOOL \"\" FORCE)\n"
