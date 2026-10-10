@@ -5,9 +5,12 @@
 #include <iostream>
 #include <mutex>
 #include <set>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 
 namespace xenon::core {
 
@@ -19,6 +22,22 @@ void XenonSession::report_stop_diagnostics() {
   // A stop that finds the guest still executing usually means it is stalled
   // (blocked in a kernel wait or spinning). Say what each thread last asked the
   // kernel for, so the stall can be diagnosed from the log alone.
+  if (logging::events::enabled()) {
+    // Recorded wait and signal events (XENON_DIAG_EVENTS=1): which guest
+    // thread still waits on which object, and which thread last signalled it.
+    const auto snapshot = logging::events::snapshot();
+    const auto waits = logging::events::blocked_waits(snapshot);
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::istringstream lines(logging::events::format_blocked_waits(waits, now_ns));
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] Diagnostic events: " << snapshot.size() << " retained of "
+              << logging::events::recorded() << " recorded; open waits: " << waits.size()
+              << std::endl;
+    for (std::string line; std::getline(lines, line);)
+      std::cout << "[XenonSession]   " << line << std::endl;
+  }
   if (config_.enable_logging && export_trace_.enabled()) {
     const auto recent = export_trace_.recent_global(16u);
     std::scoped_lock console_log_lock(console_log_mutex());

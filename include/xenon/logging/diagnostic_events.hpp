@@ -15,6 +15,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
 #include <vector>
 
 namespace xenon::logging::events {
@@ -67,5 +70,33 @@ void record(Event event) noexcept;
 
 // Forgets every event recorded so far. Safe alongside record().
 void clear() noexcept;
+
+// A guest thread whose most recent wait in a snapshot began and has not
+// ended: one entry per object it waits on (a multi-object wait gives one per
+// object).
+struct BlockedWait {
+  std::uint32_t guest_thread_id{};
+  std::uint64_t object_id{};
+  std::uint32_t guest_address{};
+  const char* source{};
+  std::int64_t waiting_since_ns{};
+  std::uint32_t timeout_ms{};
+  // The most recent Signal of the object in the snapshot, before or after
+  // the wait began. Absent when the snapshot holds none (it may have been
+  // overwritten, or the object was never signalled through a recorded path).
+  std::optional<Event> last_signal{};
+  // True when that signal came after the wait began: a wake-up the waiter did
+  // not receive, or a signal another waiter consumed.
+  bool signalled_after_wait_began{};
+};
+
+// Derives the waits still open at the end of `events` (snapshot() order).
+// A thread whose WaitBegin was overwritten before the snapshot is not listed.
+[[nodiscard]] std::vector<BlockedWait> blocked_waits(std::span<const Event> events);
+
+// One line per blocked wait, for stop reports. `now_ns` is the host
+// monotonic time the report describes.
+[[nodiscard]] std::string format_blocked_waits(std::span<const BlockedWait> waits,
+                                               std::int64_t now_ns);
 
 }  // namespace xenon::logging::events

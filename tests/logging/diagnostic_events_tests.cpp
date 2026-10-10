@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -139,6 +140,56 @@ void test_concurrent_writers_never_produce_torn_events() {
   assert(snapshots_checked.load() > 0);
 }
 
+Event at(std::uint64_t sequence, std::uint32_t thread, EventKind kind, std::uint64_t object,
+         std::uint32_t value, const char* source) {
+  Event event{};
+  event.sequence = sequence;
+  event.host_time_ns = static_cast<std::int64_t>(sequence) * 1'000'000;  // 1 ms apart
+  event.guest_thread_id = thread;
+  event.kind = kind;
+  event.object_id = object;
+  event.guest_address = 0x82000000u + static_cast<std::uint32_t>(object);
+  event.value = value;
+  event.source = source;
+  return event;
+}
+
+void test_blocked_waits_name_the_waiter_and_the_last_signaller() {
+  const std::vector<Event> trace = {
+      // t2 signals object 10; t3 waits on it and returns: that wait is closed.
+      at(0, 2, EventKind::Signal, 10, 0, "KeSetEvent"),
+      at(1, 3, EventKind::WaitBegin, 10, 0xFFFFFFFFu, "KeWaitForSingleObject"),
+      at(2, 3, EventKind::WaitEnd, 10, 0, "KeWaitForSingleObject"),
+      // t1 then waits on object 10 forever: still open, last signal before it.
+      at(3, 1, EventKind::WaitBegin, 10, 0xFFFFFFFFu, "KeWaitForSingleObject"),
+      // t4 waits on objects 20 and 21 together; 21 is signalled afterwards.
+      at(4, 4, EventKind::WaitBegin, 20, 500, "KeWaitForMultipleObjects"),
+      at(5, 4, EventKind::WaitBegin, 21, 500, "KeWaitForMultipleObjects"),
+      at(6, 5, EventKind::Signal, 21, 0, "KeSetEvent"),
+  };
+  const auto waits = events::blocked_waits(trace);
+  assert(waits.size() == 3);
+
+  assert(waits[0].guest_thread_id == 1 && waits[0].object_id == 10);
+  assert(waits[0].timeout_ms == 0xFFFFFFFFu && waits[0].waiting_since_ns == 3'000'000);
+  assert(waits[0].last_signal && waits[0].last_signal->guest_thread_id == 2);
+  assert(!waits[0].signalled_after_wait_began);
+
+  assert(waits[1].guest_thread_id == 4 && waits[1].object_id == 20 && !waits[1].last_signal);
+  assert(waits[2].guest_thread_id == 4 && waits[2].object_id == 21);
+  assert(waits[2].last_signal && waits[2].last_signal->guest_thread_id == 5);
+  assert(waits[2].signalled_after_wait_began && "a signal after the wait began is flagged");
+
+  const auto text = events::format_blocked_waits(waits, 10'000'000);
+  assert(text.find("t1 waits in KeWaitForSingleObject on object 10 (guest 0x8200000A) for 7 ms, "
+                   "no timeout; last signalled by t2 in KeSetEvent 10 ms ago, before the wait "
+                   "began") != std::string::npos);
+  assert(text.find("t4 waits in KeWaitForMultipleObjects on object 20") != std::string::npos);
+  assert(text.find("no signal of it recorded") != std::string::npos);
+  assert(text.find("after the wait began") != std::string::npos);
+  assert(text.find("t3 ") == std::string::npos && "a completed wait is not reported");
+}
+
 }  // namespace
 
 int main() {
@@ -148,6 +199,7 @@ int main() {
   test_storage_is_bounded_and_keeps_the_newest();
   test_clear_forgets_earlier_events();
   test_concurrent_writers_never_produce_torn_events();
+  test_blocked_waits_name_the_waiter_and_the_last_signaller();
   events::set_enabled(false);
   std::cout << "All diagnostic event ring tests passed!\n";
   return 0;

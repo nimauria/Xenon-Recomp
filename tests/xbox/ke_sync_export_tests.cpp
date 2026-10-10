@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/memory.hpp"
@@ -156,6 +158,61 @@ void test_waits_and_signals_are_recorded_as_diagnostic_events() {
     assert(recorded[i].object_id != 0 && recorded[i].object_id == recorded[0].object_id &&
            "the waiter and the signaller name the same kernel object");
   }
+  events::clear();
+}
+
+// A captured synthetic stall: t22 signals an auto-reset event, t23's wait
+// consumes it, and t21 then waits on it forever. The event snapshot alone
+// says which thread is stuck, on which object, and who last signalled it.
+void test_a_stalled_wait_is_explained_by_the_event_snapshot() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 1;  // SynchronizationEvent (auto-reset)
+  cpu.gpr[5] = 0;
+  assert(f.invoke(0x070u, cpu).success);  // KeInitializeEvent
+
+  events::set_enabled(true);
+  events::clear();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 22).success);  // KeSetEvent by t22
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x0B0u, cpu, 23).success && cpu.gpr[3] == 0u);  // t23 consumes it
+
+  std::thread stalled([&] {
+    cpu::CpuState waiter{};
+    waiter.gpr[3] = header;
+    waiter.gpr[7] = 0;  // NULL timeout: wait forever
+    assert(f.invoke(0x0B0u, waiter, 21).success);
+  });
+  // Wait (bounded) until t21's wait has begun.
+  std::vector<events::BlockedWait> waits;
+  for (int attempt = 0; attempt < 2000 && waits.empty(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const auto snapshot = events::snapshot();
+    waits = events::blocked_waits(snapshot);
+  }
+  assert(waits.size() == 1);
+  assert(waits[0].guest_thread_id == 21 && waits[0].guest_address == header);
+  assert(waits[0].timeout_ms == 0xFFFFFFFFu);
+  assert(waits[0].last_signal && waits[0].last_signal->guest_thread_id == 22);
+  assert(!waits[0].signalled_after_wait_began &&
+         "the only signal came before the wait and another thread consumed it");
+  const auto text = events::format_blocked_waits(waits, waits[0].waiting_since_ns);
+  assert(text.find("t21 waits in KeWaitForSingleObject") != std::string::npos);
+  assert(text.find("last signalled by t22 in KeSetEvent") != std::string::npos);
+
+  // Release the stalled thread.
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 22).success);
+  stalled.join();
+  assert(events::blocked_waits(events::snapshot()).empty());
+  events::set_enabled(false);
   events::clear();
 }
 
@@ -340,6 +397,7 @@ int main() {
   test_ordinals_are_registered();
   test_ke_initialize_event_set_and_wait_round_trip();
   test_waits_and_signals_are_recorded_as_diagnostic_events();
+  test_a_stalled_wait_is_explained_by_the_event_snapshot();
   test_repeated_calls_on_the_same_header_resolve_to_the_same_object();
   test_ke_semaphore_initialize_release_and_wait();
   test_ke_wait_for_multiple_objects_any_and_all();
