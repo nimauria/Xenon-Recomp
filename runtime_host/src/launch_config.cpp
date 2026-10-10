@@ -125,6 +125,8 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.audio_mute_unfocused = root.get_bool("audioMuteUnfocused", false);
   out.audio_latency_profile = root.get_string("audioLatencyProfile");
   out.log_verbose = root.get_bool("logVerbose", false);
+  out.diagnostic_events = root.get_bool("diagnosticEvents", false);
+  out.probe_logs = root.get_bool("probeLogs", false);
 
   out.memory_watch_addresses.clear();
   if (const auto* watch = root.find("memoryWatch")) {

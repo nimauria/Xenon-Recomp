@@ -84,6 +84,12 @@ struct LaunchConfig {
   // Mirrors the launcher's live "developer/verboseLogging" preference.
   bool log_verbose{false};
 
+  // Opt-in diagnostics, equivalent to XENON_DIAG_EVENTS=1 and
+  // XENON_PROBE_LOGS=1 (docs/runtime/AC6_RUNTIME_INVESTIGATION.md). Either
+  // the field or the environment variable turns one on.
+  bool diagnostic_events{false};
+  bool probe_logs{false};
+
   // Diagnostic guest-word watch (SessionConfig::memory_watch_*). "memoryWatch" is
   // an array of guest addresses, each a JSON number or a "0x..." / decimal string.
   std::vector<std::uint32_t> memory_watch_addresses{};

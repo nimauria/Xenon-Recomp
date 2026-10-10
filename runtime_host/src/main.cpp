@@ -34,6 +34,8 @@
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/probe_log.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
 #include "xenon/memory/types.hpp"
@@ -63,6 +65,13 @@ int main(int argc, char** argv) {
   redirect_log(launch.session_dir);
   std::cout << "[runtime_host] Starting session '" << launch.session_id << "' for game '"
             << launch.game_id << "' (" << launch.title << ")" << std::endl;
+  // Opt-in diagnostics; XENON_DIAG_EVENTS / XENON_PROBE_LOGS turn them on too.
+  if (launch.diagnostic_events) xenon::logging::events::set_enabled(true);
+  if (launch.probe_logs) xenon::logging::set_probe_logs_enabled(true);
+  std::cout << "[runtime_host] Diagnostic events: "
+            << (xenon::logging::events::enabled() ? "on" : "off")
+            << ", probe logs: " << (xenon::logging::probe_logs_enabled() ? "on" : "off")
+            << std::endl;
   log_host_capabilities();
 
   StatusWriter status(launch.session_dir, launch);
