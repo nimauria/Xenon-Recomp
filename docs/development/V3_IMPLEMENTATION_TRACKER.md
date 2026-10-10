@@ -25,7 +25,7 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | `03b26e5` compile, coverage-test and ownership-audit failures fixed locally; Windows D3D12 debug-layer failure and Node 20 deprecation remain |
+| V3-01 | CI and build correctness | IN PROGRESS | Linux green on `0e59c08`; Windows 147/149. Nested-build cost cut (see V3-01 progress); D3D12 debug-layer cause still being diagnosed |
 | V3-02 | Diagnostics contracts | NOT STARTED | |
 | V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
 | V3-04 | Kernel execution and interrupts | NOT STARTED | |
@@ -342,6 +342,37 @@ requested, 2,200 compiled). The fixture now places `.text` at its RVA.
 Because the benchmark is not a CTest, nothing caught this, and the Recomp
 Analysis V2 figures in `RECOMP_ANALYSIS_V2.md` could not be re-measured until
 this fix.
+
+## V3-01 progress
+
+CI on `0e59c08` (runs 38050800775, 38050800823): Linux passed every test,
+including `xenon_kernel_wait_semantics_tests` and `xenon_prepare_worker_tests`.
+Windows passed 147 of 149, including the wait tests under MSVC. Two failures:
+
+1. `xenon_registry_numeric_format_tests` timed out at 900 s;
+   `xenon_prepare_worker_tests` passed at 882 s. Both build a generated project
+   against the whole runtime (finding 3). Generated modules linked
+   `Xenon::Recomp`, so every nested build compiled the recompiler (44 of 172
+   compiles) although generated code needs only the runtime helpers and
+   native replacements. Those are now `xenon_recomp_runtime` (`caa56ca`). A
+   nested build compiles 130 sources. Locally, the full suite went from 27 min
+   37 s to 22 min 22 s and passed 150/150 for the first time; per test,
+   `guest_export_abi` 449 to 205 s, `audio_guest_callback` 449 to 262 s,
+   `recomp_driver` 266 to 174 s, and `prepare_worker` passes at 875 s instead
+   of timing out. No timeout was changed. Windows effect not yet measured.
+2. `xenon_backend_capability_tests` (D3D12 presentation): two debug-layer
+   exceptions with code `0x87D`. Per the ReactOS mirror of `winerror.h`,
+   2173 (`0x87D`) is `FACILITY_DIRECT3D11_DEBUG` (`0x87A` is
+   `FACILITY_DXGI`); not yet checked against the Windows SDK header. The
+   exception parameters hold no readable text. A reported case of the same
+   exception during `ResizeBuffers` came with an
+   `OBJECT_DELETED_WHILE_STILL_IN_USE` corruption message, but Xenon's resize
+   already waits for the queue to go idle first, so that cause is not
+   assumed. The presentation backend is created without the debug layer
+   requested, yet runs under it, because an earlier step in the same process
+   enables it process-wide. The test now prints the debug layer's stored
+   messages after each presentation step (`927d6c9`); the next Windows run
+   names the actual message.
 
 ## V3-03 progress
 
