@@ -1,5 +1,6 @@
 #include "xenon/kernel/mutant.hpp"
 
+#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -15,20 +16,13 @@ KernelMutant::KernelMutant(bool initial_owner, std::uint32_t owner_thread_id)
 bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
 
-  // If already owned by this thread, increment recursion count
-  if (owner_thread_id_ == owner_thread_id && recursion_count_ > 0) {
-    ++recursion_count_;
-    return true;
-  }
-
-  // Wait for the mutant to become available
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return recursion_count_ == 0; })) {
+  // Already owned by this thread: satisfied at once, deepening the recursion.
+  // Otherwise wait for the mutant to become available.
+  if (!wait_until_signaled(condition_, lock, timeout,
+                           [&] { return can_satisfy_locked(owner_thread_id); })) {
     return false;
   }
-
-  owner_thread_id_ = owner_thread_id;
-  recursion_count_ = 1;
-  abandoned_ = false;
+  satisfy_locked(owner_thread_id);
   return true;
 }
 
@@ -43,6 +37,7 @@ bool KernelMutant::release(std::uint32_t owner_thread_id) {
   if (recursion_count_ == 0) {
     owner_thread_id_ = 0;
     condition_.notify_one();
+    detail::notify_multi_object_waiters();
   }
 
   return true;
@@ -71,6 +66,7 @@ void KernelMutant::abandon() {
     recursion_count_ = 0;
   }
   condition_.notify_all();
+  detail::notify_multi_object_waiters();
 }
 
 }  // namespace xenon::kernel

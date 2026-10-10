@@ -21,6 +21,13 @@ class KernelEvent final : public KernelObject {
   [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
 
  private:
+  friend struct detail::WaitAccess;
+  // Caller holds mutex_. A satisfied wait consumes an auto-reset event.
+  [[nodiscard]] bool can_satisfy_locked() const noexcept { return signaled_; }
+  void satisfy_locked() noexcept {
+    if (!manual_reset_) signaled_ = false;
+  }
+
   bool manual_reset_{};
   mutable std::mutex mutex_{};
   std::condition_variable condition_{};

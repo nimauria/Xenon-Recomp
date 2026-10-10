@@ -18,6 +18,11 @@ class KernelSemaphore final : public KernelObject {
   [[nodiscard]] std::int32_t count() const;
 
  private:
+  friend struct detail::WaitAccess;
+  // Caller holds mutex_. A satisfied wait takes one unit.
+  [[nodiscard]] bool can_satisfy_locked() const noexcept { return count_ > 0; }
+  void satisfy_locked() noexcept { --count_; }
+
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::int32_t count_;

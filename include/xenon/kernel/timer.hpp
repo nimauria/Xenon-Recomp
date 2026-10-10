@@ -53,6 +53,13 @@ class KernelTimer final : public KernelObject {
   bool fire();
 
  private:
+  friend struct detail::WaitAccess;
+  // Caller holds mutex_. A satisfied wait resets a synchronization timer.
+  [[nodiscard]] bool can_satisfy_locked() const noexcept { return signaled_; }
+  void satisfy_locked() noexcept {
+    if (type_ == TimerType::SynchronizationTimer) signaled_ = false;
+  }
+
   TimerType type_;
   mutable std::mutex mutex_;
   std::condition_variable condition_;

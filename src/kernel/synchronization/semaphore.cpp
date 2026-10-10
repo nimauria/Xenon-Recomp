@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -35,16 +36,17 @@ bool KernelSemaphore::release(std::int32_t release_count, std::int32_t* previous
   } else {
     condition_.notify_all();
   }
+  detail::notify_multi_object_waiters();
 
   return true;
 }
 
 bool KernelSemaphore::wait_for(std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return count_ > 0; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return can_satisfy_locked(); })) {
     return false;
   }
-  --count_;
+  satisfy_locked();
   return true;
 }
 

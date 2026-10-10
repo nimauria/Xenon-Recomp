@@ -1,5 +1,6 @@
 #include "xenon/kernel/event.hpp"
 
+#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -19,6 +20,7 @@ void KernelEvent::set() {
   } else {
     condition_.notify_one();
   }
+  detail::notify_multi_object_waiters();
 }
 
 void KernelEvent::reset() {
@@ -33,10 +35,10 @@ bool KernelEvent::signaled() const {
 
 bool KernelEvent::wait_for(std::chrono::milliseconds timeout) {
   std::unique_lock lock(mutex_);
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return signaled_; })) {
+  if (!wait_until_signaled(condition_, lock, timeout, [&] { return can_satisfy_locked(); })) {
     return false;
   }
-  if (!manual_reset_) signaled_ = false;
+  satisfy_locked();
   return true;
 }
 

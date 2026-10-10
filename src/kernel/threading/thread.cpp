@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cstdio>
 
+#include "kernel/synchronization/wait_internal.hpp"
+
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -222,6 +224,7 @@ bool KernelThread::terminate(std::uint32_t exit_code) {
   exit_code_ = exit_code;
   state_ = ThreadState::Terminated;
   terminated_.store(true, std::memory_order_release);
+  detail::notify_multi_object_waiters_unconditionally();
   // Wakes a thread_main() parked at entry (create_suspended, never resumed),
   // or mid-execution at a dispatch_guest_thread() safepoint via
   // wait_while_suspended(), so it observes Terminated and exits instead of
@@ -358,6 +361,7 @@ void KernelThread::thread_main() {
       exit_code_ = result;
       state_ = ThreadState::Terminated;
       terminated_.store(true, std::memory_order_release);
+      detail::notify_multi_object_waiters_unconditionally();
     }
   }
   completion_promise_.set_value();

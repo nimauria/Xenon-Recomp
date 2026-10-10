@@ -9,6 +9,12 @@ namespace xenon::kernel {
 
 class HandleTable;
 
+namespace detail {
+// Multi-object wait access to waitable objects' private state; defined in
+// src/kernel/synchronization/wait.cpp.
+struct WaitAccess;
+}  // namespace detail
+
 class KernelObject {
  public:
   virtual ~KernelObject() = default;

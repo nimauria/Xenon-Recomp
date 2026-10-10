@@ -30,6 +30,22 @@ class KernelMutant final : public KernelObject {
   void abandon();
 
  private:
+  friend struct detail::WaitAccess;
+  // Caller holds mutex_. Free, or already owned by the waiting thread
+  // (recursive acquisition); a satisfied wait takes or deepens ownership.
+  [[nodiscard]] bool can_satisfy_locked(std::uint32_t thread_id) const noexcept {
+    return recursion_count_ == 0 || owner_thread_id_ == thread_id;
+  }
+  void satisfy_locked(std::uint32_t thread_id) noexcept {
+    if (recursion_count_ > 0) {
+      ++recursion_count_;
+      return;
+    }
+    owner_thread_id_ = thread_id;
+    recursion_count_ = 1;
+    abandoned_ = false;
+  }
+
   mutable std::mutex mutex_;
   std::condition_variable condition_;
   std::uint32_t owner_thread_id_{0};
