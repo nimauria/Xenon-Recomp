@@ -443,6 +443,10 @@ Engineering principles:
 - **Keep documentation accurate.** Documents describe what the code does today, not the intended end state.
 - **Never distribute proprietary Xbox content.**
 
+### AI-assisted development
+
+AI tools have played a part in accelerating progress on this project. Every AI-assisted change is audited and checked before it is added or approved: it is reviewed against the code it touches and the Xbox 360 behaviour it claims to implement, and it is held to the same testing and documentation standards as any other change.
+
 ---
 
 ## Documentation
