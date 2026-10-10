@@ -26,7 +26,7 @@ retail title works.
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
 | V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); one intermittent Windows thread test and the `ilammy/msvc-dev-cmd` Node 20 warning remain |
-| V3-02 | Diagnostics contracts | IN PROGRESS | Event ring, wait/signal/lock events, stall report, opt-in capped probes, title addresses removed, audio credit counters; GPU fence events remain |
+| V3-02 | Diagnostics contracts | IN PROGRESS | Acceptance criteria met locally (see V3-02 progress); waiting for CI on the final batch |
 | V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
 | V3-04 | Kernel execution and interrupts | NOT STARTED | |
 | V3-05 | Guest services and ABI | NOT STARTED | |
@@ -442,9 +442,33 @@ Status as of `01563c1`. Off by default; see "Diagnostics" in
   module then failed to link on Linux. Generated projects now build Xenon
   as position-independent code (`e0ee079`).
 
-Still open in V3-02: GPU events (`WAIT_REG_MEM` fence parks, ring pointer
-progress, interrupt delivery); guest/host clock correlation and session
-fingerprints in events; failure categories.
+- **GPU fence parks** (`e6c173e`): `GpuWaitParked` once per fence and
+  `GpuWaitResumed` when it is satisfied; the stop report prints an
+  unresolved park beside the open guest waits.
+- **Guest caller and categories** (`1e11832`): events carry the caller's
+  LR, so a report names the waiting guest code; open waits with no timeout
+  are tagged "deadlock candidate" from the shared failure-category list.
+
+Acceptance (plan, V3-02): deterministic tests show correlation (one object
+id across Ke*/Nt* waits and signals, the waiter's caller) and bounded storage
+(the ring keeps the newest 65,536 events; probe files stop at 4 MiB per
+run); a staged stall through the export registry is reported as the right
+thread, object, caller and last signaller; per-test suite timings did not
+regress, and `record()` costs about 6 ns off and 40 ns on (GCC 13 -O2).
+
+Deferred, with reasons:
+
+- Guest-time correlation: events carry host monotonic time only. The guest
+  time base is per thread and not reachable from every recording site;
+  V3-04 (thread identity and scheduling) is the natural owner.
+- Run fingerprints in exported event files: events are not written to disk
+  yet; the stop report prints them. A JSONL export belongs with V3-15's
+  compatibility reports.
+- GPU ring pointer progress and interrupt delivery are counters already
+  (`gpu_interrupts_delivered_`, PM4 statistics); per-event recording would
+  flood the ring at 60 Hz and is not added.
+- The remaining failure categories are defined but assigned by later phases
+  (V3-05 exports, V3-13 backends, V3-15 reports).
 
 ## V3-03 progress
 
