@@ -1,5 +1,7 @@
 #include "prepare_internal.hpp"
 
+namespace xenon::prepare_tool {
+
 bool load_optional_observations(const Options& options, StatusReporter& status,
                                 std::vector<xenon::recomp::AdaptiveObservation>& observations) {
   if (options.observations.empty()) return true;
@@ -30,3 +32,5 @@ bool load_optional_knowledge(const Options& options, StatusReporter& status,
   }
   return true;
 }
+
+}  // namespace xenon::prepare_tool
