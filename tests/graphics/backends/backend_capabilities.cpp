@@ -62,6 +62,12 @@
 #include "../../support/vulkan_probe.hpp"
 #endif
 
+#if defined(_WIN32) && defined(XENON_TEST_D3D12)
+#include <dxgi1_3.h>
+#include <dxgidebug.h>
+#include <wrl/client.h>
+#endif
+
 #if defined(_WIN32) && (defined(XENON_TEST_D3D12) || defined(XENON_TEST_VULKAN))
 namespace {
 HWND create_presentation_test_window(std::uint32_t width,
@@ -350,6 +356,32 @@ LONG CALLBACK report_directx_debug_notification(EXCEPTION_POINTERS* info) {
     }
   }
   return EXCEPTION_CONTINUE_EXECUTION;
+}
+#endif
+
+#if defined(_WIN32) && defined(XENON_TEST_D3D12)
+// The debug layers also store each message they raise, with its text, in
+// the process-wide DXGI info queue. Print and clear what a step left there,
+// so a notification above can be matched to its description and ID.
+void report_debug_layer_messages(const char* step) {
+  Microsoft::WRL::ComPtr<IDXGIInfoQueue> queue;
+  if (FAILED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&queue)))) return;
+  static constexpr const char* kSeverity[] = {"corruption", "error", "warning", "info",
+                                              "message"};
+  const UINT64 count = queue->GetNumStoredMessages(DXGI_DEBUG_ALL);
+  for (UINT64 i = 0; i < count; ++i) {
+    SIZE_T length = 0;
+    if (FAILED(queue->GetMessage(DXGI_DEBUG_ALL, i, nullptr, &length)) || length == 0) continue;
+    std::vector<std::byte> storage(length);
+    auto* message = reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(storage.data());
+    if (FAILED(queue->GetMessage(DXGI_DEBUG_ALL, i, message, &length))) continue;
+    const auto severity = static_cast<std::size_t>(message->Severity);
+    std::fprintf(stderr, "%s: debug-layer %s, category %d, id %d: %.*s\n", step,
+                 severity < std::size(kSeverity) ? kSeverity[severity] : "unknown",
+                 static_cast<int>(message->Category), static_cast<int>(message->ID),
+                 static_cast<int>(message->DescriptionByteLength), message->pDescription);
+  }
+  queue->ClearStoredMessages(DXGI_DEBUG_ALL);
 }
 #endif
 }  // namespace
@@ -1271,15 +1303,20 @@ int main() {
       assert(backend.configure_presentation(window, config));
       assert(backend.presentation_ready());
       std::cout << "D3D12 presentation: swapchain configured\n";
+      report_debug_layer_messages("D3D12 presentation: configure");
       assert(acceptable_present_status(backend.present(frame)));
       std::cout << "D3D12 presentation: first present\n";
+      report_debug_layer_messages("D3D12 presentation: first present");
       MoveWindow(window, 0, 0, 128, 72, FALSE);
       assert(backend.resize_presentation(128, 72));
       assert(acceptable_present_status(backend.present(frame)));
       std::cout << "D3D12 presentation: resized present\n";
+      report_debug_layer_messages("D3D12 presentation: resize and present");
     }
+    report_debug_layer_messages("D3D12 presentation: backend teardown");
     DestroyWindow(window);
     std::cout << "D3D12 presentation: torn down\n";
+    report_debug_layer_messages("D3D12 presentation: window destroyed");
   }
 #endif
 
