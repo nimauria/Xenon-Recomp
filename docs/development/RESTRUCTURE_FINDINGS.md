@@ -14,9 +14,8 @@ findings remain below; resolved findings record the observed cause and fix.
    syntax check described in `TESTING.md`, and for Vulkan by compiling
    `backend.cpp` without `XENON_HAS_DXC`.
 
-2. **`XenonSession::mount_content()` is a no-op.** It ignores both
-   arguments and returns success with a message pointing at
-   `mount_content_graph()`.
+2. Resolved; see "`XenonSession::mount_content()` reported success" below.
+   The number is kept because other documents cite findings by number.
 
 3. **`xenon-prepare` builds the Xenon runtime once per module.** Each
    module's workspace configures the generated project with
@@ -73,6 +72,11 @@ emulates a cull-both memexport draw with an empty scissor where Vulkan uses
 `VK_CULL_MODE_FRONT_AND_BACK`.
 
 ## Resolved build and test defects
+
+**`XenonSession::mount_content()` reported success.** It ignored both
+arguments, mounted nothing and returned success with a message pointing at
+`mount_content_graph()`. Nothing called it. It now returns a failure naming
+`mount_content_graph()`, and `xenon_session_tests` asserts that.
 
 **Preparation identity hashed the whole compiler directory.**
 `graph::preparation_identity()` (`src/recomp/compilation/graph/compilation_graph.cpp`)
@@ -193,10 +197,11 @@ See `docs/runtime/AC6_RUNTIME_INVESTIGATION.md`. In short:
 
 ## Code-quality notes
 
-- `src/xbox/rtl.cpp`: `read_guest_be16` is defined but unused
-  (`-Wunused-function`).
-- Several pre-existing `-Wunused-parameter` warnings in RuntimeServices
-  overrides (`syscall`, `trap`, `read_spr`, `write_spr`, `read_time_base`)
-  and in `mount_content()`.
+- `src/xbox/rtl.cpp`: `read_guest_be16` is defined but unused. It has
+  external linkage (it sits after the anonymous namespace), so no warning
+  reports it.
+- The Debug build's `-Wunused-parameter` warnings (RuntimeServices
+  overrides, `mount_content()`) and ignored `[[nodiscard]]` results of
+  `KernelThread::terminate()` were cleared without behaviour changes.
 - About forty `*_diag.log` investigation probes outside the session still
   call `fopen` directly. They are inventoried in the AC6 note.
