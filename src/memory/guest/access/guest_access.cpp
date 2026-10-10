@@ -351,7 +351,7 @@ T AddressSpace::read_integer(GuestAddress address, bool little_endian) {
 template <typename T>
 void AddressSpace::write_integer(GuestAddress address, T value, bool little_endian) {
   if constexpr (sizeof(T) == 4u) {
-    if (address == 0x62D78u || address == 0x62DC8u) {
+    if (xenon::cpu::is_write_trapped(address)) {
       xenon::cpu::debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
     }
   }

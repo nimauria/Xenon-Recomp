@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstddef>
@@ -18,13 +19,34 @@ namespace xenon::cpu {
 
 class MemoryPort;
 
-// Temporary investigation hook (AC6 render-stall diagnosis): logs a host
-// stack trace whenever a write targets one of two watched guest addresses
-// (the X_DISPATCH_HEADER SignalState fields of the two handshake events the
-// render-setup threads are permanently blocked on). Defined out-of-line in
-// address_space.cpp to keep <cstdio>/<windows.h> out of this hot header.
-// Checked unconditionally at the top of the fast inline write path below;
-// the two-address compare is the only cost on the hot path.
+// Opt-in write trap for investigations. XENON_WRITE_TRAP=<hex>[,<hex>...]
+// names up to kMaxWriteTraps guest addresses; every 32-bit guest store to one
+// of them is reported by debug_signal_write_trap() in the probe log
+// signal_write_trap_diag.log (with the host stack on Windows), which also
+// needs XENON_PROBE_LOGS=1. With no trap set, a store pays one relaxed load.
+// It generalises an Ace Combat 6 hook that compared two hard-coded addresses
+// on every store.
+inline constexpr std::size_t kMaxWriteTraps = 4;
+
+namespace write_trap_detail {
+inline std::atomic<std::uint32_t> trap_count{0};
+inline std::array<std::atomic<GuestAddress>, kMaxWriteTraps> trap_addresses{};
+}  // namespace write_trap_detail
+
+[[nodiscard]] inline bool is_write_trapped(GuestAddress address) noexcept {
+  const auto count = write_trap_detail::trap_count.load(std::memory_order_relaxed);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if (write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed) == address)
+      return true;
+  }
+  return false;
+}
+
+// Replaces the trapped addresses; at most kMaxWriteTraps are kept.
+void set_write_traps(std::span<const GuestAddress> addresses) noexcept;
+
+// Reports one trapped store. Defined out of line (memory_port.cpp) to keep
+// <windows.h> and file I/O out of this header.
 void debug_signal_write_trap(GuestAddress address, std::uint64_t value);
 
 // Stable executable-page identity consumed by the native translation cache.
@@ -1098,7 +1120,7 @@ template <typename T>
 inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
                                                bool little_endian) {
   if constexpr (sizeof(T) == 4u) {
-    if (address == 0x62D78u || address == 0x62DC8u) {
+    if (is_write_trapped(address)) {
       debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
     }
   }

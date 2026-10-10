@@ -37,6 +37,8 @@ add_library(xenon_cpu STATIC
   execution/executable_code_cache.cpp
   execution/flat_memory.cpp
 )
+# Investigation probes (debug_signal_write_trap) write through xenon_logging.
+target_link_libraries(xenon_cpu PRIVATE xenon_logging)
 target_include_directories(xenon_cpu
   PUBLIC "${XENON_SOURCE_DIR}/include"
   # Private headers are included as "cpu/<area>/<header>.hpp".
