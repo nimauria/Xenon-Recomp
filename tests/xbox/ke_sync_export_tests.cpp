@@ -14,6 +14,7 @@
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
@@ -109,6 +110,53 @@ void test_ke_initialize_event_set_and_wait_round_trip() {
   result = f.invoke(0x0B0u, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+}
+
+// With diagnostic events on, a timed-out wait, the signal and the satisfied
+// wait are recorded against one kernel object, by guest thread, with the
+// timeout and the returned status.
+void test_waits_and_signals_are_recorded_as_diagnostic_events() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 1;  // SynchronizationEvent
+  cpu.gpr[5] = 0;
+  assert(f.invoke(0x070u, cpu).success);  // KeInitializeEvent
+
+  events::set_enabled(true);
+  events::clear();
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  cpu.gpr[7] = zero_timeout;
+  assert(f.invoke(0x0B0u, cpu, 11).success && cpu.gpr[3] == 0x00000102u);  // KeWaitForSingleObject
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 12).success);  // KeSetEvent
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x0B0u, cpu, 11).success && cpu.gpr[3] == 0u);
+  events::set_enabled(false);
+
+  const auto recorded = events::snapshot();
+  assert(recorded.size() == 5);
+  using events::EventKind;
+  const EventKind kinds[] = {EventKind::WaitBegin, EventKind::WaitEnd, EventKind::Signal,
+                             EventKind::WaitBegin, EventKind::WaitEnd};
+  const std::uint32_t threads[] = {11, 11, 12, 11, 11};
+  const std::uint32_t values[] = {0, 0x102u, 0, 0xFFFFFFFFu, 0};
+  for (std::size_t i = 0; i < recorded.size(); ++i) {
+    assert(recorded[i].kind == kinds[i]);
+    assert(recorded[i].guest_thread_id == threads[i]);
+    assert(recorded[i].value == values[i]);
+    assert(recorded[i].guest_address == header);
+    assert(recorded[i].object_id != 0 && recorded[i].object_id == recorded[0].object_id &&
+           "the waiter and the signaller name the same kernel object");
+  }
+  events::clear();
 }
 
 void test_repeated_calls_on_the_same_header_resolve_to_the_same_object() {
@@ -291,6 +339,7 @@ int main() {
 
   test_ordinals_are_registered();
   test_ke_initialize_event_set_and_wait_round_trip();
+  test_waits_and_signals_are_recorded_as_diagnostic_events();
   test_repeated_calls_on_the_same_header_resolve_to_the_same_object();
   test_ke_semaphore_initialize_release_and_wait();
   test_ke_wait_for_multiple_objects_any_and_all();

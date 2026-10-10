@@ -85,7 +85,7 @@ jobs:
   windows-x64:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # TODO: configure and build Project Gracemeria's module output.
       # The produced package directory must include its Xenon module manifest.

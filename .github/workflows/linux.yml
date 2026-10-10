@@ -21,7 +21,7 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install build tools
         run: |
           sudo apt-get update
@@ -36,7 +36,7 @@ jobs:
         run: |
           python3 -m pip install --user --upgrade aqtinstall
           python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .xenon/deps
           key: xenon-deps-linux-x64-${{ hashFiles('tools/deps/manifest.json', 'tools/deps/bootstrap.py', 'tools/deps/patches/**') }}
@@ -57,7 +57,7 @@ jobs:
         run: ctest --test-dir build/linux-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
       - name: Keep CTest results for the coverage audit
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ctest-results-linux
           path: build/linux-x64-debug/ctest-results.xml

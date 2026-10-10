@@ -25,8 +25,8 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | Linux green on `0e59c08`; Windows 147/149. Nested-build cost cut (see V3-01 progress); D3D12 debug-layer cause still being diagnosed |
-| V3-02 | Diagnostics contracts | NOT STARTED | |
+| V3-01 | CI and build correctness | IN PROGRESS | Linux green; Windows 148/149 on `d5cd6e8`. D3D12 cause found and fixed (`d62bdcd`), awaiting the Windows run that confirms it |
+| V3-02 | Diagnostics contracts | IN PROGRESS | Bounded event ring (`676117d`); Ke* wait/signal probes migrated (`69d1846`) |
 | V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
 | V3-04 | Kernel execution and interrupts | NOT STARTED | |
 | V3-05 | Guest services and ABI | NOT STARTED | |
@@ -373,6 +373,30 @@ Windows passed 147 of 149, including the wait tests under MSVC. Two failures:
    enables it process-wide. The test now prints the debug layer's stored
    messages after each presentation step (`927d6c9`); the next Windows run
    names the actual message.
+
+Run 38073115216 (`d5cd6e8`): Windows passed 148 of 149. The nested-build
+change brought `registry_numeric_format` to 840 s (from a 900 s timeout),
+`prepare_worker` to 597 s (from 882 s), `guest_export_abi` to 129 s and
+`audio_guest_callback` to 147 s. Linux finished in 18 min 53 s (from 23 min
+15 s).
+
+The stored messages named the D3D12 defect: `CORRUPTION #921`, an
+`ID3D12Resource` final-released while referenced by GPU work in flight on
+the queue, after resize, and at teardown a command queue final-released
+while in use. `CommandQueue::wait_idle()` waited only for the fence value of
+Xenon's own last submission, but `IDXGISwapChain::Present()` queues work on
+the same queue after it, so resize and teardown released the back buffers
+and the queue under an in-flight present. `wait_idle()` now signals a new
+value and waits for it (`d62bdcd`). The Vulkan backend already follows its
+wait with `vkQueueWaitIdle()`. The run also showed ten `ClearRenderTargetView`
+/ `ClearDepthStencilView` warnings (#820, #821: clear values differ from the
+optimized clear value given at resource creation); these are performance
+warnings, raise no notification, and are left for V3-13.
+
+Also on this branch: CI actions moved to their first Node 24 majors
+(`f41960d`; `ilammy/msvc-dev-cmd` has no Node 24 release yet), the known
+Debug warnings cleared (`ba4b94c`), and `mount_content()` now fails instead
+of reporting success (`e471e19`).
 
 ## V3-03 progress
 

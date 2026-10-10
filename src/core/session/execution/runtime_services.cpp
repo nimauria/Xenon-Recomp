@@ -110,7 +110,7 @@ bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
 
 cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,
                                           cpu::CpuState& state,
-                                          cpu::MemoryPort& memory) {
+                                          cpu::MemoryPort& /*memory*/) {
   // Handle Xbox syscalls
   // For now, just return
   return {cpu::FlowReason::Syscall, state.cia + 4, level};
@@ -118,7 +118,7 @@ cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,
 
 cpu::ExecutionResult XenonSession::trap(std::uint32_t trap_code,
                                        cpu::CpuState& state,
-                                       cpu::MemoryPort& memory) {
+                                       cpu::MemoryPort& /*memory*/) {
   // Handle traps
   if (config_.enable_logging) {
     std::scoped_lock console_log_lock(console_log_mutex());
@@ -129,7 +129,7 @@ cpu::ExecutionResult XenonSession::trap(std::uint32_t trap_code,
 }
 
 std::uint64_t XenonSession::read_spr(std::uint32_t spr,
-                                    const cpu::CpuState& state) {
+                                    const cpu::CpuState& /*state*/) {
   // Reached only for SPRs outside mfspr/mftb's own xer/lr/ctr/vrsave/pvr/
   // time-base fast paths (dynamic_fallback.cpp) - i.e. a real, if rare, PPC
   // SPR this runtime does not model per-register semantics for. 0 is the
@@ -147,7 +147,7 @@ std::uint64_t XenonSession::read_spr(std::uint32_t spr,
 }
 
 void XenonSession::write_spr(std::uint32_t spr, std::uint64_t value,
-                            cpu::CpuState& state) {
+                            cpu::CpuState& /*state*/) {
   // See read_spr() above - same "not silent" reasoning. The write itself
   // still has nowhere real to go (no per-SPR storage/semantics modeled),
   // but it is now an accounted, logged gap instead of a silent no-op.
@@ -159,7 +159,7 @@ void XenonSession::write_spr(std::uint32_t spr, std::uint64_t value,
       });
 }
 
-std::uint64_t XenonSession::read_time_base(const cpu::CpuState& state) {
+std::uint64_t XenonSession::read_time_base(const cpu::CpuState& /*state*/) {
   // The real Xbox 360 PPC time-base register runs at a fixed 50 MHz,
   // independent of CPU clock scaling - see TimeServices::
   // kGuestTimeBaseFrequencyHz's doc comment for how this was verified

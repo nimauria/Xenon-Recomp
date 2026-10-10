@@ -154,7 +154,18 @@ bool CommandQueue::execute(
 bool CommandQueue::wait_idle() {
   if (!flush()) return false;
   if (!queue_ || !fence_) return true;
-  return wait_for_value(last_submitted_value_);
+  // Work reaches this queue without passing through flush(): DXGI's Present()
+  // queues the presentation of a back buffer on it. Waiting only for Xenon's
+  // last submission let resize and teardown release back buffers and the
+  // queue while a present was still in flight (debug-layer CORRUPTION #921).
+  // A new signal covers everything queued so far.
+  const auto value = next_fence_value_++;
+  if (FAILED(queue_->Signal(fence_.Get(), value))) {
+    error_ = "failed to signal D3D12 fence";
+    return false;
+  }
+  last_submitted_value_ = value;
+  return wait_for_value(value);
 }
 
 std::uint64_t CommandQueue::completed_value() const noexcept {

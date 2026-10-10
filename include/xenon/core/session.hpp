@@ -230,7 +230,8 @@ class XenonSession final : public cpu::RuntimeServices {
       const std::filesystem::path& dlc_path,
       std::uint64_t profile_xuid);
   
-  // Simple content mounting (legacy)
+  // Legacy entry point that mounts nothing: it always fails, naming
+  // mount_content_graph(), which is the supported way to mount content.
   [[nodiscard]] SessionResult mount_content(std::string_view host_path,
                                            std::string_view guest_mount_point);
   

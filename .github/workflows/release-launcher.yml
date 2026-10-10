@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve release version
         shell: pwsh
@@ -168,7 +168,7 @@ jobs:
           }
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: xenon-windows-x64
           path: |
@@ -184,7 +184,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve release version
         shell: bash
@@ -290,7 +290,7 @@ jobs:
             while IFS= read -r -d '' file; do sha256sum "$file" > "$file.sha256"; done
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: xenon-linux-x64
           path: |
@@ -306,7 +306,7 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve release version
         shell: bash
@@ -333,7 +333,7 @@ jobs:
             "dist/Xenon-Third-Party-Sources-$XENON_RELEASE_VERSION.zip.sha256"
 
       - name: Upload source-compliance artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: xenon-third-party-sources
           path: |
@@ -349,7 +349,7 @@ jobs:
 
     steps:
       - name: Download validated release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: release-assets
           merge-multiple: true

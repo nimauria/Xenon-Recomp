@@ -4,7 +4,7 @@
 <rect width="1200" height="700" fill="#101721"/>
 <text x="30" y="48" fill="#f4f7fb" font-size="29" font-weight="700" font-family="sans-serif">XENON  /  IMPLEMENTATION COVERAGE</text>
 <text x="30" y="77" fill="#c5d1dd" font-size="16" font-family="sans-serif">29/864 verified by tests (≥3.4%)  ·  45/864 classified  ·  source-listed scope</text>
-<text x="1170" y="48" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at d5cd6e8</text>
+<text x="1170" y="48" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 6ee8852</text>
 <rect x="30" y="102" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="132" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox 360 kernel exports</text>
 <text x="46" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">254 listed  ·  33 classified  ·  20 verified (≥7.9%)</text>
