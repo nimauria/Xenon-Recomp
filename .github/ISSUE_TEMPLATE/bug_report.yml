@@ -1,0 +1,85 @@
+name: Bug report
+description: Report a build failure, test failure, crash or incorrect behaviour in Xenon.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem. Xenon is in early development and no commercial title is confirmed playable yet, so reports about a specific game not running are only useful if they point at a concrete runtime, recompiler or build defect.
+
+        **Do not attach or link proprietary content.** That includes game executables (XEX), disc images, game data, firmware, title updates, DLC, encryption keys or Microsoft-owned software. Issues that include such material will be removed.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Build or dependencies
+        - Tests or CI
+        - Recompiler or game preparation (xenon-prepare, recomp-driver)
+        - Runtime (CPU, memory, kernel, XAM, filesystem)
+        - Graphics (Xenos, Vulkan, Direct3D 12)
+        - Audio
+        - Input
+        - Launcher
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions. For a build issue, include the configure command and CMake preset.
+      placeholder: |
+        1. cmake --preset linux-x64-debug
+        2. cmake --build build/linux-x64-debug
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Branch and commit
+      description: Output of `git rev-parse --abbrev-ref HEAD` and `git rev-parse --short HEAD`.
+      placeholder: development-restructure @ abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Host platform
+      options:
+        - Windows x86-64
+        - Linux x86-64
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system version, compiler and version, CMake version, GPU and driver, and any non-default CMake options.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: Relevant compiler, CTest or runtime output. Remove personal paths or other information you do not want to share. Do not include game data.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: This report contains no proprietary Xbox 360 content, keys or firmware.
+          required: true

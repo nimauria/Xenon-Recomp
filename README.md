@@ -638,6 +638,7 @@ AI tools have played a part in accelerating progress on this project. Every AI-a
 | Network | [Xenon Network client](docs/network/XENON_NETWORK_V1.md) |
 | Launcher | [Launcher](launcher/README.md) · [Launcher backend](launcher/BACKEND.md) |
 | Provenance | [Research provenance](docs/development/RESEARCH_PROVENANCE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md) |
+| Project | [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) |
 
 ---
 

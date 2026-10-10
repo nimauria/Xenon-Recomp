@@ -1,10 +1,14 @@
 # Automatic Game Preparation (Disc Import → First-Play Build → Cache)
 
-This document describes Xenon's end-to-end consumer workflow for turning a
-legally-owned Xbox 360 disc image into a running game, with no manual
-`default.xex` extraction and no manual invocation of the recompiler. It
-covers: disc mounting, the managed game library, the artifact cache, the
-`xenon-prepare` worker, and the launcher-side wiring. It supersedes any
+This document describes Xenon's automatic preparation workflow, which takes a
+legally owned Xbox 360 disc image to a cached native game module ready for the
+runtime, with no manual `default.xex` extraction and no manual invocation of
+the recompiler. It does not mean the game will run: preparation can succeed
+for a title the runtime cannot yet execute correctly, and no commercial title
+is confirmed playable (see the README's current milestone). It also still
+requires a local C++ toolchain (section 7). It covers: disc mounting, the
+managed game library, the artifact cache, the `xenon-prepare` worker, and the
+launcher-side wiring. It supersedes any
 assumption that Xenon requires a loose `default.xex` as the only supported
 input.
 
