@@ -76,7 +76,25 @@ int main() {
   const auto saturated_callbacks = callback_count.load();
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
   assert(callback_count.load() == saturated_callbacks);
+  // The client's counters say why its callbacks stopped: every callback
+  // returned and none submitted a frame, so no credit came back.
+  {
+    std::vector<AudioSystem::RenderClientStats> stats;
+    for (int i = 0; i < 500; ++i) {
+      stats = audio.render_client_stats();
+      if (stats.size() == 1 && stats[0].callbacks_returned == kMaxQueuedRenderFrames) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    assert(stats.size() == 1 && stats[0].handle == *credit_client);
+    assert(stats[0].callbacks_issued == kMaxQueuedRenderFrames);
+    assert(stats[0].callbacks_returned == kMaxQueuedRenderFrames);
+    assert(stats[0].callbacks_failed == 0 && stats[0].frames_submitted == 0);
+    assert(stats[0].callback_credits == 0 && stats[0].callbacks_in_flight == 0);
+    assert(AudioSystem::describe(stats[0]).find(
+               "the guest's callbacks returned without submitting a frame") != std::string::npos);
+  }
   assert(audio.unregister_render_client(*credit_client));
+  assert(audio.render_client_stats().empty());
 
   // Unregistering from another thread must not free the wrapped callback
   // argument while a guest callback is still using it. This regresses the
@@ -130,6 +148,24 @@ int main() {
   const auto client = audio.register_render_client(0, 0);
   assert(client);
   assert(audio.submit_render_frame(*client, frame_address));
+  {
+    const auto stats = audio.render_client_stats();
+    assert(stats.size() == 1 && stats[0].frames_submitted == 1 && stats[0].queued_frames == 1);
+  }
+
+  // A suspended client's submission is rejected and counted as such; an
+  // unknown handle is counted separately.
+  assert(audio.suspend_render_clients(true));
+  assert(!audio.submit_render_frame(*client, frame_address));
+  {
+    const auto stats = audio.render_client_stats();
+    assert(stats[0].rejected_suspended == 1 && stats[0].frames_submitted == 1);
+    assert(AudioSystem::describe(stats[0]).ends_with("suspended"));
+  }
+  assert(audio.suspend_render_clients(false));
+  const auto unregistered_before = audio.rejected_unregistered_submissions();
+  assert(!audio.submit_render_frame(0x41550007u, frame_address));
+  assert(audio.rejected_unregistered_submissions() == unregistered_before + 1);
 
   // Consume one Xbox render frame in two host callbacks to regress the partial
   // frame offset path. The render clock must advance through every callback.
@@ -141,6 +177,8 @@ int main() {
   fake->pump(second);
   assert(audio.render_driver_tic() == 256);
   assert(second[0] > second[1]);
+  assert(audio.render_client_stats()[0].frames_consumed == 1 &&
+         "a frame counts as consumed once all of its samples were mixed");
 
   // With an active client but no queued frame, silence is consumed and still
   // advances XAudioGetRenderDriverTic while incrementing the underrun counter.

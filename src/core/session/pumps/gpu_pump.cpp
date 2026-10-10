@@ -44,13 +44,16 @@ bool XenonSession::start_gpu_pump_thread() {
   }
   write_guest_thread_id(*memory_, gpu_pump_thread_tls_, gpu_pump_thread_->thread_id());
   gpu_pump_thread_->set_guest_kthread_address(gpu_pump_thread_tls_.kthread_address);
-  logging::append_probe_log("thread_identity_diag.log", "gpu_pump_thread_ assigned thread_id=%u\n", gpu_pump_thread_->thread_id());
+  logging::append_probe_log("thread_identity_diag.log", "gpu_pump_thread_ assigned thread_id=%u\n",
+                            gpu_pump_thread_->thread_id());
   if (main_thread_) {
-    logging::append_probe_log("thread_identity_diag.log", "main_thread_ thread_id=%u\n", main_thread_->thread_id());
+    logging::append_probe_log("thread_identity_diag.log", "main_thread_ thread_id=%u\n",
+                              main_thread_->thread_id());
   }
 #if defined(XENON_HAS_AUDIO)
   if (audio_thread_) {
-    logging::append_probe_log("thread_identity_diag.log", "audio_thread_ thread_id=%u\n", audio_thread_->thread_id());
+    logging::append_probe_log("thread_identity_diag.log", "audio_thread_ thread_id=%u\n",
+                              audio_thread_->thread_id());
   }
 #endif
 
@@ -201,7 +204,8 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       if (_present_ms >= 20) {
         static std::atomic<int> _present_diag_count{0};
         if (_present_diag_count.fetch_add(1) < 40) {
-          logging::append_probe_log("tick_phase_diag.log", "slow present: %lldms\n", (long long)_present_ms);
+          logging::append_probe_log("tick_phase_diag.log", "slow present: %lldms\n",
+                                    (long long)_present_ms);
         }
       }
     }

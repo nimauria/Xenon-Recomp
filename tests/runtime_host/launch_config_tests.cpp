@@ -86,6 +86,8 @@ int main() {
       "audioMuteUnfocused": true,
       "audioLatencyProfile": "Low",
       "logVerbose": true,
+      "diagnosticEvents": true,
+      "probeLogs": true,
       "titleUpdatePath": "C:/Games/Halo3/TU",
       "dlcRootPath": "C:/Games/Halo3/DLC",
       "dlc": [
@@ -132,6 +134,8 @@ int main() {
     assert(config.audio_mute_unfocused == true);
     assert(config.audio_latency_profile == "Low");
     assert(config.log_verbose == true);
+    assert(config.diagnostic_events == true);
+    assert(config.probe_logs == true);
     assert(config.title_update_path == "C:/Games/Halo3/TU");
     assert(config.dlc_root_path == "C:/Games/Halo3/DLC");
     assert(config.dlc.size() == 2);
@@ -281,6 +285,8 @@ int main() {
     assert(config.audio_mute_unfocused == false);
     assert(config.audio_latency_profile.empty());
     assert(config.log_verbose == false);
+    assert(config.diagnostic_events == false);
+    assert(config.probe_logs == false);
     assert(config.offline == true);
     assert(config.dlc.empty());
   }

@@ -18,12 +18,15 @@
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
+#include "xbox/exports/sync_events.hpp"
 
 namespace xenon::xbox {
 namespace {
 
 using xenon::core::ExportCallContext;
+using xenon::logging::events::EventKind;
 using xenon::kernel::Handle;
 using xenon::kernel::HandleFlags;
 using xenon::kernel::HandleView;
@@ -160,6 +163,8 @@ bool nt_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
     context.cpu.gpr[3] = kStatusSemaphoreLimitExceeded;
     return true;
   }
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(previous), "NtReleaseSemaphore");
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, static_cast<std::uint32_t>(previous));
   }
@@ -223,6 +228,8 @@ bool nt_release_mutant_export(kernel::KernelProcess& process, ExportCallContext&
     context.cpu.gpr[3] = kStatusMutantNotOwned;
     return true;
   }
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(previous), "NtReleaseMutant");
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, static_cast<std::uint32_t>(previous));
   }
@@ -269,20 +276,10 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   HandleView view{};
   const auto lookup_code = process.handle_table().lookup(handle, view);
   if (lookup_code != KernelIoCode::Success) {
-    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X LOOKUP FAILED code=%d\n",
-                   (unsigned)context.thread_id, (unsigned)handle, (int)lookup_code);
-      std::fclose(_d);
-    }
     context.cpu.gpr[3] = to_status(lookup_code);
     return true;
   }
   if (view.object->type() != ObjectType::Event) {
-    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X TYPE MISMATCH type=%d\n",
-                   (unsigned)context.thread_id, (unsigned)handle, (int)view.object->type());
-      std::fclose(_d);
-    }
     context.cpu.gpr[3] = status::ObjectTypeMismatch;
     return true;
   }
@@ -290,13 +287,10 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   auto& event = static_cast<kernel::KernelEvent&>(*view.object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
   event.set();
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle, previous,
+                      "NtSetEvent");
   if (previous_state_ptr != 0u) {
     context.memory.write32_be(previous_state_ptr, previous);
-  }
-  if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-    std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X SUCCESS previous=%u event_ptr=%p\n",
-                 (unsigned)context.thread_id, (unsigned)handle, previous, (void*)&event);
-    std::fclose(_d);
   }
   context.cpu.gpr[3] = status::Success;
   return true;
@@ -335,6 +329,8 @@ bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& co
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
   event.set();
   event.reset();
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle, previous,
+                      "NtPulseEvent");
   if (previous_state_ptr != 0u) {
     context.memory.write32_be(previous_state_ptr, previous);
   }
@@ -421,9 +417,13 @@ bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  sync_events::record(EventKind::WaitBegin, context, view.object.get(), handle,
+                      sync_events::timeout_value(timeout), "NtWaitForSingleObjectEx");
   const auto result =
       kernel::wait_for_single_object(view.object, timeout, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+  sync_events::record(EventKind::WaitEnd, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "NtWaitForSingleObjectEx");
   return true;
 }
 
@@ -465,10 +465,23 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    sync_events::record(EventKind::WaitBegin, context, objects[i].get(),
+                        context.memory.read32_be(handles_ptr + i * 4u),
+                        sync_events::timeout_value(timeout), "NtWaitForMultipleObjectsEx");
+  }
   std::uint32_t signaled_index = 0;
   const auto result = kernel::wait_for_multiple_objects(
       objects, wait_all, timeout, &signaled_index, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
+  // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
+  // has no single object.
+  const auto* satisfied = !wait_all && result == kernel::WaitResult::Success &&
+                                  signaled_index < objects.size()
+                              ? objects[signaled_index].get()
+                              : nullptr;
+  sync_events::record(EventKind::WaitEnd, context, satisfied, 0u,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "NtWaitForMultipleObjectsEx");
   return true;
 }
 
@@ -571,11 +584,9 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
           "still fires for NtWaitForSingleObjectEx-style waiters");
     });
   }
-  if (FILE* _d = std::fopen("nt_set_timer_ex_diag.log", "a")) {
-    std::fprintf(_d, "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
-                 (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log("nt_set_timer_ex_diag.log",
+                                   "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
+                                   (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
 
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));
   const auto relative_due = xbox_timeout_to_relative_ms(raw);
@@ -648,6 +659,8 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
       context.cpu.gpr[3] = status::ObjectTypeMismatch;
       return true;
   }
+  sync_events::record(EventKind::Signal, context, signal_view.object.get(), signal_handle, 0u,
+                      "NtSignalAndWaitForSingleObjectEx");
 
   HandleView wait_view{};
   const auto wait_lookup = process.handle_table().lookup(wait_handle, wait_view);
@@ -661,8 +674,13 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  sync_events::record(EventKind::WaitBegin, context, wait_view.object.get(), wait_handle,
+                      sync_events::timeout_value(timeout), "NtSignalAndWaitForSingleObjectEx");
   const auto result = kernel::wait_for_single_object(wait_view.object, timeout, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+  sync_events::record(EventKind::WaitEnd, context, wait_view.object.get(), wait_handle,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]),
+                      "NtSignalAndWaitForSingleObjectEx");
   return true;
 }
 

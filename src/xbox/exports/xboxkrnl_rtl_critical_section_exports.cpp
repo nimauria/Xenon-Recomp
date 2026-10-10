@@ -1,16 +1,13 @@
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
 #include <set>
 #include <string>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
@@ -19,6 +16,7 @@
 #include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
+#include "xbox/exports/sync_events.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -154,11 +152,6 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
   const auto cs = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   if (cs == 0u) return true;
   const auto self = owning_thread_marker(context);
-#ifdef _WIN32
-  const auto _os_tid = static_cast<unsigned long>(GetCurrentThreadId());
-#else
-  const unsigned long _os_tid = 0;
-#endif
 
   // NT protocol (LockCount: -1 = free, 0 = held without waiters, n = held with n
   // registered waiters):
@@ -186,19 +179,11 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
       // Uncontended - take it.
       context.memory.write32_be(cs + kOwningThreadOffset, self);
       context.memory.write32_be(cs + kRecursionCountOffset, 1u);
-      if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
-        std::fprintf(_d, "ENTER UNCONTENDED: cs=0x%08X new_owner=%u os_tid=%lu\n",
-                     (unsigned)cs, (unsigned)self, _os_tid);
-        std::fclose(_d);
-      }
+      sync_events::record(logging::events::EventKind::LockAcquired, context, nullptr, cs, 0u,
+                          "RtlEnterCriticalSection");
       return true;
     }
     // Contended: registered as a waiter above; block below, outside the lock.
-    if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
-      std::fprintf(_d, "ENTER CONTENDED: cs=0x%08X self_thread=%u owner_thread=%u lock_count_after=%d os_tid=%lu\n",
-                   (unsigned)cs, (unsigned)self, (unsigned)owner, lock_count + 1, _os_tid);
-      std::fclose(_d);
-    }
   }
 
   auto event = resolve_wait_event(process, context, cs, "RtlEnterCriticalSection");
@@ -216,11 +201,24 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
   // Auto-reset event: one Leave() releases exactly one waiter, which now owns the
   // section. The wait result is not branched on: with an infinite timeout the only
   // other way out is a stopping session, and the count must stay consistent then too.
-  static_cast<void>(
-      kernel::wait_for_single_object(event, xbox_infinite_timeout(), context.thread_id));
+  const auto wait_start = std::chrono::steady_clock::now();
+  sync_events::record(logging::events::EventKind::WaitBegin, context, event.get(), cs,
+                      0xFFFFFFFFu, "RtlEnterCriticalSection");
+  const auto result =
+      kernel::wait_for_single_object(event, xbox_infinite_timeout(), context.thread_id);
+  sync_events::record(logging::events::EventKind::WaitEnd, context, event.get(), cs,
+                      static_cast<std::uint32_t>(result), "RtlEnterCriticalSection");
   std::lock_guard<std::mutex> lock(process.critical_section_mutex());
   context.memory.write32_be(cs + kOwningThreadOffset, self);
   context.memory.write32_be(cs + kRecursionCountOffset, 1u);
+  if (logging::events::enabled()) {
+    const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - wait_start)
+                               .count();
+    const auto value = static_cast<std::uint32_t>(std::min<long long>(waited_ms, 0xFFFFFFFFll));
+    sync_events::record(logging::events::EventKind::LockAcquired, context, nullptr, cs, value,
+                        "RtlEnterCriticalSection");
+  }
   return true;
 }
 
@@ -285,16 +283,8 @@ bool rtl_leave_critical_section_export(kernel::KernelProcess& process,
         static_cast<std::int32_t>(context.memory.read32_be(cs + kLockCountOffset)) - 1;
     context.memory.write32_be(cs + kLockCountOffset, static_cast<std::uint32_t>(new_lock_count));
     should_wake = new_lock_count != -1;  // -1 means no waiters were registered
-    if (FILE* _d = std::fopen("critical_section_contention_diag.log", "a")) {
-#ifdef _WIN32
-      const auto _leave_os_tid = static_cast<unsigned long>(GetCurrentThreadId());
-#else
-      const unsigned long _leave_os_tid = 0;
-#endif
-      std::fprintf(_d, "LEAVE: cs=0x%08X former_owner_thread=%u new_lock_count=%d should_wake=%d os_tid=%lu\n",
-                   (unsigned)cs, (unsigned)context.thread_id, new_lock_count, (int)should_wake, _leave_os_tid);
-      std::fclose(_d);
-    }
+    sync_events::record(logging::events::EventKind::LockReleased, context, nullptr, cs,
+                        static_cast<std::uint32_t>(new_lock_count), "RtlLeaveCriticalSection");
   }
   if (should_wake) {
     if (auto event = resolve_wait_event(process, context, cs, "RtlLeaveCriticalSection")) {

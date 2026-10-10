@@ -3,7 +3,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <string_view>
 #include <thread>
 
@@ -117,6 +119,87 @@ std::uint64_t recorded() noexcept {
 void clear() noexcept {
   g_base_sequence.store(g_next_sequence.load(std::memory_order_acquire),
                         std::memory_order_release);
+}
+
+std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
+  std::map<std::uint32_t, std::vector<const Event*>> open_waits;
+  std::map<std::uint32_t, EventKind> last_kind;
+  std::map<std::uint64_t, const Event*> last_signal;
+  for (const auto& event : events) {
+    switch (event.kind) {
+      case EventKind::WaitBegin: {
+        // A WaitBegin that does not continue a multi-object wait's run of
+        // WaitBegins starts a new wait.
+        const auto previous = last_kind.find(event.guest_thread_id);
+        auto& open = open_waits[event.guest_thread_id];
+        if (previous == last_kind.end() || previous->second != EventKind::WaitBegin) open.clear();
+        open.push_back(&event);
+        break;
+      }
+      case EventKind::WaitEnd:
+        open_waits[event.guest_thread_id].clear();
+        break;
+      case EventKind::Signal:
+        if (event.object_id != 0) last_signal[event.object_id] = &event;
+        break;
+      case EventKind::LockAcquired:
+      case EventKind::LockReleased:
+        break;
+    }
+    last_kind[event.guest_thread_id] = event.kind;
+  }
+
+  std::vector<BlockedWait> waits;
+  for (const auto& [thread, open] : open_waits) {
+    for (const auto* begin : open) {
+      BlockedWait wait{};
+      wait.guest_thread_id = thread;
+      wait.object_id = begin->object_id;
+      wait.guest_address = begin->guest_address;
+      wait.source = begin->source;
+      wait.waiting_since_ns = begin->host_time_ns;
+      wait.timeout_ms = begin->value;
+      if (const auto found = last_signal.find(begin->object_id); found != last_signal.end()) {
+        wait.last_signal = *found->second;
+        wait.signalled_after_wait_began = found->second->sequence > begin->sequence;
+      }
+      waits.push_back(wait);
+    }
+  }
+  return waits;
+}
+
+std::string format_blocked_waits(std::span<const BlockedWait> waits, std::int64_t now_ns) {
+  std::string text;
+  char line[320];
+  for (const auto& wait : waits) {
+    const auto waited_ms = (now_ns - wait.waiting_since_ns) / 1'000'000;
+    std::snprintf(line, sizeof(line), "t%u waits in %s on object %llu (guest 0x%08X) for %lld ms",
+                  wait.guest_thread_id, wait.source ? wait.source : "?",
+                  static_cast<unsigned long long>(wait.object_id), wait.guest_address,
+                  static_cast<long long>(waited_ms));
+    text += line;
+    if (wait.timeout_ms == 0xFFFFFFFFu) {
+      text += ", no timeout";
+    } else {
+      std::snprintf(line, sizeof(line), ", timeout %u ms", wait.timeout_ms);
+      text += line;
+    }
+    if (!wait.last_signal) {
+      text += "; no signal of it recorded";
+    } else {
+      std::snprintf(line, sizeof(line), "; last signalled by t%u in %s %lld ms %s",
+                    wait.last_signal->guest_thread_id,
+                    wait.last_signal->source ? wait.last_signal->source : "?",
+                    static_cast<long long>(
+                        (now_ns - wait.last_signal->host_time_ns) / 1'000'000),
+                    wait.signalled_after_wait_began ? "ago, after the wait began"
+                                                    : "ago, before the wait began");
+      text += line;
+    }
+    text += '\n';
+  }
+  return text;
 }
 
 }  // namespace xenon::logging::events

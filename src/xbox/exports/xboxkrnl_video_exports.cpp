@@ -17,6 +17,7 @@
 // xbox.h (X_VIDEO_MODE), fetched 2026-09-27 - see the doc comment on each
 // export below for the specific citation.
 
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 
 #include <atomic>
@@ -296,11 +297,10 @@ bool vd_set_graphics_interrupt_callback_export(kernel::KernelProcess& process,
                                                ExportCallContext& context) {
   const auto callback_address = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto callback_context = static_cast<std::uint32_t>(context.cpu.gpr[4]);
-  if (FILE* _d = std::fopen("vsync_callback_diag.log", "a")) {
-    std::fprintf(_d, "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
-                 callback_address, callback_context);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log(
+      "vsync_callback_diag.log",
+      "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
+      callback_address, callback_context);
   process.set_gpu_interrupt_callback(callback_address, callback_context);
   context.cpu.gpr[3] = 0u;
   return true;
@@ -392,13 +392,12 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     const int _n = _vd_swap_call_count.fetch_add(1) + 1;
     // First 20 in full, then a running total every 60 swaps (~1 s at 60 Hz).
     if (_n <= 20 || _n % 60 == 0) {
-      if (FILE* _d = std::fopen("vdswap_calls_diag.log", "a")) {
-        std::fprintf(_d, "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
-                     _n, context.thread_id, (unsigned long long)context.cpu.lr,
-                     (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
-                     (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
-        std::fclose(_d);
-      }
+      xenon::logging::append_probe_log(
+          "vdswap_calls_diag.log",
+          "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
+          _n, context.thread_id, (unsigned long long)context.cpu.lr,
+          (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
+          (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
     }
   }
   const auto buffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);

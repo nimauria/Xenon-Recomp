@@ -14,6 +14,10 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_memory_tests PRIVATE xenon_memory)
     xenon_enable_test_asserts(xenon_memory_tests)
     add_test(NAME xenon_memory_tests COMMAND xenon_memory_tests)
+    add_executable(xenon_write_trap_tests write_trap_tests.cpp)
+    target_link_libraries(xenon_write_trap_tests PRIVATE xenon_memory xenon_logging)
+    xenon_enable_test_asserts(xenon_write_trap_tests)
+    add_test(NAME xenon_write_trap_tests COMMAND xenon_write_trap_tests)
 
     add_executable(xenon_memory_hardening_tests
       memory_hardening_tests.cpp)

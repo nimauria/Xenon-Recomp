@@ -1,8 +1,8 @@
 {
-  "content_digest": "sha256:e1fea2b421edef1f6b9defe89009b8c70b0d32eb008146f16ad6cbe318b9d448",
+  "content_digest": "sha256:237dfad5ea9f0c50f4fb5e14aa2613c5dbba58418086b132e809643c02eaa17c",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "6ee88521b250f01491d158095845506f0a265a5e",
+    "assessed_commit": "99298e100508a63f080d22c8a6259a2d3635f650",
     "worktree": "clean"
   },
   "problems": [],
@@ -245,9 +245,9 @@
     {"category": "kernel", "detail": "mentioned by xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeResetEvent", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeResumeThread", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeSetBasePriorityThread", "kind": "test_evidence_found"},
-    {"category": "kernel", "detail": "mentioned by xenon_xboxkrnl_ke_sync_export_tests, xenon_xboxkrnl_sync_export_tests", "id": "kernel:registered:KeSetEvent", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_diagnostic_events_tests, xenon_xboxkrnl_ke_sync_export_tests, xenon_xboxkrnl_sync_export_tests", "id": "kernel:registered:KeSetEvent", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_ke_irql_export_tests", "id": "kernel:registered:KeTryToAcquireSpinLockAtRaisedIrql", "kind": "test_evidence_found"},
-    {"category": "kernel", "detail": "mentioned by xenon_kernel_wait_semantics_tests, xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeWaitForMultipleObjects", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_diagnostic_events_tests, xenon_kernel_wait_semantics_tests, xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeWaitForMultipleObjects", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_diagnostic_events_tests, xenon_kernel_infinite_wait_tests, xenon_kernel_synchronization_tests, xenon_xboxkrnl_ke_sync_export_tests", "id": "kernel:registered:KeWaitForSingleObject", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_ke_irql_export_tests", "id": "kernel:registered:KfAcquireSpinLock", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_ke_irql_export_tests", "id": "kernel:registered:KfReleaseSpinLock", "kind": "test_evidence_found"},

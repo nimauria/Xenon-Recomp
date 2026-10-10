@@ -3,6 +3,8 @@
 // Physical page range allocation and physical-to-guest reverse mappings.
 // Private to xenon_memory; included through address_space_internal.hpp.
 
+#include "xenon/logging/probe_log.hpp"
+
 namespace xenon::memory {
 
 class AddressSpace::PhysicalRangeAllocator {
@@ -77,15 +79,12 @@ class AddressSpace::PhysicalRangeAllocator {
     for (const auto& [first, count] : free_ranges_) free_total += count;
     std::uint64_t retired_total = 0;
     for (const auto& [first, count] : retired_ranges_) retired_total += count;
-    if (std::FILE* diag = std::fopen("phys_alloc_fail_diag.log", "a")) {
-      std::fprintf(diag,
-                   "PHYS_ALLOC_FAIL requested=%u free_total=%llu free_ranges=%zu "
-                   "retired_total=%llu retired_ranges=%zu active_fast_readers=%u\n",
-                   requested_page_count, static_cast<unsigned long long>(free_total),
-                   free_ranges_.size(), static_cast<unsigned long long>(retired_total),
-                   retired_ranges_.size(), readers_snapshot);
-      std::fclose(diag);
-    }
+    xenon::logging::append_probe_log(
+        "phys_alloc_fail_diag.log",
+        "PHYS_ALLOC_FAIL requested=%u free_total=%llu free_ranges=%zu "
+        "retired_total=%llu retired_ranges=%zu active_fast_readers=%u\n",
+        requested_page_count, static_cast<unsigned long long>(free_total), free_ranges_.size(),
+        static_cast<unsigned long long>(retired_total), retired_ranges_.size(), readers_snapshot);
   }
 
   [[nodiscard]] bool contains_free(std::uint32_t first_page,

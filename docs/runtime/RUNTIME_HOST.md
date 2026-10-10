@@ -95,6 +95,8 @@ Written once by the launcher before starting the process, passed as
   "audioMuteUnfocused": false,
   "audioLatencyProfile": "",
   "logVerbose": false,
+  "diagnosticEvents": false,
+  "probeLogs": false,
   "titleUpdatePath": "",
   "dlcRootPath": "",
   "dlc": [{ "type": "DLC", "path": "C:/Games/Halo3/DLC/map1" }],
@@ -121,6 +123,12 @@ readiness pass addition (Part 5) - see "Normal Play vs. headless/test mode"
 below for exactly what relaxes when it is `true`. An ordinary launcher Play
 action never sets it; it exists for automated compatibility sweeps and
 dedicated/offscreen hosts.
+
+`diagnosticEvents` and `probeLogs` (both default `false`) turn on the bounded
+wait/signal/lock event ring and the `*_diag.log` investigation probes, as
+`XENON_DIAG_EVENTS=1` and `XENON_PROBE_LOGS=1` do; either the field or the
+variable enables one. The log records which are on. See "Diagnostics" in
+`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`.
 
 ## Status schema
 

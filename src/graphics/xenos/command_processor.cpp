@@ -12,6 +12,8 @@
 #include <string>
 #include <thread>
 
+#include "xenon/logging/probe_log.hpp"
+
 namespace xenon::gpu {
 namespace {
 
@@ -1126,12 +1128,11 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     static std::atomic<int> _trunc_diag_count{0};
     const int _n = _trunc_diag_count.fetch_add(1) + 1;
     if (_n <= 10) {
-      if (FILE* _d = std::fopen("truncation_diag.log", "a")) {
-        std::fprintf(_d, "truncation #%d: opcode=%u raw=0x%08X requested_count=%u remaining=%u depth=%u predicate=%d\n",
-                     _n, static_cast<unsigned>(header.opcode), header.raw, header.count,
-                     reader.remaining(), depth, header.predicate ? 1 : 0);
-        std::fclose(_d);
-      }
+      xenon::logging::append_probe_log(
+          "truncation_diag.log",
+          "truncation #%d: opcode=%u raw=0x%08X requested_count=%u remaining=%u depth=%u predicate=%d\n",
+          _n, static_cast<unsigned>(header.opcode), header.raw, header.count, reader.remaining(),
+          depth, header.predicate ? 1 : 0);
     }
   }
   auto payload = read_payload(reader, header.count);

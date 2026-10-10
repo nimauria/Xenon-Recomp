@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/probe_log.hpp"
 
 namespace xenon::recomp::native_replacements {
 
@@ -233,14 +234,12 @@ ExecutionResult heap_allocate_v2(ExecutionContext& context) {
   auto& state = context.state;
   auto* process = context.runtime.current_process();
   if (!process) {
-    if (std::FILE* diag = std::fopen("heap_alloc_null_process_diag.log", "a")) {
-      std::fprintf(diag, "NULL_PROCESS tid=%zu handle=0x%08x flags=0x%08x size=0x%08x\n",
-                   static_cast<std::size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
-                   static_cast<std::uint32_t>(state.gpr[3]),
-                   static_cast<std::uint32_t>(state.gpr[4]),
-                   static_cast<std::uint32_t>(state.gpr[5]));
-      std::fclose(diag);
-    }
+    xenon::logging::append_probe_log(
+        "heap_alloc_null_process_diag.log",
+        "NULL_PROCESS tid=%zu handle=0x%08x flags=0x%08x size=0x%08x\n",
+        static_cast<std::size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+        static_cast<std::uint32_t>(state.gpr[3]), static_cast<std::uint32_t>(state.gpr[4]),
+        static_cast<std::uint32_t>(state.gpr[5]));
     state.gpr[3] = 0;
     return guest_return(state);
   }
@@ -249,13 +248,11 @@ ExecutionResult heap_allocate_v2(ExecutionContext& context) {
       static_cast<std::uint32_t>(state.gpr[4]),
       static_cast<std::uint32_t>(state.gpr[5]));
   if (result == 0) {
-    if (std::FILE* diag = std::fopen("heap_alloc_null_process_diag.log", "a")) {
-      std::fprintf(diag, "ALLOC_RETURNED_ZERO handle=0x%08x flags=0x%08x size=0x%08x\n",
-                   static_cast<std::uint32_t>(state.gpr[3]),
-                   static_cast<std::uint32_t>(state.gpr[4]),
-                   static_cast<std::uint32_t>(state.gpr[5]));
-      std::fclose(diag);
-    }
+    xenon::logging::append_probe_log(
+        "heap_alloc_null_process_diag.log",
+        "ALLOC_RETURNED_ZERO handle=0x%08x flags=0x%08x size=0x%08x\n",
+        static_cast<std::uint32_t>(state.gpr[3]), static_cast<std::uint32_t>(state.gpr[4]),
+        static_cast<std::uint32_t>(state.gpr[5]));
   }
   state.gpr[3] = result;
   return guest_return(state);

@@ -25,7 +25,7 @@ void write_u32_be(cpu::MemoryPort& memory, cpu::GuestAddress addr, std::uint32_t
 // internal Xenon APIs (see XamSession::achievements()) for a future
 // GPD-backed write path; see xam_exports.hpp for the full rationale.
 bool register_achievement_exports(core::ExportRegistry& registry,
-                                 AchievementManager& achievement_manager) {
+                                 AchievementManager& /*achievement_manager*/) {
   bool ok = true;
 
   // XamUserCreateAchievementEnumerator (0x02EE) - Stubbed. Real xam.xex
