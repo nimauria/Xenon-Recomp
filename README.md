@@ -602,7 +602,7 @@ None of these milestones is complete yet.
 
 ## Contributing
 
-Xenon is a solo-led project that is still moving quickly. There is no formal contributor programme yet, but issues, research notes and focused pull requests are welcome. Before making a large architectural change, read [`PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) and the relevant subsystem document under [`docs/`](docs/).
+Xenon is a solo-led project that is still moving quickly. There is no formal contributor programme yet, but issues, research notes and focused pull requests are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for what to read first, what a pull request should include, and what must never be submitted. Before making a large architectural change, read [`PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) and the relevant subsystem document under [`docs/`](docs/).
 
 Engineering principles:
 
