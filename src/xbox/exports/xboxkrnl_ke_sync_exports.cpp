@@ -1,7 +1,6 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
 #include <cstdint>
-#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,6 +17,7 @@
 #include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
@@ -61,6 +61,28 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
+}
+
+// Bounded diagnostic events (xenon/logging/diagnostic_events.hpp) for waits
+// and signals, so a stall can be traced to the object a thread waits on and
+// the thread that last signalled it.
+void record_event(logging::events::EventKind kind, const ExportCallContext& context,
+                  const KernelObject* object, cpu::GuestAddress address, std::uint32_t value,
+                  const char* source) {
+  if (!logging::events::enabled()) return;
+  logging::events::Event event{};
+  event.kind = kind;
+  event.guest_thread_id = context.thread_id;
+  event.object_id = object ? object->object_id() : 0u;
+  event.guest_address = address;
+  event.value = value;
+  event.source = source;
+  logging::events::record(event);
+}
+
+std::uint32_t timeout_event_value(std::chrono::milliseconds timeout) {
+  if (timeout.count() < 0 || timeout.count() >= 0xFFFFFFFFll) return 0xFFFFFFFFu;
+  return static_cast<std::uint32_t>(timeout.count());
 }
 
 std::chrono::milliseconds read_timeout(ExportCallContext& context, cpu::GuestAddress timeout_ptr) {
@@ -111,12 +133,6 @@ bool ke_initialize_semaphore_export(kernel::KernelProcess&, ExportCallContext& c
 bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
-  if (FILE* _d = std::fopen("set_event_all_diag.log", "a")) {
-    std::fprintf(_d, "KeSetEvent: thread_id=%u header=0x%08X\n",
-                 (unsigned)context.thread_id, (unsigned)header_address);
-    std::fclose(_d);
-  }
-
   std::string error;
   auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
   if (!object || object->type() != ObjectType::Event) {
@@ -128,6 +144,8 @@ bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   auto& event = static_cast<kernel::KernelEvent&>(*object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
   event.set();
+  record_event(logging::events::EventKind::Signal, context, object.get(), header_address, previous,
+               "KeSetEvent");
   context.cpu.gpr[3] = previous;
   return true;
 }
@@ -199,22 +217,13 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
     return true;
   }
 
-  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
-    std::fprintf(_d, "KeWaitForSingleObject ENTER: thread_id=%u header=0x%08X type=%d timeout_ptr=0x%08X object_ptr=%p\n",
-                 (unsigned)context.thread_id, (unsigned)header_address, (int)object->type(),
-                 (unsigned)timeout_ptr, (void*)object.get());
-    std::fclose(_d);
-  }
-
   const auto timeout = read_timeout(context, timeout_ptr);
+  record_event(logging::events::EventKind::WaitBegin, context, object.get(), header_address,
+               timeout_event_value(timeout), "KeWaitForSingleObject");
   const auto result = kernel::wait_for_single_object(object, timeout, context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
-
-  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
-    std::fprintf(_d, "KeWaitForSingleObject RETURNED: thread_id=%u header=0x%08X result=%d\n",
-                 (unsigned)context.thread_id, (unsigned)header_address, (int)result);
-    std::fclose(_d);
-  }
+  record_event(logging::events::EventKind::WaitEnd, context, object.get(), header_address,
+               static_cast<std::uint32_t>(context.cpu.gpr[3]), "KeWaitForSingleObject");
   return true;
 }
 
@@ -262,11 +271,24 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    record_event(logging::events::EventKind::WaitBegin, context, objects[i].get(),
+                 context.memory.read32_be(headers_ptr + i * 4u), timeout_event_value(timeout),
+                 "KeWaitForMultipleObjects");
+  }
   std::uint32_t signaled_index = 0;
   const auto result =
       kernel::wait_for_multiple_objects(objects, wait_all, timeout, &signaled_index,
                                         context.thread_id);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
+  // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
+  // has no single object.
+  const auto* satisfied = !wait_all && result == kernel::WaitResult::Success &&
+                                  signaled_index < objects.size()
+                              ? objects[signaled_index].get()
+                              : nullptr;
+  record_event(logging::events::EventKind::WaitEnd, context, satisfied, 0u,
+               static_cast<std::uint32_t>(context.cpu.gpr[3]), "KeWaitForMultipleObjects");
   return true;
 }
 
