@@ -25,8 +25,8 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | Linux green; Windows 148/149 on `d5cd6e8`. D3D12 cause found and fixed (`d62bdcd`), awaiting the Windows run that confirms it |
-| V3-02 | Diagnostics contracts | IN PROGRESS | Bounded event ring (`676117d`); Ke* wait/signal probes migrated (`69d1846`) |
+| V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); one intermittent Windows thread test and the `ilammy/msvc-dev-cmd` Node 20 warning remain |
+| V3-02 | Diagnostics contracts | IN PROGRESS | Event ring, wait/signal/lock events, stall report, opt-in capped probes, title addresses removed, audio credit counters; GPU fence events remain |
 | V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
 | V3-04 | Kernel execution and interrupts | NOT STARTED | |
 | V3-05 | Guest services and ABI | NOT STARTED | |
@@ -397,6 +397,54 @@ Also on this branch: CI actions moved to their first Node 24 majors
 (`f41960d`; `ilammy/msvc-dev-cmd` has no Node 24 release yet), the known
 Debug warnings cleared (`ba4b94c`), and `mount_content()` now fails instead
 of reporting success (`e471e19`).
+
+Run 38075338656 (`6ee8852`): `xenon_backend_capability_tests` passed on
+Windows; the D3D12 fix holds. One other test failed there for the first
+time: `xenon_thread_creation_tests` asserts that a looping guest thread
+stops within 500 ms of `terminate()`, and it took longer (it stopped within
+the 2 s join bound). It passed on the two previous Windows runs and passes
+30 of 30 locally, idle and with the CPU saturated. On that build the thread's
+exit path still opened probe files unconditionally, which can be slow on a
+loaded Windows runner; that is a hypothesis, not a cause. The 500 ms bound is
+unchanged; the next Windows runs decide.
+
+## V3-02 progress
+
+Status as of `01563c1`. Off by default; see "Diagnostics" in
+`docs/runtime/AC6_RUNTIME_INVESTIGATION.md` for the switches.
+
+- **Bounded event ring** (`676117d`): fixed-size, lock-free, atomic records
+  with a per-slot sequence check; 300 plain and 20 ThreadSanitizer runs
+  clean; publishing a slot before its payload fails the tests.
+- **Wait, signal and lock events**: every Ke*/Nt* wait and signal
+  (`69d1846`, `1b84dc9`), spin locks and critical sections (`433e0d2`), with
+  the kernel object id so Ke* and Nt* use of one object line up.
+- **Stall report** (`6dbb155`): `blocked_waits()` names each thread still
+  waiting, the object, how long, and the last signaller, flagging a signal
+  that came after the wait began. A staged stall through the real export
+  registry is reported correctly.
+- **Probe logs** (`a336752`): every `*_diag.log` probe goes through one
+  function that is off unless enabled, replaces each file per run and caps
+  it at 4 MiB. The launch configuration can enable events and probes
+  (`d36972c`).
+- **Title addresses out of generic code**: the guest store path compared
+  every 32-bit write against two AC6 addresses; it is now an opt-in
+  `XENON_WRITE_TRAP` (`86c9da9`). The spin-lock path named an AC6 lock
+  (`433e0d2`). Only `title_probes.cpp`, the isolated AC6 probe file, still
+  names title addresses.
+- **Audio credits** (`01563c1`): per-client counts of callbacks, frames and
+  rejections by reason, and a one-line diagnosis in the stop report. This
+  answers the AC6 note's first question (does the client exhaust its eight
+  credits, and why) on the next real run.
+- **Defect found on the way**: generated game modules linked Xenon's static
+  libraries without `-fPIC`; that worked only while no linked object
+  referenced preemptible global data. The write-trap table did, and every
+  module then failed to link on Linux. Generated projects now build Xenon
+  as position-independent code (`e0ee079`).
+
+Still open in V3-02: GPU events (`WAIT_REG_MEM` fence parks, ring pointer
+progress, interrupt delivery); guest/host clock correlation and session
+fingerprints in events; failure categories.
 
 ## V3-03 progress
 
