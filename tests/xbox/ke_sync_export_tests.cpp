@@ -187,6 +187,7 @@ void test_a_stalled_wait_is_explained_by_the_event_snapshot() {
     cpu::CpuState waiter{};
     waiter.gpr[3] = header;
     waiter.gpr[7] = 0;  // NULL timeout: wait forever
+    waiter.lr = 0x82123450u;  // the guest code that called the export
     assert(f.invoke(0x0B0u, waiter, 21).success);
   });
   // Wait (bounded) until t21's wait has begun.
@@ -199,6 +200,8 @@ void test_a_stalled_wait_is_explained_by_the_event_snapshot() {
   assert(waits.size() == 1);
   assert(waits[0].guest_thread_id == 21 && waits[0].guest_address == header);
   assert(waits[0].timeout_ms == 0xFFFFFFFFu);
+  assert(waits[0].guest_caller == 0x82123450u);
+  assert(waits[0].category == xenon::logging::FailureCategory::DeadlockCandidate);
   assert(waits[0].last_signal && waits[0].last_signal->guest_thread_id == 22);
   assert(!waits[0].signalled_after_wait_began &&
          "the only signal came before the wait and another thread consumed it");

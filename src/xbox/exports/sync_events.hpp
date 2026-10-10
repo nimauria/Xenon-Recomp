@@ -22,6 +22,7 @@ inline void record(logging::events::EventKind kind, const core::ExportCallContex
   logging::events::Event event{};
   event.kind = kind;
   event.guest_thread_id = context.thread_id;
+  event.guest_caller = static_cast<std::uint32_t>(context.cpu.lr);
   event.object_id = object ? object->object_id() : 0u;
   event.guest_address = guest_address;
   event.value = value;

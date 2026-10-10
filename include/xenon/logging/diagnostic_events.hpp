@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "xenon/logging/failure_category.hpp"
+
 namespace xenon::logging::events {
 
 inline constexpr std::size_t kCapacity = std::size_t{1} << 16;
@@ -61,6 +63,9 @@ struct Event {
   // Guest address of the object (dispatcher header) or a handle value.
   std::uint32_t guest_address{};
   std::uint32_t value{};
+  // The guest return address (LR) of the export call that recorded the
+  // event, which identifies the calling guest code; 0 when there is none.
+  std::uint32_t guest_caller{};
   // The operation that recorded the event, such as "KeWaitForSingleObject".
   // Must point to a string with static storage duration.
   const char* source{};
@@ -92,6 +97,7 @@ struct BlockedWait {
   std::uint64_t object_id{};
   std::uint32_t guest_address{};
   const char* source{};
+  std::uint32_t guest_caller{};
   std::int64_t waiting_since_ns{};
   std::uint32_t timeout_ms{};
   // The most recent Signal of the object in the snapshot, before or after
@@ -101,6 +107,9 @@ struct BlockedWait {
   // True when that signal came after the wait began: a wake-up the waiter did
   // not receive, or a signal another waiter consumed.
   bool signalled_after_wait_began{};
+  // DeadlockCandidate for a wait with no timeout; empty for a bounded wait,
+  // which will end by itself.
+  std::optional<FailureCategory> category{};
 };
 
 // Derives the waits still open at the end of `events` (snapshot() order).

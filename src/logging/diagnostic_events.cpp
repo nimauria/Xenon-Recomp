@@ -20,7 +20,7 @@ static_assert((kCapacity & (kCapacity - 1)) == 0, "kCapacity must be a power of 
 // reader accepts a slot only when it holds exactly the event it asked for.
 struct Slot {
   std::atomic<std::uint64_t> version{0};
-  std::array<std::atomic<std::uint64_t>, 5> words{};
+  std::array<std::atomic<std::uint64_t>, 6> words{};
 };
 
 bool enabled_from_environment() {
@@ -75,6 +75,7 @@ void record(Event event) noexcept {
   slot.words[2].store(event.object_id, std::memory_order_release);
   slot.words[3].store(pack(event.guest_address, event.value), std::memory_order_release);
   slot.words[4].store(reinterpret_cast<std::uintptr_t>(event.source), std::memory_order_release);
+  slot.words[5].store(event.guest_caller, std::memory_order_release);
   slot.version.store(writing + 1, std::memory_order_release);
 }
 
@@ -89,7 +90,7 @@ std::vector<Event> snapshot() {
     const auto& slot = g_ring[sequence & (kCapacity - 1)];
     const std::uint64_t complete = 2 * sequence + 2;
     if (slot.version.load(std::memory_order_acquire) != complete) continue;
-    std::array<std::uint64_t, 5> words{};
+    std::array<std::uint64_t, 6> words{};
     // Acquire loads keep the version re-check below after every word read.
     for (std::size_t i = 0; i < words.size(); ++i)
       words[i] = slot.words[i].load(std::memory_order_acquire);
@@ -104,6 +105,7 @@ std::vector<Event> snapshot() {
     event.guest_address = static_cast<std::uint32_t>(words[3]);
     event.value = static_cast<std::uint32_t>(words[3] >> 32);
     event.source = reinterpret_cast<const char*>(static_cast<std::uintptr_t>(words[4]));
+    event.guest_caller = static_cast<std::uint32_t>(words[5]);
     events.push_back(event);
   }
   return events;
@@ -159,8 +161,10 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
       wait.object_id = begin->object_id;
       wait.guest_address = begin->guest_address;
       wait.source = begin->source;
+      wait.guest_caller = begin->guest_caller;
       wait.waiting_since_ns = begin->host_time_ns;
       wait.timeout_ms = begin->value;
+      if (wait.timeout_ms == 0xFFFFFFFFu) wait.category = FailureCategory::DeadlockCandidate;
       if (const auto found = last_signal.find(begin->object_id); found != last_signal.end()) {
         wait.last_signal = *found->second;
         wait.signalled_after_wait_began = found->second->sequence > begin->sequence;
@@ -185,11 +189,20 @@ std::string format_blocked_waits(std::span<const BlockedWait> waits, std::int64_
   char line[320];
   for (const auto& wait : waits) {
     const auto waited_ms = (now_ns - wait.waiting_since_ns) / 1'000'000;
+    if (wait.category) {
+      text += '[';
+      text += failure_category_name(*wait.category);
+      text += "] ";
+    }
     std::snprintf(line, sizeof(line), "t%u waits in %s on object %llu (guest 0x%08X) for %lld ms",
                   wait.guest_thread_id, wait.source ? wait.source : "?",
                   static_cast<unsigned long long>(wait.object_id), wait.guest_address,
                   static_cast<long long>(waited_ms));
     text += line;
+    if (wait.guest_caller != 0) {
+      std::snprintf(line, sizeof(line), ", called from 0x%08X", wait.guest_caller);
+      text += line;
+    }
     if (wait.timeout_ms == 0xFFFFFFFFu) {
       text += ", no timeout";
     } else {

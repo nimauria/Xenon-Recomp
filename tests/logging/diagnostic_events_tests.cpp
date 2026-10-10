@@ -141,7 +141,7 @@ void test_concurrent_writers_never_produce_torn_events() {
 }
 
 Event at(std::uint64_t sequence, std::uint32_t thread, EventKind kind, std::uint64_t object,
-         std::uint32_t value, const char* source) {
+         std::uint32_t value, const char* source, std::uint32_t caller = 0) {
   Event event{};
   event.sequence = sequence;
   event.host_time_ns = static_cast<std::int64_t>(sequence) * 1'000'000;  // 1 ms apart
@@ -151,6 +151,7 @@ Event at(std::uint64_t sequence, std::uint32_t thread, EventKind kind, std::uint
   event.guest_address = 0x82000000u + static_cast<std::uint32_t>(object);
   event.value = value;
   event.source = source;
+  event.guest_caller = caller;
   return event;
 }
 
@@ -161,7 +162,7 @@ void test_blocked_waits_name_the_waiter_and_the_last_signaller() {
       at(1, 3, EventKind::WaitBegin, 10, 0xFFFFFFFFu, "KeWaitForSingleObject"),
       at(2, 3, EventKind::WaitEnd, 10, 0, "KeWaitForSingleObject"),
       // t1 then waits on object 10 forever: still open, last signal before it.
-      at(3, 1, EventKind::WaitBegin, 10, 0xFFFFFFFFu, "KeWaitForSingleObject"),
+      at(3, 1, EventKind::WaitBegin, 10, 0xFFFFFFFFu, "KeWaitForSingleObject", 0x82001000u),
       // t4 waits on objects 20 and 21 together; 21 is signalled afterwards.
       at(4, 4, EventKind::WaitBegin, 20, 500, "KeWaitForMultipleObjects"),
       at(5, 4, EventKind::WaitBegin, 21, 500, "KeWaitForMultipleObjects"),
@@ -174,6 +175,10 @@ void test_blocked_waits_name_the_waiter_and_the_last_signaller() {
   assert(waits[0].timeout_ms == 0xFFFFFFFFu && waits[0].waiting_since_ns == 3'000'000);
   assert(waits[0].last_signal && waits[0].last_signal->guest_thread_id == 2);
   assert(!waits[0].signalled_after_wait_began);
+  assert(waits[0].guest_caller == 0x82001000u);
+  assert(waits[0].category == xenon::logging::FailureCategory::DeadlockCandidate &&
+         "an open wait with no timeout is a deadlock candidate");
+  assert(!waits[1].category && "a bounded wait ends by itself");
 
   assert(waits[1].guest_thread_id == 4 && waits[1].object_id == 20 && !waits[1].last_signal);
   assert(waits[2].guest_thread_id == 4 && waits[2].object_id == 21);
@@ -181,9 +186,10 @@ void test_blocked_waits_name_the_waiter_and_the_last_signaller() {
   assert(waits[2].signalled_after_wait_began && "a signal after the wait began is flagged");
 
   const auto text = events::format_blocked_waits(waits, 10'000'000);
-  assert(text.find("t1 waits in KeWaitForSingleObject on object 10 (guest 0x8200000A) for 7 ms, "
-                   "no timeout; last signalled by t2 in KeSetEvent 10 ms ago, before the wait "
-                   "began") != std::string::npos);
+  assert(text.find("[deadlock candidate] t1 waits in KeWaitForSingleObject on object 10 "
+                   "(guest 0x8200000A) for 7 ms, called from 0x82001000, no timeout; last "
+                   "signalled by t2 in KeSetEvent 10 ms ago, before the wait began") !=
+         std::string::npos);
   assert(text.find("t4 waits in KeWaitForMultipleObjects on object 20") != std::string::npos);
   assert(text.find("no signal of it recorded") != std::string::npos);
   assert(text.find("after the wait began") != std::string::npos);
