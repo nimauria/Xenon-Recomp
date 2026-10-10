@@ -142,6 +142,9 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
       case EventKind::Signal:
         if (event.object_id != 0) last_signal[event.object_id] = &event;
         break;
+      case EventKind::LockAcquired:
+      case EventKind::LockReleased:
+        break;
     }
     last_kind[event.guest_thread_id] = event.kind;
   }

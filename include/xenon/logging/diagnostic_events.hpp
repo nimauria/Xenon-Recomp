@@ -33,6 +33,12 @@ enum class EventKind : std::uint16_t {
   // A guest thread signalled an object. value: operation-specific
   // (for example the previous signal state).
   Signal = 3,
+  // A guest thread took a spin lock or critical section (guest_address).
+  // value: milliseconds spent acquiring it.
+  LockAcquired = 4,
+  // A guest thread released one. value: operation-specific (the critical
+  // section's lock count after the release).
+  LockReleased = 5,
 };
 
 struct Event {

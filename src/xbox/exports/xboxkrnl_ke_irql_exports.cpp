@@ -1,5 +1,6 @@
 #include "xenon/xbox/xboxkrnl_ke_irql_exports.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -8,11 +9,13 @@
 #include <thread>
 
 #include "xenon/core/export_registry.hpp"
+#include "xbox/exports/sync_events.hpp"
 
 namespace xenon::xbox {
 namespace {
 
 using xenon::core::ExportCallContext;
+using xenon::logging::events::EventKind;
 
 // A KSPIN_LOCK is one word of guest memory (0 = free, nonzero = held) and the
 // title may read or write it directly - inlined lock code, KeInitializeSpinLock
@@ -52,38 +55,19 @@ void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
   // only a lock held across a long host stall (thousands of failed attempts) falls
   // back to sleeping, so it does not burn a core. (Windows rounds short sleeps up
   // to a scheduler tick, so sleeping any earlier would make ordinary contention crawl.)
-  const auto _acquire_start = std::chrono::steady_clock::now();
-  if (lock_address == 0x641B8u) {
-    if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
-      std::fprintf(_d, "ACQUIRE ATTEMPT START by thread_id=%u\n", context.thread_id);
-      std::fclose(_d);
-    }
-  }
+  const auto acquire_start = std::chrono::steady_clock::now();
   for (std::uint32_t attempt = 0;; ++attempt) {
     // Test-and-test-and-set: only issue the (comparatively heavy) load-reserve/
     // store-conditional pair when a plain load says the lock looks free, so
     // waiters do not keep starving the holder's own reservation traffic.
     if (context.memory.read32_be(lock_address) == 0u && try_acquire(context, lock_address)) {
-      const auto _elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - _acquire_start)
-                                    .count();
-      if (lock_address == 0x641B8u) {
-        if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
-          std::fprintf(_d, "ACQUIRED by thread_id=%u after %lldms (%u attempts)\n",
-                       context.thread_id, (long long)_elapsed_ms, attempt);
-          std::fclose(_d);
-        }
-      }
-      if (_elapsed_ms >= 20) {
-        static std::atomic<int> _slow_acquire_diag_count{0};
-        if (_slow_acquire_diag_count.fetch_add(1) < 20) {
-          if (FILE* _d = std::fopen("spinlock_contention_diag.log", "a")) {
-            std::fprintf(_d, "acquire(0x%08llX) by thread_id=%u took %lldms (%u attempts)\n",
-                         (unsigned long long)lock_address, context.thread_id,
-                         (long long)_elapsed_ms, attempt);
-            std::fclose(_d);
-          }
-        }
+      if (logging::events::enabled()) {
+        const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - acquire_start)
+                                   .count();
+        const auto value = static_cast<std::uint32_t>(std::min<long long>(waited_ms, 0xFFFFFFFFll));
+        sync_events::record(EventKind::LockAcquired, context, nullptr, lock_address, value,
+                            "KeAcquireSpinLock");
       }
       return;
     }
@@ -103,13 +87,8 @@ void acquire(ExportCallContext& context, cpu::GuestAddress lock_address) {
 }
 
 void release(ExportCallContext& context, cpu::GuestAddress lock_address) {
-  if (lock_address == 0x641B8u) {
-    if (FILE* _d = std::fopen("lock_641b8_history_diag.log", "a")) {
-      std::fprintf(_d, "RELEASE by thread_id=%u (previous holder was 0x%08X)\n",
-                   context.thread_id, context.memory.read32_be(lock_address));
-      std::fclose(_d);
-    }
-  }
+  sync_events::record(EventKind::LockReleased, context, nullptr, lock_address, 0u,
+                      "KeReleaseSpinLock");
   context.memory.write32_be(lock_address, 0u);
 }
 
