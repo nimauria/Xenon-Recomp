@@ -166,13 +166,14 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
     build << "  " << std::filesystem::relative(path, options.output).generic_string() << "\n";
   build << "  registry.cpp\n  imports.cpp\n  metadata.cpp\n  hooks.cpp\n"
            ")\n"
-           // Xenon::Recomp: native_replacements.hpp/.cpp - referenced by
-           // registry.cpp's lookup_compiled() switch whenever this module
-           // used at least one NativeReplacement hint (Part 1.10). Always
-           // linked (small, already a dependency of the driver itself) so a
+           // Xenon::RecompRuntime: runtime helpers and
+           // native_replacements.hpp/.cpp - referenced by registry.cpp's
+           // lookup_compiled() switch whenever this module used at least one
+           // NativeReplacement hint (Part 1.10). Always linked (small) so a
            // module gaining its first native replacement never needs a
-           // build-system change.
-           "target_link_libraries(xenon_game PRIVATE Xenon::CPU Xenon::Memory Xenon::XboxKernelIo Xenon::Recomp)\n"
+           // build-system change. The recompiler itself (Xenon::Recomp) is
+           // not linked, so a module build does not compile it.
+           "target_link_libraries(xenon_game PRIVATE Xenon::CPU Xenon::Memory Xenon::XboxKernelIo Xenon::RecompRuntime)\n"
            "target_include_directories(xenon_game PRIVATE ${XENON_RECOMP_ROOT}/include)\n"
            "set_property(TARGET xenon_game PROPERTY POSITION_INDEPENDENT_CODE ON)\n"
            "add_library(xenon_game_module SHARED module_export.cpp)\n"
