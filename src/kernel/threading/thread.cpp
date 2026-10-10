@@ -94,7 +94,8 @@ KernelThread::KernelThread(ThreadEntry entry, const ThreadCreationParams& params
 
 KernelThread::~KernelThread() {
   if (host_thread_) {
-    terminate(0xDEADBEEF);
+    // False only when the thread already finished, which is fine here.
+    static_cast<void>(terminate(0xDEADBEEF));
     // A bounded wait, not the previous unconditional host_thread_->join():
     // terminate() cannot interrupt a thread already running non-preemptible
     // compiled guest code (see terminate()'s own doc comment), so an
@@ -469,7 +470,7 @@ void ThreadManager::shutdown() {
   // threads_copy is destroyed at the end of this function).
   constexpr std::uint32_t kShutdownJoinTimeoutMs = 5000;
   for (auto& thread : threads_copy) {
-    thread->terminate(0);
+    static_cast<void>(thread->terminate(0));
     static_cast<void>(thread->join(kShutdownJoinTimeoutMs));
   }
 }
