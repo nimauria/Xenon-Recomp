@@ -250,6 +250,9 @@ observed in source or by execution during V3-00.
     that). V3-03.
 11. **The capability verdict cannot see a stall.** It reports `FAIL` only
     for a recorded session error or an unbound native module. V3-02, V3-15.
+12. **Benchmarks are never executed by CI**, so they rot unnoticed
+    (confirmed: the recomp benchmark failed its own assertion at every size).
+    V3-09 should run a short benchmark smoke as a CTest.
 
 ## Documentation that disagrees with the tree
 
@@ -300,6 +303,7 @@ What exists:
 - `xenon_recomp_analysis_benchmark [functions] [words]`: synthetic XEX of
   hint-seeded NOP/`blr` functions; reports analysis and codegen wall time
   for one worker and for all workers. Always cold: it deletes its cache root.
+  It does not exercise real CFG shapes.
 - `xenon_memory_v2_benchmarks`: the Memory V2 Release benchmark (CSV/JSON).
 - CTest durations from `ctest-results-*` JUnit artifacts in CI.
 
@@ -316,7 +320,28 @@ What V3 needs and does not yet have:
 | Runtime progression | Missing; needs V3-02 events and V3-15 reports |
 | Lawful AC6 run | Not available in this environment |
 
-<!-- V3-00-BENCH -->
+Baseline measurement after fixing the benchmark fixture (below), Debug build,
+`xenon_recomp_analysis_benchmark 3000 20`, three process runs each timing
+`jobs=1` and `jobs=auto` (one worker on this host), six samples:
+
+| Measure | Median | Range |
+| --- | ---: | ---: |
+| Analysis | 5.39 s | 5.11 to 5.67 s |
+| C++ codegen | 3.16 s | 3.08 to 3.37 s |
+| Peak RSS (whole process) | 29 MiB | 29 MiB |
+
+Debug numbers set a reference point for this host only; Release
+measurements belong to V3-06 and V3-09.
+
+**The benchmark was broken.** Its synthetic XEX put `.text` at raw file
+offset `0x600` while declaring RVA `0x10000`. The loader copies sections by
+RVA (`src/xbox/xex/image/pe_directories.cpp`), which is right for XEX
+basefiles, so the first 64,000 bytes of hinted functions read as zero words
+and were rejected. Every size failed the benchmark's own assertion (3,000
+requested, 2,200 compiled). The fixture now places `.text` at its RVA.
+Because the benchmark is not a CTest, nothing caught this, and the Recomp
+Analysis V2 figures in `RECOMP_ANALYSIS_V2.md` could not be re-measured until
+this fix.
 
 ## V3-03 progress
 
@@ -345,7 +370,17 @@ Change (`src/kernel/synchronization/`):
 
 Verification:
 
-<!-- V3-03-RESULTS -->
+| Check | Result |
+| --- | --- |
+| Owner reproducers before the fix (built out of tree) | Abort on the first: a timed-out WaitAll reset an auto-reset event |
+| `xenon_kernel_wait_semantics_tests` (13 tests) | Pass; 300 repetitions of the original nine and 100 of all 13 with no failure |
+| ThreadSanitizer (GCC 13, test plus kernel synchronization and thread sources) | 20 runs, no reports |
+| Mutation: remove the notification from thread termination, event, semaphore, mutant or timer in turn | Each makes the suite abort |
+| Source-ownership audit | 0 errors (was 1) |
+| Full CTest, Debug, `--parallel 2 --timeout 900` | 149/150; `xenon_prepare_worker_tests` timed out at 900 s while compiling a nested generated project |
+| `xenon_prepare_worker_tests` alone | Pass in 1,047 s on this 2-vCPU host, over the 900 s CI budget. Not attributable to the wait change (it is compile-bound; finding 3) but not yet compared against a baseline run |
+| Sync-related test durations before and after | No regression (for example `xenon_xboxkrnl_ke_sync_export_tests` 2.30 s to 2.17 s, `xenon_thread_creation_tests` 8.38 s to 7.14 s) |
+| Windows MSVC build and tests | Not run; needs CI |
 
 Still open in V3-03:
 
@@ -401,6 +436,10 @@ and the compilation graph.
 - **Slow nested builds.** Tests that build generated projects take minutes
   each and hash `include/`, `src/` and `cmake/`; editing sources during a
   full CTest run can fail them.
+- **Prepare-worker budget.** `xenon_prepare_worker_tests` needed 1,047 s
+  alone on this 2-vCPU host against a 900 s CTest timeout. It passed within
+  budget on earlier CI runs; if CI now times out, the fix is finding 3, not a
+  longer timeout.
 - **Disk.** About 4 GiB free here; a second full build directory may not fit.
 - **No Windows, D3D12 hardware or title input locally.** V3-01's Windows fix
   and every AC6 claim need CI or the owner's machine.
