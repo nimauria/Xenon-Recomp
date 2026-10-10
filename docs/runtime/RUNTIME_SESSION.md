@@ -523,10 +523,14 @@ proven, and two real defects this work surfaced were fixed.
   deterministically would need a real, uninitialized GPU backend object,
   which risks undefined behavior in third-party SDL/Vulkan calls rather than
   a clean, portable test.
+- 🔄 Multi-threaded guest execution: threads created through `ExCreateThread`
+  and `XamTaskSchedule` run on their own `KernelThread`
+  (`src/core/session/threading/`), alongside the GPU-pump and audio-callback
+  threads. Their behaviour under a real title is part of the open
+  investigation in [AC6_RUNTIME_INVESTIGATION.md](AC6_RUNTIME_INVESTIGATION.md).
 
 ### TODO
 
-- ⏳ Thread management (multiple guest threads)
 - ⏳ Network subsystem integration
 - ⏳ Save state / restore
 
