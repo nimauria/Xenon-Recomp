@@ -18,6 +18,7 @@
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/mutant.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/kernel/semaphore.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
@@ -123,6 +124,49 @@ void test_nt_create_event_and_wait_single() {
   result = f.invoke(0x0FDu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+}
+
+// Handle-based signals and waits record one kernel object, by guest thread;
+// NtSignalAndWaitForSingleObjectEx records its signal before its wait.
+void test_nt_waits_and_signals_are_recorded_as_diagnostic_events() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1;  // SynchronizationEvent (auto-reset)
+  cpu.gpr[6] = 0;  // not signaled
+  assert(f.invoke(0x0D1u, cpu).success && cpu.gpr[3] == 0u);  // NtCreateEvent
+  const auto handle = f.address_space->read32_be(handle_out);
+
+  events::set_enabled(true);
+  events::clear();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  assert(f.invoke(0x0F6u, cpu, 31).success && cpu.gpr[3] == 0u);  // NtSetEvent
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  assert(f.invoke(0x0FDu, cpu, 32).success && cpu.gpr[3] == 0u);  // NtWaitForSingleObjectEx
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;  // signal
+  cpu.gpr[4] = handle;  // then wait on the same event
+  assert(f.invoke(0x0FBu, cpu, 33).success && cpu.gpr[3] == 0u);  // NtSignalAndWait...
+  events::set_enabled(false);
+
+  const auto recorded = events::snapshot();
+  assert(recorded.size() == 6);
+  using events::EventKind;
+  const EventKind kinds[] = {EventKind::Signal,    EventKind::WaitBegin, EventKind::WaitEnd,
+                             EventKind::Signal,    EventKind::WaitBegin, EventKind::WaitEnd};
+  const std::uint32_t threads[] = {31, 32, 32, 33, 33, 33};
+  for (std::size_t i = 0; i < recorded.size(); ++i) {
+    assert(recorded[i].kind == kinds[i] && recorded[i].guest_thread_id == threads[i]);
+    assert(recorded[i].guest_address == handle);
+    assert(recorded[i].object_id != 0 && recorded[i].object_id == recorded[0].object_id);
+  }
+  assert(recorded[1].value == 0xFFFFFFFFu && recorded[2].value == 0u);
+  assert(events::blocked_waits(recorded).empty());
+  events::clear();
 }
 
 void test_nt_pulse_event_signals_then_resets() {
@@ -429,6 +473,7 @@ int main() {
 
   test_ordinals_are_registered();
   test_nt_create_event_and_wait_single();
+  test_nt_waits_and_signals_are_recorded_as_diagnostic_events();
   test_nt_pulse_event_signals_then_resets();
   test_ex_terminate_thread_sets_state_and_exit_code();
   test_nt_create_semaphore_release_and_limit();
