@@ -84,12 +84,30 @@ only while that client has **callback credits**:
    issued by a host thread with no registered `KernelThread`. These break
    thread-keyed semantics such as mutant ownership and waits.
 
-## Existing probes
+## Diagnostics
 
-The probes are unconditional `*_diag.log` files in the working directory,
-written through `logging::append_probe_log()`. The title-specific probes are
-isolated in `src/core/session/diagnostics/title_probes.cpp` and are called
-from the same points as before the refactor.
+Three opt-in switches, all off by default. Set them in the environment of the
+process that runs the game (the runtime host).
+
+| Variable | Effect |
+|----------|--------|
+| `XENON_DIAG_EVENTS=1` | Records every guest wait, signal, spin-lock and critical-section acquire/release in a bounded in-memory ring (`xenon/logging/diagnostic_events.hpp`). The stop report then lists each thread still waiting, the object it waits on, and the thread that last signalled that object, including whether that signal came after the wait began. |
+| `XENON_PROBE_LOGS=1` | Writes the `*_diag.log` investigation probes listed below to the working directory. Each file is replaced by its first record in a run and capped at 4 MiB per run. |
+| `XENON_WRITE_TRAP=<hex>[,<hex>...]` | Reports every 32-bit guest store to up to four guest addresses in `signal_write_trap_diag.log`, with the host stack on Windows. Needs `XENON_PROBE_LOGS=1`. The two handshake events' `SignalState` words are `XENON_WRITE_TRAP=0x62D78,0x62DC8`. |
+
+These replaced unconditional files: `ke_wait_diag.log` (35 MB in one test
+run), `set_event_all_diag.log`, `nt_set_event_diag.log`,
+`critical_section_contention_diag.log`, `spinlock_contention_diag.log` and
+`lock_641b8_history_diag.log` are now diagnostic events. To follow the lock
+at guest `0x641B8`, filter the events by that address; the generic runtime no
+longer names it. The write trap used to compare two hard-coded addresses on
+every guest store.
+
+### Probe logs (`XENON_PROBE_LOGS=1`)
+
+The title-specific probes are isolated in
+`src/core/session/diagnostics/title_probes.cpp` and are called from the same
+points as before the refactor.
 
 | File | Where | Records |
 |------|-------|---------|
@@ -104,15 +122,11 @@ from the same points as before the refactor.
 | `thread_identity_diag.log`, `thread_start_diag.log`, `set_current_thread_diag.log`, `thread_create_flags_diag.log` | thread creation/start | thread ids, start addresses, suspend flags |
 | `dispatch_lookup_diag.log`, `dispatch_outcome_diag.log` | guest dispatch | compiled-entry lookups and per-thread dispatch outcomes |
 | `anonymous_thread_export_diag.log`, `unique_exports_seen_diag.log` | export dispatch | exports with no thread identity; first use of each export |
-
-Other subsystems still write raw `fopen` probes. They should move to
-`append_probe_log()` when their libraries link `xenon_logging`:
-
-- kernel: `wptr`/`rptr`/`ring_init`, `thread_resume`, `thread_main_entry`, `nt_read_file`
-- xbox exports: `nt_set_event`, `ke_wait`, `set_event_all`, critical-section and spin-lock contention, `vdswap_calls`, `vsync_callback`
-- memory: physical/virtual allocation failures
-- CPU: `signal_write_trap`
-- graphics: `draw_calls`, `truncation`
+| `ring_init_diag.log`, `wptr_diag.log`, `rptr_diag.log` | kernel GPU ring | ring setup and read/write pointer updates |
+| `thread_resume_diag.log`, `thread_main_entry_diag.log` | kernel threads | resume calls and thread entry |
+| `vdswap_calls_diag.log`, `vsync_callback_diag.log`, `nt_set_timer_ex_diag.log`, `nt_read_file_diag.log` | Xbox exports | VdSwap, vsync callback registration, timers, file reads |
+| `allocate_early_fail_diag.log`, `virt_alloc_fail_diag.log`, `phys_alloc_fail_diag.log`, `heap_alloc_null_process_diag.log` | memory | allocation failures |
+| `draw_calls_diag.log`, `truncation_diag.log` | graphics | draw packets, truncated PM4 packets |
 
 In the PM4 interrupt path, the session also logs the title's interrupt
 handler words to the console (first four deliveries, verbose logging only).

@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "kernel/synchronization/wait_internal.hpp"
+#include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -195,11 +196,9 @@ bool KernelThread::resume() {
 
   const auto old_count = suspend_count_.load(std::memory_order_acquire);
   {
-    if (FILE* _d = std::fopen("thread_resume_diag.log", "a")) {
-      std::fprintf(_d, "resume() called: thread_id=%u old_suspend_count=%d\n",
-                   thread_id_, (int)old_count);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log("thread_resume_diag.log",
+                                     "resume() called: thread_id=%u old_suspend_count=%d\n",
+                                     thread_id_, (int)old_count);
   }
   if (old_count == 0) {
     return false;  // Not suspended
@@ -338,11 +337,10 @@ void KernelThread::thread_main() {
   }
 
   {
-    if (FILE* _d = std::fopen("thread_main_entry_diag.log", "a")) {
-      std::fprintf(_d, "thread_main: thread_id=%u should_run_entry=%d has_entry=%d\n",
-                   thread_id_, should_run_entry ? 1 : 0, entry_ ? 1 : 0);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log(
+        "thread_main_entry_diag.log",
+        "thread_main: thread_id=%u should_run_entry=%d has_entry=%d\n", thread_id_,
+        should_run_entry ? 1 : 0, entry_ ? 1 : 0);
   }
   std::uint32_t result = 0;
   if (should_run_entry && entry_) {

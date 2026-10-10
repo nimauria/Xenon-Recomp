@@ -114,7 +114,8 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
     }
     const bool _ok = run_guest_callback(state, callback, audio_thread_);
     if (_en <= 20 || (_en % 500) == 0) {
-      logging::append_probe_log("audio_callback_diag.log", "invoke_audio_callback #%d RETURNED: ok=%d\n", _en, (int)_ok);
+      logging::append_probe_log("audio_callback_diag.log",
+                                "invoke_audio_callback #%d RETURNED: ok=%d\n", _en, (int)_ok);
     }
     return _ok;
   }

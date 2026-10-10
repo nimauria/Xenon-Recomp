@@ -18,6 +18,7 @@
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xbox/exports/sync_events.hpp"
 
@@ -583,11 +584,9 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
           "still fires for NtWaitForSingleObjectEx-style waiters");
     });
   }
-  if (FILE* _d = std::fopen("nt_set_timer_ex_diag.log", "a")) {
-    std::fprintf(_d, "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
-                 (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log("nt_set_timer_ex_diag.log",
+                                   "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
+                                   (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
 
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));
   const auto relative_due = xbox_timeout_to_relative_ms(raw);

@@ -123,7 +123,8 @@ void sample_title_vsync_probes(memory::AddressSpace& memory, std::uint32_t inter
         }
         if (!label.empty()) {
           _label_dumped.store(true);
-          logging::append_probe_log("subsystem_label_diag.log", "label at 0x82067EC8: \"%s\"\n", label.c_str());
+          logging::append_probe_log("subsystem_label_diag.log", "label at 0x82067EC8: \"%s\"\n",
+                                    label.c_str());
         }
       } catch (const std::exception&) {
       }

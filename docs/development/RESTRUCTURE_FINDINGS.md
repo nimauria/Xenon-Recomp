@@ -203,5 +203,6 @@ See `docs/runtime/AC6_RUNTIME_INVESTIGATION.md`. In short:
 - The Debug build's `-Wunused-parameter` warnings (RuntimeServices
   overrides, `mount_content()`) and ignored `[[nodiscard]]` results of
   `KernelThread::terminate()` were cleared without behaviour changes.
-- About forty `*_diag.log` investigation probes outside the session still
-  call `fopen` directly. They are inventoried in the AC6 note.
+- The `*_diag.log` investigation probes no longer call `fopen` directly and
+  are off unless `XENON_PROBE_LOGS=1`; the highest-volume ones became bounded
+  diagnostic events. See the AC6 note.

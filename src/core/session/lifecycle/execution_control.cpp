@@ -48,7 +48,8 @@ SessionResult XenonSession::start() {
   write_guest_thread_id(*memory_, main_thread_tls_, main_thread_->thread_id());
   main_thread_->set_guest_kthread_address(main_thread_tls_.kthread_address);
   kernel_process_->set_main_thread(main_thread_);
-  logging::append_probe_log("thread_identity_diag.log", "main_thread_ assigned thread_id=%u\n", main_thread_->thread_id());
+  logging::append_probe_log("thread_identity_diag.log", "main_thread_ assigned thread_id=%u\n",
+                            main_thread_->thread_id());
   // Take the watch baseline before any guest code runs.
   start_memory_watch_poll();
   if (!main_thread_->start()) {

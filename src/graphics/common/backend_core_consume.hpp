@@ -4,6 +4,7 @@
 // by backend_core.hpp; see that header for the backend hooks.
 
 #include "graphics/common/backend_core.hpp"
+#include "xenon/logging/probe_log.hpp"
 
 namespace xenon::gpu::detail {
 
@@ -43,12 +44,12 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       const int _n = _draw_diag_count.fetch_add(1) + 1;
       // First 10 in full, then a running total every 1000 draws.
       if (_n <= 10 || _n % 1000 == 0) {
-        if (FILE* _d = std::fopen("draw_calls_diag.log", "a")) {
-          std::fprintf(_d, "%.*s draw #%d: index_count=%u primitive=%d source=%d vs_valid=%d ps_valid=%d\n",
-                       static_cast<int>(Api::kName.size()), Api::kName.data(), _n, draw->index_count, static_cast<int>(draw->primitive_type),
-                       static_cast<int>(draw->source), draw->vertex_shader.valid, draw->pixel_shader.valid);
-          std::fclose(_d);
-        }
+        xenon::logging::append_probe_log(
+            "draw_calls_diag.log",
+            "%.*s draw #%d: index_count=%u primitive=%d source=%d vs_valid=%d ps_valid=%d\n",
+            static_cast<int>(Api::kName.size()), Api::kName.data(), _n, draw->index_count,
+            static_cast<int>(draw->primitive_type), static_cast<int>(draw->source),
+            draw->vertex_shader.valid, draw->pixel_shader.valid);
       }
     }
     const auto state = resource_state.snapshot();

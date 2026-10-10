@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/fault.hpp"
 
 namespace xenon::kernel::xbox {
@@ -281,13 +282,11 @@ Status GuestIoBridge::nt_read_file(
   }
   if (!write_iosb(io_status_block, iosb)) return status::AccessViolation;
   queue_apc(apc_routine, apc_context, io_status_block, iosb);
-  if (FILE* _d = std::fopen("nt_read_file_diag.log", "a")) {
-    std::fprintf(_d,
-                 "NtReadFile: file_handle=0x%08X offset=%lld requested=%u transferred=%u iosb_status=0x%08X result=0x%08X\n",
-                 (unsigned)file_handle, offset.has_value() ? (long long)*offset : -1LL,
-                 buffer_length, iosb.information, (unsigned)iosb.status, (unsigned)result);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log(
+      "nt_read_file_diag.log",
+      "NtReadFile: file_handle=0x%08X offset=%lld requested=%u transferred=%u iosb_status=0x%08X result=0x%08X\n",
+      (unsigned)file_handle, offset.has_value() ? (long long)*offset : -1LL, buffer_length,
+      iosb.information, (unsigned)iosb.status, (unsigned)result);
   return result;
 }
 

@@ -26,7 +26,7 @@ if(XENON_ENABLE_MEMORY)
     guest/diagnostics/invariants.cpp
     ${XENON_HOST_VM_SOURCE}
   )
-  target_link_libraries(xenon_memory PUBLIC xenon_cpu)
+  target_link_libraries(xenon_memory PUBLIC xenon_cpu PRIVATE xenon_logging)
   target_include_directories(xenon_memory
     PUBLIC "${XENON_SOURCE_DIR}/include"
     PRIVATE "${XENON_SOURCE_DIR}/src")
