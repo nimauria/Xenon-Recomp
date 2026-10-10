@@ -18,6 +18,33 @@ findings remain below; resolved findings record the observed cause and fix.
    arguments and returns success with a message pointing at
    `mount_content_graph()`.
 
+3. **`xenon-prepare` builds the Xenon runtime once per module.** Each
+   module's workspace configures the generated project with
+   `add_subdirectory(${XENON_RECOMP_ROOT})`, so a title with several modules
+   compiles the whole runtime several times. `xenon_prepare_worker_tests` does
+   three such builds and passed at 783 s and 540 s of its 900 s budget on
+   Windows CI (runs 37967218940, 37968759726). The same applies to every test
+   that builds a generated project.
+
+4. **The D3D12 stencil-reference path checks an interface, not the
+   capability.** `src/graphics/d3d12/backend.cpp` sets separate front/back
+   stencil references whenever `ID3D12GraphicsCommandList8` is available;
+   `OMSetFrontAndBackStencilRef` requires the same `OPTIONS14` capability the
+   pipeline stream now checks. Not yet observed failing.
+
+5. **Unverified: the reservation commit handshake relies on x86 ordering.**
+   Plain writers increment `active_coherency_writers` and then load the commit
+   gate, while a conditional store acquires the gate and then loads the
+   counter, using acquire/release rather than sequentially consistent
+   operations. That store-then-load exclusion is guaranteed on x86-64, the
+   only supported host, but not by the C++ memory model in general.
+
+6. **Unverified: `InterlockedPopEntrySList` reads the head entry's link
+   after reserving the header.** If another thread pops and frees that entry
+   and its page is released, the read faults instead of retrying, as the real
+   kernel arranges. Guest memory normally stays mapped, so this has not been
+   observed.
+
 ## Differences between the Vulkan and D3D12 backends
 
 Both backends now share `src/graphics/common/backend_core*.hpp`. Where their
@@ -98,10 +125,12 @@ defect that predates the refactor:
 - `xenon-prepare` named its build workspace with a 64-hex-digit digest, which
   pushed nested object paths past the 260-character `MAX_PATH` (C1083). The
   name is now the first 16 digits.
-- GitHub's Windows runners have a Vulkan loader but no Vulkan driver and no
-  hardware D3D12 adapter. Tests now skip device checks where no device exists,
-  using a loader-level probe (`tests/support/vulkan_probe.hpp`) so a Xenon
-  regression still fails where a device is present.
+- GitHub's Windows runners have a Vulkan loader but no Vulkan driver. Tests
+  now skip Vulkan device checks where no device exists, using a loader-level
+  probe (`tests/support/vulkan_probe.hpp`) so a Xenon regression still fails
+  where a device is present. The runners do expose a D3D12 device: the
+  Microsoft Basic Render Driver creates a feature-level 12_0 device without
+  the software-adapter flag, so the D3D12 checks run there.
 
 **`xenon_xbox_threading_exports_tests` hung intermittently.** Its
 `slist_concurrent` case hung in about 1 of 40 local runs and timed out on
@@ -122,6 +151,36 @@ either gate only while uncounted, backing out both counts if a gate was
 raised after it counted itself. `xenon_memory_tests` races conditional and
 plain stores in one granule under a no-progress watchdog: it stalled in 5 of
 5 runs before the fix and passes after it.
+
+**D3D12 draw pipelines failed on Windows 10 and Server 2022 runtimes.**
+`d3d12::GraphicsPipeline` (`src/graphics/d3d12/pipeline.cpp`) built every
+pipeline through a state stream with a `DEPTH_STENCIL2` subobject whenever the
+device exposed `ID3D12Device2`. That subobject exists only in runtimes that
+report `D3D12_OPTIONS14::IndependentFrontAndBackStencilRefMaskSupported`
+(Agility SDK 1.610+ or the Windows 11 24H2 inbox runtime); the windows-2022
+runner reports it unsupported, and `xenon_backend_capability_tests` aborted at
+pipeline creation while DXC-built transfer pipelines on the same device, made
+with `CreateGraphicsPipelineState`, succeeded. The stream path is now gated on
+that capability, with the existing legacy description (which rejects divergent
+front/back stencil masks) as the fallback. CI run 37968759726 shows the
+pipeline building through the legacy path and the functional D3D12 checks
+passing on the Basic Render Driver.
+
+**The FFmpeg patch test wrote a CRLF patch on Windows.**
+`tests/deps/bootstrap_tests.py` wrote its synthetic patch with
+`Path.write_text()`, which translates newlines on Windows, so `git apply`
+rejected the fixture's own patch. Pinned patches are `eol=lf` and hash-pinned,
+so production was unaffected; the fixture is now written as bytes.
+
+**Nested generated-project builds were serial on Windows.**
+`recomp_driver`, `registry_numeric_format`, `guest_export_abi` and
+`audio_guest_callback` tests build a generated project against a snapshot of
+the Xenon tree. Their nested configure named no generator, so Windows used the
+Visual Studio generator, which compiles a project's files one at a time; two
+of them also built without `--parallel`. `registry_numeric_format` timed out at
+900 s and later passed at 873 s. Nested builds now use the outer build's
+generator and compiler (`tests/support/nested_cmake.hpp`) with
+`--parallel 4`.
 
 ## Runtime observations
 

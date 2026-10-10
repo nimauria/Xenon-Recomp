@@ -164,6 +164,15 @@ void print_usage();
 bool parse_args(int argc, char** argv, Options& options, std::string& error);
 
 // ---------------------------------------------------------------------------
+// Optional analysis feedback (--observations, --knowledge). Not given, or not
+// created yet, is an empty set. A file that exists but cannot be loaded is
+// reported as Failed and returns false; xenon-prepare then exits with 2.
+bool load_optional_observations(const Options& options, StatusReporter& status,
+                                std::vector<xenon::recomp::AdaptiveObservation>& observations);
+bool load_optional_knowledge(const Options& options, StatusReporter& status,
+                             std::vector<xenon::recomp::KnowledgeRecord>& records);
+
+// ---------------------------------------------------------------------------
 // Analyze + generate + compile + commit one already-identified XEX image
 // (Analyzing/GeneratingSource/Compiling/Validating). Shared verbatim between
 // the single-module fast path and the Gen 11 multi-module loop below, so the

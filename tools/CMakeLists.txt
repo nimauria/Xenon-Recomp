@@ -29,6 +29,7 @@ xenon_enable_warnings(import-scanner)
 # and promotes the result through the artifact cache. XENON_SOURCE_ROOT lets
 # it default --recomp-root to this checkout, matching xenon_recomp_driver_tests.
 add_executable(xenon-prepare
+  xenon_prepare/feedback.cpp
   xenon_prepare/main.cpp
   xenon_prepare/module_build.cpp
   xenon_prepare/options.cpp

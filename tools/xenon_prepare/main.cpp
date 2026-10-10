@@ -163,20 +163,7 @@ int main(int argc, char** argv) {
       // and excluded from the cache fingerprint, so only NEW control-flow
       // facts cause a rebuild on the next Play.
       std::vector<xenon::recomp::AdaptiveObservation> adaptive_observations;
-      if (!options.observations.empty()) {
-        std::error_code observation_ec;
-        if (std::filesystem::exists(options.observations, observation_ec) && !observation_ec) {
-          std::string observation_error;
-          if (!xenon::recomp::load_adaptive_observations(
-                  options.observations, adaptive_observations, observation_error)) {
-            const auto message = "adaptive observation trace could not be loaded: " +
-                                 observation_error;
-            status.report(Phase::Failed, 5, "Loading adaptive analysis feedback", message);
-            std::cerr << "xenon-prepare: " << message << "\n";
-            return 2;
-          }
-        }
-      }
+      if (!load_optional_observations(options, status, adaptive_observations)) return 2;
       adaptive_observations.erase(
           std::remove_if(adaptive_observations.begin(), adaptive_observations.end(),
                          [&](const auto& observation) {
@@ -192,19 +179,7 @@ int main(int argc, char** argv) {
       // from another executable revision; the matcher validates normalized
       // code/CFG identity before any record becomes evidence.
       std::vector<xenon::recomp::KnowledgeRecord> knowledge_records;
-      if (!options.knowledge.empty()) {
-        std::error_code knowledge_ec;
-        if (std::filesystem::exists(options.knowledge, knowledge_ec) && !knowledge_ec) {
-          std::string knowledge_error;
-          if (!xenon::recomp::load_knowledge_base(
-                  options.knowledge, knowledge_records, knowledge_error)) {
-            const auto message = "knowledge base could not be loaded: " + knowledge_error;
-            status.report(Phase::Failed, 5, "Loading universal analysis knowledge", message);
-            std::cerr << "xenon-prepare: " << message << "\n";
-            return 2;
-          }
-        }
-      }
+      if (!load_optional_knowledge(options, status, knowledge_records)) return 2;
       const auto knowledge_base_hash =
           xenon::recomp::knowledge_base_fingerprint(knowledge_records);
 
@@ -293,33 +268,10 @@ int main(int argc, char** argv) {
         hint_provider ? hint_provider->compatibility_version() : std::string("1");
 
     std::vector<xenon::recomp::AdaptiveObservation> all_adaptive_observations;
-    if (!options.observations.empty()) {
-      std::error_code observation_ec;
-      if (std::filesystem::exists(options.observations, observation_ec) && !observation_ec) {
-        std::string observation_error;
-        if (!xenon::recomp::load_adaptive_observations(
-                options.observations, all_adaptive_observations, observation_error)) {
-          const auto message = "adaptive observation trace could not be loaded: " + observation_error;
-          status.report(Phase::Failed, 5, "Loading adaptive analysis feedback", message);
-          std::cerr << "xenon-prepare: " << message << "\n";
-          return 2;
-        }
-      }
-    }
+    if (!load_optional_observations(options, status, all_adaptive_observations)) return 2;
 
     std::vector<xenon::recomp::KnowledgeRecord> knowledge_records;
-    if (!options.knowledge.empty()) {
-      std::error_code knowledge_ec;
-      if (std::filesystem::exists(options.knowledge, knowledge_ec) && !knowledge_ec) {
-        std::string knowledge_error;
-        if (!xenon::recomp::load_knowledge_base(options.knowledge, knowledge_records, knowledge_error)) {
-          const auto message = "knowledge base could not be loaded: " + knowledge_error;
-          status.report(Phase::Failed, 5, "Loading universal analysis knowledge", message);
-          std::cerr << "xenon-prepare: " << message << "\n";
-          return 2;
-        }
-      }
-    }
+    if (!load_optional_knowledge(options, status, knowledge_records)) return 2;
     const auto knowledge_base_hash = xenon::recomp::knowledge_base_fingerprint(knowledge_records);
 
     if (options.recomp_root.empty()) {
