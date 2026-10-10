@@ -144,6 +144,8 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
         break;
       case EventKind::LockAcquired:
       case EventKind::LockReleased:
+      case EventKind::GpuWaitParked:
+      case EventKind::GpuWaitResumed:
         break;
     }
     last_kind[event.guest_thread_id] = event.kind;
@@ -167,6 +169,15 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
     }
   }
   return waits;
+}
+
+std::optional<Event> parked_gpu_wait(std::span<const Event> events) {
+  std::optional<Event> parked;
+  for (const auto& event : events) {
+    if (event.kind == EventKind::GpuWaitParked) parked = event;
+    if (event.kind == EventKind::GpuWaitResumed) parked.reset();
+  }
+  return parked;
 }
 
 std::string format_blocked_waits(std::span<const BlockedWait> waits, std::int64_t now_ns) {

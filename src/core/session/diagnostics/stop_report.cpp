@@ -40,6 +40,12 @@ void XenonSession::report_stop_diagnostics() {
               << std::endl;
     for (std::string line; std::getline(lines, line);)
       std::cout << "[XenonSession]   " << line << std::endl;
+    if (const auto parked = logging::events::parked_gpu_wait(snapshot)) {
+      std::cout << "[XenonSession]   GPU parked on WAIT_REG_MEM 0x" << std::hex
+                << parked->guest_address << " for reference 0x" << parked->value << std::dec
+                << " since " << (now_ns - parked->host_time_ns) / 1'000'000 << " ms ago"
+                << std::endl;
+    }
   }
 #if defined(XENON_HAS_AUDIO)
   if (config_.enable_logging && audio_) {

@@ -39,6 +39,13 @@ enum class EventKind : std::uint16_t {
   // A guest thread released one. value: operation-specific (the critical
   // section's lock count after the release).
   LockReleased = 5,
+  // The GPU command processor parked on an unsatisfied WAIT_REG_MEM, recorded
+  // once per fence rather than on every retried drain. guest_address: the
+  // polled physical address (with its endian bits) or register index;
+  // value: the reference it waits for.
+  GpuWaitParked = 6,
+  // That wait was satisfied. value: the value that satisfied it.
+  GpuWaitResumed = 7,
 };
 
 struct Event {
@@ -99,6 +106,10 @@ struct BlockedWait {
 // Derives the waits still open at the end of `events` (snapshot() order).
 // A thread whose WaitBegin was overwritten before the snapshot is not listed.
 [[nodiscard]] std::vector<BlockedWait> blocked_waits(std::span<const Event> events);
+
+// The GPU wait still parked at the end of `events`, if the last GpuWaitParked
+// has no GpuWaitResumed after it.
+[[nodiscard]] std::optional<Event> parked_gpu_wait(std::span<const Event> events);
 
 // One line per blocked wait, for stop reports. `now_ns` is the host
 // monotonic time the report describes.

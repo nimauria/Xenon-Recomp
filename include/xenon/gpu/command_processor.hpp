@@ -223,6 +223,8 @@ class CommandProcessor {
   // callers (captures, tools) keep the blocking behaviour.
   bool stall_on_unsatisfied_wait_{false};
   WaitStallInfo last_wait_stall_{};
+  // A GpuWaitParked event was recorded for last_wait_stall_ and no resume yet.
+  bool wait_park_recorded_{false};
 
   // Where a suspended wait sits inside nested indirect buffers, so the next drain
   // resumes AT the wait rather than replaying the buffer from its start.

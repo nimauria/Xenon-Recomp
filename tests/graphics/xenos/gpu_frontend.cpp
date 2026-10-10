@@ -14,6 +14,7 @@
 #include "xenon/gpu/command_processor.hpp"
 #include "xenon/gpu/graphics_system.hpp"
 #include "xenon/gpu/types.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
 
 using xenon::gpu::CommandProcessor;
@@ -586,6 +587,9 @@ void test_ring_wait_stall_resumes(AddressSpace& memory, CommandProcessor& cp,
                0x12345678u, 0xFFFFFFFFu, 0u,
                make_packet_type1(0x342, 0x343), 0xBBBB0001u, 0xBBBB0002u});
 
+  namespace events = xenon::logging::events;
+  events::set_enabled(true);
+  events::clear();
   const auto stalls_before = cp.statistics().wait_stalls;
   const auto read = cp.execute_ring(ring, capacity, 0, 12);
   assert(read == 3 && "the ring must stop AT the unsatisfied wait packet");
@@ -596,12 +600,29 @@ void test_ring_wait_stall_resumes(AddressSpace& memory, CommandProcessor& cp,
 
   // Still not satisfied: a second drain stalls at the same place, cheaply.
   assert(cp.execute_ring(ring, capacity, read, 12) == 3);
+  // The park is recorded once for the fence, not once per drain.
+  const auto polled = poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32);
+  {
+    const auto recorded = events::snapshot();
+    assert(recorded.size() == 1 && recorded[0].kind == events::EventKind::GpuWaitParked);
+    assert(recorded[0].guest_address == polled && recorded[0].value == 0x12345678u);
+    const auto parked = events::parked_gpu_wait(recorded);
+    assert(parked && parked->guest_address == polled);
+  }
 
   // The CPU produces the value; the next drain resumes at the wait and finishes.
   store_be32(memory, poll_memory, 0x12345678u);
   regs.write(0x340, 0u);  // would be rewritten if earlier packets were replayed
   const auto finished = cp.execute_ring(ring, capacity, read, 12);
   assert(finished == 12);
+  {
+    const auto recorded = events::snapshot();
+    assert(recorded.size() == 2 && recorded[1].kind == events::EventKind::GpuWaitResumed);
+    assert(recorded[1].guest_address == polled && recorded[1].value == 0x12345678u);
+    assert(!events::parked_gpu_wait(recorded));
+  }
+  events::set_enabled(false);
+  events::clear();
   assert(regs.read(0x340) == 0u && "earlier packets are not replayed on resume");
   assert(regs.read(0x342) == 0xBBBB0001u && regs.read(0x343) == 0xBBBB0002u);
 }
