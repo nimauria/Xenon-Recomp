@@ -272,7 +272,7 @@ class CoverageTests(unittest.TestCase):
         for workflow_file in ("windows.yml", "linux.yml", "ci.yml"):
             self.assertIn(f"actions/workflows/{workflow_file}/badge.svg?branch=development-restructure&amp;event=push".replace("&amp;", "&"), readme)
             self.assertTrue((generate.ROOT / ".github/workflows" / workflow_file).is_file())
-        self.assertIn("[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/dashboard.svg)", readme)
+        self.assertIn("[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/README.md)", readme)
         self.assertIn("docs/coverage/REPORT.md", readme)
         self.assertEqual((generate.ROOT / "README.md").read_bytes().count(b"\r\n"),
                          (generate.ROOT / "README.md").read_bytes().count(b"\n"))
