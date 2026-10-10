@@ -18,7 +18,7 @@ jobs:
   windows:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -35,7 +35,7 @@ jobs:
         with:
           update: true
           install: make
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .xenon/deps
           key: xenon-deps-windows-x64-${{ hashFiles('tools/deps/manifest.json', 'tools/deps/bootstrap.py', 'tools/deps/patches/**') }}
@@ -70,7 +70,7 @@ jobs:
         run: ctest --test-dir build/windows-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
       - name: Keep CTest results for the coverage audit
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ctest-results-windows
           path: build/windows-x64-debug/ctest-results.xml
