@@ -312,6 +312,8 @@ int main() {
 
     const auto mount = session.mount_content_graph(0x4E4D07D1u, root, {}, {}, 0);
     assert(mount.success && "directory content should mount without throwing");
+    assert(!session.mount_content(root.string(), "game:").success &&
+           "mount_content() mounts nothing and must not report success");
 
     xenon::filesystem::ResolvedPath resolved{};
     assert(session.filesystem()->resolve("game:\\default.xex", resolved) ==
