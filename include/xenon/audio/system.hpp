@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "xenon/audio/backend.hpp"
 #include "xenon/audio/mixer.hpp"
@@ -78,6 +79,32 @@ class AudioSystem final {
   [[nodiscard]] bool submit_render_frame(RenderClientHandle handle,
                                          cpu::GuestAddress samples);
   [[nodiscard]] bool suspend_render_clients(bool suspend);
+
+  // What one render client has done, for diagnosing stalled audio: a client
+  // gets a callback only while it holds a credit, and a credit comes back
+  // only when a frame it submitted has been consumed by the host mixer.
+  struct RenderClientStats {
+    RenderClientHandle handle{};
+    bool suspended{};
+    std::size_t callback_credits{};
+    std::size_t queued_frames{};
+    std::size_t callbacks_in_flight{};
+    std::uint64_t callbacks_issued{};
+    std::uint64_t callbacks_returned{};
+    std::uint64_t callbacks_failed{};
+    std::uint64_t frames_submitted{};
+    std::uint64_t frames_consumed{};
+    std::uint64_t rejected_untranslatable{};
+    std::uint64_t rejected_suspended{};
+    std::uint64_t rejected_queue_full{};
+  };
+  [[nodiscard]] std::vector<RenderClientStats> render_client_stats() const;
+  // Submissions naming no registered client.
+  [[nodiscard]] std::uint64_t rejected_unregistered_submissions() const noexcept {
+    return rejected_unregistered_.load(std::memory_order_relaxed);
+  }
+  // One line: whether the client can still get callbacks and, if not, why.
+  [[nodiscard]] static std::string describe(const RenderClientStats& stats);
   [[nodiscard]] std::uint32_t render_driver_tic() const noexcept {
     return static_cast<std::uint32_t>(render_tic_samples_.load());
   }
@@ -145,6 +172,7 @@ class AudioSystem final {
     // only when a submitted 256-sample frame is actually consumed.
     std::size_t callback_credits{};
     std::size_t callback_in_flight{};
+    RenderClientStats counters{};
   };
 
   [[nodiscard]] bool translate_render_frame(cpu::GuestAddress samples,
@@ -167,6 +195,7 @@ class AudioSystem final {
   std::thread callback_thread_{};
   GuestCallbackInvoker guest_callback_invoker_{};
   std::atomic<std::uint32_t> underrun_count_{0};
+  std::atomic<std::uint64_t> rejected_unregistered_{0};
   // Xbox render-driver clock, in 48 kHz samples consumed by the host. This
   // advances through underrun silence as well as submitted audio so guest AV
   // synchronization follows real playback time rather than queue occupancy.

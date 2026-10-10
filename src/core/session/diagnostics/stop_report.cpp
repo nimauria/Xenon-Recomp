@@ -11,6 +11,9 @@
 
 #include "xenon/core/session.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
+#if defined(XENON_HAS_AUDIO)
+#include "xenon/audio/system.hpp"
+#endif
 
 namespace xenon::core {
 
@@ -38,6 +41,20 @@ void XenonSession::report_stop_diagnostics() {
     for (std::string line; std::getline(lines, line);)
       std::cout << "[XenonSession]   " << line << std::endl;
   }
+#if defined(XENON_HAS_AUDIO)
+  if (config_.enable_logging && audio_) {
+    // Why each render client's callbacks stopped, if they did: a callback
+    // needs a credit, and a credit returns only when a submitted frame has
+    // been consumed.
+    const auto clients = audio_->render_client_stats();
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] Audio render clients: " << clients.size()
+              << "; submissions to unregistered handles: "
+              << audio_->rejected_unregistered_submissions() << std::endl;
+    for (const auto& client : clients)
+      std::cout << "[XenonSession]   " << audio::AudioSystem::describe(client) << std::endl;
+  }
+#endif
   if (config_.enable_logging && export_trace_.enabled()) {
     const auto recent = export_trace_.recent_global(16u);
     std::scoped_lock console_log_lock(console_log_mutex());
