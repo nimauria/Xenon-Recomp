@@ -182,6 +182,13 @@ For dashboard/system UI calls Xenon cannot meaningfully reproduce, provide:
 2. **Explicit Unsupported Behaviour**: Clear diagnostic logging with appropriate error codes
 3. **No Success Pretense**: Never return success if the game depends on returned state
 
+Dialogs a title cannot proceed without are answered without drawing
+anything, as xenia does when it runs headless: `XamShowMessageBoxUI`
+(0x02CA) returns the focused button and `XamShowKeyboardUI` (0x02C1) the
+default text, each with `XN_SYS_UI` broadcast on then off and its
+XOVERLAPPED completed. `XamIsUIActive` (0x02EC) is false because no dialog
+stays open. `XamUserGetGamerTag` (0x020C) returns the profile's gamertag.
+
 ## AC6 Requirements
 
 Initial implementation prioritizes APIs required by Armored Core 6:

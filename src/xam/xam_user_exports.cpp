@@ -74,6 +74,46 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
+  // XamUserGetGamerTag (0x020C): (user_index, buffer, buffer_len) -> HRESULT,
+  // as in xenia: the gamertag as UTF-16, at most 16 units with the
+  // terminator. E_INVALIDARG for a bad index or a buffer under 16 units,
+  // E_NO_SUCH_USER for a user who is not signed in.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamUserGetGamerTag";
+    desc.ordinal = ordinal::XamUserGetGamerTag;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&user_manager](core::ExportCallContext& ctx) -> bool {
+      constexpr std::uint32_t kEInvalidArg = 0x80070057u;
+      constexpr std::uint32_t kENoSuchUser = 0x80070525u;
+      const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
+      const auto buffer = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const auto buffer_len = static_cast<std::uint32_t>(ctx.cpu.gpr[5]);
+      if (user_index >= 4u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
+        return true;
+      }
+      if (!user_manager.is_signed_in(user_index)) {
+        ctx.cpu.gpr[3] = kENoSuchUser;
+        return true;
+      }
+      if (buffer == 0u || buffer_len < 16u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
+        return true;
+      }
+      const auto tag = user_manager.gamertag(user_index);
+      std::uint32_t i = 0;
+      for (; i < tag.size() && i < 15u; ++i) {
+        ctx.memory.write16_be(buffer + i * 2u, static_cast<unsigned char>(tag[i]));
+      }
+      ctx.memory.write16_be(buffer + i * 2u, 0u);
+      ctx.cpu.gpr[3] = 0u;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
   // XamUserGetSigninState (0x0210)
   {
     core::ExportDescriptor desc{};

@@ -19,7 +19,8 @@ bool register_task_exports(core::ExportRegistry& registry, core::XenonSession& s
 bool register_msg_exports(core::ExportRegistry& registry, core::XenonSession& session);
 bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& session);
 bool register_session_handle_exports(core::ExportRegistry& registry);
-bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session);
+bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session,
+                         NotificationManager& notifications);
 bool register_profile_settings_exports(core::ExportRegistry& registry, UserManager& users,
                                        ProfileSettings& settings, NotificationManager& notifications,
                                        core::XenonSession& session);
@@ -68,7 +69,7 @@ bool XamSession::register_exports(core::ExportRegistry& registry, core::XenonSes
   ok = register_msg_exports(registry, session) && ok;
   ok = register_enum_exports(registry, session) && ok;
   ok = register_session_handle_exports(registry) && ok;
-  ok = register_ui_exports(registry, session) && ok;
+  ok = register_ui_exports(registry, session, *notification_manager_) && ok;
 
   return ok;
 }

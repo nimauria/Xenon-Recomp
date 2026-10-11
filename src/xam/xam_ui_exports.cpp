@@ -1,5 +1,10 @@
+#include <cstdint>
+#include <functional>
+
+#include "xam/xam_overlapped.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/xam/notification_manager.hpp"
 #include "xenon/xam/xam_exports.hpp"
 #include "xenon/xam/types.hpp"
 
@@ -16,8 +21,101 @@ namespace xenon::xam {
 // always keeps a valid local user already signed in by default (see
 // user_manager.hpp), so the real precondition this UI exists to satisfy is
 // already met, and the honestly correct answer is success, not failure.
-bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session) {
+bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session,
+                         NotificationManager& notifications) {
   bool ok = true;
+
+  // Dialogs Xenon answers without drawing anything, as xenia does when it
+  // runs headless (xeXamDispatchHeadless): XN_SYS_UI is broadcast on, the
+  // answer is written, XN_SYS_UI is broadcast off, and the call returns its
+  // result directly or completes its XOVERLAPPED. No dialog stays open, so
+  // XamIsUIActive is false.
+  const auto answer_dialog = [&session, &notifications](core::ExportCallContext& ctx,
+                                                        cpu::GuestAddress overlapped,
+                                                        const std::function<void()>& write) {
+    notifications.broadcast(notification::kSystemUi, 1u);
+    write();
+    notifications.broadcast(notification::kSystemUi, 0u);
+    ctx.cpu.gpr[3] = overlapped == 0u
+                         ? result::Success
+                         : complete_overlapped(ctx, session.kernel_process(), overlapped,
+                                               result::Success, 0u, 0u);
+  };
+
+  // XamIsUIActive (0x02EC) -> BOOL.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamIsUIActive";
+    desc.ordinal = ordinal::XamIsUIActive;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [](core::ExportCallContext& ctx) -> bool {
+      ctx.cpu.gpr[3] = 0u;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamShowMessageBoxUI (0x02CA): (user_index, title, text, button_count,
+  // button_ptrs, active_button, flags, result_ptr, overlapped), the
+  // overlapped from the stack. The focused button (active_button) is the
+  // answer, as in xenia headless.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamShowMessageBoxUI";
+    desc.ordinal = ordinal::XamShowMessageBoxUI;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.partial = true;
+    desc.partial_note = "no dialog is shown: the focused button is returned as the user's choice";
+    desc.handler = [answer_dialog](core::ExportCallContext& ctx) -> bool {
+      const auto active_button = static_cast<std::uint32_t>(ctx.cpu.gpr[8]);
+      const auto result_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[10]);
+      if (result_ptr == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      answer_dialog(ctx, argument_u32(ctx, 8),
+                    [&] { ctx.memory.write32_be(result_ptr, active_button); });
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamShowKeyboardUI (0x02C1): (user_index, flags, default_text, title,
+  // description, buffer, buffer_length, overlapped). The default text, cut
+  // to buffer_length - 1 characters and terminated, is the entered text (an
+  // empty buffer without one), as in xenia headless.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamShowKeyboardUI";
+    desc.ordinal = ordinal::XamShowKeyboardUI;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.partial = true;
+    desc.partial_note = "no keyboard is shown: the default text is returned as the entered text";
+    desc.handler = [answer_dialog](core::ExportCallContext& ctx) -> bool {
+      const auto default_text = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      const auto buffer = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[8]);
+      const auto buffer_length = static_cast<std::uint32_t>(ctx.cpu.gpr[9]);
+      const auto overlapped = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[10]);
+      if (buffer == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      answer_dialog(ctx, overlapped, [&] {
+        for (std::uint32_t i = 0; i < buffer_length; ++i) ctx.memory.write16_be(buffer + i * 2u, 0u);
+        if (default_text == 0u || buffer_length == 0u) return;
+        for (std::uint32_t i = 0; i + 1u < buffer_length; ++i) {
+          const auto unit = ctx.memory.read16_be(default_text + i * 2u);
+          if (unit == 0u) break;
+          ctx.memory.write16_be(buffer + i * 2u, unit);
+        }
+      });
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
 
   // XamShowSigninUI (0x02BC) - the local offline user is always already
   // signed in (UserManager::initialize()), so there is nothing to prompt;

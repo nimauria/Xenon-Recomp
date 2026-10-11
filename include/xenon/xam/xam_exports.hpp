@@ -95,6 +95,9 @@ constexpr std::uint32_t XamNotifyCreateListener = 0x028A;
 constexpr std::uint32_t XNotifyGetNext = 0x028B;
 constexpr std::uint32_t XNotifyPositionUI = 0x028C;
 constexpr std::uint32_t XNotifyDelayUI = 0x028D;
+constexpr std::uint32_t XamShowKeyboardUI = 0x02C1;
+constexpr std::uint32_t XamIsUIActive = 0x02EC;
+constexpr std::uint32_t XamUserGetGamerTag = 0x020C;
 constexpr std::uint32_t XamNotifyCreateListenerInternal = 0x0291;
 
 // ---------------------------------------------------------------------------
