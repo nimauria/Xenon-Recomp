@@ -25,10 +25,10 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); the thread test that failed once passed on the next two Windows runs; the `ilammy/msvc-dev-cmd` Node 20 warning remains (no Node 24 release upstream) |
-| V3-02 | Diagnostics contracts | IN PROGRESS | Acceptance met locally; Windows failed `xenon_probe_log_tests` on `99298e1` (text-mode newlines), fixed in `641b17e`, needs a Windows run |
-| V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll, event-driven WaitAny, mutant abandonment, guest `SignalState` consistency, Ob/Ke object identity and per-object wait lists done locally; open items under V3-03 below |
-| V3-04 | Kernel execution and interrupts | NOT STARTED | |
+| V3-01 | CI and build correctness | DONE | Linux and Windows green on `6c23b0b` (runs 38124710875, 38124710898, 38124710980). Residual: `ilammy/msvc-dev-cmd` still runs on Node 20; no Node 24 release exists upstream |
+| V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
+| V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
+| V3-04 | Kernel execution and interrupts | IN PROGRESS | Pump callback watch (`d6708af`) and `RtlRaiseException` (`54d36c2`); see V3-04 progress |
 | V3-05 | Guest services and ABI | NOT STARTED | |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
@@ -604,6 +604,46 @@ Still open in V3-03:
   callback today; recorded, not changed.
 - AC6 has not been run; whether any of these changes moves its stall is
   unknown.
+
+CI on `6c23b0b` (all workflows green): Windows 153/153, including
+`xenon_probe_log_tests` (0.6 s), the three kernel wait suites and the Ke,
+Nt and Ob export tests under MSVC; `prepare_worker` 414 s and
+`registry_numeric_format` 749 s within the 900 s budget.
+
+## V3-04 progress
+
+Started 11 October 2026. The plan asks for APC/DPC semantics only with
+evidence that titles need them; the repository holds no AC6 import list or
+trace naming an APC or DPC export, so none was added yet. The evidence that
+does exist (weakness 3, AC6 hypothesis 2) is that pump callbacks run
+synchronously, so the first step makes a blocked callback visible rather
+than changing interrupt ordering.
+
+- **Pump callback watch** (`d6708af`). Each pump keeps an always-on
+  `CallbackWatch`: the guest callback it is inside and since when, the
+  number of callbacks, how many took longer than a 60 Hz frame, and the
+  longest. The stop report prints both pumps. With diagnostic events on,
+  `CallbackBegin`/`CallbackEnd` (with duration) are recorded and
+  `open_callbacks()` lists a callback that never returned beside that
+  thread's open waits. On hardware an interrupt callback runs at raised
+  IRQL and cannot block, so a long or open callback points at a Xenon
+  semantics gap. Tested through a real session with a vsync callback that
+  blocks (`xenon_gpu_pump_tests`) and deterministically
+  (`xenon_diagnostic_events_tests`).
+- **`RtlRaiseException`** (`54d36c2`) was a silent no-op. The MSVC
+  thread-naming exception (`0x406D1388`, `THREADNAME_INFO` in
+  `ExceptionInformation`) now names the thread, as xenia does; returning is
+  correct there because the idiom wraps the raise in `__try`/`__except`.
+  Any other exception is logged once per code and recorded as
+  `ExceptionNotDispatched`; Xenon still has no guest SEH unwinder, so the
+  call returns. `KernelThread::name()` now returns a copy under the
+  thread's lock.
+
+Still open in V3-04: a guest SEH unwinder (needs the PPC `.pdata` and
+unwind contract verified first), APC/DPC delivery and alertable waits
+(waiting for evidence), IRQL during interrupt callbacks, and decoupling a
+blocked callback from its pump, which needs the ordering model the plan
+asks for.
 
 ## Dependency graph
 
