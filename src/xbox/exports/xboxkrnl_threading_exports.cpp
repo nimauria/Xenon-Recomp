@@ -9,6 +9,7 @@
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
+#include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/xbox_io.hpp"
@@ -272,6 +273,46 @@ bool rtl_raise_exception_export(kernel::KernelProcess& process, ExportCallContex
       return std::string(line);
     });
   }
+  return true;
+}
+
+// ---- User APCs ----------------------------------------------------------------
+
+bool nt_queue_apc_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  constexpr std::uint32_t kCurrentThreadPseudoHandle = 0xFFFFFFFEu;
+  const auto handle = static_cast<kernel::Handle>(context.cpu.gpr[3]);
+  const auto routine = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  std::shared_ptr<kernel::KernelThread> thread;
+  if (handle == kCurrentThreadPseudoHandle) {
+    thread = process.thread_manager().get_thread(context.thread_id);
+  } else {
+    kernel::HandleView view{};
+    if (process.handle_table().lookup(handle, view) != kernel::KernelIoCode::Success) {
+      context.cpu.gpr[3] = status::InvalidHandle;
+      return true;
+    }
+    if (view.object->type() != kernel::ObjectType::Thread) {
+      context.cpu.gpr[3] = status::ObjectTypeMismatch;
+      return true;
+    }
+    thread = std::static_pointer_cast<kernel::KernelThread>(view.object);
+  }
+  if (!thread) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  if (routine == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+  if (thread->is_terminated()) {
+    context.cpu.gpr[3] = kStatusThreadIsTerminating;
+    return true;
+  }
+  thread->queue_user_apc({routine, static_cast<std::uint32_t>(context.cpu.gpr[5]),
+                          static_cast<std::uint32_t>(context.cpu.gpr[6]),
+                          static_cast<std::uint32_t>(context.cpu.gpr[7])});
+  context.cpu.gpr[3] = status::Success;
   return true;
 }
 

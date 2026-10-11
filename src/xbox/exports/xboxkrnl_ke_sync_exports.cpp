@@ -21,6 +21,7 @@
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
 #include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -63,6 +64,8 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
     // The waiting thread is being terminated; the dispatch loop stops it at
     // its next block boundary.
     case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
+    // An alertable wait ended to run user APCs; they ran before this returns.
+    case kernel::WaitResult::UserApc: return 0x000000C0u;  // STATUS_USER_APC
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
@@ -191,10 +194,12 @@ bool ke_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
 
 // KeWaitForSingleObject (ordinal 0xB0)
 // Guest ABI: r3 = dispatcher object header pointer, r4 = wait reason
-// (ignored), r5 = processor mode (ignored), r6 = alertable (ignored),
+// (ignored), r5 = processor mode (ignored), r6 = alertable (user APCs run,
+// STATUS_USER_APC),
 // r7 = PLARGE_INTEGER timeout (nullable, NULL = infinite) -> r3 = NTSTATUS.
 bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[6]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   std::string error;
@@ -209,7 +214,9 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
   const auto timeout = read_timeout(context, timeout_ptr);
   sync_events::record(EventKind::WaitBegin, context, object.get(), header_address,
                       sync_events::timeout_value(timeout), "KeWaitForSingleObject");
-  const auto result = kernel::wait_for_single_object(object, timeout, context.thread_id);
+  const auto result =
+      kernel::wait_for_single_object(object, timeout, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
   sync_events::record(EventKind::WaitEnd, context, object.get(), header_address,
                       static_cast<std::uint32_t>(context.cpu.gpr[3]), "KeWaitForSingleObject");
@@ -222,7 +229,7 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
 // GUEST ADDRESSES, not handles), r5 = wait type (NT WAIT_TYPE: 0 = WaitAll,
 // 1 = WaitAny; `typedef enum _WAIT_TYPE { WaitAll, WaitAny, ... }`),
 // r6 = wait reason (ignored), r7 = processor mode (ignored), r8 = alertable
-// (ignored), r9 = PLARGE_INTEGER timeout (nullable), r10 = wait block array
+// (user APCs run, STATUS_USER_APC), r9 = PLARGE_INTEGER timeout (nullable), r10 = wait block array
 // (ignored - real-hardware-only kernel bookkeeping, not needed here) ->
 // r3 = NTSTATUS.
 bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
@@ -231,6 +238,7 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   const auto headers_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
   const bool wait_all = wait_type == 0u;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[8]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
@@ -271,7 +279,8 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   std::uint32_t signaled_index = 0;
   const auto result =
       kernel::wait_for_multiple_objects(objects, wait_all, timeout, &signaled_index,
-                                        context.thread_id);
+                                        context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
   // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
   // has no single object.

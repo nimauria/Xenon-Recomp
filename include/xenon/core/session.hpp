@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -466,6 +467,14 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] bool run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,
                                         const std::shared_ptr<kernel::KernelThread>& thread,
                                         CallbackWatch& watch, const char* kind);
+  // Runs `routine` to completion on the calling guest thread, nested below
+  // `caller`'s stack pointer and with its KPCR, with `arguments` in r3
+  // onwards; `caller` is not modified. What exports reach through
+  // ExportCallContext::guest_call (user APCs, completion routines). Returns
+  // false if the routine trapped or crashed, or the caller is not a guest
+  // thread.
+  [[nodiscard]] bool call_guest_routine(cpu::CpuState& caller, cpu::GuestAddress routine,
+                                        std::span<const std::uint64_t> arguments);
   // Guest execution thread body: builds a CPU V2 ExecutionContext, binds the
   // native extension's compiled registry into it, looks up the entry point,
   // and invokes it via dispatch_guest_thread(), then applies main-thread-only
@@ -756,6 +765,10 @@ class XenonSession final : public cpu::RuntimeServices {
   // The guest callback each pump is running and how long its callbacks take.
   CallbackWatch gpu_callback_watch_{};
   CallbackWatch audio_callback_watch_{};
+  const GuestCall guest_call_{[this](cpu::CpuState& caller, cpu::GuestAddress routine,
+                                     std::span<const std::uint64_t> arguments) {
+    return call_guest_routine(caller, routine, arguments);
+  }};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> execution_active_{false};

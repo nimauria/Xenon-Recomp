@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -31,6 +32,14 @@ struct ExportCallResult {
   std::string diagnostic_message{};
 };
 
+// Runs a guest function to completion on the calling guest thread, nested
+// below the caller's stack, with `arguments` in r3 onwards; the caller's own
+// registers are left as they were. Returns false if the routine trapped or
+// crashed. Used for routines the kernel calls back into: user APCs, I/O and
+// overlapped completion routines.
+using GuestCall = std::function<bool(cpu::CpuState& caller, cpu::GuestAddress routine,
+                                     std::span<const std::uint64_t> arguments)>;
+
 // Context passed to export handlers
 struct ExportCallContext {
   cpu::CpuState& cpu;
@@ -41,6 +50,9 @@ struct ExportCallContext {
   // (spin locks) poll it so shutdown cannot hang behind a lock whose holder will
   // never run again. Null (tests, tools) means "never stopping".
   const std::atomic<bool>* stopping{nullptr};
+  // Set by a session that can run guest code; null in tests and tools that
+  // cannot (an APC queued there is then not run).
+  const GuestCall* guest_call{nullptr};
 };
 
 // Export handler function type

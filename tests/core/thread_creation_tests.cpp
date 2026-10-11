@@ -14,6 +14,7 @@
 #include "xenon/kernel/time.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -84,6 +86,12 @@ struct SessionExecutionTestAccess {
 
   static std::uint32_t run_execution(XenonSession& session) {
     return session.run_execution();
+  }
+
+  static bool call_guest_routine(XenonSession& session, cpu::CpuState& caller,
+                                 cpu::GuestAddress routine,
+                                 std::span<const std::uint64_t> arguments) {
+    return session.call_guest_routine(caller, routine, arguments);
   }
 };
 
@@ -233,6 +241,67 @@ struct ThreadCreationHarness {
 xenon::core::ExportCallContext make_call(xenon::cpu::CpuState& cpu,
                                          xenon::memory::AddressSpace& memory) {
   return xenon::core::ExportCallContext{cpu, memory, 0, 0};
+}
+
+// call_guest_routine(): the routine the kernel calls back into (a user APC, a
+// completion routine) runs nested on the calling guest thread, below its
+// stack, with its KPCR and the given arguments, and leaves the caller's
+// registers as they were.
+xenon::core::XenonSession* g_nesting_session = nullptr;
+std::atomic<bool> g_nested_ran{false};
+std::atomic<bool> g_nested_call_succeeded{false};
+std::atomic<bool> g_caller_registers_unchanged{false};
+std::array<std::uint64_t, 5> g_nested_registers{};  // r3, r4, r5, r1, r13
+
+ExecutionResult nested_routine_entry(ExecutionContext& context) {
+  g_nested_registers = {context.state.gpr[3], context.state.gpr[4], context.state.gpr[5],
+                        context.state.gpr[1], context.state.gpr[13]};
+  g_nested_ran.store(true);
+  context.state.gpr[3] = 0x5555u;  // clobbers its own copy only
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+ExecutionResult nesting_thread_entry(ExecutionContext& context) {
+  const auto before = context.state;
+  const std::uint64_t arguments[] = {0x11u, 0x22u, 0x33u};
+  g_nested_call_succeeded.store(xenon::core::SessionExecutionTestAccess::call_guest_routine(
+      *g_nesting_session, context.state, 0x3100u, arguments));
+  g_caller_registers_unchanged.store(context.state.gpr == before.gpr &&
+                                     context.state.lr == before.lr);
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+void test_call_guest_routine_runs_nested_on_the_calling_thread() {
+  g_nested_ran.store(false);
+  g_nested_call_succeeded.store(false);
+  g_caller_registers_unchanged.store(false);
+  ThreadCreationHarness harness(&nesting_thread_entry);
+  harness.registry.entries.emplace(0x3100u, &nested_routine_entry);
+  g_nesting_session = &harness.session;
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(
+             harness.session.memory()->read32_be(handle_out), view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000));
+
+  assert(g_nested_ran.load() && g_nested_call_succeeded.load());
+  assert(g_nested_registers[0] == 0x11u && g_nested_registers[1] == 0x22u &&
+         g_nested_registers[2] == 0x33u);
+  assert(g_nested_registers[4] != 0u && "the routine runs with the thread's KPCR");
+  assert(g_caller_registers_unchanged.load() && "the caller's registers are untouched");
+  g_nesting_session = nullptr;
 }
 
 void test_ex_create_thread_runs_and_propagates_start_context_and_exit_code() {
@@ -900,6 +969,7 @@ int main() {
   std::cout << "Testing ExCreateThread / guest thread creation...\n";
 
   test_ex_create_thread_runs_and_propagates_start_context_and_exit_code();
+  test_call_guest_routine_runs_nested_on_the_calling_thread();
   test_ex_create_thread_honors_create_suspended();
   test_ex_create_thread_affinity_alone_does_not_suspend();
   test_preemptive_safepoint_terminates_a_running_created_thread();

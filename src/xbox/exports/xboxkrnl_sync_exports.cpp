@@ -14,6 +14,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
 #include "xenon/kernel/thread.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/kernel/timer.hpp"
 #include "xenon/kernel/timer_manager.hpp"
 #include "xenon/kernel/wait.hpp"
@@ -22,6 +23,7 @@
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -71,6 +73,8 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
     // The waiting thread is being terminated; the dispatch loop stops it at
     // its next block boundary.
     case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
+    // An alertable wait ended to run user APCs; they ran before this returns.
+    case kernel::WaitResult::UserApc: return 0x000000C0u;  // STATUS_USER_APC
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
@@ -408,12 +412,13 @@ bool ex_terminate_thread_export(kernel::KernelProcess& process, ExportCallContex
 
 // NtWaitForSingleObjectEx (ordinal 0xFD)
 // Guest ABI: r3 = handle, r4 = wait mode (ignored - Xenon has no distinct
-// kernel/user PPC mode), r5 = alertable (ignored - no APC delivery yet),
+// kernel/user PPC mode), r5 = alertable (user APCs run, STATUS_USER_APC),
 // r6 = PLARGE_INTEGER timeout (nullable, NULL = infinite) -> r3 = NTSTATUS
 // (STATUS_WAIT_0 / STATUS_TIMEOUT / STATUS_ABANDONED_WAIT_0).
 bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
                                          ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
 
   HandleView view{};
@@ -431,7 +436,8 @@ bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
   sync_events::record(EventKind::WaitBegin, context, view.object.get(), handle,
                       sync_events::timeout_value(timeout), "NtWaitForSingleObjectEx");
   const auto result =
-      kernel::wait_for_single_object(view.object, timeout, context.thread_id);
+      kernel::wait_for_single_object(view.object, timeout, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
   sync_events::record(EventKind::WaitEnd, context, view.object.get(), handle,
                       static_cast<std::uint32_t>(context.cpu.gpr[3]), "NtWaitForSingleObjectEx");
@@ -441,7 +447,7 @@ bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
 // NtWaitForMultipleObjectsEx (ordinal 0xFE)
 // Guest ABI: r3 = count, r4 = PHANDLE array (guest array of dword handles),
 // r5 = wait type (NT WAIT_TYPE: 0 = WaitAll, 1 = WaitAny), r6 = wait mode
-// (ignored), r7 = alertable (ignored), r8 = PLARGE_INTEGER timeout
+// (ignored), r7 = alertable (user APCs run, STATUS_USER_APC), r8 = PLARGE_INTEGER timeout
 // (nullable) -> r3 = NTSTATUS (STATUS_WAIT_0 + signaled index for WaitAny,
 // STATUS_SUCCESS for WaitAll). As in NT's object-manager wait, a WaitAll
 // naming the same object twice (through any handles) fails with
@@ -452,6 +458,7 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
   const auto handles_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
   const bool wait_all = wait_type == kWaitAll;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[7]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
@@ -491,7 +498,8 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
   }
   std::uint32_t signaled_index = 0;
   const auto result = kernel::wait_for_multiple_objects(
-      objects, wait_all, timeout, &signaled_index, context.thread_id);
+      objects, wait_all, timeout, &signaled_index, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
   // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
   // has no single object.
@@ -569,15 +577,18 @@ bool nt_cancel_timer_export(kernel::KernelProcess& process, ExportCallContext& c
 // NtSetTimerEx (ordinal 0xFA)
 // Guest ABI: r3 = handle, r4 = PLARGE_INTEGER due time (100ns units, same
 // convention as wait timeouts - negative = relative, positive = absolute,
-// mandatory), r5 = guest callback routine pointer (accepted but not
-// invoked - see xboxkrnl_sync_exports.hpp), r6 = unk (ignored), r7 =
-// routine argument (ignored - the routine is never invoked), r8 = resume
-// (ignored - no APC/suspend semantics modeled), r9 = period in
-// milliseconds (0 = one-shot), r10 = unk (ignored) -> r3 = NTSTATUS.
+// mandatory), r5 = timer APC routine (nullable), r6 = unk (ignored), r7 =
+// routine argument, r8 = resume (ignored - no suspend semantics modeled),
+// r9 = period in milliseconds (0 = one-shot), r10 = unk (ignored) ->
+// r3 = NTSTATUS. Each firing queues Routine(Argument, TimeLow, TimeHigh) as
+// a user APC to the thread that set the timer (the time is the system time
+// of the firing), as xenia and rexglue-sdk do; it runs at that thread's
+// next alertable wait.
 bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto due_time_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto routine_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto routine_arg = static_cast<std::uint32_t>(context.cpu.gpr[7]);
   const auto period_ms = static_cast<std::uint32_t>(context.cpu.gpr[9]);
 
   if (due_time_ptr == 0u) {
@@ -596,13 +607,19 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
     return true;
   }
 
+  kernel::TimerCallback queue_timer_apc;
   if (routine_ptr != 0u) {
-    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "timer", [&] {
-      return std::string(
-          "NtSetTimerEx: guest callback routine requested but not invoked "
-          "(DPC/APC timer callbacks are not modeled) - the timer object itself "
-          "still fires for NtWaitForSingleObjectEx-style waiters");
-    });
+    // The setting thread may exit before the timer fires; its APCs then go
+    // nowhere, as on hardware.
+    std::weak_ptr<kernel::KernelThread> target =
+        process.thread_manager().get_thread(context.thread_id);
+    queue_timer_apc = [target, routine_ptr, routine_arg] {
+      if (auto thread = target.lock()) {
+        const auto now = kernel::TimeServices::system_time();
+        thread->queue_user_apc({routine_ptr, routine_arg, static_cast<std::uint32_t>(now),
+                                static_cast<std::uint32_t>(now >> 32)});
+      }
+    };
   }
   xenon::logging::append_probe_log("nt_set_timer_ex_diag.log",
                                    "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
@@ -615,7 +632,7 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
                       : std::optional<std::chrono::milliseconds>(period_ms);
 
   auto timer = std::static_pointer_cast<kernel::KernelTimer>(view.object);
-  if (!timer->set(relative_due, period, nullptr)) {
+  if (!timer->set(relative_due, period, std::move(queue_timer_apc))) {
     context.cpu.gpr[3] = status::Unsuccessful;
     return true;
   }
@@ -632,9 +649,8 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
 // NtSignalAndWaitForSingleObjectEx (ordinal 0xFB / 251)
 // Guest ABI (verified against rexglue-sdk's
 // NtSignalAndWaitForSingleObjectEx_entry register mapping): r3 = signal
-// handle, r4 = wait handle, r5 = alertable (ignored - Xenon delivers no
-// guest APCs, same rationale as the Ke IRQL/critical-region no-ops in
-// xboxkrnl_ke_irql_exports.cpp), r6 = unused by that same reference
+// handle, r4 = wait handle, r5 = alertable (user APCs run,
+// STATUS_USER_APC), r6 = unused by that same reference
 // implementation, r7 = PLARGE_INTEGER timeout (nullable) -> r3 = NTSTATUS.
 // Signals signal_handle (Event -> Set, Semaphore -> Release(1), Mutant ->
 // Release) then waits on wait_handle, exactly as the two-step
@@ -646,6 +662,7 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
                                                      ExportCallContext& context) {
   const auto signal_handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto wait_handle = static_cast<Handle>(context.cpu.gpr[4]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   HandleView signal_view{};
@@ -696,7 +713,9 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
   const auto timeout = read_timeout(context, timeout_ptr);
   sync_events::record(EventKind::WaitBegin, context, wait_view.object.get(), wait_handle,
                       sync_events::timeout_value(timeout), "NtSignalAndWaitForSingleObjectEx");
-  const auto result = kernel::wait_for_single_object(wait_view.object, timeout, context.thread_id);
+  const auto result =
+      kernel::wait_for_single_object(wait_view.object, timeout, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
   sync_events::record(EventKind::WaitEnd, context, wait_view.object.get(), wait_handle,
                       static_cast<std::uint32_t>(context.cpu.gpr[3]),

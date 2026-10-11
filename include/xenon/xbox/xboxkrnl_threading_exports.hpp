@@ -40,6 +40,13 @@ namespace xenon::xbox {
 [[nodiscard]] bool rtl_raise_exception_export(xenon::kernel::KernelProcess& process,
                                               xenon::core::ExportCallContext& context);
 
+// NtQueueApcThread (0xE3): r3 = thread handle (0xFFFFFFFE = the calling
+// thread), r4 = APC routine, r5 = routine context, r6 = argument 1, r7 =
+// argument 2 -> NTSTATUS. Queues Routine(Context, Argument1, Argument2) as a
+// user APC; it runs at the target thread's next alertable wait or delay.
+[[nodiscard]] bool nt_queue_apc_thread_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
 // KePulseEvent (0x7F): r3 = KEVENT*, r4 = increment, r5 = wait -> r3 = previous state.
 [[nodiscard]] bool ke_pulse_event_export(xenon::kernel::KernelProcess& process,
                                          xenon::core::ExportCallContext& context);

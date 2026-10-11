@@ -16,21 +16,31 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   GuestDispatchOutcome outcome{};
 
   // Publish this thread's register file for the stall report in stop(). Reads
-  // there are deliberately racy and diagnostic-only.
+  // there are deliberately racy and diagnostic-only. A nested dispatch (a
+  // routine the kernel calls back into, see call_guest_routine()) restores
+  // the outer registration when it returns.
   const auto tracked_thread_id = thread ? thread->thread_id() : 0u;
+  const cpu::CpuState* outer_state = nullptr;
   if (tracked_thread_id != 0u) {
     std::scoped_lock lock(in_flight_exports_mutex_);
-    guest_thread_states_[tracked_thread_id] = &state;
+    auto& slot = guest_thread_states_[tracked_thread_id];
+    outer_state = slot;
+    slot = &state;
   }
   struct StateRegistration {
     XenonSession* session;
     std::uint32_t thread_id;
+    const cpu::CpuState* outer_state;
     ~StateRegistration() {
       if (thread_id == 0u) return;
       std::scoped_lock lock(session->in_flight_exports_mutex_);
-      session->guest_thread_states_.erase(thread_id);
+      if (outer_state) {
+        session->guest_thread_states_[thread_id] = outer_state;
+      } else {
+        session->guest_thread_states_.erase(thread_id);
+      }
     }
-  } state_registration{this, tracked_thread_id};
+  } state_registration{this, tracked_thread_id, outer_state};
 
   cpu::ExecutionContext context(state, *memory_, *this);
   if (dynamic_fallback_) dynamic_fallback_->bind(context);
@@ -320,6 +330,33 @@ bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress en
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest callback 0x" << std::hex << entry << std::dec
                 << " crashed: " << outcome.crash_message << std::endl;
+    }
+    return false;
+  }
+  return outcome.final_result.reason != cpu::FlowReason::Trap;
+}
+
+bool XenonSession::call_guest_routine(cpu::CpuState& caller, cpu::GuestAddress routine,
+                                      std::span<const std::uint64_t> arguments) {
+  if (!kernel_process_ || routine == 0u) return false;
+  auto thread = kernel_process_->thread_manager().current_thread();
+  if (!thread) return false;
+  // The routine runs on the caller's stack, below everything the caller (an
+  // export call in progress) may still use, with the caller's KPCR (r13) and
+  // other registers. It returns through lr == 0, which ends the dispatch
+  // loop as for any callback.
+  constexpr std::uint64_t kStackGap = 0x400u;
+  cpu::CpuState state = caller;
+  state.gpr[1] = (caller.gpr[1] - kStackGap) & ~std::uint64_t{0xF};
+  for (std::size_t i = 0; i < arguments.size() && i < 8u; ++i) state.gpr[3 + i] = arguments[i];
+  state.lr = 0u;
+  state.cia = routine;
+  const auto outcome = dispatch_guest_thread(state, routine, thread, /*trace_dispatches=*/false);
+  if (outcome.crashed) {
+    if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
+      std::cout << "[XenonSession] Guest routine 0x" << std::hex << routine << std::dec
+                << " called from the kernel crashed: " << outcome.crash_message << std::endl;
     }
     return false;
   }
