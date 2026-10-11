@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::gpu {
@@ -192,6 +193,17 @@ struct DrawInitiatorFields {
   return format == IndexFormat::UInt32 ? 4u : 2u;
 }
 
+void record_gpu_wait_event(logging::events::EventKind kind, std::uint32_t address,
+                           std::uint32_t value) {
+  if (!logging::events::enabled()) return;
+  logging::events::Event event{};
+  event.kind = kind;
+  event.guest_address = address;
+  event.value = value;
+  event.source = "WAIT_REG_MEM";
+  logging::events::record(event);
+}
+
 }  // namespace
 
 class CommandProcessor::Reader {
@@ -249,6 +261,8 @@ CommandProcessor::CommandProcessor(memory::AddressSpace& memory,
 
 void CommandProcessor::reset() {
   registers_.reset();
+  last_wait_stall_ = {};
+  wait_park_recorded_ = false;
   stream_.clear();
   stats_ = {};
   active_vertex_shader_ = {};
@@ -673,6 +687,11 @@ void CommandProcessor::execute_wait_reg_mem(
     last_value = value;
     ++stats_.wait_reg_mem_polls;
     if (wait_condition_matches(wait_info, value, payload[2], payload[3])) {
+      if (wait_park_recorded_ && last_wait_stall_.memory == memory_source &&
+          last_wait_stall_.address == payload[1]) {
+        record_gpu_wait_event(logging::events::EventKind::GpuWaitResumed, payload[1], value);
+        wait_park_recorded_ = false;
+      }
       return;
     }
 
@@ -683,7 +702,20 @@ void CommandProcessor::execute_wait_reg_mem(
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
   }
   if (stall_on_unsatisfied_wait_) {
-    last_wait_stall_ = {true, memory_source, payload[1], wait_info, payload[2], payload[3], last_value};
+    const WaitStallInfo stall{true,       memory_source, payload[1], wait_info,
+                              payload[2], payload[3],    last_value};
+    // Record the park once per fence, not on every retried drain of it.
+    const bool same_fence = wait_park_recorded_ && last_wait_stall_.memory == stall.memory &&
+                            last_wait_stall_.address == stall.address &&
+                            last_wait_stall_.wait_info == stall.wait_info &&
+                            last_wait_stall_.reference == stall.reference &&
+                            last_wait_stall_.mask == stall.mask;
+    if (!same_fence) {
+      record_gpu_wait_event(logging::events::EventKind::GpuWaitParked, stall.address,
+                            stall.reference);
+      wait_park_recorded_ = true;
+    }
+    last_wait_stall_ = stall;
     throw WaitStalled{};
   }
   // Say exactly what never became true: a title stuck here is waiting on hardware

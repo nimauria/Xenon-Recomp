@@ -4,7 +4,7 @@
 #include <cassert>
 #include <cstdio>
 
-#include "kernel/synchronization/wait_internal.hpp"
+#include "xenon/kernel/mutant.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -147,6 +147,45 @@ void KernelThread::set_processor_affinity(std::uint32_t affinity) noexcept {
 #endif
 }
 
+void KernelThread::queue_user_apc(const UserApc& apc) {
+  {
+    std::scoped_lock lock(apc_mutex_);
+    user_apcs_.push_back(apc);
+    user_apc_pending_.store(true, std::memory_order_release);
+  }
+  // An alertable wait registers on this thread's own list; see wait.cpp.
+  multi_waiters_.notify_always();
+}
+
+std::vector<KernelThread::UserApc> KernelThread::take_user_apcs() {
+  std::scoped_lock lock(apc_mutex_);
+  std::vector<UserApc> apcs(user_apcs_.begin(), user_apcs_.end());
+  user_apcs_.clear();
+  user_apc_pending_.store(false, std::memory_order_release);
+  return apcs;
+}
+
+bool KernelThread::alert() {
+  const bool previous = alerted_.exchange(true, std::memory_order_acq_rel);
+  multi_waiters_.notify_always();
+  return previous;
+}
+
+bool KernelThread::remove_user_apc(std::uint32_t guest_apc) {
+  std::scoped_lock lock(apc_mutex_);
+  const auto found = std::find_if(user_apcs_.begin(), user_apcs_.end(),
+                                  [&](const UserApc& apc) { return apc.guest_apc == guest_apc; });
+  if (found == user_apcs_.end()) return false;
+  user_apcs_.erase(found);
+  user_apc_pending_.store(!user_apcs_.empty(), std::memory_order_release);
+  return true;
+}
+
+std::string KernelThread::name() const {
+  std::scoped_lock lock(mutex_);
+  return name_;
+}
+
 void KernelThread::set_name(std::string name) {
   std::scoped_lock lock(mutex_);
   name_ = std::move(name);
@@ -224,7 +263,7 @@ bool KernelThread::terminate(std::uint32_t exit_code) {
   exit_code_ = exit_code;
   state_ = ThreadState::Terminated;
   terminated_.store(true, std::memory_order_release);
-  detail::notify_multi_object_waiters_unconditionally();
+  multi_waiters_.notify_always();
   // Wakes a thread_main() parked at entry (create_suspended, never resumed),
   // or mid-execution at a dispatch_guest_thread() safepoint via
   // wait_while_suspended(), so it observes Terminated and exits instead of
@@ -318,7 +357,14 @@ bool KernelThread::set_tls(std::uint32_t slot, std::uint64_t value) {
   return true;
 }
 
+namespace {
+thread_local KernelThread* t_current_thread = nullptr;
+}  // namespace
+
+KernelThread* KernelThread::current() noexcept { return t_current_thread; }
+
 void KernelThread::thread_main() {
+  t_current_thread = this;
   // Honors CREATE_SUSPENDED: park here until resume() drops suspend_count_
   // to zero, or terminate() is called while still parked - either way, this
   // never runs entry_() before the thread has actually been resumed at
@@ -347,6 +393,13 @@ void KernelThread::thread_main() {
     result = entry_();
   }
 
+  // Thread rundown: mutants this thread still owns become abandoned before
+  // the thread is signalled, so their waiters do not hang on an owner that
+  // no longer exists. Done here, after guest code has stopped running on
+  // this host thread, and not in terminate(), which can run while guest
+  // code is still inside the critical section the mutant guards.
+  abandon_mutants_owned_by_this_thread();
+
   {
     std::scoped_lock lock(mutex_);
     // A concurrent terminate() may already have set a specific exit_code_
@@ -360,9 +413,10 @@ void KernelThread::thread_main() {
       exit_code_ = result;
       state_ = ThreadState::Terminated;
       terminated_.store(true, std::memory_order_release);
-      detail::notify_multi_object_waiters_unconditionally();
+      multi_waiters_.notify_always();
     }
   }
+  t_current_thread = nullptr;
   completion_promise_.set_value();
 }
 

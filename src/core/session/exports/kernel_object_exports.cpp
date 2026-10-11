@@ -79,6 +79,22 @@ bool XenonSession::register_kernel_object_exports() {
          &xbox::ex_try_to_acquire_read_write_lock_shared_export},
         {0x016u, "ExReleaseReadWriteLock", &xbox::ex_release_read_write_lock_export},
         {0x07Fu, "KePulseEvent", &xbox::ke_pulse_event_export},
+        {0x0E3u, "NtQueueApcThread", &xbox::nt_queue_apc_thread_export},
+        {0x06Du, "KeInitializeApc", &xbox::ke_initialize_apc_export},
+        {0x04Fu, "KeAlertThread", &xbox::ke_alert_thread_export, true,
+         "one alert flag per thread: the alert mode is not distinguished"},
+        {0x04Eu, "KeAlertResumeThread", &xbox::ke_alert_resume_thread_export},
+        {0x0ACu, "KeTestAlertThread", &xbox::ke_test_alert_thread_export, true,
+         "one alert flag per thread: the alert mode is not distinguished"},
+        {0x07Au, "KeInsertQueueApc", &xbox::ke_insert_queue_apc_export, true,
+         "user-mode KAPCs run at the target's next alertable wait or delay; a "
+         "kernel-mode KAPC is queued but never delivered (no kernel-mode APC "
+         "delivery, as in xenia and rexglue-sdk)"},
+        {0x2F0u, "KeRemoveQueueApc", &xbox::ke_remove_queue_apc_export},
+        {0x136u, "RtlRaiseException", &xbox::rtl_raise_exception_export, true,
+         "names the thread for the MSVC thread-naming exception (0x406D1388); "
+         "any other exception is not dispatched (no guest SEH unwinder) - it is "
+         "logged and recorded as ExceptionNotDispatched, and the call returns"},
         {0x0E6u, "NtQueryEvent", &xbox::nt_query_event_export},
         {0x0A9u, "KeSuspendThread", &xbox::ke_suspend_thread_export},
         {0x0FCu, "NtSuspendThread", &xbox::nt_suspend_thread_export},

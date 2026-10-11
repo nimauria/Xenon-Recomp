@@ -216,6 +216,9 @@ constexpr std::uint32_t XMsgInProcessCall = 0x01F4;
 constexpr std::uint32_t XMsgStartIORequest = 0x01F7;
 constexpr std::uint32_t XMsgCancelIORequest = 0x01F8;
 constexpr std::uint32_t XMsgStartIORequestEx = 0x01FC;
+// XamGetOverlappedResult (what XGetOverlappedResult calls): reads back an
+// XOVERLAPPED's result, see src/xam/xam_overlapped.hpp.
+constexpr std::uint32_t XamGetOverlappedResult = 0x01FB;
 
 // ---------------------------------------------------------------------------
 // Generic enumerator walk (xam_table.inc 0x250) - walks a handle produced by

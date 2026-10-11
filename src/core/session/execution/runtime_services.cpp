@@ -216,6 +216,7 @@ bool XenonSession::external_call(std::string_view module,
 
   // Try the export registry first
   ExportCallContext context{state, memory, state.cia, calling_thread_id, &stop_requested_};
+  context.guest_call = &guest_call_;
   std::array<std::uint64_t, 8> arguments{};
   std::copy_n(state.gpr.begin() + 3, arguments.size(), arguments.begin());
   const auto call_address = context.call_address;

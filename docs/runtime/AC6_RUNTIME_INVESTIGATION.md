@@ -69,17 +69,27 @@ only while that client has **callback credits**:
    pump. A stalled vsync callback also stops ring draining and presentation.
    There is no watchdog or timeout. The stop-time report (`stop()` ->
    `report_stop_diagnostics()`) lists threads blocked inside kernel calls and
-   threads running guest code, which tells these cases apart.
+   threads running guest code, which tells these cases apart. It also always
+   prints each pump's `CallbackWatch` line: the callback it is inside and for
+   how long, how many callbacks took longer than a frame, and the longest.
+   With `XENON_DIAG_EVENTS=1`, a callback that began and never returned is
+   listed next to the open waits of the same thread. On hardware an
+   interrupt callback runs at raised IRQL and cannot block, so either finding
+   points at a semantics gap.
 3. **GPU-CPU handshakes through memory.** The stop report prints the
    `WAIT_REG_MEM` fence the command processor is parked on and the
    surrounding indirect-buffer words. The vsync ISR probe comments note that
    the guest's per-tick chain only signals when two counters at
    `ctx+0x412C`/`ctx+0x4130` differ.
-4. **Kernel event state read once.** The handshake-event probe tests whether
-   the title signals two render-setup events by writing `SignalState`
-   directly, rather than by calling `KeSetEvent`. The comment there records
-   that the host-side `KernelEvent` reads that field only once, at first
-   resolution.
+4. **Kernel event state read once (fixed in V3-03).** The handshake-event
+   probe tests whether the title signals two render-setup events by writing
+   `SignalState` directly, rather than by calling `KeSetEvent`. The host-side
+   `KernelEvent` used to read that field only once, at first resolution. It
+   now writes `SignalState` on every change and adopts a direct guest write at
+   the next `Ke*` call on that object, recording a `GuestStateAdopted`
+   diagnostic event. As on hardware, a direct write does not wake a thread
+   already blocked in a wait, so if both render-setup threads are blocked
+   before the write, they stay blocked; the event ring shows which happened.
 5. **Thread identity.** `anonymous_thread_export_diag.log` records exports
    issued by a host thread with no registered `KernelThread`. These break
    thread-keyed semantics such as mutant ownership and waits.
@@ -91,9 +101,9 @@ process that runs the game (the runtime host).
 
 | Variable | Effect |
 |----------|--------|
-| `XENON_DIAG_EVENTS=1` | Records every guest wait, signal, spin-lock and critical-section acquire/release in a bounded in-memory ring (`xenon/logging/diagnostic_events.hpp`). The stop report then lists each thread still waiting, the object it waits on, and the thread that last signalled that object, including whether that signal came after the wait began. |
+| `XENON_DIAG_EVENTS=1` | Records every guest wait, signal, spin-lock and critical-section acquire/release, and every pump callback's begin and end, in a bounded in-memory ring (`xenon/logging/diagnostic_events.hpp`). The stop report then lists each thread still waiting, the object it waits on, and the thread that last signalled that object, including whether that signal came after the wait began. |
 | `XENON_PROBE_LOGS=1` | Writes the `*_diag.log` investigation probes listed below to the working directory. Each file is replaced by its first record in a run and capped at 4 MiB per run. |
-| `XENON_WRITE_TRAP=<hex>[,<hex>...]` | Reports every 32-bit guest store to up to four guest addresses in `signal_write_trap_diag.log`, with the host stack on Windows. Needs `XENON_PROBE_LOGS=1`. The two handshake events' `SignalState` words are `XENON_WRITE_TRAP=0x62D78,0x62DC8`. |
+| `XENON_WRITE_TRAP=<hex>[,<hex>...]` | Reports every 32-bit guest store to up to four guest addresses in `signal_write_trap_diag.log`, with the host stack on Windows. Needs `XENON_PROBE_LOGS=1`. The two handshake events' `SignalState` words are `XENON_WRITE_TRAP=0x62D78,0x62DC8`. The kernel's own `SignalState` write-backs are reported too. |
 
 These replaced unconditional files: `ke_wait_diag.log` (35 MB in one test
 run), `set_event_all_diag.log`, `nt_set_event_diag.log`,

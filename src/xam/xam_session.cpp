@@ -14,7 +14,7 @@ bool register_system_exports(core::ExportRegistry& registry, core::XenonSession&
 bool register_net_exports(core::ExportRegistry& registry);
 bool register_voice_exports(core::ExportRegistry& registry);
 bool register_task_exports(core::ExportRegistry& registry, core::XenonSession& session);
-bool register_msg_exports(core::ExportRegistry& registry);
+bool register_msg_exports(core::ExportRegistry& registry, core::XenonSession& session);
 bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& session);
 bool register_session_handle_exports(core::ExportRegistry& registry);
 bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session);
@@ -48,7 +48,7 @@ bool XamSession::register_exports(core::ExportRegistry& registry, core::XenonSes
   bool ok = true;
 
   // Register all XAM export categories
-  ok = register_user_exports(registry, *user_manager_) && ok;
+  ok = register_user_exports(registry, *user_manager_, session) && ok;
   ok = register_locale_exports(registry, *locale_manager_) && ok;
   ok = register_content_exports(registry, *content_manager_, session) && ok;
   ok = register_notification_exports(registry, *notification_manager_) && ok;
@@ -57,7 +57,7 @@ bool XamSession::register_exports(core::ExportRegistry& registry, core::XenonSes
   ok = register_net_exports(registry) && ok;
   ok = register_voice_exports(registry) && ok;
   ok = register_task_exports(registry, session) && ok;
-  ok = register_msg_exports(registry) && ok;
+  ok = register_msg_exports(registry, session) && ok;
   ok = register_enum_exports(registry, session) && ok;
   ok = register_session_handle_exports(registry) && ok;
   ok = register_ui_exports(registry, session) && ok;

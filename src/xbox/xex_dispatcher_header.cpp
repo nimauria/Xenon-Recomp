@@ -1,11 +1,14 @@
 #include "xenon/xbox/xex_dispatcher_header.hpp"
 
 #include <mutex>
+#include <unordered_map>
 
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/memory/address_space.hpp"
+#include "xenon/memory/fault.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -19,11 +22,70 @@ namespace {
 // marker (independently chosen, not copied).
 constexpr std::uint32_t kDispatcherStashSignature = 0x584E4B31u;  // "XNK1"
 
+// The guest header's SignalState for an event or semaphore resolved from it.
+// Holds the process's address space so a signal after the resolving call
+// still has memory to write to. A header in memory the guest has since freed
+// or unmapped faults; that access is dropped, as the guest no longer owns the
+// object there.
+class GuestDispatchHeaderMirror final : public kernel::SignalStateMirror {
+ public:
+  GuestDispatchHeaderMirror(std::shared_ptr<memory::AddressSpace> memory,
+                            cpu::GuestAddress header_address)
+      : memory_(std::move(memory)),
+        signal_state_(header_address + DispatchHeaderLayout::kSignalStateOffset) {}
+
+  std::int32_t load() noexcept override {
+    try {
+      return static_cast<std::int32_t>(memory_->read32_be(signal_state_));
+    } catch (const memory::MemoryFault&) {
+      return last_stored_;
+    }
+  }
+
+  void store(std::int32_t signal_state) noexcept override {
+    last_stored_ = signal_state;
+    try {
+      memory_->write32_be(signal_state_, static_cast<std::uint32_t>(signal_state));
+    } catch (const memory::MemoryFault&) {
+    }
+  }
+
+ private:
+  std::shared_ptr<memory::AddressSpace> memory_;
+  cpu::GuestAddress signal_state_;
+  std::int32_t last_stored_{};
+};
+
+// Serialises every stash of a guest header (see resolve_dispatcher_object()).
+std::mutex& resolve_mutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+// Headers published for handle-created objects, by object id (ids are never
+// reused). Guarded by resolve_mutex().
+std::unordered_map<std::uint64_t, cpu::GuestAddress>& published_headers() {
+  static std::unordered_map<std::uint64_t, cpu::GuestAddress> headers;
+  return headers;
+}
+
+kernel::GuestStateSync reconcile(kernel::KernelObject& object) {
+  switch (object.type()) {
+    case kernel::ObjectType::Event:
+      return static_cast<kernel::KernelEvent&>(object).reconcile_with_guest_state();
+    case kernel::ObjectType::Semaphore:
+      return static_cast<kernel::KernelSemaphore&>(object).reconcile_with_guest_state();
+    default:
+      return kernel::GuestStateSync::Unchanged;
+  }
+}
+
 }  // namespace
 
 std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     kernel::KernelProcess& process, cpu::MemoryPort& memory, cpu::GuestAddress header_address,
-    std::string* error) {
+    std::string* error, kernel::GuestStateSync* sync) {
+  if (sync) *sync = kernel::GuestStateSync::Unchanged;
   if (header_address == 0u) {
     if (error) *error = "null X_DISPATCH_HEADER pointer";
     return nullptr;
@@ -38,8 +100,7 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
   // which a concurrent reader could observe half-written. One process-wide mutex
   // makes the whole resolution atomic; it is held only for this short section
   // (no wait ever happens under it).
-  static std::mutex resolve_mutex;
-  std::scoped_lock resolve_lock(resolve_mutex);
+  std::scoped_lock resolve_lock(resolve_mutex());
 
   const auto flink = memory.read32_be(header_address + DispatchHeaderLayout::kWaitListFlinkOffset);
   if (flink == kDispatcherStashSignature) {
@@ -47,6 +108,8 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     kernel::HandleView view{};
     if (process.handle_table().lookup(static_cast<kernel::Handle>(handle), view) ==
         kernel::KernelIoCode::Success) {
+      const auto synced = reconcile(*view.object);
+      if (sync) *sync = synced;
       return view.object;
     }
     // Stashed handle is stale (the host object was destroyed and its handle
@@ -64,7 +127,10 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
           type_byte == static_cast<std::uint8_t>(DispatchObjectType::EventNotification);
       const auto signal_state =
           memory.read32_be(header_address + DispatchHeaderLayout::kSignalStateOffset);
-      object = std::make_shared<kernel::KernelEvent>(manual_reset, signal_state != 0u);
+      auto event = std::make_shared<kernel::KernelEvent>(manual_reset, signal_state != 0u);
+      event->attach_signal_state_mirror(std::make_unique<GuestDispatchHeaderMirror>(
+          process.memory().shared_address_space(), header_address));
+      object = std::move(event);
       break;
     }
     case static_cast<std::uint8_t>(DispatchObjectType::Semaphore): {
@@ -80,7 +146,10 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
         }
         return nullptr;
       }
-      object = std::make_shared<kernel::KernelSemaphore>(count, limit);
+      auto semaphore = std::make_shared<kernel::KernelSemaphore>(count, limit);
+      semaphore->attach_signal_state_mirror(std::make_unique<GuestDispatchHeaderMirror>(
+          process.memory().shared_address_space(), header_address));
+      object = std::move(semaphore);
       break;
     }
     default:
@@ -103,6 +172,55 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
                     kDispatcherStashSignature);
   memory.write32_be(header_address + DispatchHeaderLayout::kWaitListBlinkOffset, handle);
   return object;
+}
+
+cpu::GuestAddress publish_dispatcher_header(kernel::KernelProcess& process,
+                                            const std::shared_ptr<kernel::KernelObject>& object) {
+  if (!object) return 0u;
+  const auto type = object->type();
+  if (type != kernel::ObjectType::Event && type != kernel::ObjectType::Semaphore) return 0u;
+
+  std::scoped_lock resolve_lock(resolve_mutex());
+  auto& published = published_headers();
+  if (const auto found = published.find(object->object_id()); found != published.end()) {
+    return found->second;
+  }
+
+  const bool is_event = type == kernel::ObjectType::Event;
+  const auto address = process.pool().allocate(
+      is_event ? DispatchHeaderLayout::kSize : DispatchHeaderLayout::kSemaphoreLimitOffset + 4u,
+      is_event ? 0x4576656Eu /* "Even" */ : 0x53656D61u /* "Sema" */);
+  if (address == 0u) return 0u;
+
+  kernel::Handle handle{};
+  if (process.handle_table().insert(object, /*granted_access=*/0xFFFFFFFFu,
+                                    kernel::HandleFlags::None, handle) !=
+      kernel::KernelIoCode::Success) {
+    static_cast<void>(process.pool().free(address));
+    return 0u;
+  }
+
+  auto& memory = process.memory().address_space();
+  auto mirror = std::make_unique<GuestDispatchHeaderMirror>(
+      process.memory().shared_address_space(), address);
+  if (is_event) {
+    auto& event = static_cast<kernel::KernelEvent&>(*object);
+    initialize_dispatch_header(memory, address,
+                               event.manual_reset() ? DispatchObjectType::EventNotification
+                                                    : DispatchObjectType::EventSynchronization,
+                               0u);
+    event.attach_signal_state_mirror(std::move(mirror));  // writes the current state
+  } else {
+    auto& semaphore = static_cast<kernel::KernelSemaphore&>(*object);
+    initialize_dispatch_header(memory, address, DispatchObjectType::Semaphore, 0u,
+                               semaphore.maximum_count());
+    semaphore.attach_signal_state_mirror(std::move(mirror));
+  }
+  memory.write32_be(address + DispatchHeaderLayout::kWaitListFlinkOffset,
+                    kDispatcherStashSignature);
+  memory.write32_be(address + DispatchHeaderLayout::kWaitListBlinkOffset, handle);
+  published.emplace(object->object_id(), address);
+  return address;
 }
 
 void initialize_dispatch_header(cpu::MemoryPort& memory, cpu::GuestAddress header_address,

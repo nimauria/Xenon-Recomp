@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -51,16 +53,23 @@ struct ThreadCreationParams {
 using ThreadEntry = std::function<std::uint32_t()>;
 
 class KernelThread final : public KernelObject {
+  friend struct detail::WaitAccess;
+
  public:
   explicit KernelThread(ThreadEntry entry, const ThreadCreationParams& params);
   ~KernelThread() override;
 
   [[nodiscard]] std::uint32_t thread_id() const noexcept { return thread_id_; }
+  // The KernelThread whose thread_main() is running on the calling host
+  // thread, or null on any other host thread.
+  [[nodiscard]] static KernelThread* current() noexcept;
   [[nodiscard]] ThreadState state() const noexcept;
   [[nodiscard]] ThreadPriority priority() const noexcept;
   [[nodiscard]] std::uint32_t exit_code() const noexcept;
   [[nodiscard]] std::uint32_t processor_affinity() const noexcept;
-  [[nodiscard]] const std::string& name() const noexcept { return name_; }
+  // A copy: the name can change while another thread reads it (a guest
+  // names its threads through RtlRaiseException).
+  [[nodiscard]] std::string name() const;
   // The real Xbox 360/Win32 NtSuspendThread/NtResumeThread contract returns
   // the PREVIOUS suspend count through an out parameter, which resume()'s
   // own bool return (suspended-or-not) cannot express - exported read-only
@@ -104,6 +113,42 @@ class KernelThread final : public KernelObject {
   // KeSetDisableBoostThread: whether scheduler priority boosts are disabled for
   // this thread. Returns the previous value. Xenon runs guest threads as host
   // threads and applies no dynamic boost, so the flag is pure guest-visible state.
+  // A user-mode APC: NormalRoutine(NormalContext, SystemArgument1,
+  // SystemArgument2), run on this thread when it next makes an alertable wait
+  // or delay (KeWaitFor*, NtWaitFor*Ex, KeDelayExecutionThread with
+  // Alertable set), which then returns STATUS_USER_APC.
+  struct UserApc {
+    std::uint32_t routine{};
+    std::uint32_t context{};
+    std::uint32_t arg1{};
+    std::uint32_t arg2{};
+    // For an APC the guest built in its own memory (KeInitializeApc and
+    // KeInsertQueueApc): the KAPC's guest address. Its routines, context and
+    // arguments are then read from the KAPC when it is delivered.
+    std::uint32_t guest_apc{};
+  };
+  // Queues `apc` and wakes an alertable wait this thread is in. APCs queued
+  // to a thread that never waits alertably again are never run, as on
+  // hardware.
+  void queue_user_apc(const UserApc& apc);
+  // Removes and returns the queued APCs, oldest first.
+  [[nodiscard]] std::vector<UserApc> take_user_apcs();
+  // Removes the queued APC for guest KAPC `guest_apc`; false if none is queued.
+  bool remove_user_apc(std::uint32_t guest_apc);
+  [[nodiscard]] bool user_apc_pending() const noexcept {
+    return user_apc_pending_.load(std::memory_order_acquire);
+  }
+
+  // Thread alerts (KeAlertThread, KeTestAlertThread): an alert ends this
+  // thread's next alertable wait or delay, which returns STATUS_ALERTED and
+  // clears it. NT keeps one flag per processor mode; Xenon has no distinct
+  // kernel and user mode, so there is one. alert() returns the previous
+  // state and wakes an alertable wait in progress.
+  bool alert();
+  // Returns whether the thread is alerted and clears the alert.
+  bool take_alert() noexcept { return alerted_.exchange(false, std::memory_order_acq_rel); }
+  [[nodiscard]] bool alerted() const noexcept { return alerted_.load(std::memory_order_acquire); }
+
   bool exchange_boost_disabled(bool disabled) noexcept {
     return boost_disabled_.exchange(disabled, std::memory_order_acq_rel);
   }
@@ -186,7 +231,13 @@ class KernelThread final : public KernelObject {
   // alongside every state_ = ThreadState::Terminated transition (terminate()
   // and thread_main()'s natural-completion path).
   std::atomic<bool> terminated_{false};
+  // Multi-object waits on this thread; woken when it terminates.
+  detail::MultiWaitList multi_waiters_;
   std::atomic<bool> boost_disabled_{false};
+  std::mutex apc_mutex_;
+  std::deque<UserApc> user_apcs_;
+  std::atomic<bool> user_apc_pending_{false};
+  std::atomic<bool> alerted_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned
   // naturally, or the thread was terminated before ever running entry_()),

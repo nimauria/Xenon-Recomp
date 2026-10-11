@@ -25,10 +25,10 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); one intermittent Windows thread test and the `ilammy/msvc-dev-cmd` Node 20 warning remain |
-| V3-02 | Diagnostics contracts | IN PROGRESS | Event ring, wait/signal/lock events, stall report, opt-in capped probes, title addresses removed, audio credit counters; GPU fence events remain |
-| V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
-| V3-04 | Kernel execution and interrupts | NOT STARTED | |
+| V3-01 | CI and build correctness | DONE | Linux and Windows green on `6c23b0b` (runs 38124710875, 38124710898, 38124710980). Residual: `ilammy/msvc-dev-cmd` still runs on Node 20; no Node 24 release exists upstream |
+| V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
+| V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
+| V3-04 | Kernel execution and interrupts | IN PROGRESS | Acceptance items tested locally (see V3-04 progress); evidence-gated items deferred with reasons; waiting for CI on the latest batch |
 | V3-05 | Guest services and ABI | NOT STARTED | |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
@@ -178,7 +178,7 @@ operations are unassessed, which means unknown, not missing.
 | Gen 7 dynamic fallback | implemented+tested (bounded) | Unsupported instructions trap rather than NOP; the interpreter is deliberately limited |
 | Gen 8 semantic verification | partial | Fail-closed but narrow, see above; no differential checkpoint system by design |
 | Memory V2 | implemented+tested | 21/21 brief phases; 81 MB metadata for 512 MiB guest RAM. Open: findings 5 (commit handshake depends on x86 store/load ordering) and 6 (`InterlockedPopEntrySList` link read) in `RESTRUCTURE_FINDINGS.md` |
-| Kernel objects (events, semaphores, mutants, timers) | implemented+tested individually | Single-object waits are covered by `xenon_kernel_synchronization_tests` |
+| Kernel objects (events, semaphores, mutants, timers) | implemented+tested individually | Single-object waits are covered by `xenon_kernel_synchronization_tests`; mutant abandonment on owner exit and guest `SignalState` consistency since V3-03 |
 | Kernel multi-object waits | implemented+tested (since the V3-03 fix) | At the baseline, `wait.cpp` WaitAll consumed objects one at a time (a timeout left earlier objects consumed), a zero-timeout WaitAll always timed out, and WaitAny polled every 1 ms. Fixed; see V3-03 |
 | APC, DPC, interrupts | missing (APC/DPC), partial (interrupts) | Only `KiApcNormalRoutineNop` is registered; no `KeInitializeApc`, `KeInsertQueueApc`, `KeInitializeDpc` or `KeInsertQueueDpc`. GPU interrupts are delivered synchronously on the GPU pump thread |
 | Guest SEH and exceptions | partial | `RtlRaiseException`, `RtlUnwind`, `RtlCaptureContext`, `__C_specific_handler` declare partial; `setjmp`/`longjmp` has dedicated tests |
@@ -242,7 +242,8 @@ observed in source or by execution during V3-00.
 9. **Memory ordering assumes x86-64** for the reservation commit handshake
    (finding 5). Correct on the only supported host; not portable to ARM64.
    V3-11.
-10. **Kernel objects read guest `SignalState` once** (confirmed in source).
+10. **Kernel objects read guest `SignalState` once** (confirmed in source;
+    fixed in V3-03, `b907c97`).
     `resolve_dispatcher_object()` (`src/xbox/xex_dispatcher_header.cpp`)
     reads `SignalState` only when it creates and stashes the host object;
     later guest writes to that field are not observed. Whether titles write
@@ -410,6 +411,14 @@ unchanged; the next Windows runs decide.
 
 ## V3-02 progress
 
+Run 38082406059 (`99298e1`, Windows): 151/152; `xenon_probe_log_tests`
+failed. `append_probe_log()` opened files in text mode, so MSVC's CRT wrote
+a carriage return before every newline and the file no longer held the
+bytes the 4 MiB cap counted. Files are now opened in binary mode
+(`641b17e`). Linux cannot show the difference; the next Windows run
+confirms it. The same run passed `xenon_thread_creation_tests` (43 s) and
+`registry_numeric_format` at 823 s, `prepare_worker` at 381 s.
+
 Status as of `01563c1`. Off by default; see "Diagnostics" in
 `docs/runtime/AC6_RUNTIME_INVESTIGATION.md` for the switches.
 
@@ -442,9 +451,33 @@ Status as of `01563c1`. Off by default; see "Diagnostics" in
   module then failed to link on Linux. Generated projects now build Xenon
   as position-independent code (`e0ee079`).
 
-Still open in V3-02: GPU events (`WAIT_REG_MEM` fence parks, ring pointer
-progress, interrupt delivery); guest/host clock correlation and session
-fingerprints in events; failure categories.
+- **GPU fence parks** (`e6c173e`): `GpuWaitParked` once per fence and
+  `GpuWaitResumed` when it is satisfied; the stop report prints an
+  unresolved park beside the open guest waits.
+- **Guest caller and categories** (`1e11832`): events carry the caller's
+  LR, so a report names the waiting guest code; open waits with no timeout
+  are tagged "deadlock candidate" from the shared failure-category list.
+
+Acceptance (plan, V3-02): deterministic tests show correlation (one object
+id across Ke*/Nt* waits and signals, the waiter's caller) and bounded storage
+(the ring keeps the newest 65,536 events; probe files stop at 4 MiB per
+run); a staged stall through the export registry is reported as the right
+thread, object, caller and last signaller; per-test suite timings did not
+regress, and `record()` costs about 6 ns off and 40 ns on (GCC 13 -O2).
+
+Deferred, with reasons:
+
+- Guest-time correlation: events carry host monotonic time only. The guest
+  time base is per thread and not reachable from every recording site;
+  V3-04 (thread identity and scheduling) is the natural owner.
+- Run fingerprints in exported event files: events are not written to disk
+  yet; the stop report prints them. A JSONL export belongs with V3-15's
+  compatibility reports.
+- GPU ring pointer progress and interrupt delivery are counters already
+  (`gpu_interrupts_delivered_`, PM4 statistics); per-event recording would
+  flood the ring at 60 Hz and is not added.
+- The remaining failure categories are defined but assigned by later phases
+  (V3-05 exports, V3-13 backends, V3-15 reports).
 
 ## V3-03 progress
 
@@ -485,19 +518,253 @@ Verification:
 | Sync-related test durations before and after | No regression (for example `xenon_xboxkrnl_ke_sync_export_tests` 2.30 s to 2.17 s, `xenon_thread_creation_tests` 8.38 s to 7.14 s) |
 | Windows MSVC build and tests | Not run; needs CI |
 
+Second batch, 11 October 2026 (local, not pushed):
+
+- **Mutant abandonment** (`8941755`). Nothing called
+  `KernelMutant::abandon()`, so a thread that exited owning a mutant left it
+  owned forever and every later waiter hung; `WaitResult::Abandoned` was
+  never produced. A mutant now records the host thread that acquired it
+  (guest thread ids are per `ThreadManager` and repeat across sessions in one
+  process). When a `KernelThread`'s host thread finishes, after guest code
+  has stopped and before the thread is signalled, it abandons every live
+  mutant it still owns. Doing it in `terminate()` instead would free the
+  mutant while the thread may still be inside the critical section. The
+  next wait takes ownership and returns `STATUS_ABANDONED_WAIT_0` plus the
+  satisfying index for a WaitAny, or index 0 for a WaitAll.
+- **Guest `SignalState` kept consistent both ways** (`b907c97`). Events and
+  semaphores resolved from a guest header store every state change into
+  `SignalState` under their own mutex, through the process's address space.
+  Each later `Ke*` resolution adopts a value the guest wrote directly and
+  records `GuestStateAdopted` (or `GuestStateRejected` for a semaphore count
+  outside 0..limit). As on hardware, a direct write wakes no thread already
+  blocked. This closes weakness 10 and answers AC6 hypothesis 4 from the
+  event ring on the next run.
+- **`ObReferenceObjectByHandle` for events and semaphores** (`b94565a`)
+  returned the sentinel `0xDEADF00D`, so a title passing the pointer to
+  `KeSetEvent` or a `Ke*` wait failed to resolve it. The first reference now
+  places a `DISPATCHER_HEADER` (and a semaphore's limit) in the kernel pool,
+  stashed to resolve to the handle's own object; later references return the
+  same address. Mutants and timers keep the sentinel.
+- **Dispatched timers under multi-object waits** (`585036f`): tests for
+  WaitAny waking at the due time, a synchronization timer releasing one of
+  two waiters, and WaitAll completing when the timer fires.
+- **Per-object multi-wait lists** (`d5a0f28`). Every signal used to wake
+  every multi-object wait in progress. Each object now keeps a list of the
+  multi-object waits on it, as the NT dispatcher does, and a change wakes
+  only that list.
+
+- **Multi-object wait type was inverted.** Both exports took 0 as WaitAny
+  and nonzero as WaitAll. NT's `WAIT_TYPE` is `{ WaitAll, WaitAny, ... }`
+  (0 = WaitAll), and xenia selects WaitAny for any nonzero value, so every
+  guest multi-object wait ran as the other type: a WaitAny on a work event
+  and a quit event became a WaitAll that needs both. Fixed; other values are
+  now rejected, and `NtWaitForMultipleObjectsEx` rejects a WaitAll naming one
+  object twice with `STATUS_INVALID_PARAMETER_MIX`. This is a candidate cause
+  of AC6's permanent waits; unconfirmed until AC6 is run.
+
+Semantics provenance (research policy, section 5):
+
+| Question | Source | Certainty | Implemented |
+| --- | --- | --- | --- |
+| Owner exit abandons a mutant; next waiter gets ownership and `STATUS_ABANDONED` | Win32 `WaitForSingleObject`/`WaitForMultipleObjects` documentation; NT dispatcher (WRK `KiWaitSatisfyMutant`, recalled, not re-read) | High for NT; Xbox 360 by NT derivation, unverified on hardware | Yes |
+| WaitAny abandoned status is `0x80 + index`; WaitAll is `0x80` | WRK `KeWaitForMultipleObjects` (recalled) | Medium | Yes |
+| `SignalState` is the object's state; a direct write takes effect at the next wait or signal and wakes no blocked waiter | NT `DISPATCHER_HEADER` semantics: waits test `SignalState`, waking is done by `KiWaitTest` on signal paths | High for NT | Yes |
+| `ObReferenceObjectByHandle` returns the object body | NT object manager contract | High | Events and semaphores |
+| `WAIT_TYPE`: WaitAll = 0, WaitAny = 1 | NT headers (ntdoc `_WAIT_TYPE`); xenia `XObject::WaitMultiple` (nonzero = WaitAny) | High | Yes |
+| Nt WaitAll with a duplicate object fails `STATUS_INVALID_PARAMETER_MIX` | ReactOS `ntoskrnl/ob/obwait.c`; Win32 `WaitForMultipleObjects` documentation | High for NT; Xbox unverified | Nt only; Ke still consumes a duplicate once |
+
+Verification (Debug unless noted, this host):
+
+| Check | Result |
+| --- | --- |
+| `xenon_kernel_mutant_abandonment_tests` (9 tests, new) | Pass; 200 repetitions with no failure |
+| `xenon_kernel_wait_semantics_tests` (14 tests) | Pass; 50 repetitions |
+| `xenon_kernel_timer_dispatch_tests` (8 tests) | Pass; 50 repetitions |
+| `xenon_xboxkrnl_ke_sync_export_tests`, `xenon_xboxkrnl_sync_export_tests`, `xenon_xbox_ob_exports_tests` | Pass; Ke tests 50 repetitions |
+| ThreadSanitizer, GCC 13, the three kernel suites | 20 runs each, no reports |
+| Mutation: remove the exit-time abandonment; the abandoned flag; the abandoned index in the status; the `SignalState` store; the reconcile; the Ob header; each object's multi-wait wake (event, semaphore, mutant release and abandon, timer set and fire, thread exit and `terminate()`) | Each fails a test (removing the store hangs the cross-thread test, which CTest's timeout would report) |
+| Source-ownership audit | 0 errors |
+| Full CTest at `d5a0f28`, Debug, `--parallel 2 --timeout 900` | 153/154 in 16 min 44 s; `xenon_prepare_worker_tests` timed out at 900 s while running beside `registry_numeric_format` (317 s), then passed alone in 720 s. Compile-bound (finding 3), as on earlier runs on this host; timeout unchanged |
+| Wake cost, `-O2`, 20,000 set/reset pairs on an event nobody waits on, three runs | Before `d5a0f28`: 0.7 us per signal with 4 idle WaitAny waiters, 27 to 42 us with 16, about 176 us (273 us CPU) with 64. After: about 0.04 us with 0 to 64 |
+
 Still open in V3-03:
 
-- Guest `SignalState` read once (weakness 10).
-- `WaitResult::Abandoned` is never reported; an abandoned mutant satisfies a
-  wait as an ordinary success, as before this change.
-- Duplicate objects in one WaitAll are consumed once; Xbox kernel behaviour
-  is unverified.
-- Every signal wakes every registered multi-object waiter. The cost under
-  many concurrent waiters has not been measured.
-- Alertable waits, APC delivery during waits, and mixed `Ke*`/`Nt*` flows on
-  the same guest object need tests through the export registry.
-- Timer firing through `TimerManager` is not covered by the latency test,
-  which uses an immediate `set(0)`.
+- `KeWaitForMultipleObjects` with a duplicate object in a WaitAll consumes
+  it once; NT leaves that case undefined for kernel callers.
+- Alertable waits and APC delivery during waits need APCs, which do not
+  exist yet (V3-04).
+- A thread that runs guest code on a host thread not started by
+  `KernelThread::thread_main()` does not abandon its mutants on exit; every
+  guest thread created through `ExCreateThread` does.
+- `terminate()` signals a waiter on the thread before the terminated
+  thread has stopped running guest code (unchanged; mutants are abandoned
+  later, at the real exit).
+- `TimerManager` runs timer callbacks while holding its own mutex, so a
+  callback that re-schedules a timer would deadlock. Production passes no
+  callback today; recorded, not changed.
+- AC6 has not been run; whether any of these changes moves its stall is
+  unknown.
+
+CI on `6c23b0b` (all workflows green): Windows 153/153, including
+`xenon_probe_log_tests` (0.6 s), the three kernel wait suites and the Ke,
+Nt and Ob export tests under MSVC; `prepare_worker` 414 s and
+`registry_numeric_format` 749 s within the 900 s budget.
+
+## V3-04 progress
+
+Started 11 October 2026. The plan asks for APC/DPC semantics only with
+evidence that titles need them; the repository holds no AC6 import list or
+trace naming an APC or DPC export, so none was added yet. The evidence that
+does exist (weakness 3, AC6 hypothesis 2) is that pump callbacks run
+synchronously, so the first step makes a blocked callback visible rather
+than changing interrupt ordering.
+
+- **Pump callback watch** (`d6708af`). Each pump keeps an always-on
+  `CallbackWatch`: the guest callback it is inside and since when, the
+  number of callbacks, how many took longer than a 60 Hz frame, and the
+  longest. The stop report prints both pumps. With diagnostic events on,
+  `CallbackBegin`/`CallbackEnd` (with duration) are recorded and
+  `open_callbacks()` lists a callback that never returned beside that
+  thread's open waits. On hardware an interrupt callback runs at raised
+  IRQL and cannot block, so a long or open callback points at a Xenon
+  semantics gap. Tested through a real session with a vsync callback that
+  blocks (`xenon_gpu_pump_tests`) and deterministically
+  (`xenon_diagnostic_events_tests`).
+- **`RtlRaiseException`** (`54d36c2`) was a silent no-op. The MSVC
+  thread-naming exception (`0x406D1388`, `THREADNAME_INFO` in
+  `ExceptionInformation`) now names the thread, as xenia does; returning is
+  correct there because the idiom wraps the raise in `__try`/`__except`.
+  Any other exception is logged once per code and recorded as
+  `ExceptionNotDispatched`; Xenon still has no guest SEH unwinder, so the
+  call returns. `KernelThread::name()` now returns a copy under the
+  thread's lock.
+
+- **Terminated threads' waits end** (`e58d458`). `terminate()` could not
+  interrupt a kernel wait, so a guest thread parked in an unbounded wait
+  could never be stopped. A `KernelThread`'s waits now also register on its
+  own thread, and return `Terminating` (`STATUS_THREAD_IS_TERMINATING`)
+  without taking anything; `KeDelayExecutionThread` is interruptible too.
+  `RtlEnterCriticalSection` takes no ownership in that case and leaves the
+  waiter's `LockCount` registration, as hardware does. Reproducer
+  `xenon_kernel_wait_termination_tests` timed out on `join()` before the
+  change. Waiting for another thread to finish still uses `join()` and is
+  not interruptible.
+- **Stop and shutdown** (`3c20d56`). `stop()` now terminates the guest's
+  threads after printing the stall report, so a guest blocked in a wait
+  exits cooperatively instead of reaching the runtime host's hard `_Exit`.
+  `shutdown()` terminates threads before joining the main thread and each
+  pump, and terminates and joins every guest thread before unloading the
+  native extension (the KNOWN ISSUE in `shutdown.cpp` is gone). Tested with
+  a vsync callback and a worker both blocked in infinite waits
+  (`xenon_gpu_pump_tests`); without the pump terminate, shutdown hangs.
+  Analysis and plan for both by the earlier `xenon-recomp-ad` session.
+
+Verification for the last two: 50 repetitions and 15 ThreadSanitizer runs
+of the termination suite, no failures or reports; mutations (no
+own-thread registration, no critical-section guard, no pump terminate)
+each fail a test; session, kernel and export suites 42/42 and runtime-host
+suites 6/6. Full CTest at `3c20d56`, Debug, `--parallel 2 --timeout 900`:
+155/155 in 23 min 34 s (`prepare_worker` 889 s, compile-bound as before).
+
+- **Callback and wait ordering** (`gpu_pump_tests`): a guest render thread
+  waiting on an event the vsync callback sets sees ten frames within 5 s
+  with no wait timing out.
+
+Acceptance items (plan, V3-04) and where they are tested: concurrent
+callback/wait ordering and blocked callbacks (`xenon_gpu_pump_tests`);
+interruption of waits and delays (`xenon_kernel_wait_termination_tests`);
+suspended creation (`xenon_kernel_thread_lifecycle_tests`,
+`xenon_thread_creation_tests`); TLS identity per thread
+(`xenon_thread_creation_tests`); shutdown with blocked threads
+(`xenon_gpu_pump_tests`); guest faults (`xenon_thread_creation_tests`
+crash case); exception boundaries (`RtlRaiseException` in
+`xenon_xbox_threading_exports_tests`, setjmp/longjmp in
+`xenon_cpu_setjmp_longjmp`). AC6 categorisation improves through the
+callback watch and wait-type fix; unconfirmed until AC6 runs.
+
+Decided not to change, with reasons (plan: semantics only with evidence):
+
+- **IRQL.** Neither xenia nor Xenon keeps IRQL in guest memory; xenia
+  tracks it host-side per thread and uses it mainly to deliver pending APCs
+  when `KfLowerIrql` drops the level. Xenon has no APCs, and guest code only
+  passes the returned previous IRQL back to the matching release, so a
+  tracked value would change nothing a title can observe today.
+- **Guest SEH unwinder.** Needs the PPC `.pdata`/unwind contract verified
+  and evidence that a title raises a real exception; `ExceptionNotDispatched`
+  events now provide that evidence from any run.
+- **DPC delivery** (revised 11 October, see "User APCs" below). xenia and
+  rexglue-sdk both stub `KeInsertQueueDpc` (`assert_always("DPC does not
+  dispatch yet; going to hang!")`, nothing drains the list), and both AC6
+  recomps (`sal063/AC6_recomp`, `rapidsamphire/AC6Recomp`, on rexglue-sdk
+  with only input and codegen fixes on top) run in-game on that stub, so AC6
+  does not depend on a DPC running. Xenon does not register the DPC exports;
+  a title importing them is reported as an unresolved import.
+- **Decoupling a blocked callback from its pump.** Needs the ordering model
+  the plan asks for; the callback watch now measures whether AC6 needs it.
+- **Join-then-detach** in `ThreadManager::shutdown()` and `~KernelThread()`
+  is still reached by a thread spinning in compiled code with no block
+  boundary; waits no longer reach it.
+
+### User APCs (V3-04, 11 October 2026)
+
+The owner asked whether Xenon needs APCs and DPCs; the evidence above was
+re-checked against xenia, rexglue-sdk and the AC6 recomps. User APCs are
+needed: titles queue them through I/O completion routines, timer routines,
+XAM overlapped completions and `NtQueueApcThread`, and both references
+deliver them when the thread next waits or sleeps alertably, returning
+`STATUS_USER_APC`. Xenon had no queue, ignored the alertable flag, logged
+and dropped `NtSetTimerEx` routines, and dropped every I/O completion APC
+(the I/O bridge's APC hook was never installed).
+
+- `7b5fc47`: per-thread user APC queue; alertable waits and delays return
+  `WaitResult::UserApc` when an APC is pending and no object is
+  satisfiable (an object is taken first, as on NT).
+- `48821cb`: `ExportCallContext::guest_call`, implemented by the session as
+  a nested dispatch on the calling thread below its stack
+  (`call_guest_routine()`); alertable Ke*/Nt* waits and
+  `KeDelayExecutionThread` run the queued APCs and return
+  `STATUS_USER_APC`; producers `NtQueueApcThread`, `NtSetTimerEx` routines
+  (to the setting thread) and I/O completion routines (to the issuing
+  thread).
+- `f87e662`: guest KAPC objects (`KeInitializeApc`, `KeInsertQueueApc`,
+  `KeRemoveQueueApc`, 40-byte layout as in xenia and rexglue-sdk); the
+  kernel routine runs first and may rewrite the normal routine, context and
+  arguments. Kernel-mode KAPCs are accepted but not delivered, as in both
+  references.
+
+Tests: `xenon_kernel_user_apc_tests` (queue, alertable and non-alertable
+waits and delays, ordering), `xenon_xboxkrnl_user_apc_export_tests`
+(NtQueueApcThread, timer routine, KAPC kernel-then-normal routine,
+removal, kernel-mode, bad targets), and the nested call through a real
+session in `xenon_thread_creation_tests`. Mutations removing delivery or
+the timer routine fail them; ThreadSanitizer clean over 15 runs.
+
+- `3a99684`: XOVERLAPPED completion. Every XAM export ignored its
+  overlapped and returned synchronously, and `XamGetOverlappedResult` was
+  unregistered, so a title waiting on the overlapped's event or result
+  waited forever. Calls given an overlapped now complete it at once (Result,
+  ExtendedError, Length; event signalled; completion routine queued as a
+  user APC) and return `ERROR_IO_PENDING`, as xenia and rexglue-sdk do with
+  `CompleteOverlappedImmediate`; applied to the twelve registered exports
+  that take one, reading a ninth argument and beyond from the stack.
+  `XamGetOverlappedResult` (0x1FB) added. Tests: `xenon_xam_overlapped_tests`.
+- `a7c8dcf`: thread alerts (`KeAlertThread`, `KeAlertResumeThread`,
+  `KeTestAlertThread`; rexglue-sdk stubs them). An alertable wait or delay
+  returns `STATUS_ALERTED` and clears the alert, before a pending APC as in
+  NT. One flag per thread, since Xenon has no distinct processor mode.
+
+Still open: kernel-mode APC delivery and DPCs (neither reference delivers
+them; AC6 runs in-game without them); XAM exports that take an overlapped
+but are not registered yet (V3-05's inventory).
+
+Environment note: after the Codespace restarted, PulseAudio was no longer
+installed, so sessions with audio enabled failed `initialize()` ("dsp: No
+such audio device"); local runs use `SDL_AUDIODRIVER=dummy`. This is
+weakness 2 (guest audio depends on a host device), owned by V3-14. An
+interrupted build also left 15 objects with no recorded header
+dependencies, which ninja then never rebuilt (a stale
+`title_update_integration_tests.o` overflowed its stack-allocated
+`XenonSession`); deleting them restored correct rebuilds.
 
 ## Dependency graph
 
@@ -555,3 +822,5 @@ and the compilation graph.
 | 2026-10-10 | The V3-00 audit itself changed no source | V3-00 is documentation-only |
 | 2026-10-10 | After `03b26e5` broke every workflow, fix the build and coverage test, and pull the V3-03 wait fix forward rather than register a failing test or drop the reproducers | Owner decision; the defect was confirmed and the reproducers already existed |
 | 2026-10-10 | Fixes stay local until the owner pushes | Owner decision |
+| 2026-10-11 | Abandon mutants at the owning host thread's real exit, not at `terminate()` | `terminate()` can run while the thread is still inside the critical section its mutant guards |
+| 2026-10-11 | A direct guest write to `SignalState` is adopted at the next `Ke*` call and wakes no blocked waiter | Matches NT dispatcher semantics; waking blocked waiters on memory writes would need polling that hardware does not do |

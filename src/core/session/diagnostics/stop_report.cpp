@@ -22,6 +22,17 @@ namespace xenon::core {
 // registers and the memory-watch history. Diagnostic-only; reads are racy by
 // design.
 void XenonSession::report_stop_diagnostics() {
+  if (config_.enable_logging) {
+    // Always on: a pump that stopped because a guest callback never returned.
+    const auto now = CallbackWatch::now_ns();
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] "
+              << CallbackWatch::describe("GPU pump", gpu_callback_watch_.snapshot(), now)
+              << std::endl;
+    std::cout << "[XenonSession] "
+              << CallbackWatch::describe("Audio pump", audio_callback_watch_.snapshot(), now)
+              << std::endl;
+  }
   // A stop that finds the guest still executing usually means it is stalled
   // (blocked in a kernel wait or spinning). Say what each thread last asked the
   // kernel for, so the stall can be diagnosed from the log alone.
@@ -40,6 +51,18 @@ void XenonSession::report_stop_diagnostics() {
               << std::endl;
     for (std::string line; std::getline(lines, line);)
       std::cout << "[XenonSession]   " << line << std::endl;
+    for (const auto& callback : logging::events::open_callbacks(snapshot)) {
+      std::cout << "[XenonSession]   t" << callback.guest_thread_id << " is inside the "
+                << (callback.source ? callback.source : "guest") << " callback 0x" << std::hex
+                << callback.guest_address << std::dec << " since "
+                << (now_ns - callback.host_time_ns) / 1'000'000 << " ms ago" << std::endl;
+    }
+    if (const auto parked = logging::events::parked_gpu_wait(snapshot)) {
+      std::cout << "[XenonSession]   GPU parked on WAIT_REG_MEM 0x" << std::hex
+                << parked->guest_address << " for reference 0x" << parked->value << std::dec
+                << " since " << (now_ns - parked->host_time_ns) / 1'000'000 << " ms ago"
+                << std::endl;
+    }
   }
 #if defined(XENON_HAS_AUDIO)
   if (config_.enable_logging && audio_) {

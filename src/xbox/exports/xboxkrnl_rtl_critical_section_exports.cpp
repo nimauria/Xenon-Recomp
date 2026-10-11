@@ -77,7 +77,7 @@ std::shared_ptr<kernel::KernelEvent> resolve_wait_event(kernel::KernelProcess& p
                                                          cpu::GuestAddress cs_address,
                                                          const char* caller) {
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, cs_address, &error);
+  auto object = sync_events::resolve_header(process, context, cs_address, &error, caller);
   if (!object || object->type() != kernel::ObjectType::Event) {
     xenon::logging::Logger::instance().log_if_enabled(
         xenon::logging::Level::Warning, "rtl_critical_section", [&] {
@@ -199,8 +199,8 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
     return true;
   }
   // Auto-reset event: one Leave() releases exactly one waiter, which now owns the
-  // section. The wait result is not branched on: with an infinite timeout the only
-  // other way out is a stopping session, and the count must stay consistent then too.
+  // section. With an infinite timeout the only other way out is the thread being
+  // terminated, which takes no ownership.
   const auto wait_start = std::chrono::steady_clock::now();
   sync_events::record(logging::events::EventKind::WaitBegin, context, event.get(), cs,
                       0xFFFFFFFFu, "RtlEnterCriticalSection");
@@ -208,6 +208,13 @@ bool rtl_enter_critical_section_export(kernel::KernelProcess& process,
       kernel::wait_for_single_object(event, xbox_infinite_timeout(), context.thread_id);
   sync_events::record(logging::events::EventKind::WaitEnd, context, event.get(), cs,
                       static_cast<std::uint32_t>(result), "RtlEnterCriticalSection");
+  if (result == kernel::WaitResult::Terminating) {
+    // Its registration in LockCount stays, as it does on hardware when a
+    // waiting thread dies: undoing it could free the section while a Leave()
+    // has already handed this waiter the event, letting a later thread in
+    // beside the next owner.
+    return true;
+  }
   std::lock_guard<std::mutex> lock(process.critical_section_mutex());
   context.memory.write32_be(cs + kOwningThreadOffset, self);
   context.memory.write32_be(cs + kRecursionCountOffset, 1u);

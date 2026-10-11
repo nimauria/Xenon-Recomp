@@ -1,6 +1,7 @@
 #include <iostream>
 #include <mutex>
 
+#include "xenon/kernel/thread.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 
@@ -27,6 +28,16 @@ bool XenonSession::init_filesystem() {
 bool XenonSession::init_kernel() {
   kernel_io_ = std::make_unique<kernel::KernelIoManager>(filesystem_);
   io_bridge_ = std::make_unique<kernel::xbox::GuestIoBridge>(*memory_, *kernel_io_);
+  // An I/O completion routine, IoApcRoutine(ApcContext, IoStatusBlock,
+  // Reserved), is a user APC for the thread that issued the request; I/O
+  // completes synchronously here, so that is the calling thread. It runs at
+  // that thread's next alertable wait.
+  io_bridge_->set_apc_queue([](memory::GuestAddress routine, memory::GuestAddress context,
+                               memory::GuestAddress io_status_block) {
+    if (auto* thread = kernel::KernelThread::current()) {
+      thread->queue_user_apc({routine, context, io_status_block, 0u});
+    }
+  });
   if (!xbox::register_xboxkrnl_io_imports(xbox_imports_)) {
     set_error("Failed to register xboxkrnl I/O import thunks");
     return false;

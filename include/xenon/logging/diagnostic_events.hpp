@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "xenon/logging/failure_category.hpp"
+
 namespace xenon::logging::events {
 
 inline constexpr std::size_t kCapacity = std::size_t{1} << 16;
@@ -39,6 +41,31 @@ enum class EventKind : std::uint16_t {
   // A guest thread released one. value: operation-specific (the critical
   // section's lock count after the release).
   LockReleased = 5,
+  // The GPU command processor parked on an unsatisfied WAIT_REG_MEM, recorded
+  // once per fence rather than on every retried drain. guest_address: the
+  // polled physical address (with its endian bits) or register index;
+  // value: the reference it waits for.
+  GpuWaitParked = 6,
+  // That wait was satisfied. value: the value that satisfied it.
+  GpuWaitResumed = 7,
+  // A Ke* call found that guest code had written an object's
+  // DISPATCHER_HEADER SignalState directly since the kernel last wrote it,
+  // and the object took that state. guest_address: the header; value: the
+  // SignalState the guest wrote.
+  GuestStateAdopted = 8,
+  // As GuestStateAdopted, but the value cannot be the object's state (a
+  // semaphore count outside 0 to its limit), so the object kept its own.
+  GuestStateRejected = 9,
+  // A pump thread entered a guest callback (an interrupt or audio render
+  // callback). guest_address: the callback's entry; source: its kind, such
+  // as "vsync interrupt".
+  CallbackBegin = 10,
+  // It returned. value: its duration in milliseconds.
+  CallbackEnd = 11,
+  // RtlRaiseException with an exception Xenon cannot dispatch (it has no
+  // guest SEH unwinder); the call returned to the guest. guest_address: the
+  // EXCEPTION_RECORD; value: the exception code.
+  ExceptionNotDispatched = 12,
 };
 
 struct Event {
@@ -54,6 +81,9 @@ struct Event {
   // Guest address of the object (dispatcher header) or a handle value.
   std::uint32_t guest_address{};
   std::uint32_t value{};
+  // The guest return address (LR) of the export call that recorded the
+  // event, which identifies the calling guest code; 0 when there is none.
+  std::uint32_t guest_caller{};
   // The operation that recorded the event, such as "KeWaitForSingleObject".
   // Must point to a string with static storage duration.
   const char* source{};
@@ -85,6 +115,7 @@ struct BlockedWait {
   std::uint64_t object_id{};
   std::uint32_t guest_address{};
   const char* source{};
+  std::uint32_t guest_caller{};
   std::int64_t waiting_since_ns{};
   std::uint32_t timeout_ms{};
   // The most recent Signal of the object in the snapshot, before or after
@@ -94,11 +125,23 @@ struct BlockedWait {
   // True when that signal came after the wait began: a wake-up the waiter did
   // not receive, or a signal another waiter consumed.
   bool signalled_after_wait_began{};
+  // DeadlockCandidate for a wait with no timeout; empty for a bounded wait,
+  // which will end by itself.
+  std::optional<FailureCategory> category{};
 };
 
 // Derives the waits still open at the end of `events` (snapshot() order).
 // A thread whose WaitBegin was overwritten before the snapshot is not listed.
 [[nodiscard]] std::vector<BlockedWait> blocked_waits(std::span<const Event> events);
+
+// The guest callbacks still running at the end of `events`: per thread, a
+// CallbackBegin with no CallbackEnd after it. A thread listed here and in
+// blocked_waits() is a pump blocked inside a guest callback.
+[[nodiscard]] std::vector<Event> open_callbacks(std::span<const Event> events);
+
+// The GPU wait still parked at the end of `events`, if the last GpuWaitParked
+// has no GpuWaitResumed after it.
+[[nodiscard]] std::optional<Event> parked_gpu_wait(std::span<const Event> events);
 
 // One line per blocked wait, for stop reports. `now_ns` is the host
 // monotonic time the report describes.
