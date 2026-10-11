@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -95,6 +96,32 @@ class ContentManager {
 
   [[nodiscard]] XResult delete_content(std::uint32_t content_id);
 
+  // Content packages. Every piece of content is a host directory, laid out
+  // as xenia lays it out: <root>/<title id>/<content type>/<file name>/,
+  // with its display name beside it in <file name>.display. The root is the
+  // one set here (the session's save root), whose existing packages are
+  // listed by enumerate_content(); without one, packages live in a private
+  // scratch directory removed with this manager.
+  void set_content_root(std::filesystem::path root);
+  [[nodiscard]] std::filesystem::path package_path(const ContentData& data) const;
+
+  // Creates content with its own display name (create_content() above uses
+  // the file name for both). ERROR_ALREADY_EXISTS if it exists; the file
+  // name must be a plain name (no separators, ':' or "..").
+  [[nodiscard]] XResult create_content(const ContentData& data, std::uint32_t& out_content_id);
+  [[nodiscard]] std::optional<ContentData> find_content(std::uint32_t device_id, ContentType type,
+                                                        std::uint64_t title_id,
+                                                        const std::string& file_name) const;
+
+  // Mounts existing content as "<root_name>:" (XamContentCreate) and
+  // unmounts it (XamContentClose). Opening a root name already in use
+  // fails with ERROR_ALREADY_EXISTS; closing one that is not open with
+  // ERROR_FILE_NOT_FOUND. Open content cannot be deleted.
+  [[nodiscard]] XResult open_package(filesystem::VirtualFileSystem& vfs,
+                                     const std::string& root_name, std::uint32_t content_id);
+  [[nodiscard]] XResult close_package(filesystem::VirtualFileSystem& vfs,
+                                      const std::string& root_name);
+
   // Content Services V1 Integration
   
   // Initialize content services (TU manager, DLC manager, Save manager)
@@ -133,6 +160,18 @@ class ContentManager {
   std::map<std::uint32_t, ContentData> content_{};
   std::uint32_t default_device_id_{storage_device::HardDisk};
   std::uint32_t next_content_id_{1};
+
+  struct OpenPackage {
+    std::string device_path;
+    std::string alias;
+    std::uint32_t content_id;
+  };
+  [[nodiscard]] std::filesystem::path package_root() const;
+  mutable std::mutex mutex_;
+  std::filesystem::path content_root_{};
+  mutable std::filesystem::path scratch_root_{};
+  std::map<std::string, OpenPackage> open_packages_{};  // by lower-case root name
+  std::uint32_t next_package_device_{0};
   bool initialized_{false};
   
   // Content Services V1 managers

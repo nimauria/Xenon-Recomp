@@ -145,9 +145,12 @@ bool XenonSession::init_xam() {
     set_error("XAM subsystem initialization failed");
     return false;
   }
-  // Title-specific profile settings are saved beside the host's saves; a
-  // session without a save root keeps them in memory.
+  // Content packages (XamContentCreate) and title-specific profile
+  // settings are saved beside the host's saves. Without a save root, content
+  // lives in a scratch directory removed at shutdown and profile settings
+  // stay in memory.
   if (!config_.save_root_path.empty()) {
+    xam_->content().set_content_root(config_.save_root_path / "Content");
     xam_->profile_settings().set_storage_directory(config_.save_root_path / "ProfileSettings");
   }
   return true;

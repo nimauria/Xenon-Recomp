@@ -98,6 +98,7 @@ constexpr std::uint32_t XNotifyPositionUI = 0x028C;
 // ---------------------------------------------------------------------------
 // Content and storage (xam_table.inc ~0x259-0x269)
 // ---------------------------------------------------------------------------
+constexpr std::uint32_t XamContentCreate = 0x0258;
 constexpr std::uint32_t XamContentCreateEx = 0x0259;
 constexpr std::uint32_t XamContentClose = 0x025A;
 constexpr std::uint32_t XamContentDelete = 0x025B;

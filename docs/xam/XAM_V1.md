@@ -119,10 +119,23 @@ call.
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
 | 0x02CB | `XamShowDeviceSelectorUI` | ✅ Stubbed | Returns default HDD (real identity is part of the XamShow* UI family, not content storage) |
-| 0x025C | `XamContentCreateEnumerator` | ✅ Stubbed | Create content enumerator |
-| 0x025A | `XamContentClose` | ✅ Stubbed | Close content handle |
+| 0x025C | `XamContentCreateEnumerator` | Implemented | Lists the title's content packages (0x134-byte `XCONTENT_DATA` items) |
+| 0x0258 | `XamContentCreate` | Implemented | Create or open a package and mount it as `<root>:` |
+| 0x0259 | `XamContentCreateEx` | Implemented | As 0x0258, with cache and content sizes; overlapped on the stack |
+| 0x025A | `XamContentClose` | Implemented | Unmount a root; `ERROR_FILE_NOT_FOUND` if not open |
+| 0x025B | `XamContentDelete` | Implemented | Delete a package; refused while mounted |
+| 0x0267 | `XamContentFlush` | Implemented | Nothing to commit: package writes go straight to the host |
 | 0x025E | `XamContentGetDeviceData` | ✅ Implemented | Storage device capacity data |
 | 0x025F | `XamContentGetDeviceName` | ✅ Implemented | Storage device name |
+
+Content packages are host directories laid out as xenia lays them out,
+`<root>/<title id>/<content type>/<file name>/`, with the display name in
+`<file name>.display` beside each. The root is `<save root>/Content` when
+the session has a save root, and its existing packages are listed at start;
+otherwise packages live in a scratch directory removed at shutdown. The
+creation disposition (`flags & 0xF`) follows xenia: CREATE_NEW, CREATE_ALWAYS,
+OPEN_EXISTING, OPEN_ALWAYS and TRUNCATE_EXISTING, with `*disposition` 1 for
+created and 2 for opened.
 
 ### Phase 5: Notifications ✅
 

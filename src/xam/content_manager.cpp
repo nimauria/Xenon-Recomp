@@ -1,8 +1,14 @@
 #include "xenon/xam/content_manager.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <string_view>
+#include <system_error>
 
 #include "xenon/filesystem/gdfx_image_source.hpp"
 #include "xenon/filesystem/host_path_device.hpp"
@@ -17,7 +23,12 @@
 namespace xenon::xam {
 
 ContentManager::ContentManager() = default;
-ContentManager::~ContentManager() = default;
+ContentManager::~ContentManager() {
+  if (!scratch_root_.empty()) {
+    std::error_code error;
+    std::filesystem::remove_all(scratch_root_, error);
+  }
+}
 
 void ContentManager::initialize() {
   if (initialized_) return;
@@ -59,21 +70,114 @@ std::vector<ContentData> ContentManager::enumerate_content(
     std::uint32_t device_id,
     ContentType type,
     std::uint64_t title_id) const {
-  
+  std::scoped_lock lock(mutex_);
   std::vector<ContentData> result;
   for (const auto& [id, content] : content_) {
     bool matches = content.device_id == device_id &&
                    content.content_type == type;
-    
     if (title_id != 0) {
       matches = matches && content.title_id == title_id;
     }
-    
     if (matches) {
       result.push_back(content);
     }
   }
   return result;
+}
+
+namespace {
+
+std::string hex32(std::uint64_t value) {
+  char text[9]{};
+  std::snprintf(text, sizeof(text), "%08X", static_cast<unsigned>(value & 0xFFFFFFFFu));
+  return text;
+}
+
+// A content file name becomes a host directory name, so it must be one
+// plain path component.
+bool is_plain_file_name(const std::string& name) {
+  if (name.empty() || name == "." || name == "..") return false;
+  return std::none_of(name.begin(), name.end(), [](char c) {
+    const auto u = static_cast<unsigned char>(c);
+    return u < 0x20u || c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+           c == '"' || c == '<' || c == '>' || c == '|';
+  });
+}
+
+std::string lower(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return text;
+}
+
+constexpr XResult kErrorFileNotFound = 0x00000002u;
+constexpr XResult kErrorAccessDenied = 0x00000005u;
+constexpr XResult kErrorAlreadyExists = 0x000000B7u;
+
+}  // namespace
+
+std::filesystem::path ContentManager::package_root() const {
+  if (!content_root_.empty()) return content_root_;
+  if (scratch_root_.empty()) {
+    static std::atomic<std::uint32_t> counter{0};
+    scratch_root_ = std::filesystem::temp_directory_path() /
+                    ("xenon-content-" + std::to_string(static_cast<unsigned long long>(
+                                            std::chrono::steady_clock::now()
+                                                .time_since_epoch()
+                                                .count())) +
+                     "-" + std::to_string(counter.fetch_add(1)));
+  }
+  return scratch_root_;
+}
+
+std::filesystem::path ContentManager::package_path(const ContentData& data) const {
+  return package_root() / hex32(data.title_id) /
+         hex32(static_cast<std::uint32_t>(data.content_type)) / data.file_name;
+}
+
+void ContentManager::set_content_root(std::filesystem::path root) {
+  std::scoped_lock lock(mutex_);
+  content_root_ = std::move(root);
+  // List the packages already there, as xenia's ListContent does.
+  std::error_code error;
+  for (const auto& title : std::filesystem::directory_iterator(content_root_, error)) {
+    if (!title.is_directory()) continue;
+    const auto title_text = title.path().filename().string();
+    if (title_text.size() != 8u) continue;
+    const auto title_id = std::strtoull(title_text.c_str(), nullptr, 16);
+    for (const auto& type : std::filesystem::directory_iterator(title.path(), error)) {
+      if (!type.is_directory()) continue;
+      const auto type_text = type.path().filename().string();
+      if (type_text.size() != 8u) continue;
+      const auto content_type = static_cast<ContentType>(std::strtoul(type_text.c_str(), nullptr, 16));
+      for (const auto& package : std::filesystem::directory_iterator(type.path(), error)) {
+        if (!package.is_directory()) continue;
+        ContentData content{};
+        content.content_id = next_content_id_++;
+        content.content_type = content_type;
+        content.file_name = package.path().filename().string();
+        content.display_name = content.file_name;
+        std::ifstream display(type.path() / (content.file_name + ".display"), std::ios::binary);
+        if (display) std::getline(display, content.display_name, '\0');
+        content.device_id = storage_device::HardDisk;
+        content.title_id = title_id;
+        content_[content.content_id] = std::move(content);
+      }
+    }
+  }
+}
+
+std::optional<ContentData> ContentManager::find_content(std::uint32_t device_id, ContentType type,
+                                                        std::uint64_t title_id,
+                                                        const std::string& file_name) const {
+  std::scoped_lock lock(mutex_);
+  for (const auto& [id, content] : content_) {
+    if (content.device_id == device_id && content.content_type == type &&
+        content.title_id == title_id && lower(content.file_name) == lower(file_name)) {
+      return content;
+    }
+  }
+  return std::nullopt;
 }
 
 XResult ContentManager::create_content(
@@ -82,34 +186,93 @@ XResult ContentManager::create_content(
     ContentType type,
     std::uint64_t title_id,
     std::uint32_t& out_content_id) {
-  
-  auto device_opt = get_device(device_id);
-  if (!device_opt.has_value()) {
-    return result::InvalidParameter;
-  }
-
   ContentData content{};
-  content.content_id = next_content_id_++;
   content.content_type = type;
   content.display_name = name;
   content.file_name = name;
   content.device_id = device_id;
   content.title_id = title_id;
+  return create_content(content, out_content_id);
+}
+
+XResult ContentManager::create_content(const ContentData& data, std::uint32_t& out_content_id) {
+  if (!get_device(data.device_id).has_value() || !is_plain_file_name(data.file_name)) {
+    return result::InvalidParameter;
+  }
+  if (find_content(data.device_id, data.content_type, data.title_id, data.file_name)) {
+    return kErrorAlreadyExists;
+  }
+  std::scoped_lock lock(mutex_);
+  const auto path = package_path(data);
+  std::error_code error;
+  std::filesystem::create_directories(path, error);
+  if (error || !std::filesystem::is_directory(path)) return kErrorAccessDenied;
+  {
+    std::ofstream display(path.parent_path() / (data.file_name + ".display"),
+                          std::ios::binary | std::ios::trunc);
+    display << data.display_name;
+  }
+  ContentData content = data;
+  content.content_id = next_content_id_++;
   content.size_bytes = 0;
-
-  content_[content.content_id] = content;
   out_content_id = content.content_id;
-
+  content_[content.content_id] = std::move(content);
   return result::Success;
 }
 
 XResult ContentManager::delete_content(std::uint32_t content_id) {
+  std::scoped_lock lock(mutex_);
   auto it = content_.find(content_id);
   if (it == content_.end()) {
     return result::InvalidParameter;
   }
-
+  for (const auto& [root, package] : open_packages_) {
+    if (package.content_id == content_id) return kErrorAccessDenied;
+  }
+  const auto path = package_path(it->second);
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  std::filesystem::remove(path.parent_path() / (it->second.file_name + ".display"), error);
   content_.erase(it);
+  return result::Success;
+}
+
+XResult ContentManager::open_package(filesystem::VirtualFileSystem& vfs,
+                                     const std::string& root_name, std::uint32_t content_id) {
+  if (root_name.empty() || root_name.find_first_of(":\\/") != std::string::npos) {
+    return result::InvalidParameter;
+  }
+  std::scoped_lock lock(mutex_);
+  const auto key = lower(root_name);
+  if (open_packages_.count(key) != 0u) return kErrorAlreadyExists;
+  const auto it = content_.find(content_id);
+  if (it == content_.end()) return kErrorFileNotFound;
+  const auto path = package_path(it->second);
+  if (!std::filesystem::is_directory(path)) return kErrorFileNotFound;
+
+  filesystem::HostPathDeviceOptions options{};
+  options.read_only = false;
+  options.create_root = false;
+  OpenPackage package{"\\Device\\XContent" + std::to_string(next_package_device_++),
+                      root_name + ":", content_id};
+  auto device = std::make_shared<filesystem::HostPathDevice>(package.device_path, path, options);
+  if (vfs.register_device(device) != filesystem::FsError::None) return kErrorAccessDenied;
+  if (vfs.register_symbolic_link(package.alias, package.device_path) != filesystem::FsError::None) {
+    static_cast<void>(vfs.unregister_device(package.device_path));
+    return kErrorAlreadyExists;
+  }
+  open_packages_.emplace(key, std::move(package));
+  return result::Success;
+}
+
+XResult ContentManager::close_package(filesystem::VirtualFileSystem& vfs,
+                                      const std::string& root_name) {
+  std::scoped_lock lock(mutex_);
+  const auto it = open_packages_.find(lower(root_name));
+  if (it == open_packages_.end()) return kErrorFileNotFound;
+  static_cast<void>(vfs.unregister_symbolic_link(it->second.alias));
+  static_cast<void>(vfs.unregister_device(it->second.device_path));
+  open_packages_.erase(it);
   return result::Success;
 }
 
