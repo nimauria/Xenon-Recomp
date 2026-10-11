@@ -9,12 +9,16 @@
 
 #include "xenon/kernel/timer_manager.hpp"
 
+#include "xenon/kernel/event.hpp"
+#include "xenon/kernel/wait.hpp"
+
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <vector>
 
 using namespace xenon::kernel;
 using namespace std::chrono_literals;
@@ -96,6 +100,64 @@ void test_manager_shutdown_does_not_hang_with_pending_timers() {
   assert(elapsed < 2000ms && "TimerManager teardown must not block on a far-future pending timer");
 }
 
+// A multi-object wait sleeps on the kernel-wide wait generation, so a timer
+// fired by the dispatch thread (not an immediate set(0)) must advance it.
+void test_dispatched_timer_wakes_a_multi_object_wait_at_its_due_time() {
+  TimerManager manager;
+  auto never = std::make_shared<KernelEvent>(true, false);
+  auto timer = std::make_shared<KernelTimer>(TimerType::NotificationTimer);
+  constexpr auto kDelay = 100ms;
+  const auto start = std::chrono::steady_clock::now();
+  assert(timer->set(kDelay));
+  manager.schedule(timer);
+  const std::vector<std::shared_ptr<KernelObject>> objects{never, timer};
+  std::uint32_t index = 99;
+  assert(wait_for_multiple_objects(objects, false, 5000ms, &index) == WaitResult::Success);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  assert(index == 1);
+  assert(elapsed >= kDelay - 20ms && "must not wake before the timer is due");
+  assert(elapsed < kDelay + 1000ms && "woken by the firing, not by the wait's own timeout");
+}
+
+// A synchronization timer is consumed by the wait it satisfies: of two
+// threads waiting on one firing, exactly one is released.
+void test_dispatched_synchronization_timer_releases_one_waiter() {
+  TimerManager manager;
+  auto timer = std::make_shared<KernelTimer>(TimerType::SynchronizationTimer);
+  std::atomic<int> released{0};
+  const auto wait = [&] {
+    auto never = std::make_shared<KernelEvent>(true, false);
+    const std::vector<std::shared_ptr<KernelObject>> objects{never, timer};
+    std::uint32_t index = 99;
+    if (wait_for_multiple_objects(objects, false, 500ms, &index) == WaitResult::Success) {
+      ++released;
+    }
+  };
+  std::thread first(wait);
+  std::thread second(wait);
+  std::this_thread::sleep_for(30ms);
+  assert(timer->set(30ms));
+  manager.schedule(timer);
+  first.join();
+  second.join();
+  assert(released.load() == 1);
+  assert(!timer->is_signaled());
+}
+
+// WaitAll over a dispatched timer and an event completes only once both hold.
+void test_wait_all_completes_when_a_dispatched_timer_fires() {
+  TimerManager manager;
+  auto event = std::make_shared<KernelEvent>(false, true);  // auto-reset, signalled
+  auto timer = std::make_shared<KernelTimer>(TimerType::SynchronizationTimer);
+  assert(timer->set(60ms));
+  manager.schedule(timer);
+  const std::vector<std::shared_ptr<KernelObject>> objects{event, timer};
+  assert(wait_for_multiple_objects(objects, true, 20ms) == WaitResult::Timeout);
+  assert(event->signaled() && "the timed-out WaitAll consumed nothing");
+  assert(wait_for_multiple_objects(objects, true, 5000ms) == WaitResult::Success);
+  assert(!event->signaled() && !timer->is_signaled());
+}
+
 }  // namespace
 
 int main() {
@@ -106,6 +168,9 @@ int main() {
   test_periodic_timer_refires();
   test_cancel_before_due_time_prevents_firing();
   test_manager_shutdown_does_not_hang_with_pending_timers();
+  test_dispatched_timer_wakes_a_multi_object_wait_at_its_due_time();
+  test_dispatched_synchronization_timer_releases_one_waiter();
+  test_wait_all_completes_when_a_dispatched_timer_fires();
 
   std::cout << "All kernel timer dispatch tests passed!\n";
   return 0;
