@@ -254,9 +254,11 @@ constexpr std::uint32_t XamShowDirtyDiscErrorUI = 0x02D9;
 constexpr std::uint32_t XamShowMessageBoxUIEx = 0x02DC;
 
 // ---------------------------------------------------------------------------
-// User profile additions (xam_table.inc 0x219) and gamer tile (0x2F0)
+// Profile settings (xam_table.inc 0x219, 0x21A, 0x22A) and gamer tile (0x2F0)
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamUserReadProfileSettings = 0x0219;
+constexpr std::uint32_t XamUserWriteProfileSettings = 0x021A;
+constexpr std::uint32_t XamUserReadProfileSettingsEx = 0x022A;
 constexpr std::uint32_t XamWriteGamerTile = 0x02F0;
 
 // ---------------------------------------------------------------------------

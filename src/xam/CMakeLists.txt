@@ -11,9 +11,11 @@ target_sources(xenon_core PRIVATE
   save_manager.cpp
   notification_manager.cpp
   achievement_manager.cpp
+  profile_settings.cpp
   guest_enumerator.cpp
   xam_session.cpp
   xam_user_exports.cpp
+  xam_profile_settings_exports.cpp
   xam_locale_exports.cpp
   xam_content_exports.cpp
   xam_notification_exports.cpp
