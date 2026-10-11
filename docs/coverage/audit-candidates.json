@@ -1,11 +1,24 @@
 {
-  "content_digest": "sha256:101ac3225f06703364319689e3bd511f2ba5ba43c8c06abc2679adb1afdfc419",
+  "content_digest": "sha256:1dc6de937dbcb56ed06059b71cf65cc7fbd740c62b4718f558bcd720c01cfaa1",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "cfb0e8a5b3c7554f6532929d28fb1b8de256e03e",
+    "assessed_commit": "4f5f69d853cd9228673d0d3f035a0f61a5031886",
     "worktree": "clean"
   },
-  "problems": [],
+  "problems": [
+    {
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 4f5f69d853cd",
+      "id": null,
+      "kind": "ci_stale",
+      "severity": "warning"
+    },
+    {
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 4f5f69d853cd",
+      "id": null,
+      "kind": "ci_stale",
+      "severity": "warning"
+    }
+  ],
   "schema": 1,
   "candidates": [
     {"category": "kernel", "detail": "registration declares partial", "id": "kernel:registered:ExRegisterTitleTerminateNotification", "kind": "declared_limitation"},
@@ -140,6 +153,7 @@
     {"category": "kernel", "detail": "handler rtl_compare_string", "id": "kernel:registered:RtlCompareString", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler rtl_compare_string_n", "id": "kernel:registered:RtlCompareStringN", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler rtl_compare_unicode_string", "id": "kernel:registered:RtlCompareUnicodeString", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:RtlComputeCrc32", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler rtl_copy_string", "id": "kernel:registered:RtlCopyString", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler rtl_copy_unicode_string", "id": "kernel:registered:RtlCopyUnicodeString", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:RtlCreateUnicodeString", "kind": "implementation_found"},
@@ -219,7 +233,18 @@
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XMASetOutputBufferReadOffset", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XMASetOutputBufferValid", "kind": "implementation_found"},
     {"category": "kernel", "detail": "guest variable export", "id": "kernel:registered:XboxKrnlVersion", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptBnQw_SwapDwQwLeBe", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptHmacSha", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptRc4", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptRc4Ecb", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptRc4Key", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xe_crypt_sha_export", "id": "kernel:registered:XeCryptSha", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptSha256Final", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptSha256Init", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptSha256Update", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptShaFinal", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptShaInit", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptShaUpdate", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexCheckExecutablePrivilege", "kind": "implementation_found"},
     {"category": "kernel", "detail": "guest variable export", "id": "kernel:registered:XexExecutableModuleHandle", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexGetModuleHandle", "kind": "implementation_found"},
@@ -289,6 +314,7 @@
     {"category": "kernel", "detail": "mentioned by xenon_session_tests", "id": "kernel:registered:NtWriteFile", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_rtl_string_memory_export_tests", "id": "kernel:registered:RtlAnsiStringToUnicodeString", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_rtl_string_memory_export_tests", "id": "kernel:registered:RtlCompareMemory", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:RtlComputeCrc32", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_rtl_string_memory_export_tests, xenon_rtl_tests, xenon_xboxkrnl_memory_export_tests, xenon_xboxkrnl_process_export_tests", "id": "kernel:registered:RtlImageXexHeaderField", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_rtl_critical_section_export_tests", "id": "kernel:registered:RtlInitializeCriticalSectionAndSpinCount", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_video_export_tests", "id": "kernel:registered:VdCallGraphicsNotificationRoutines", "kind": "test_evidence_found"},
@@ -304,6 +330,9 @@
     {"category": "kernel", "detail": "mentioned by xenon_audio_xma_tests", "id": "kernel:registered:XMAEnableContext", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_audio_export_tests", "id": "kernel:registered:XMASetLoopData", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_session_tests", "id": "kernel:registered:XboxKrnlVersion", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptBnQw_SwapDwQwLeBe", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptHmacSha", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptRc4", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptSha", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_tls_export_tests, xenon_xex_module_export_tests", "id": "kernel:registered:XexCheckExecutablePrivilege", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_xboxkrnl_memory_export_tests, xenon_xboxkrnl_process_export_tests", "id": "kernel:registered:KeFlushUserModeTb", "kind": "verification_candidate"},
