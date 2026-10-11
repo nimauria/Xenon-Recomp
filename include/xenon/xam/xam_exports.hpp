@@ -192,9 +192,9 @@ constexpr std::uint32_t XamLoaderTerminateTitle = 0x01A9;
 // a working voice channel.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamVoiceCreate = 0x030C;
-constexpr std::uint32_t XamVoiceClose = 0x030D;
-constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030E;
-constexpr std::uint32_t XamVoiceSubmitPacket = 0x030F;
+constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030D;
+constexpr std::uint32_t XamVoiceSubmitPacket = 0x030E;
+constexpr std::uint32_t XamVoiceClose = 0x030F;
 
 // ---------------------------------------------------------------------------
 // XAM background tasks (xam_table.inc 0x1AF/0x1B1/0x1B3) - XamTaskSchedule

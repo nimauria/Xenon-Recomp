@@ -152,4 +152,12 @@ if(XENON_BUILD_TESTS)
     xenon_add_standalone_test(xenon_xbox_${test_name}_tests
       ${test_name}_tests.cpp xenon_core)
   endforeach()
+
+  # Every export in the production registry against the pinned research
+  # ordinal tables (tools/coverage/reference/).
+  if(Python3_Interpreter_FOUND AND TARGET import-scanner)
+    add_test(NAME xenon_export_ordinal_reference_tests
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/export_ordinal_reference_tests.py"
+              "$<TARGET_FILE:import-scanner>" "${XENON_SOURCE_DIR}/tools/coverage/reference")
+  endif()
 endif()
