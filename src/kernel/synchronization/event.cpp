@@ -14,6 +14,7 @@ void KernelEvent::set() {
   {
     std::scoped_lock lock(mutex_);
     signaled_ = true;
+    store_state_locked();
   }
   if (manual_reset_) {
     condition_.notify_all();
@@ -26,6 +27,7 @@ void KernelEvent::set() {
 void KernelEvent::reset() {
   std::scoped_lock lock(mutex_);
   signaled_ = false;
+  store_state_locked();
 }
 
 bool KernelEvent::signaled() const {
@@ -40,6 +42,21 @@ bool KernelEvent::wait_for(std::chrono::milliseconds timeout) {
   }
   satisfy_locked();
   return true;
+}
+
+void KernelEvent::attach_signal_state_mirror(std::unique_ptr<SignalStateMirror> mirror) {
+  std::scoped_lock lock(mutex_);
+  mirror_ = std::move(mirror);
+  store_state_locked();
+}
+
+GuestStateSync KernelEvent::reconcile_with_guest_state() {
+  std::scoped_lock lock(mutex_);
+  if (!mirror_) return GuestStateSync::Unchanged;
+  const bool guest_signaled = mirror_->load() != 0;
+  if (guest_signaled == signaled_) return GuestStateSync::Unchanged;
+  signaled_ = guest_signaled;
+  return GuestStateSync::Adopted;
 }
 
 }  // namespace xenon::kernel

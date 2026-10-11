@@ -114,7 +114,8 @@ bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeSetEvent");
   if (!object || object->type() != ObjectType::Event) {
     log_resolution_failure("KeSetEvent", object ? "resolved object is not an Event" : error);
     context.cpu.gpr[3] = 0u;
@@ -136,7 +137,8 @@ bool ke_reset_event_export(kernel::KernelProcess& process, ExportCallContext& co
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeResetEvent");
   if (!object || object->type() != ObjectType::Event) {
     log_resolution_failure("KeResetEvent", object ? "resolved object is not an Event" : error);
     context.cpu.gpr[3] = 0u;
@@ -159,7 +161,8 @@ bool ke_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
   const auto adjustment = static_cast<std::int32_t>(context.cpu.gpr[5]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeReleaseSemaphore");
   if (!object || object->type() != ObjectType::Semaphore) {
     log_resolution_failure("KeReleaseSemaphore",
                            object ? "resolved object is not a Semaphore" : error);
@@ -192,7 +195,8 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeWaitForSingleObject");
   if (!object) {
     log_resolution_failure("KeWaitForSingleObject", error);
     context.cpu.gpr[3] = status::InvalidParameter;
@@ -235,7 +239,8 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   for (std::uint32_t i = 0; i < count; ++i) {
     const auto header_address = context.memory.read32_be(headers_ptr + i * 4u);
     std::string error;
-    auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+    auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                              "KeWaitForMultipleObjects");
     if (!object) {
       std::ostringstream detail;
       detail << error << " [entry " << i << " of " << count << " at array 0x" << std::hex

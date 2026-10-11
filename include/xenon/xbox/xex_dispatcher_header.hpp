@@ -52,6 +52,7 @@
 
 #include "xenon/cpu/memory_port.hpp"
 #include "xenon/kernel/object.hpp"
+#include "xenon/kernel/signal_state_mirror.hpp"
 
 namespace xenon::kernel {
 class KernelProcess;
@@ -86,9 +87,15 @@ enum class DispatchObjectType : std::uint8_t {
 // invalid semaphore count/limit, or handle-table exhaustion) - never
 // silently substitutes a different object or guesses a type it cannot
 // verify.
+//
+// The header's SignalState is the object's state on hardware, so it is kept
+// consistent both ways. A created object writes every state change back to
+// SignalState (through the process's address space). Resolving an existing
+// object first adopts a SignalState the guest wrote directly since then;
+// *sync, when given, reports whether that happened.
 [[nodiscard]] std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     kernel::KernelProcess& process, cpu::MemoryPort& memory, cpu::GuestAddress header_address,
-    std::string* error);
+    std::string* error, kernel::GuestStateSync* sync = nullptr);
 
 // Writes type/signal_state into a guest X_DISPATCH_HEADER and clears its
 // wait_list_flink/wait_list_blink fields (invalidating any previously

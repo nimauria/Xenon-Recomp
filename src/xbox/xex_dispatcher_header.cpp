@@ -6,6 +6,8 @@
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/memory/address_space.hpp"
+#include "xenon/memory/fault.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -19,11 +21,57 @@ namespace {
 // marker (independently chosen, not copied).
 constexpr std::uint32_t kDispatcherStashSignature = 0x584E4B31u;  // "XNK1"
 
+// The guest header's SignalState for an event or semaphore resolved from it.
+// Holds the process's address space so a signal after the resolving call
+// still has memory to write to. A header in memory the guest has since freed
+// or unmapped faults; that access is dropped, as the guest no longer owns the
+// object there.
+class GuestDispatchHeaderMirror final : public kernel::SignalStateMirror {
+ public:
+  GuestDispatchHeaderMirror(std::shared_ptr<memory::AddressSpace> memory,
+                            cpu::GuestAddress header_address)
+      : memory_(std::move(memory)),
+        signal_state_(header_address + DispatchHeaderLayout::kSignalStateOffset) {}
+
+  std::int32_t load() noexcept override {
+    try {
+      return static_cast<std::int32_t>(memory_->read32_be(signal_state_));
+    } catch (const memory::MemoryFault&) {
+      return last_stored_;
+    }
+  }
+
+  void store(std::int32_t signal_state) noexcept override {
+    last_stored_ = signal_state;
+    try {
+      memory_->write32_be(signal_state_, static_cast<std::uint32_t>(signal_state));
+    } catch (const memory::MemoryFault&) {
+    }
+  }
+
+ private:
+  std::shared_ptr<memory::AddressSpace> memory_;
+  cpu::GuestAddress signal_state_;
+  std::int32_t last_stored_{};
+};
+
+kernel::GuestStateSync reconcile(kernel::KernelObject& object) {
+  switch (object.type()) {
+    case kernel::ObjectType::Event:
+      return static_cast<kernel::KernelEvent&>(object).reconcile_with_guest_state();
+    case kernel::ObjectType::Semaphore:
+      return static_cast<kernel::KernelSemaphore&>(object).reconcile_with_guest_state();
+    default:
+      return kernel::GuestStateSync::Unchanged;
+  }
+}
+
 }  // namespace
 
 std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     kernel::KernelProcess& process, cpu::MemoryPort& memory, cpu::GuestAddress header_address,
-    std::string* error) {
+    std::string* error, kernel::GuestStateSync* sync) {
+  if (sync) *sync = kernel::GuestStateSync::Unchanged;
   if (header_address == 0u) {
     if (error) *error = "null X_DISPATCH_HEADER pointer";
     return nullptr;
@@ -47,6 +95,8 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
     kernel::HandleView view{};
     if (process.handle_table().lookup(static_cast<kernel::Handle>(handle), view) ==
         kernel::KernelIoCode::Success) {
+      const auto synced = reconcile(*view.object);
+      if (sync) *sync = synced;
       return view.object;
     }
     // Stashed handle is stale (the host object was destroyed and its handle
@@ -64,7 +114,10 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
           type_byte == static_cast<std::uint8_t>(DispatchObjectType::EventNotification);
       const auto signal_state =
           memory.read32_be(header_address + DispatchHeaderLayout::kSignalStateOffset);
-      object = std::make_shared<kernel::KernelEvent>(manual_reset, signal_state != 0u);
+      auto event = std::make_shared<kernel::KernelEvent>(manual_reset, signal_state != 0u);
+      event->attach_signal_state_mirror(std::make_unique<GuestDispatchHeaderMirror>(
+          process.memory().shared_address_space(), header_address));
+      object = std::move(event);
       break;
     }
     case static_cast<std::uint8_t>(DispatchObjectType::Semaphore): {
@@ -80,7 +133,10 @@ std::shared_ptr<kernel::KernelObject> resolve_dispatcher_object(
         }
         return nullptr;
       }
-      object = std::make_shared<kernel::KernelSemaphore>(count, limit);
+      auto semaphore = std::make_shared<kernel::KernelSemaphore>(count, limit);
+      semaphore->attach_signal_state_mirror(std::make_unique<GuestDispatchHeaderMirror>(
+          process.memory().shared_address_space(), header_address));
+      object = std::move(semaphore);
       break;
     }
     default:

@@ -11,6 +11,7 @@
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
+#include "xbox/exports/sync_events.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -203,7 +204,7 @@ bool ex_release_read_write_lock_export(kernel::KernelProcess& process, ExportCal
 bool ke_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header, &error);
+  auto object = sync_events::resolve_header(process, context, header, &error, "KePulseEvent");
   if (!object || object->type() != kernel::ObjectType::Event) {
     context.cpu.gpr[3] = 0u;
     return true;

@@ -28,6 +28,7 @@ bool KernelSemaphore::release(std::int32_t release_count, std::int32_t* previous
     }
 
     count_ += release_count;
+    if (mirror_) mirror_->store(count_);
   }
 
   // Notify waiting threads
@@ -53,6 +54,22 @@ bool KernelSemaphore::wait_for(std::chrono::milliseconds timeout) {
 std::int32_t KernelSemaphore::count() const {
   std::scoped_lock lock(mutex_);
   return count_;
+}
+
+void KernelSemaphore::attach_signal_state_mirror(std::unique_ptr<SignalStateMirror> mirror) {
+  std::scoped_lock lock(mutex_);
+  mirror_ = std::move(mirror);
+  mirror_->store(count_);
+}
+
+GuestStateSync KernelSemaphore::reconcile_with_guest_state() {
+  std::scoped_lock lock(mutex_);
+  if (!mirror_) return GuestStateSync::Unchanged;
+  const auto guest_count = mirror_->load();
+  if (guest_count == count_) return GuestStateSync::Unchanged;
+  if (guest_count < 0 || guest_count > maximum_count_) return GuestStateSync::Rejected;
+  count_ = guest_count;
+  return GuestStateSync::Adopted;
 }
 
 }  // namespace xenon::kernel

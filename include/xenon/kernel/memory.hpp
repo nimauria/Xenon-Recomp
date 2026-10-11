@@ -55,6 +55,11 @@ class KernelMemory {
   [[nodiscard]] memory::AddressSpace& address_space() const {
     return *address_space_;
   }
+  // For kernel objects that keep guest memory current and may outlive the
+  // call that created them.
+  [[nodiscard]] std::shared_ptr<memory::AddressSpace> shared_address_space() const {
+    return address_space_;
+  }
 
  private:
   std::shared_ptr<memory::AddressSpace> address_space_;

@@ -77,7 +77,7 @@ std::shared_ptr<kernel::KernelEvent> resolve_wait_event(kernel::KernelProcess& p
                                                          cpu::GuestAddress cs_address,
                                                          const char* caller) {
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, cs_address, &error);
+  auto object = sync_events::resolve_header(process, context, cs_address, &error, caller);
   if (!object || object->type() != kernel::ObjectType::Event) {
     xenon::logging::Logger::instance().log_if_enabled(
         xenon::logging::Level::Warning, "rtl_critical_section", [&] {

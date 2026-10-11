@@ -48,6 +48,14 @@ enum class EventKind : std::uint16_t {
   GpuWaitParked = 6,
   // That wait was satisfied. value: the value that satisfied it.
   GpuWaitResumed = 7,
+  // A Ke* call found that guest code had written an object's
+  // DISPATCHER_HEADER SignalState directly since the kernel last wrote it,
+  // and the object took that state. guest_address: the header; value: the
+  // SignalState the guest wrote.
+  GuestStateAdopted = 8,
+  // As GuestStateAdopted, but the value cannot be the object's state (a
+  // semaphore count outside 0 to its limit), so the object kept its own.
+  GuestStateRejected = 9,
 };
 
 struct Event {

@@ -142,8 +142,12 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
         open_waits[event.guest_thread_id].clear();
         break;
       case EventKind::Signal:
+      case EventKind::GuestStateAdopted:
+        // A direct guest write that the object took changes its state as a
+        // signal (or reset) does.
         if (event.object_id != 0) last_signal[event.object_id] = &event;
         break;
+      case EventKind::GuestStateRejected:
       case EventKind::LockAcquired:
       case EventKind::LockReleased:
       case EventKind::GpuWaitParked:
