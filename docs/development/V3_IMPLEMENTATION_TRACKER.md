@@ -29,7 +29,7 @@ retail title works.
 | V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
 | V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
 | V3-04 | Kernel execution and interrupts | DONE | Linux, Windows, Xenon CI and coverage refresh green on `ccdadae`; evidence-gated items deferred with reasons (V3-04 progress). AC6 not run |
-| V3-05 | Guest services and ABI | IN PROGRESS | Registry ordinal check; ABI defects fixed in voice, enumerators, `XamUserGetXUID`, `XeCryptSha`, `ExCreateThread`, `XCONTENT_DATA`; profile settings and content packages implemented (see V3-05 progress) |
+| V3-05 | Guest services and ABI | IN PROGRESS | Registry ordinal check; ABI defects fixed in voice, enumerators, `XamUserGetXUID`, `XeCryptSha`, `ExCreateThread`, `XCONTENT_DATA`; profile settings, content packages, notifications, headless dialogs and XeCrypt hashes implemented (see V3-05 progress) |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
 | V3-08 | Adaptive knowledge | NOT STARTED | |
@@ -831,6 +831,37 @@ against rexglue-sdk and xenia-canary:
   dispositions, `XamContentCreate`, `XamContentClose`, `XamContentDelete`
   and `XamContentFlush` follow xenia.
 
+- `2979fcd`: `XamContentDelete` reported success when the host could not
+  remove the package (a file still open on Windows, a read-only
+  directory); it now returns `ERROR_ACCESS_DENIED` and keeps it listed.
+  Found when the package test aborted on Windows.
+- `f95fb43`: XNotify listeners. Every listener shared one queue, masks and
+  `match_id` were ignored, the ids were invented, and no startup
+  notifications were sent, so a title waiting at boot for
+  `XN_SYS_SIGNINCHANGED` would wait forever. A listener is now a waitable
+  kernel event with its own queue, area mask and version filter; the first
+  system listener gets the startup set xenia and rexglue-sdk send;
+  profile-setting writes broadcast `XN_SYS_PROFILESETTINGCHANGED`.
+
+Missing exports. Of the exports xenia marks implemented, 94 were not
+registered in Xenon (excluding networking, which Xenon registers on
+Windows only, about 70). Added so far:
+
+- `e6f722a`: `XamShowMessageBoxUI` and `XamShowKeyboardUI`, answered as
+  xenia answers them headless (focused button, default text, `XN_SYS_UI`
+  on/off, overlapped completed); `XamIsUIActive`; `XamUserGetGamerTag`.
+- `4f5f69d`: incremental SHA-1 and SHA-256, HMAC-SHA1, RC4,
+  `XeCryptBnQw_SwapDwQwLeBe` and `RtlComputeCrc32`, checked against
+  published vectors (FIPS 180-2, RFC 2202, RC4, CRC-32 check value).
+  `XeCryptRc4Key` uses the key's length; the references read
+  `key[x % 16]`. Coverage dashboard: 273 of 922 kernel exports registered.
+
+Still missing from that list: AES, DES3 and the `XeKeys*` key functions;
+I/O completion ports; `Ob*ByName` and symbolic-link objects;
+`XexGetModuleSection`, `XexLoadImage`; `KeSetCurrentStackPointers`;
+`ObLookupThreadByThreadId`; the XAM locale-string and resource-locator
+helpers; `XamContentGetCreator` and `XamContentGetThumbnail`.
+
 Unverified, left as they are: `XamQueryTimeZoneInformation` (no reference
 implements it, so its ABI and structure are unknown), and the
 `XamUserCheckPrivilege` grant-all offline model.
@@ -839,7 +870,8 @@ Tests: `xenon_export_ordinal_reference_tests`, `xenon_xam_export_ordinal_tests`
 (voice ordinals and behaviour), `xenon_guest_enumerator_tests`,
 `xenon_session_tests`, `xenon_xam_profile_settings_tests`,
 `xenon_misc_export_tests`, `xenon_thread_creation_tests`,
-`xenon_xam_content_package_tests`. Each fix was
+`xenon_xam_content_package_tests`, `xenon_xam_notification_tests`,
+`xenon_xam_ui_tests`. Each fix was
 checked by reverting it: the test fails (the old `XamUserGetXUID` raises the
 guest page-protection fault).
 
