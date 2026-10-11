@@ -28,7 +28,7 @@ retail title works.
 | V3-01 | CI and build correctness | DONE | Linux and Windows green on `6c23b0b` (runs 38124710875, 38124710898, 38124710980). Residual: `ilammy/msvc-dev-cmd` still runs on Node 20; no Node 24 release exists upstream |
 | V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
 | V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
-| V3-04 | Kernel execution and interrupts | IN PROGRESS | Pump callback watch, `RtlRaiseException`, and interruptible waits with a non-hanging stop and shutdown; see V3-04 progress |
+| V3-04 | Kernel execution and interrupts | IN PROGRESS | Acceptance items tested locally (see V3-04 progress); evidence-gated items deferred with reasons; waiting for CI on the latest batch |
 | V3-05 | Guest services and ABI | NOT STARTED | |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
@@ -666,13 +666,38 @@ each fail a test; session, kernel and export suites 42/42 and runtime-host
 suites 6/6. Full CTest at `3c20d56`, Debug, `--parallel 2 --timeout 900`:
 155/155 in 23 min 34 s (`prepare_worker` 889 s, compile-bound as before).
 
-Still open in V3-04: a guest SEH unwinder (needs the PPC `.pdata` and
-unwind contract verified first), APC/DPC delivery and alertable waits
-(waiting for evidence), IRQL during interrupt callbacks, decoupling a
-blocked callback from its pump (needs the ordering model the plan asks
-for), and the bounded join-then-detach in `ThreadManager::shutdown()` and
-`~KernelThread()`, still reached by a thread spinning in compiled code with
-no block boundary.
+- **Callback and wait ordering** (`gpu_pump_tests`): a guest render thread
+  waiting on an event the vsync callback sets sees ten frames within 5 s
+  with no wait timing out.
+
+Acceptance items (plan, V3-04) and where they are tested: concurrent
+callback/wait ordering and blocked callbacks (`xenon_gpu_pump_tests`);
+interruption of waits and delays (`xenon_kernel_wait_termination_tests`);
+suspended creation (`xenon_kernel_thread_lifecycle_tests`,
+`xenon_thread_creation_tests`); TLS identity per thread
+(`xenon_thread_creation_tests`); shutdown with blocked threads
+(`xenon_gpu_pump_tests`); guest faults (`xenon_thread_creation_tests`
+crash case); exception boundaries (`RtlRaiseException` in
+`xenon_xbox_threading_exports_tests`, setjmp/longjmp in
+`xenon_cpu_setjmp_longjmp`). AC6 categorisation improves through the
+callback watch and wait-type fix; unconfirmed until AC6 runs.
+
+Decided not to change, with reasons (plan: semantics only with evidence):
+
+- **IRQL.** Neither xenia nor Xenon keeps IRQL in guest memory; xenia
+  tracks it host-side per thread and uses it mainly to deliver pending APCs
+  when `KfLowerIrql` drops the level. Xenon has no APCs, and guest code only
+  passes the returned previous IRQL back to the matching release, so a
+  tracked value would change nothing a title can observe today.
+- **Guest SEH unwinder.** Needs the PPC `.pdata`/unwind contract verified
+  and evidence that a title raises a real exception; `ExceptionNotDispatched`
+  events now provide that evidence from any run.
+- **APC/DPC delivery and alertable waits.** No title evidence yet.
+- **Decoupling a blocked callback from its pump.** Needs the ordering model
+  the plan asks for; the callback watch now measures whether AC6 needs it.
+- **Join-then-detach** in `ThreadManager::shutdown()` and `~KernelThread()`
+  is still reached by a thread spinning in compiled code with no block
+  boundary; waits no longer reach it.
 
 ## Dependency graph
 
