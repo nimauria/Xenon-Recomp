@@ -148,21 +148,21 @@ void test_content_enumerator_round_trip() {
   auto result = f.invoke(0x025Cu, cpu);  // XamContentCreateEnumerator
   assert(result.handled);
   assert(cpu.gpr[3] == xam::result::Success);
-  assert(f.address_space->read32_be(buffer_size_ptr) == 306u * 10u);
+  assert(f.address_space->read32_be(buffer_size_ptr) == 308u * 10u);
   const auto handle = f.address_space->read32_be(handle_ptr);
   assert(handle != 0u);
 
   // XamEnumerate: one item should come back, matching the real content's
   // device_id/content_type/file_name byte layout.
   memory::GuestAddress buffer_addr{};
-  assert(f.address_space->allocate(306, 4, memory::kReadWrite, false, buffer_addr));
+  assert(f.address_space->allocate(308, 4, memory::kReadWrite, false, buffer_addr));
   const auto items_returned_ptr = f.alloc32();
 
   cpu::CpuState enum_cpu{};
   enum_cpu.gpr[3] = handle;
   enum_cpu.gpr[4] = 0;  // flags
   enum_cpu.gpr[5] = buffer_addr;
-  enum_cpu.gpr[6] = 306u;  // buffer_length - exactly one item
+  enum_cpu.gpr[6] = 308u;  // buffer_length - exactly one item
   enum_cpu.gpr[7] = items_returned_ptr;
 
   result = f.invoke(0x0250u, enum_cpu);  // XamEnumerate
@@ -200,14 +200,53 @@ void test_content_enumerator_round_trip() {
   std::cout << "test_content_enumerator_round_trip passed\n";
 }
 
+// XCONTENT_DATA is 0x134 bytes (with two bytes of padding), so a batch of
+// items is laid out at that stride.
+void test_content_items_use_the_xcontent_data_stride() {
+  ContentFixture f;
+  std::uint32_t id = 0;
+  assert(f.content_manager.create_content(xam::storage_device::HardDisk, "first",
+                                           xam::ContentType::SavedGame, 0, id) ==
+         xam::result::Success);
+  assert(f.content_manager.create_content(xam::storage_device::HardDisk, "second",
+                                           xam::ContentType::SavedGame, 0, id) ==
+         xam::result::Success);
+  cpu::CpuState cpu{};
+  const auto buffer_size_ptr = f.alloc32();
+  const auto handle_ptr = f.alloc32();
+  cpu.gpr[4] = xam::storage_device::HardDisk;
+  cpu.gpr[5] = static_cast<std::uint32_t>(xam::ContentType::SavedGame);
+  cpu.gpr[7] = 2;
+  cpu.gpr[8] = buffer_size_ptr;
+  cpu.gpr[9] = handle_ptr;
+  assert(f.invoke(0x025Cu, cpu).handled && cpu.gpr[3] == xam::result::Success);
+  assert(f.address_space->read32_be(buffer_size_ptr) == 0x134u * 2u);
+
+  memory::GuestAddress buffer{};
+  assert(f.address_space->allocate(0x134u * 2u, 4, memory::kReadWrite, false, buffer));
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = f.address_space->read32_be(handle_ptr);
+  cpu.gpr[5] = buffer;
+  cpu.gpr[6] = 0x134u * 2u;
+  cpu.gpr[7] = f.alloc32();
+  assert(f.invoke(0x0250u, cpu).handled && cpu.gpr[3] == xam::result::Success);
+  assert(f.address_space->read32_be(static_cast<memory::GuestAddress>(cpu.gpr[7])) == 2u);
+  assert(f.address_space->read32_be(buffer + 0x134u) == xam::storage_device::HardDisk &&
+         "the second item starts 0x134 bytes in");
+  const auto second_name = f.address_space->read8(buffer + 0x134u + 264u);
+  const auto first_name = f.address_space->read8(buffer + 264u);
+  assert((first_name == 'f' && second_name == 's') || (first_name == 's' && second_name == 'f'));
+  std::cout << "test_content_items_use_the_xcontent_data_stride passed\n";
+}
+
 void test_enumerate_unknown_handle_is_invalid() {
   ContentFixture f;
   cpu::CpuState cpu{};
   memory::GuestAddress buffer_addr{};
-  assert(f.address_space->allocate(306, 4, memory::kReadWrite, false, buffer_addr));
+  assert(f.address_space->allocate(308, 4, memory::kReadWrite, false, buffer_addr));
   cpu.gpr[3] = 0xDEADBEEFu;  // never a real handle
   cpu.gpr[5] = buffer_addr;
-  cpu.gpr[6] = 306u;
+  cpu.gpr[6] = 308u;
   const auto result = f.invoke(0x0250u, cpu);
   assert(result.handled);
   assert(cpu.gpr[3] == 0x00000006u);  // X_ERROR_INVALID_HANDLE
@@ -356,6 +395,7 @@ int main() {
   test_guest_enumerator_batches_and_exhausts();
   test_guest_enumerator_empty();
   test_content_enumerator_round_trip();
+  test_content_items_use_the_xcontent_data_stride();
   test_enumerate_unknown_handle_is_invalid();
   test_notify_create_listener_returns_handle_directly();
   test_notify_get_next_writes_real_payload();

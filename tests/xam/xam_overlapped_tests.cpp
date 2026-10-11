@@ -206,12 +206,12 @@ void test_enumerate_reports_the_item_count_through_the_overlapped() {
   cpu.gpr[9] = handle_out;
   assert(f.call(kXamContentCreateEnumerator, cpu) == xam::result::Success);
   const auto handle = f.address_space->read32_be(handle_out);
-  const auto buffer = f.alloc(306u * 10u);
+  const auto buffer = f.alloc(308u * 10u);
   const auto o = f.overlapped();
   cpu = cpu::CpuState{};
   cpu.gpr[3] = handle;
   cpu.gpr[5] = buffer;
-  cpu.gpr[6] = 306u * 10u;
+  cpu.gpr[6] = 308u * 10u;
   cpu.gpr[7] = 0;  // items_returned: none with an overlapped
   cpu.gpr[8] = o;
   assert(f.call(kXamEnumerate, cpu) == kErrorIoPending);
@@ -221,7 +221,7 @@ void test_enumerate_reports_the_item_count_through_the_overlapped() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = handle;
   cpu.gpr[5] = buffer;
-  cpu.gpr[6] = 306u;
+  cpu.gpr[6] = 308u;
   cpu.gpr[8] = exhausted;
   assert(f.call(kXamEnumerate, cpu) == kErrorIoPending);
   assert(f.result_of(exhausted) == 0x12u && f.extended_of(exhausted) == 0x80070012u &&

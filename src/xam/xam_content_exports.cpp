@@ -36,10 +36,12 @@ std::string read_content_file_name(cpu::MemoryPort& memory, cpu::GuestAddress co
 }
 
 // XCONTENT_DATA on-guest size: device_id(4) + content_type(4) +
-// display_name_raw(256) + file_name_raw(42) = 306 bytes - same layout
-// read_content_file_name()/XamContentCreateEx's parsing above already treat
-// as authoritative, kept symmetric here for serialization.
-constexpr std::uint32_t kContentDataSize = 306u;
+// display_name_raw(256) + file_name_raw(42) + padding(2) = 0x134 bytes, as
+// xenia and rexglue-sdk define it (static_assert_size(XCONTENT_DATA,
+// 0x134)). The padding is part of the struct, so it is also the stride of
+// an XamEnumerate result array; Xenon used 306, which misaligned every
+// item after the first.
+constexpr std::uint32_t kContentDataSize = 0x134u;
 
 std::vector<std::byte> serialize_content_data(const ContentData& item) {
   std::vector<std::byte> out(kContentDataSize, std::byte{0});
