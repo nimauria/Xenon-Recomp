@@ -542,6 +542,59 @@ void test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads() {
   g_never_signalled.reset();
 }
 
+std::shared_ptr<kernel::KernelEvent> g_frame_event;
+std::atomic<int> g_frames_signalled{0};
+
+// A vsync callback that signals an auto-reset event a guest thread waits on,
+// the usual way a title paces its render thread to vertical blank.
+ExecutionResult signal_frame_callback_entry(ExecutionContext& context) {
+  if (g_frame_event) {
+    g_frame_event->set();
+    g_frames_signalled.fetch_add(1);
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// Ordering between a pump callback and a guest wait: every frame the
+// callback signals wakes the waiting guest thread, and the pump keeps
+// running while the guest thread waits.
+void test_vsync_callback_wakes_a_waiting_guest_thread_each_frame() {
+  g_frame_event = std::make_shared<kernel::KernelEvent>(false, false);
+  g_frames_signalled.store(0);
+  constexpr GuestAddress kCallbackAddr = 0x5400u;
+  GpuPumpHarness harness(kCallbackAddr, &signal_frame_callback_entry);
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+
+  std::atomic<int> frames_seen{0};
+  kernel::ThreadCreationParams params{};
+  auto render = kernel_process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        while (frames_seen.load() < 10) {
+          if (kernel::wait_for_single_object(g_frame_event, std::chrono::milliseconds(1000), 0u) !=
+              kernel::WaitResult::Success) {
+            return 1;  // a frame never arrived
+          }
+          frames_seen.fetch_add(1);
+        }
+        return 0;
+      },
+      params);
+  assert(render && render->start());
+  kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+
+  assert(render->join(5000) && "ten vsync frames arrive within 5 s");
+  assert(render->exit_code() == 0u && "no wait for a frame timed out");
+  assert(frames_seen.load() == 10 && g_frames_signalled.load() >= 10);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  g_frame_event.reset();
+}
+
 }  // namespace
 
 int main() {
@@ -554,6 +607,7 @@ int main() {
   test_pm4_interrupt_reaches_guest_callback_with_source_one();
   test_a_blocked_callback_is_reported_while_it_blocks();
   test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads();
+  test_vsync_callback_wakes_a_waiting_guest_thread_each_frame();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;
