@@ -1,14 +1,19 @@
 #include "xenon/xbox/xboxkrnl_threading_exports.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
 #include "xbox/exports/sync_events.hpp"
@@ -195,6 +200,77 @@ bool ex_release_read_write_lock_export(kernel::KernelProcess& process, ExportCal
                               1u, wake_readers, 0u));
   } else if (wake_writer) {
     static_cast<void>(call_ke(process, context, &ke_set_event_export, lock + kWriterEvent, 1u, 0u));
+  }
+  return true;
+}
+
+// ---- Exceptions --------------------------------------------------------------
+
+namespace {
+
+// X_EXCEPTION_RECORD (the 32-bit NT EXCEPTION_RECORD): code, flags, nested
+// record, address, parameter count, then ExceptionInformation[15].
+constexpr std::uint32_t kExceptionCode = 0x00u;
+constexpr std::uint32_t kExceptionParameterCount = 0x10u;
+constexpr std::uint32_t kExceptionInformation = 0x14u;
+
+// The MSVC "set thread name" exception. Its ExceptionInformation is a
+// THREADNAME_INFO: type (0x1000), name pointer, thread id (-1 = the calling
+// thread), flags. The same convention xenia handles in RtlRaiseException.
+constexpr std::uint32_t kSetThreadNameException = 0x406D1388u;
+constexpr std::uint32_t kThreadNameInfoType = 0x1000u;
+constexpr std::size_t kMaxThreadNameLength = 64;
+
+void name_thread(kernel::KernelProcess& process, ExportCallContext& context,
+                 cpu::GuestAddress record) {
+  const auto info = record + kExceptionInformation;
+  if (context.memory.read32_be(record + kExceptionParameterCount) < 3u ||
+      context.memory.read32_be(info) != kThreadNameInfoType) {
+    return;
+  }
+  const auto name_ptr = context.memory.read32_be(info + 4u);
+  const auto requested = context.memory.read32_be(info + 8u);
+  if (name_ptr == 0u) return;
+  std::string name;
+  for (std::size_t i = 0; i < kMaxThreadNameLength; ++i) {
+    const auto c = context.memory.read8(name_ptr + static_cast<std::uint32_t>(i));
+    if (c == 0u) break;
+    name.push_back(c < 32u || c > 126u ? '?' : static_cast<char>(c));
+  }
+  const auto thread_id = requested == 0xFFFFFFFFu ? context.thread_id : requested;
+  if (auto* thread = process.thread_manager().get_thread_ptr(thread_id)) {
+    thread->set_name(std::move(name));
+  }
+}
+
+}  // namespace
+
+bool rtl_raise_exception_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto record = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (record == 0u) return true;
+  const auto code = context.memory.read32_be(record + kExceptionCode);
+  if (code == kSetThreadNameException) {
+    name_thread(process, context, record);
+    return true;
+  }
+  sync_events::record(logging::events::EventKind::ExceptionNotDispatched, context, nullptr,
+                      record, code, "RtlRaiseException");
+  static std::mutex logged_mutex;
+  static std::set<std::uint32_t> logged_codes;
+  bool first = false;
+  {
+    std::scoped_lock lock(logged_mutex);
+    first = logged_codes.insert(code).second;
+  }
+  if (first) {
+    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "exception", [&] {
+      char line[160];
+      std::snprintf(line, sizeof(line),
+                    "RtlRaiseException 0x%08X from lr=0x%08X not dispatched: no guest SEH "
+                    "unwinder; the call returns to the guest (logged once per code)",
+                    code, static_cast<unsigned>(context.cpu.lr));
+      return std::string(line);
+    });
   }
   return true;
 }

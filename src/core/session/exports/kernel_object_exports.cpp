@@ -79,6 +79,10 @@ bool XenonSession::register_kernel_object_exports() {
          &xbox::ex_try_to_acquire_read_write_lock_shared_export},
         {0x016u, "ExReleaseReadWriteLock", &xbox::ex_release_read_write_lock_export},
         {0x07Fu, "KePulseEvent", &xbox::ke_pulse_event_export},
+        {0x136u, "RtlRaiseException", &xbox::rtl_raise_exception_export, true,
+         "names the thread for the MSVC thread-naming exception (0x406D1388); "
+         "any other exception is not dispatched (no guest SEH unwinder) - it is "
+         "logged and recorded as ExceptionNotDispatched, and the call returns"},
         {0x0E6u, "NtQueryEvent", &xbox::nt_query_event_export},
         {0x0A9u, "KeSuspendThread", &xbox::ke_suspend_thread_export},
         {0x0FCu, "NtSuspendThread", &xbox::nt_suspend_thread_export},

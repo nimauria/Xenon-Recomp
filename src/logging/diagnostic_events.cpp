@@ -150,6 +150,7 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
       case EventKind::GuestStateRejected:
       case EventKind::CallbackBegin:
       case EventKind::CallbackEnd:
+      case EventKind::ExceptionNotDispatched:
       case EventKind::LockAcquired:
       case EventKind::LockReleased:
       case EventKind::GpuWaitParked:

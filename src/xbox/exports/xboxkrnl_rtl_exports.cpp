@@ -343,7 +343,8 @@ bool rtl_time_fields_to_time_export(ExportCallContext& context) {
 // follows it on the stack, or feeding a real consumer plausible-looking
 // garbage instead of the honest "we did not fill this" signal a no-op
 // preserves. RtlCaptureContext only ever feeds RtlUnwind/exception dispatch
-// (also not implemented - see RtlRaiseException/RtlUnwind), so there is no
+// (also not implemented - see RtlUnwind, and RtlRaiseException in
+// xboxkrnl_threading_exports.cpp), so there is no
 // currently-reachable consumer of this buffer's contents to get right or
 // wrong yet.
 bool rtl_capture_context_export(ExportCallContext&) { return true; }
@@ -366,19 +367,6 @@ bool c_specific_handler_export(ExportCallContext& context) {
   context.cpu.gpr[3] = kExceptionContinueSearch;
   return true;
 }
-
-// RtlRaiseException (ordinal 0x136) - void RtlRaiseException(EXCEPTION_RECORD*).
-// Real hardware dispatches the exception through the function-table-driven
-// SEH engine __C_specific_handler above would be invoked by - which Xenon
-// does not implement (see that function's comment and RtlUnwind below).
-// Without a real unwind engine, there is no structurally honest alternative
-// to a no-op return: Xenon cannot locate or transfer control to a real
-// handler frame, and fabricating success/failure would claim dispatch work
-// that never happened. Matches this exact gap's already-established
-// treatment in this file (RtlCaptureContext/__C_specific_handler) rather
-// than introducing a second, inconsistent response to the same missing
-// prerequisite.
-bool rtl_raise_exception_export(ExportCallContext&) { return true; }
 
 // RtlUnwind (ordinal 0x147) - void RtlUnwind(void* TargetFrame, void*
 // TargetIp, EXCEPTION_RECORD*, void* ReturnValue). Real hardware walks the
@@ -413,10 +401,6 @@ const RtlExportSpec kRtlExports[] = {
      "either), so this is currently unreachable dead code; matches hedge-"
      "dev/UnleashedRecomp's identical no-op precedent in a real shipped "
      "title"},
-    {0x0136u, "RtlRaiseException", &rtl_raise_exception_export, true,
-     "no-op - real dispatch needs the same unimplemented unwind engine "
-     "RtlUnwind/__C_specific_handler do not have either; rexglue-sdk has no "
-     "real implementation of this export either"},
     {0x0147u, "RtlUnwind", &rtl_unwind_export, true,
      "no-op - no real unwind engine exists to walk the scope chain or "
      "perform the real non-local jump to the target frame"},

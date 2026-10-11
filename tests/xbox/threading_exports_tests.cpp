@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_threading_exports.hpp"
@@ -54,6 +56,7 @@ constexpr std::uint32_t kOrdSListPush = 0x2Du;
 constexpr std::uint32_t kOrdYield = 0x101u;
 constexpr std::uint32_t kOrdKfRaiseIrql = 0xB2u;
 constexpr std::uint32_t kOrdKeEnableFpuExceptions = 0x5Du;
+constexpr std::uint32_t kOrdRtlRaiseException = 0x136u;
 
 struct Fixture {
   std::shared_ptr<memory::AddressSpace> address_space;
@@ -103,6 +106,7 @@ struct Fixture {
     add(kOrdKeSetDisableBoost, "KeSetDisableBoostThread", &xbox::ke_set_disable_boost_thread_export);
     add(kOrdFscGet, "FscGetCacheElementCount", &xbox::fsc_get_cache_element_count_export);
     add(kOrdFscSet, "FscSetCacheElementCount", &xbox::fsc_set_cache_element_count_export);
+    add(kOrdRtlRaiseException, "RtlRaiseException", &xbox::rtl_raise_exception_export);
     const bool reg = xbox::register_xboxkrnl_threading_exports(registry);
     assert(reg);
     static_cast<void>(reg);
@@ -481,6 +485,83 @@ void test_misc_process_free_exports() {
   f.call(kOrdKeEnableFpuExceptions, 1);
 }
 
+// ---- RtlRaiseException ----------------------------------------------------------
+// An X_EXCEPTION_RECORD: code, flags, nested record, address, parameter count,
+// ExceptionInformation[15].
+memory::GuestAddress exception_record(Fixture& f, std::uint32_t code,
+                                      std::initializer_list<std::uint32_t> information) {
+  const auto record = f.alloc(0x50u);
+  f.address_space->write32_be(record, code);
+  f.address_space->write32_be(record + 0x10u, static_cast<std::uint32_t>(information.size()));
+  std::uint32_t offset = 0x14u;
+  for (const auto value : information) {
+    f.address_space->write32_be(record + offset, value);
+    offset += 4u;
+  }
+  return record;
+}
+
+memory::GuestAddress guest_string(Fixture& f, const std::string& text) {
+  const auto address = f.alloc(static_cast<std::uint32_t>(text.size() + 1u));
+  for (std::size_t i = 0; i <= text.size(); ++i) {
+    f.address_space->write8(address + static_cast<std::uint32_t>(i),
+                            i < text.size() ? static_cast<std::uint8_t>(text[i]) : 0u);
+  }
+  return address;
+}
+
+// The MSVC thread-naming idiom raises 0x406D1388 with a THREADNAME_INFO inside
+// __try/__except; the call returns, as the handler would continue, and the
+// named thread (or the caller, for thread id -1) takes the name.
+void test_raise_exception_names_threads() {
+  Fixture f;
+  std::atomic<bool> release{false};
+  kernel::ThreadCreationParams params{};
+  auto thread = f.process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        while (!release.load()) std::this_thread::sleep_for(1ms);
+        return 0u;
+      },
+      params);
+  assert(thread && thread->start());
+  const auto id = thread->thread_id();
+
+  f.call(kOrdRtlRaiseException,
+         exception_record(f, 0x406D1388u, {0x1000u, guest_string(f, "Render\x01Thread"), id, 0u}));
+  assert(thread->name() == "Render?Thread" && "control characters are replaced");
+  f.call(kOrdRtlRaiseException,
+         exception_record(f, 0x406D1388u, {0x1000u, guest_string(f, "Self"), 0xFFFFFFFFu, 0u}),
+         0, 0, id);
+  assert(thread->name() == "Self" && "thread id -1 names the calling thread");
+  f.call(kOrdRtlRaiseException,
+         exception_record(f, 0x406D1388u, {0x2000u, guest_string(f, "Ignored"), id, 0u}));
+  assert(thread->name() == "Self" && "a record that is not a THREADNAME_INFO changes nothing");
+
+  release = true;
+  static_cast<void>(thread->join(5000));
+}
+
+// Without a guest unwinder any other exception cannot be dispatched; that is
+// recorded rather than silently returned from.
+void test_raise_exception_records_what_it_cannot_dispatch() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  events::set_enabled(true);
+  events::clear();
+  const auto record = exception_record(f, 0xE06D7363u, {0x19930520u, 0u, 0u});  // C++ throw
+  f.call(kOrdRtlRaiseException, record, 0, 0, 9);
+  events::set_enabled(false);
+  bool recorded = false;
+  for (const auto& event : events::snapshot()) {
+    if (event.kind != events::EventKind::ExceptionNotDispatched) continue;
+    assert(event.value == 0xE06D7363u && event.guest_address == record);
+    assert(event.guest_thread_id == 9 && std::string(event.source) == "RtlRaiseException");
+    recorded = true;
+  }
+  assert(recorded);
+  events::clear();
+}
+
 }  // namespace
 
 int main() {
@@ -503,6 +584,9 @@ int main() {
       {"pulse_and_query_event", &test_pulse_and_query_event},
       {"thread_suspension", &test_thread_suspension},
       {"misc_process_free_exports", &test_misc_process_free_exports},
+      {"raise_exception_names_threads", &test_raise_exception_names_threads},
+      {"raise_exception_records_what_it_cannot_dispatch",
+       &test_raise_exception_records_what_it_cannot_dispatch},
   };
   for (const auto& c : cases) {
     std::cerr << "[test] " << c.name << std::endl;

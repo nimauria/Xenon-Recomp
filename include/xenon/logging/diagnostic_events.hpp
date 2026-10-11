@@ -62,6 +62,10 @@ enum class EventKind : std::uint16_t {
   CallbackBegin = 10,
   // It returned. value: its duration in milliseconds.
   CallbackEnd = 11,
+  // RtlRaiseException with an exception Xenon cannot dispatch (it has no
+  // guest SEH unwinder); the call returned to the guest. guest_address: the
+  // EXCEPTION_RECORD; value: the exception code.
+  ExceptionNotDispatched = 12,
 };
 
 struct Event {

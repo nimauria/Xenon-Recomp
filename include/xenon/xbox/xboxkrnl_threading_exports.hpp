@@ -32,6 +32,14 @@ namespace xenon::xbox {
 [[nodiscard]] bool ex_release_read_write_lock_export(xenon::kernel::KernelProcess& process,
                                                      xenon::core::ExportCallContext& context);
 
+// RtlRaiseException (0x136): r3 = EXCEPTION_RECORD* -> returns only if the
+// exception is continued. Xenon has no guest SEH unwinder: the MSVC
+// thread-naming exception (0x406D1388) names the thread and returns, as the
+// __except handler around it would; any other exception is logged and
+// recorded as ExceptionNotDispatched, and the call returns.
+[[nodiscard]] bool rtl_raise_exception_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
 // KePulseEvent (0x7F): r3 = KEVENT*, r4 = increment, r5 = wait -> r3 = previous state.
 [[nodiscard]] bool ke_pulse_event_export(xenon::kernel::KernelProcess& process,
                                          xenon::core::ExportCallContext& context);

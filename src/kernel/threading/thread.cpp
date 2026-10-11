@@ -147,6 +147,11 @@ void KernelThread::set_processor_affinity(std::uint32_t affinity) noexcept {
 #endif
 }
 
+std::string KernelThread::name() const {
+  std::scoped_lock lock(mutex_);
+  return name_;
+}
+
 void KernelThread::set_name(std::string name) {
   std::scoped_lock lock(mutex_);
   name_ = std::move(name);

@@ -63,7 +63,9 @@ class KernelThread final : public KernelObject {
   [[nodiscard]] ThreadPriority priority() const noexcept;
   [[nodiscard]] std::uint32_t exit_code() const noexcept;
   [[nodiscard]] std::uint32_t processor_affinity() const noexcept;
-  [[nodiscard]] const std::string& name() const noexcept { return name_; }
+  // A copy: the name can change while another thread reads it (a guest
+  // names its threads through RtlRaiseException).
+  [[nodiscard]] std::string name() const;
   // The real Xbox 360/Win32 NtSuspendThread/NtResumeThread contract returns
   // the PREVIOUS suspend count through an out parameter, which resume()'s
   // own bool return (suspended-or-not) cannot express - exported read-only
