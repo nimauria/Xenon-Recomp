@@ -2,23 +2,10 @@
   "content_digest": "sha256:101ac3225f06703364319689e3bd511f2ba5ba43c8c06abc2679adb1afdfc419",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "12052fefd72710061ba418460e4b63579c87e3f7",
+    "assessed_commit": "cfb0e8a5b3c7554f6532929d28fb1b8de256e03e",
     "worktree": "clean"
   },
-  "problems": [
-    {
-      "detail": "linux results come from 99298e100508, not the assessed revision 12052fefd727",
-      "id": null,
-      "kind": "ci_stale",
-      "severity": "warning"
-    },
-    {
-      "detail": "windows results come from 99298e100508, not the assessed revision 12052fefd727",
-      "id": null,
-      "kind": "ci_stale",
-      "severity": "warning"
-    }
-  ],
+  "problems": [],
   "schema": 1,
   "candidates": [
     {"category": "kernel", "detail": "registration declares partial", "id": "kernel:registered:ExRegisterTitleTerminateNotification", "kind": "declared_limitation"},
