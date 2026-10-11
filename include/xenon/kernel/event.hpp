@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 #include "xenon/kernel/signal_state_mirror.hpp"
 
@@ -47,6 +48,7 @@ class KernelEvent final : public KernelObject {
   std::condition_variable condition_{};
   bool signaled_{};
   std::unique_ptr<SignalStateMirror> mirror_;
+  detail::MultiWaitList multi_waiters_;
 };
 
 }  // namespace xenon::kernel

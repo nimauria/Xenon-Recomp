@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -37,7 +36,7 @@ bool KernelSemaphore::release(std::int32_t release_count, std::int32_t* previous
   } else {
     condition_.notify_all();
   }
-  detail::notify_multi_object_waiters();
+  multi_waiters_.notify();
 
   return true;
 }

@@ -129,8 +129,8 @@ void test_blocked_waiter_wakes_with_abandoned_when_the_owner_exits() {
   assert(owner->join());
 }
 
-// A multi-object waiter sleeps on the kernel-wide wait generation, not on the
-// mutant's own condition variable, so abandonment must advance it too.
+// A multi-object waiter sleeps on its own wait block, not on the mutant's
+// condition variable, so abandonment must wake the mutant's wait list too.
 void test_wait_any_wakes_with_abandoned_when_the_owner_exits() {
   auto never = std::make_shared<KernelEvent>(true, false);
   auto mutant = std::make_shared<KernelMutant>();

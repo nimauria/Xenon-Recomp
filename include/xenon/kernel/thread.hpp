@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -51,6 +52,8 @@ struct ThreadCreationParams {
 using ThreadEntry = std::function<std::uint32_t()>;
 
 class KernelThread final : public KernelObject {
+  friend struct detail::WaitAccess;
+
  public:
   explicit KernelThread(ThreadEntry entry, const ThreadCreationParams& params);
   ~KernelThread() override;
@@ -186,6 +189,8 @@ class KernelThread final : public KernelObject {
   // alongside every state_ = ThreadState::Terminated transition (terminate()
   // and thread_main()'s natural-completion path).
   std::atomic<bool> terminated_{false};
+  // Multi-object waits on this thread; woken when it terminates.
+  detail::MultiWaitList multi_waiters_;
   std::atomic<bool> boost_disabled_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned

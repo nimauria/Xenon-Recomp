@@ -14,7 +14,6 @@
 #include <functional>
 #include <mutex>
 
-#include "kernel/synchronization/wait_internal.hpp"
 
 namespace xenon::kernel {
 
@@ -46,6 +45,16 @@ struct WaitAccess {
     }
   }
 
+  static MultiWaitList& wait_list(KernelObject& object) {
+    switch (object.type()) {
+      case ObjectType::Event: return static_cast<KernelEvent&>(object).multi_waiters_;
+      case ObjectType::Semaphore: return static_cast<KernelSemaphore&>(object).multi_waiters_;
+      case ObjectType::Mutant: return static_cast<KernelMutant&>(object).multi_waiters_;
+      case ObjectType::Timer: return static_cast<KernelTimer&>(object).multi_waiters_;
+      default: return static_cast<KernelThread&>(object).multi_waiters_;
+    }
+  }
+
   // Returns whether the wait took over an abandoned mutant.
   static bool satisfy(KernelObject& object, std::uint32_t thread_id) {
     switch (object.type()) {
@@ -66,36 +75,32 @@ namespace {
 
 constexpr std::size_t kMaxWaitObjects = 64;
 
-struct MultiWaitNotifier {
-  std::mutex mutex;
-  std::condition_variable condition;
-  std::uint64_t generation{0};
-  std::atomic<std::uint32_t> waiters{0};
-};
-
-// Never destroyed: guest threads may still signal objects during process exit.
-MultiWaitNotifier& multi_wait_notifier() {
-  static auto* notifier = new MultiWaitNotifier();
-  return *notifier;
-}
-
-void advance_generation(MultiWaitNotifier& notifier) {
-  {
-    std::scoped_lock lock(notifier.mutex);
-    ++notifier.generation;
-  }
-  notifier.condition.notify_all();
-}
-
 }  // namespace
 
-void detail::notify_multi_object_waiters() noexcept {
-  auto& notifier = multi_wait_notifier();
-  if (notifier.waiters.load(std::memory_order_seq_cst) != 0) advance_generation(notifier);
+void detail::MultiWaitList::add(MultiWaitBlock* block) {
+  std::scoped_lock lock(mutex_);
+  blocks_.push_back(block);
+  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_seq_cst);
 }
 
-void detail::notify_multi_object_waiters_unconditionally() noexcept {
-  advance_generation(multi_wait_notifier());
+void detail::MultiWaitList::remove(MultiWaitBlock* block) noexcept {
+  std::scoped_lock lock(mutex_);
+  if (const auto found = std::find(blocks_.begin(), blocks_.end(), block); found != blocks_.end()) {
+    *found = blocks_.back();
+    blocks_.pop_back();
+  }
+  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_seq_cst);
+}
+
+void detail::MultiWaitList::notify_always() noexcept {
+  std::scoped_lock lock(mutex_);
+  for (auto* block : blocks_) {
+    {
+      std::scoped_lock block_lock(block->mutex);
+      ++block->wakeups;
+    }
+    block->condition.notify_one();
+  }
 }
 
 bool is_waitable_object(ObjectType type) {
@@ -225,31 +230,38 @@ WaitResult wait_for_multiple_objects(
   const auto deadline =
       std::chrono::steady_clock::now() + (infinite ? std::chrono::milliseconds(0) : timeout);
 
-  // Registered before the first check, so any signal after that check
-  // advances the generation this wait sleeps on (see wait_internal.hpp).
-  auto& notifier = multi_wait_notifier();
-  notifier.waiters.fetch_add(1, std::memory_order_seq_cst);
+  // A wait that is satisfied at once, or has a zero timeout, never registers.
+  if (try_satisfy()) return satisfied();
+  if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
+
+  // Registered on every object before the next check, so any change after
+  // that check wakes this block (see multi_wait_list.hpp).
+  detail::MultiWaitBlock block;
+  for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
   struct Unregister {
-    MultiWaitNotifier& notifier;
-    ~Unregister() { notifier.waiters.fetch_sub(1, std::memory_order_seq_cst); }
-  } unregister{notifier};
+    std::span<KernelObject* const> objects;
+    detail::MultiWaitBlock* block;
+    ~Unregister() {
+      for (auto* object : objects) detail::WaitAccess::wait_list(*object).remove(block);
+    }
+  } unregister{distinct, &block};
 
   while (true) {
     std::uint64_t observed = 0;
     {
-      std::scoped_lock lock(notifier.mutex);
-      observed = notifier.generation;
+      std::scoped_lock lock(block.mutex);
+      observed = block.wakeups;
     }
     if (try_satisfy()) return satisfied();
     if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
 
-    std::unique_lock lock(notifier.mutex);
-    const auto changed = [&] { return notifier.generation != observed; };
+    std::unique_lock lock(block.mutex);
+    const auto woken = [&] { return block.wakeups != observed; };
     if (infinite) {
-      notifier.condition.wait(lock, changed);
+      block.condition.wait(lock, woken);
     } else {
       // On timeout, loop once more: the final check above decides.
-      (void)notifier.condition.wait_until(lock, deadline, changed);
+      (void)block.condition.wait_until(lock, deadline, woken);
     }
   }
 }

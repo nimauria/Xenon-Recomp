@@ -232,6 +232,33 @@ void test_wait_any_wakes_when_a_thread_terminates() {
   assert(worker->join());
 }
 
+// terminate() marks a thread terminated while its guest code may still be
+// running; a multi-object wait on the thread must wake then, not only when
+// the host thread finishes.
+void test_wait_any_wakes_when_a_running_thread_is_terminated() {
+  std::atomic<bool> release_worker{false};
+  ThreadCreationParams params{};
+  auto worker = std::make_shared<KernelThread>(
+      [&]() -> std::uint32_t {
+        while (!release_worker.load()) std::this_thread::sleep_for(1ms);
+        return 0;
+      },
+      params);
+  assert(worker->start());
+  auto never = std::make_shared<KernelEvent>(true, false);
+  std::uint32_t index = 99;
+  std::atomic<WaitResult> result{WaitResult::Failed};
+  std::thread waiter([&] { result = wait_any({never, worker}, 5000ms, index); });
+  std::this_thread::sleep_for(30ms);
+  const auto terminated = std::chrono::steady_clock::now();
+  assert(worker->terminate(3));
+  waiter.join();
+  assert(result.load() == WaitResult::Success && index == 1);
+  assert(std::chrono::steady_clock::now() - terminated < 2000ms);
+  release_worker = true;
+  assert(worker->join());
+}
+
 // Every operation that makes an object satisfiable must wake a multi-object
 // wait promptly, not leave it to be found by the final check at its timeout.
 void test_each_signal_wakes_wait_any_promptly() {
@@ -278,6 +305,7 @@ int main() {
   test_overlapping_wait_all_in_opposite_orders_does_not_deadlock();
   test_wait_all_deepens_a_mutant_the_waiter_already_owns();
   test_wait_any_wakes_when_a_thread_terminates();
+  test_wait_any_wakes_when_a_running_thread_is_terminated();
   test_each_signal_wakes_wait_any_promptly();
   std::cout << "All multi-object wait semantics tests passed!\n";
   return 0;

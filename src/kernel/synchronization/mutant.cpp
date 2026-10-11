@@ -3,7 +3,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -71,7 +70,7 @@ bool KernelMutant::release(std::uint32_t owner_thread_id) {
     owner_thread_id_ = 0;
     owner_host_thread_ = {};
     condition_.notify_one();
-    detail::notify_multi_object_waiters();
+    multi_waiters_.notify();
   }
 
   return true;
@@ -103,7 +102,7 @@ void KernelMutant::abandon_locked() noexcept {
   owner_host_thread_ = {};
   recursion_count_ = 0;
   condition_.notify_all();
-  detail::notify_multi_object_waiters();
+  multi_waiters_.notify();
 }
 
 void abandon_mutants_owned_by_this_thread() noexcept {

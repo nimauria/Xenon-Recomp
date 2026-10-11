@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -68,6 +69,7 @@ class KernelTimer final : public KernelObject {
   std::chrono::steady_clock::time_point due_time_;
   std::optional<std::chrono::milliseconds> period_;
   TimerCallback callback_;
+  detail::MultiWaitList multi_waiters_;
 };
 
 }  // namespace xenon::kernel

@@ -1,6 +1,5 @@
 #include "xenon/kernel/event.hpp"
 
-#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -21,7 +20,7 @@ void KernelEvent::set() {
   } else {
     condition_.notify_one();
   }
-  detail::notify_multi_object_waiters();
+  multi_waiters_.notify();
 }
 
 void KernelEvent::reset() {

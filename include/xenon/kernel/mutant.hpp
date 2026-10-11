@@ -7,6 +7,7 @@
 #include <thread>
 #include <utility>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -69,6 +70,7 @@ class KernelMutant final : public KernelObject {
   std::thread::id owner_host_thread_{};
   std::int32_t recursion_count_{0};
   bool abandoned_{false};
+  detail::MultiWaitList multi_waiters_;
 };
 
 // Abandons every mutant the calling host thread still owns. Called by a guest

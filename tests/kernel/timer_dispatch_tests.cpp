@@ -100,8 +100,8 @@ void test_manager_shutdown_does_not_hang_with_pending_timers() {
   assert(elapsed < 2000ms && "TimerManager teardown must not block on a far-future pending timer");
 }
 
-// A multi-object wait sleeps on the kernel-wide wait generation, so a timer
-// fired by the dispatch thread (not an immediate set(0)) must advance it.
+// A multi-object wait sleeps on its own wait block, so a timer fired by the
+// dispatch thread (not an immediate set(0)) must wake the timer's wait list.
 void test_dispatched_timer_wakes_a_multi_object_wait_at_its_due_time() {
   TimerManager manager;
   auto never = std::make_shared<KernelEvent>(true, false);

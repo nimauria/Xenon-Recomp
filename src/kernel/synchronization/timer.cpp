@@ -1,6 +1,5 @@
 #include "xenon/kernel/timer.hpp"
 
-#include "kernel/synchronization/wait_internal.hpp"
 #include "xenon/kernel/wait_util.hpp"
 
 namespace xenon::kernel {
@@ -27,7 +26,7 @@ bool KernelTimer::set(std::chrono::milliseconds due_time,
   if (due_time.count() == 0) {
     signaled_ = true;
     condition_.notify_all();
-    detail::notify_multi_object_waiters();
+    multi_waiters_.notify();
     if (callback_) {
       callback_();
     }
@@ -83,7 +82,7 @@ bool KernelTimer::fire() {
 
     signaled_ = true;
     condition_.notify_all();
-    detail::notify_multi_object_waiters();
+    multi_waiters_.notify();
     callback_copy = callback_;
 
     if (period_) {
