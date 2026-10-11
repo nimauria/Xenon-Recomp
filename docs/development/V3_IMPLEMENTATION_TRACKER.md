@@ -692,12 +692,65 @@ Decided not to change, with reasons (plan: semantics only with evidence):
 - **Guest SEH unwinder.** Needs the PPC `.pdata`/unwind contract verified
   and evidence that a title raises a real exception; `ExceptionNotDispatched`
   events now provide that evidence from any run.
-- **APC/DPC delivery and alertable waits.** No title evidence yet.
+- **DPC delivery** (revised 11 October, see "User APCs" below). xenia and
+  rexglue-sdk both stub `KeInsertQueueDpc` (`assert_always("DPC does not
+  dispatch yet; going to hang!")`, nothing drains the list), and both AC6
+  recomps (`sal063/AC6_recomp`, `rapidsamphire/AC6Recomp`, on rexglue-sdk
+  with only input and codegen fixes on top) run in-game on that stub, so AC6
+  does not depend on a DPC running. Xenon does not register the DPC exports;
+  a title importing them is reported as an unresolved import.
 - **Decoupling a blocked callback from its pump.** Needs the ordering model
   the plan asks for; the callback watch now measures whether AC6 needs it.
 - **Join-then-detach** in `ThreadManager::shutdown()` and `~KernelThread()`
   is still reached by a thread spinning in compiled code with no block
   boundary; waits no longer reach it.
+
+### User APCs (V3-04, 11 October 2026)
+
+The owner asked whether Xenon needs APCs and DPCs; the evidence above was
+re-checked against xenia, rexglue-sdk and the AC6 recomps. User APCs are
+needed: titles queue them through I/O completion routines, timer routines,
+XAM overlapped completions and `NtQueueApcThread`, and both references
+deliver them when the thread next waits or sleeps alertably, returning
+`STATUS_USER_APC`. Xenon had no queue, ignored the alertable flag, logged
+and dropped `NtSetTimerEx` routines, and dropped every I/O completion APC
+(the I/O bridge's APC hook was never installed).
+
+- `7b5fc47`: per-thread user APC queue; alertable waits and delays return
+  `WaitResult::UserApc` when an APC is pending and no object is
+  satisfiable (an object is taken first, as on NT).
+- `48821cb`: `ExportCallContext::guest_call`, implemented by the session as
+  a nested dispatch on the calling thread below its stack
+  (`call_guest_routine()`); alertable Ke*/Nt* waits and
+  `KeDelayExecutionThread` run the queued APCs and return
+  `STATUS_USER_APC`; producers `NtQueueApcThread`, `NtSetTimerEx` routines
+  (to the setting thread) and I/O completion routines (to the issuing
+  thread).
+- `f87e662`: guest KAPC objects (`KeInitializeApc`, `KeInsertQueueApc`,
+  `KeRemoveQueueApc`, 40-byte layout as in xenia and rexglue-sdk); the
+  kernel routine runs first and may rewrite the normal routine, context and
+  arguments. Kernel-mode KAPCs are accepted but not delivered, as in both
+  references.
+
+Tests: `xenon_kernel_user_apc_tests` (queue, alertable and non-alertable
+waits and delays, ordering), `xenon_xboxkrnl_user_apc_export_tests`
+(NtQueueApcThread, timer routine, KAPC kernel-then-normal routine,
+removal, kernel-mode, bad targets), and the nested call through a real
+session in `xenon_thread_creation_tests`. Mutations removing delivery or
+the timer routine fail them; ThreadSanitizer clean over 15 runs.
+
+Still open: XAM overlapped completion routines (Xenon's XAM has no
+asynchronous overlapped model to queue them from), kernel-mode APC
+delivery, thread alerts (`NtAlertThread`, `STATUS_ALERTED`).
+
+Environment note: after the Codespace restarted, PulseAudio was no longer
+installed, so sessions with audio enabled failed `initialize()` ("dsp: No
+such audio device"); local runs use `SDL_AUDIODRIVER=dummy`. This is
+weakness 2 (guest audio depends on a host device), owned by V3-14. An
+interrupted build also left 15 objects with no recorded header
+dependencies, which ninja then never rebuilt (a stale
+`title_update_integration_tests.o` overflowed its stack-allocated
+`XenonSession`); deleting them restored correct rebuilds.
 
 ## Dependency graph
 
