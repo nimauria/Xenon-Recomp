@@ -1,111 +1,122 @@
 #include "xenon/core/export_registry.hpp"
+#include "xenon/core/session.hpp"
+#include "xenon/kernel/event.hpp"
+#include "xenon/kernel/handle_table.hpp"
+#include "xenon/kernel/process.hpp"
 #include "xenon/xam/notification_manager.hpp"
 #include "xenon/xam/xam_exports.hpp"
 
 namespace xenon::xam {
-namespace {
 
-void write_u32_be(cpu::MemoryPort& memory, cpu::GuestAddress addr, std::uint32_t value) {
-  memory.write32_be(addr, value);
-}
-
-}  // namespace
-
+// XNotify listeners, as in xenia's xam_notify.cc (see NotificationManager):
+//   XamNotifyCreateListener(qword mask, max_version) -> handle
+//   XamNotifyCreateListenerInternal(qword mask, is_system, max_version) -> handle
+//   XNotifyGetNext(handle, match_id, id_ptr, param_ptr) -> BOOL
+// The handle is a waitable kernel object closed with NtClose; 0 is returned
+// when no handle could be made. Earlier Xenon returned a counter as the
+// "handle", kept one queue for every listener, ignored the mask and
+// match_id, used invented notification ids, and sent no startup
+// notifications.
 bool register_notification_exports(core::ExportRegistry& registry,
-                                   NotificationManager& notification_manager) {
+                                   NotificationManager& notifications,
+                                   core::XenonSession& session) {
   bool ok = true;
 
-  // XamNotifyCreateListener (0x028A) - real ABI is a dword_result_t, verified
-  // against xenia's XamNotifyCreateListener_entry(qword_t mask,
-  // dword_t max_version): mask=r3 (PPC64 passes a 64-bit qword in one GPR,
-  // not a register pair), max_version=r4, and the HANDLE ITSELF is the
-  // return value in r3 - there is no separate out-pointer parameter at all.
-  // The previous stub read a nonexistent "out_handle_ptr" from gpr[1] (the
-  // guest stack pointer register - never a valid argument slot) and always
-  // returned result::Success (0) in r3, which a real caller reads directly
-  // as "listener handle 0" - i.e. an invalid handle - even though a listener
-  // was actually created internally. Returning the real id directly in r3
-  // is the fix; see NotificationManager's own "stubbed" listener-management
-  // comment for the separate, already-disclosed limitation that its queue
-  // is global rather than partitioned per listener/mask.
+  const auto create = [&notifications, &session](core::ExportCallContext& ctx,
+                                                 std::uint64_t mask, std::uint32_t max_version) {
+    auto* process = session.kernel_process();
+    kernel::Handle handle{};
+    if (process == nullptr ||
+        process->handle_table().insert(notifications.create_listener(mask, max_version),
+                                       0xFFFFFFFFu, kernel::HandleFlags::None,
+                                       handle) != kernel::KernelIoCode::Success) {
+      handle = 0u;
+    }
+    ctx.cpu.gpr[3] = handle;
+    return true;
+  };
+
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XamNotifyCreateListener";
     desc.ordinal = ordinal::XamNotifyCreateListener;
-    desc.requirement = core::ExportRequirement::Stubbed;
-    desc.partial = true;
-    desc.partial_note =
-        "the returned listener handle does not back a per-listener filtered "
-        "queue - NotificationManager has a single global FIFO shared by "
-        "every listener, so the mask parameter is accepted but not applied";
-    desc.handler = [&notification_manager](core::ExportCallContext& ctx) -> bool {
-      ctx.cpu.gpr[3] = notification_manager.create_listener();
-      return true;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [create](core::ExportCallContext& ctx) -> bool {
+      return create(ctx, ctx.cpu.gpr[3], static_cast<std::uint32_t>(ctx.cpu.gpr[4]));
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamNotifyCreateListenerInternal";
+    desc.ordinal = ordinal::XamNotifyCreateListenerInternal;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [create](core::ExportCallContext& ctx) -> bool {
+      return create(ctx, ctx.cpu.gpr[3], static_cast<std::uint32_t>(ctx.cpu.gpr[5]));
     };
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XNotifyGetNext (0x028B) - real xam.xex identity has no "Xam" prefix;
-  // see xam_exports.hpp for the rename rationale. Real ABI verified against
-  // xenia's XNotifyGetNext_entry(handle, match_id, id_ptr, param_ptr):
-  // handle=r3, match_id=r4, id_ptr=r5, param_ptr=r6. The previous stub read
-  // none of these and never wrote id_ptr/param_ptr at all - this now writes
-  // the real dequeued notification's type/param, fixing exactly the gap its
-  // own partial_note described. match_id-based filtering (dequeue a specific
-  // pending type out of order) is NOT honored: NotificationManager's queue
-  // is FIFO-only with no by-type lookup, a separate, already-disclosed
-  // limitation (see NotificationManager's class comment) rather than
-  // something this export itself could fix.
+  // XNotifyGetNext: *param_ptr is zeroed first, and with no id_ptr nothing
+  // is dequeued (FALSE), as in xenia; a null param_ptr is allowed (Ghost
+  // Recon Advanced Warfighter 2 passes one).
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XNotifyGetNext";
     desc.ordinal = ordinal::XNotifyGetNext;
-    desc.requirement = core::ExportRequirement::Stubbed;
-    desc.partial = true;
-    desc.partial_note =
-        "match_id-based filtering is not honored (always dequeues the "
-        "front of the single global FIFO) - NotificationManager has no "
-        "by-type lookup to dequeue a specific pending notification out of "
-        "order";
-    desc.handler = [&notification_manager](core::ExportCallContext& ctx) -> bool {
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&notifications, &session](core::ExportCallContext& ctx) -> bool {
+      const auto handle = static_cast<kernel::Handle>(ctx.cpu.gpr[3]);
+      const auto match_id = static_cast<std::uint32_t>(ctx.cpu.gpr[4]);
       const auto id_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
       const auto param_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[6]);
-
-      if (param_ptr != 0u) write_u32_be(ctx.memory, param_ptr, 0u);
-      if (id_ptr != 0u) write_u32_be(ctx.memory, id_ptr, 0u);
-
-      auto notification = notification_manager.get_next_notification();
-      if (!notification.has_value()) {
-        ctx.cpu.gpr[3] = 0u;  // FALSE: no notification dequeued.
+      if (param_ptr != 0u) ctx.memory.write32_be(param_ptr, 0u);
+      ctx.cpu.gpr[3] = 0u;
+      if (id_ptr == 0u) return true;
+      ctx.memory.write32_be(id_ptr, 0u);
+      auto* process = session.kernel_process();
+      kernel::HandleView view{};
+      if (process == nullptr ||
+          process->handle_table().lookup(handle, view) != kernel::KernelIoCode::Success) {
         return true;
       }
-
-      if (id_ptr != 0u) {
-        write_u32_be(ctx.memory, id_ptr, static_cast<std::uint32_t>(notification->type));
-      }
-      if (param_ptr != 0u) {
-        write_u32_be(ctx.memory, param_ptr, static_cast<std::uint32_t>(notification->param));
-      }
-
-      ctx.cpu.gpr[3] = 1u;  // TRUE: a notification was dequeued.
+      std::uint32_t id = 0;
+      std::uint32_t param = 0;
+      if (!notifications.dequeue(view.object.get(), match_id, id, param)) return true;
+      ctx.memory.write32_be(id_ptr, id);
+      if (param_ptr != 0u) ctx.memory.write32_be(param_ptr, param);
+      ctx.cpu.gpr[3] = 1u;
       return true;
     };
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XNotifyPositionUI (0x028C) - Stubbed; real xam.xex identity has no
-  // "Xam" prefix, see xam_exports.hpp.
+  // XNotifyPositionUI(position) and XNotifyDelayUI(delay_ms) place and
+  // delay the system notification toasts; Xenon draws no system UI, so
+  // there is nothing to move or delay (xenia ignores both too).
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XNotifyPositionUI";
     desc.ordinal = ordinal::XNotifyPositionUI;
-    desc.requirement = core::ExportRequirement::Stubbed;
+    desc.requirement = core::ExportRequirement::Required;
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
-      // No UI to position
-      ctx.cpu.gpr[3] = result::Success;
+      ctx.cpu.gpr[3] = 0u;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XNotifyDelayUI";
+    desc.ordinal = ordinal::XNotifyDelayUI;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [](core::ExportCallContext& ctx) -> bool {
+      ctx.cpu.gpr[3] = 0u;
       return true;
     };
     ok = registry.register_export(std::move(desc)) && ok;

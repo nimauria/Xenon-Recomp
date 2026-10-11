@@ -94,6 +94,8 @@ constexpr std::uint32_t XamNotifyCreateListener = 0x028A;
 // separate export that does keep the prefix.
 constexpr std::uint32_t XNotifyGetNext = 0x028B;
 constexpr std::uint32_t XNotifyPositionUI = 0x028C;
+constexpr std::uint32_t XNotifyDelayUI = 0x028D;
+constexpr std::uint32_t XamNotifyCreateListenerInternal = 0x0291;
 
 // ---------------------------------------------------------------------------
 // Content and storage (xam_table.inc ~0x259-0x269)

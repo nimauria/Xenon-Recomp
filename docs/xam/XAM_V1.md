@@ -141,9 +141,18 @@ created and 2 for opened.
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x028A | `XamNotifyCreateListener` | ✅ Stubbed | Create notification listener |
-| 0x028B | `XNotifyGetNext` | ✅ Stubbed | Get next notification (real identity has no "Xam" prefix) |
-| 0x028C | `XNotifyPositionUI` | ✅ Stubbed | Position notification UI (no-op; real identity has no "Xam" prefix) |
+| 0x028A | `XamNotifyCreateListener` | Implemented | Waitable listener handle with its own queue, area mask and version filter |
+| 0x0291 | `XamNotifyCreateListenerInternal` | Implemented | As 0x028A, with `is_system` |
+| 0x028B | `XNotifyGetNext` | Implemented | Next notification, or the next with `match_id` (real identity has no "Xam" prefix) |
+| 0x028C | `XNotifyPositionUI` | Implemented | No system UI to position (real identity has no "Xam" prefix) |
+| 0x028D | `XNotifyDelayUI` | Implemented | No system UI to delay |
+
+Notification ids are XAM's own (`XN_SYS_SIGNINCHANGED` 0x0A and so on). The
+first listener whose mask includes the system area receives the startup
+notifications xenia and rexglue-sdk send: `XN_SYS_UI` on then off,
+`XN_SYS_SIGNINCHANGED` twice, and `XN_SYS_INPUTDEVICESCHANGED` and
+`XN_SYS_INPUTDEVICECONFIGCHANGED` twice each. `XamUserWriteProfileSettings`
+sends `XN_SYS_PROFILESETTINGCHANGED`.
 
 ### Phase 6: Achievements ✅
 

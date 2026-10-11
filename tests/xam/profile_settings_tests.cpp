@@ -22,13 +22,15 @@
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xam/notification_manager.hpp"
 #include "xenon/xam/profile_settings.hpp"
 #include "xenon/xam/types.hpp"
 #include "xenon/xam/user_manager.hpp"
 
 namespace xenon::xam {
 bool register_profile_settings_exports(core::ExportRegistry& registry, UserManager& users,
-                                       ProfileSettings& settings, core::XenonSession& session);
+                                       ProfileSettings& settings, NotificationManager& notifications,
+                                       core::XenonSession& session);
 }  // namespace xenon::xam
 
 namespace xenon::core {
@@ -100,6 +102,7 @@ struct Fixture {
   core::XenonSession session;
   xam::UserManager users;
   xam::ProfileSettings settings;
+  xam::NotificationManager notifications;
   core::ExportRegistry registry;
   memory::GuestAddress stack_top{};
 
@@ -109,7 +112,7 @@ struct Fixture {
     assert(address_space->initialize());
     core::SessionExecutionTestAccess::configure(session, address_space);
     users.initialize();
-    assert(xam::register_profile_settings_exports(registry, users, settings, session));
+    assert(xam::register_profile_settings_exports(registry, users, settings, notifications, session));
     memory::GuestAddress stack{};
     assert(address_space->allocate(0x10000, 0x1000, memory::kReadWrite, false, stack));
     stack_top = stack + 0x10000u - 0x200u;
@@ -243,7 +246,12 @@ void test_a_written_setting_reads_back() {
   cpu.gpr[4] = 0;
   cpu.gpr[5] = 2;
   cpu.gpr[6] = entries;
+  auto listener = f.notifications.create_listener(1u, 0u);
+  std::uint32_t id = 0, param = 0;
+  while (f.notifications.dequeue(listener.get(), 0, id, param)) {}  // startup notifications
   assert(f.call(kWrite, cpu) == xam::result::Success);
+  assert(f.notifications.dequeue(listener.get(), 0, id, param) && id == 0x0000000Eu &&
+         param == 1u && "XN_SYS_PROFILESETTINGCHANGED for user 0");
 
   const auto buffer = f.read_all({kTitleSpecific1, kTitleSpecific2});
   const auto written = f.entry(buffer, 0);

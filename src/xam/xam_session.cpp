@@ -8,7 +8,8 @@ namespace xenon::xam {
 bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& locale_manager);
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager,
                               core::XenonSession& session);
-bool register_notification_exports(core::ExportRegistry& registry, NotificationManager& notification_manager);
+bool register_notification_exports(core::ExportRegistry& registry, NotificationManager& notification_manager,
+                                   core::XenonSession& session);
 bool register_achievement_exports(core::ExportRegistry& registry, AchievementManager& achievement_manager,
                                   core::XenonSession& session);
 bool register_system_exports(core::ExportRegistry& registry, core::XenonSession& session);
@@ -20,7 +21,8 @@ bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& s
 bool register_session_handle_exports(core::ExportRegistry& registry);
 bool register_ui_exports(core::ExportRegistry& registry, core::XenonSession& session);
 bool register_profile_settings_exports(core::ExportRegistry& registry, UserManager& users,
-                                       ProfileSettings& settings, core::XenonSession& session);
+                                       ProfileSettings& settings, NotificationManager& notifications,
+                                       core::XenonSession& session);
 }
 
 namespace xenon::xam {
@@ -53,10 +55,11 @@ bool XamSession::register_exports(core::ExportRegistry& registry, core::XenonSes
 
   // Register all XAM export categories
   ok = register_user_exports(registry, *user_manager_, session) && ok;
-  ok = register_profile_settings_exports(registry, *user_manager_, *profile_settings_, session) && ok;
+  ok = register_profile_settings_exports(registry, *user_manager_, *profile_settings_,
+                                          *notification_manager_, session) && ok;
   ok = register_locale_exports(registry, *locale_manager_) && ok;
   ok = register_content_exports(registry, *content_manager_, session) && ok;
-  ok = register_notification_exports(registry, *notification_manager_) && ok;
+  ok = register_notification_exports(registry, *notification_manager_, session) && ok;
   ok = register_achievement_exports(registry, *achievement_manager_, session) && ok;
   ok = register_system_exports(registry, session) && ok;
   ok = register_net_exports(registry) && ok;
