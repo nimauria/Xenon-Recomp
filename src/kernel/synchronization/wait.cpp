@@ -46,14 +46,17 @@ struct WaitAccess {
     }
   }
 
-  static void satisfy(KernelObject& object, std::uint32_t thread_id) {
+  // Returns whether the wait took over an abandoned mutant.
+  static bool satisfy(KernelObject& object, std::uint32_t thread_id) {
     switch (object.type()) {
       case ObjectType::Event: static_cast<KernelEvent&>(object).satisfy_locked(); break;
       case ObjectType::Semaphore: static_cast<KernelSemaphore&>(object).satisfy_locked(); break;
-      case ObjectType::Mutant: static_cast<KernelMutant&>(object).satisfy_locked(thread_id); break;
+      case ObjectType::Mutant:
+        return static_cast<KernelMutant&>(object).satisfy_locked(thread_id);
       case ObjectType::Timer: static_cast<KernelTimer&>(object).satisfy_locked(); break;
       default: break;
     }
+    return false;
   }
 };
 
@@ -138,6 +141,14 @@ WaitResult wait_for_single_object(
     return WaitResult::Failed;
   }
 
+  if (object->type() == ObjectType::Mutant) {
+    bool abandoned = false;
+    if (!static_cast<KernelMutant&>(*object).acquire(waiting_thread_id, timeout, &abandoned)) {
+      return WaitResult::Timeout;
+    }
+    return abandoned ? WaitResult::Abandoned : WaitResult::Success;
+  }
+
   if (wait_on_object(*object, timeout, waiting_thread_id)) {
     return WaitResult::Success;
   }
@@ -176,7 +187,11 @@ WaitResult wait_for_multiple_objects(
 
   // Checks and consumes with every object's mutex held, so WaitAll takes all
   // of its objects or none of them, and WaitAny takes exactly one: the
-  // lowest-indexed satisfiable object.
+  // lowest-indexed satisfiable object. Taking over an abandoned mutant makes
+  // the result Abandoned. As in the NT wait code the Xbox kernel derives
+  // from, a WaitAny reports the satisfying index with it and a WaitAll
+  // reports index 0 (STATUS_ABANDONED) whichever mutant was abandoned.
+  bool abandoned = false;
   const auto try_satisfy = [&]() -> bool {
     std::array<std::unique_lock<std::mutex>, kMaxWaitObjects> locks;
     std::size_t locked = 0;
@@ -189,18 +204,22 @@ WaitResult wait_for_multiple_objects(
       for (auto* object : distinct) {
         if (!detail::WaitAccess::can_satisfy(*object, waiting_thread_id)) return false;
       }
-      for (auto* object : distinct) detail::WaitAccess::satisfy(*object, waiting_thread_id);
+      for (auto* object : distinct) {
+        if (detail::WaitAccess::satisfy(*object, waiting_thread_id)) abandoned = true;
+      }
+      if (abandoned && signaled_index) *signaled_index = 0;
       return true;
     }
     for (std::size_t i = 0; i < objects.size(); ++i) {
       if (detail::WaitAccess::can_satisfy(*objects[i], waiting_thread_id)) {
-        detail::WaitAccess::satisfy(*objects[i], waiting_thread_id);
+        abandoned = detail::WaitAccess::satisfy(*objects[i], waiting_thread_id);
         if (signaled_index) *signaled_index = static_cast<std::uint32_t>(i);
         return true;
       }
     }
     return false;
   };
+  const auto satisfied = [&] { return abandoned ? WaitResult::Abandoned : WaitResult::Success; };
 
   const bool infinite = timeout.count() < 0 || timeout.count() >= 0xFFFFFFFFll;
   const auto deadline =
@@ -221,7 +240,7 @@ WaitResult wait_for_multiple_objects(
       std::scoped_lock lock(notifier.mutex);
       observed = notifier.generation;
     }
-    if (try_satisfy()) return WaitResult::Success;
+    if (try_satisfy()) return satisfied();
     if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
 
     std::unique_lock lock(notifier.mutex);

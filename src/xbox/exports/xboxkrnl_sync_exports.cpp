@@ -59,7 +59,8 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
   switch (result) {
     case kernel::WaitResult::Success: return signaled_index_as_status;
     case kernel::WaitResult::Timeout: return status::Timeout;
-    case kernel::WaitResult::Abandoned: return 0x00000080u;  // STATUS_ABANDONED_WAIT_0
+    // STATUS_ABANDONED_WAIT_0 + index, like STATUS_WAIT_0 + index.
+    case kernel::WaitResult::Abandoned: return 0x00000080u + signaled_index_as_status;
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
@@ -476,8 +477,9 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
   // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
   // has no single object.
-  const auto* satisfied = !wait_all && result == kernel::WaitResult::Success &&
-                                  signaled_index < objects.size()
+  const bool took_one =
+      result == kernel::WaitResult::Success || result == kernel::WaitResult::Abandoned;
+  const auto* satisfied = !wait_all && took_one && signaled_index < objects.size()
                               ? objects[signaled_index].get()
                               : nullptr;
   sync_events::record(EventKind::WaitEnd, context, satisfied, 0u,

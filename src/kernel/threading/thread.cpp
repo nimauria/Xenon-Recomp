@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "kernel/synchronization/wait_internal.hpp"
+#include "xenon/kernel/mutant.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -346,6 +347,13 @@ void KernelThread::thread_main() {
   if (should_run_entry && entry_) {
     result = entry_();
   }
+
+  // Thread rundown: mutants this thread still owns become abandoned before
+  // the thread is signalled, so their waiters do not hang on an owner that
+  // no longer exists. Done here, after guest code has stopped running on
+  // this host thread, and not in terminate(), which can run while guest
+  // code is still inside the critical section the mutant guards.
+  abandon_mutants_owned_by_this_thread();
 
   {
     std::scoped_lock lock(mutex_);

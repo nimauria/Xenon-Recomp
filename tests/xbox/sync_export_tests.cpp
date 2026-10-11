@@ -20,6 +20,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
@@ -334,6 +335,64 @@ void test_nt_create_mutant_uses_real_thread_id_and_ownership() {
   assert(!mutant.is_owned());
 }
 
+// A guest thread that exits owning a mutant abandons it; the next wait
+// returns STATUS_ABANDONED_WAIT_0 plus the mutant's index and takes ownership.
+void test_waits_report_a_mutant_abandoned_by_an_exiting_thread() {
+  Fixture f;
+  constexpr std::uint32_t kExitingThread = 42;
+  constexpr std::uint32_t kWaitingThread = 43;
+  const auto create_owned_mutant_and_exit = [&] {
+    const auto handle_out = f.alloc32();
+    kernel::ThreadCreationParams params{};
+    auto thread = std::make_shared<kernel::KernelThread>(
+        [&]() -> std::uint32_t {
+          cpu::CpuState cpu{};
+          cpu.gpr[3] = handle_out;
+          cpu.gpr[5] = 1;  // initial owner = true
+          assert(f.invoke(0x0D4u, cpu, kExitingThread).success && cpu.gpr[3] == 0u);
+          return 0;
+        },
+        params);
+    assert(thread->start() && thread->join());
+    return f.address_space->read32_be(handle_out);
+  };
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+
+  const auto single = create_owned_mutant_and_exit();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = single;
+  cpu.gpr[6] = zero_timeout;
+  assert(f.invoke(0x0FDu, cpu, kWaitingThread).success);
+  assert(cpu.gpr[3] == 0x00000080u);  // STATUS_ABANDONED_WAIT_0
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = single;
+  assert(f.invoke(0x0F2u, cpu, kWaitingThread).success && cpu.gpr[3] == 0u &&
+         "the waiter that took the abandoned mutant owns it");
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = single;
+  cpu.gpr[6] = zero_timeout;
+  assert(f.invoke(0x0FDu, cpu, kWaitingThread).success && cpu.gpr[3] == 0u &&
+         "abandonment is reported once");
+
+  const auto semaphore_out = f.alloc32();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = semaphore_out;
+  cpu.gpr[5] = 0;  // count 0: never satisfies this wait
+  cpu.gpr[6] = 1;
+  assert(f.invoke(0x0D5u, cpu).success && cpu.gpr[3] == 0u);
+  const auto handles = f.alloc64();
+  f.address_space->write32_be(handles, f.address_space->read32_be(semaphore_out));
+  f.address_space->write32_be(handles + 4u, create_owned_mutant_and_exit());
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 2;
+  cpu.gpr[4] = handles;
+  cpu.gpr[5] = 0;  // wait type: any
+  cpu.gpr[8] = zero_timeout;
+  assert(f.invoke(0x0FEu, cpu, kWaitingThread).success);
+  assert(cpu.gpr[3] == 0x00000081u);  // STATUS_ABANDONED_WAIT_0 + 1
+}
+
 void test_nt_wait_for_multiple_objects_any_and_all() {
   Fixture f;
 
@@ -478,6 +537,7 @@ int main() {
   test_ex_terminate_thread_sets_state_and_exit_code();
   test_nt_create_semaphore_release_and_limit();
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
+  test_waits_report_a_mutant_abandoned_by_an_exiting_thread();
   test_nt_wait_for_multiple_objects_any_and_all();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();

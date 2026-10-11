@@ -256,7 +256,8 @@ void test_each_signal_wakes_wait_any_promptly() {
     const auto signalled = std::chrono::steady_clock::now();
     signal();
     waiter.join();
-    assert(result.load() == WaitResult::Success && index == 1);
+    const auto expected = object == abandoned_mutant ? WaitResult::Abandoned : WaitResult::Success;
+    assert(result.load() == expected && index == 1);
     assert(std::chrono::steady_clock::now() - signalled < 2000ms);
   }
 }
