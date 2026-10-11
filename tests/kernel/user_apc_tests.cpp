@@ -125,6 +125,41 @@ void test_apcs_are_taken_in_queue_order() {
   });
 }
 
+// Thread alerts: an alert ends an alertable wait or delay with Alerted and is
+// cleared by it; a non-alertable wait ignores it; an alert is taken before a
+// pending APC, as in NT's TestForAlertPending.
+void test_an_alert_ends_an_alertable_wait_once() {
+  auto never = std::make_shared<KernelEvent>(true, false);
+  std::atomic<KernelThread*> target{nullptr};
+  std::thread alerter([&] {
+    while (!target.load()) std::this_thread::sleep_for(1ms);
+    std::this_thread::sleep_for(30ms);
+    assert(!target.load()->alert() && "not previously alerted");
+  });
+  on_kernel_thread([&](KernelThread& self) {
+    target = &self;
+    assert(wait_for_single_object(never, kInfinite, 1, true) == WaitResult::Alerted);
+    assert(!self.alerted() && "the wait cleared the alert");
+    assert(wait_for_single_object(never, 20ms, 1, true) == WaitResult::Timeout);
+  });
+  alerter.join();
+}
+
+void test_alerts_against_non_alertable_waits_delays_and_apcs() {
+  auto never = std::make_shared<KernelEvent>(true, false);
+  on_kernel_thread([&](KernelThread& self) {
+    assert(!self.alert());
+    assert(self.alert() && "already alerted");
+    assert(wait_for_single_object(never, 20ms, 1, false) == WaitResult::Timeout);
+    assert(self.alerted() && "a non-alertable wait leaves the alert");
+    self.queue_user_apc({0x82001000u, 0u, 0u, 0u});
+    assert(delay_current_thread(5000ms, true) == WaitResult::Alerted && "alert before APC");
+    assert(delay_current_thread(5000ms, true) == WaitResult::UserApc);
+    static_cast<void>(self.take_user_apcs());
+    assert(!self.take_alert());
+  });
+}
+
 }  // namespace
 
 int main() {
@@ -135,6 +170,8 @@ int main() {
   test_a_satisfiable_object_wins_over_a_pending_apc();
   test_an_apc_ends_an_alertable_delay();
   test_apcs_are_taken_in_queue_order();
+  test_an_alert_ends_an_alertable_wait_once();
+  test_alerts_against_non_alertable_waits_delays_and_apcs();
   std::cout << "All user APC tests passed!\n";
   return 0;
 }

@@ -139,6 +139,16 @@ class KernelThread final : public KernelObject {
     return user_apc_pending_.load(std::memory_order_acquire);
   }
 
+  // Thread alerts (KeAlertThread, KeTestAlertThread): an alert ends this
+  // thread's next alertable wait or delay, which returns STATUS_ALERTED and
+  // clears it. NT keeps one flag per processor mode; Xenon has no distinct
+  // kernel and user mode, so there is one. alert() returns the previous
+  // state and wakes an alertable wait in progress.
+  bool alert();
+  // Returns whether the thread is alerted and clears the alert.
+  bool take_alert() noexcept { return alerted_.exchange(false, std::memory_order_acq_rel); }
+  [[nodiscard]] bool alerted() const noexcept { return alerted_.load(std::memory_order_acquire); }
+
   bool exchange_boost_disabled(bool disabled) noexcept {
     return boost_disabled_.exchange(disabled, std::memory_order_acq_rel);
   }
@@ -227,6 +237,7 @@ class KernelThread final : public KernelObject {
   std::mutex apc_mutex_;
   std::deque<UserApc> user_apcs_;
   std::atomic<bool> user_apc_pending_{false};
+  std::atomic<bool> alerted_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned
   // naturally, or the thread was terminated before ever running entry_()),

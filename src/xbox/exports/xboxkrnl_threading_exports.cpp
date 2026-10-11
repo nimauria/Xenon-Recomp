@@ -317,6 +317,30 @@ bool nt_queue_apc_thread_export(kernel::KernelProcess& process, ExportCallContex
   return true;
 }
 
+bool ke_alert_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  auto* thread = thread_for_kthread(process, static_cast<cpu::GuestAddress>(context.cpu.gpr[3]));
+  context.cpu.gpr[3] = thread ? (thread->alert() ? 1u : 0u) : 0u;
+  return true;
+}
+
+bool ke_alert_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  auto* thread = thread_for_kthread(process, static_cast<cpu::GuestAddress>(context.cpu.gpr[3]));
+  std::uint32_t previous = 0u;
+  if (thread) {
+    static_cast<void>(thread->alert());
+    previous = thread->suspend_count();
+    if (previous != 0u) static_cast<void>(thread->resume());
+  }
+  context.cpu.gpr[3] = previous;
+  return true;
+}
+
+bool ke_test_alert_thread_export(kernel::KernelProcess&, ExportCallContext& context) {
+  auto* self = kernel::KernelThread::current();
+  context.cpu.gpr[3] = self && self->take_alert() ? 1u : 0u;
+  return true;
+}
+
 bool ke_initialize_apc_export(kernel::KernelProcess&, ExportCallContext& context) {
   const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   if (apc == 0u) return true;

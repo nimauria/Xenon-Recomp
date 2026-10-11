@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 
@@ -250,17 +251,23 @@ WaitResult wait_for_multiple_objects(
   const auto apc_pending = [self, alertable] {
     return alertable && self && self->user_apc_pending();
   };
+  // As NT's TestForAlertPending: an alert is taken before a pending APC.
+  const auto alert_or_apc = [self, alertable, &apc_pending]() -> std::optional<WaitResult> {
+    if (alertable && self && self->take_alert()) return WaitResult::Alerted;
+    if (apc_pending()) return WaitResult::UserApc;
+    return std::nullopt;
+  };
   if (terminating()) return WaitResult::Terminating;
 
   // A wait that is satisfied at once, or has a zero timeout, never registers.
   if (try_satisfy()) return satisfied();
-  if (apc_pending()) return WaitResult::UserApc;
+  if (const auto ended = alert_or_apc()) return *ended;
   if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
 
   // Registered on every object before the next check, so any change after
   // that check wakes this block (see multi_wait_list.hpp). A KernelThread
-  // also registers on its own thread, so terminate() and a queued user APC
-  // wake it.
+  // also registers on its own thread, so terminate(), a queued user APC and
+  // an alert wake it.
   detail::MultiWaitBlock block;
   for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
   KernelObject* own_thread = nullptr;
@@ -286,7 +293,7 @@ WaitResult wait_for_multiple_objects(
     }
     if (terminating()) return WaitResult::Terminating;
     if (try_satisfy()) return satisfied();
-    if (apc_pending()) return WaitResult::UserApc;
+    if (const auto ended = alert_or_apc()) return *ended;
     if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
 
     std::unique_lock lock(block.mutex);
@@ -307,8 +314,14 @@ WaitResult delay_current_thread(std::chrono::milliseconds delay, bool alertable)
     return WaitResult::Success;
   }
   const auto apc_pending = [&] { return alertable && self->user_apc_pending(); };
+  const auto alert_pending = [&] { return alertable && self->alerted(); };
+  const auto ended = [&]() -> std::optional<WaitResult> {
+    if (alertable && self->take_alert()) return WaitResult::Alerted;
+    if (apc_pending()) return WaitResult::UserApc;
+    return std::nullopt;
+  };
   if (self->is_terminated()) return WaitResult::Terminating;
-  if (apc_pending()) return WaitResult::UserApc;
+  if (const auto result = ended()) return *result;
   if (delay.count() <= 0) return WaitResult::Success;
 
   detail::MultiWaitBlock block;
@@ -322,10 +335,12 @@ WaitResult delay_current_thread(std::chrono::milliseconds delay, bool alertable)
   const auto deadline = std::chrono::steady_clock::now() + delay;
   std::unique_lock lock(block.mutex);
   // Registered before this check, so a terminate() after it wakes the block.
-  block.condition.wait_until(lock, deadline,
-                             [&] { return self->is_terminated() || apc_pending(); });
+  block.condition.wait_until(lock, deadline, [&] {
+    return self->is_terminated() || apc_pending() || alert_pending();
+  });
   if (self->is_terminated()) return WaitResult::Terminating;
-  return apc_pending() ? WaitResult::UserApc : WaitResult::Success;
+  if (const auto result = ended()) return *result;
+  return WaitResult::Success;
 }
 
 }  // namespace xenon::kernel

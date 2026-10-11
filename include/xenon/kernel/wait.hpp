@@ -21,6 +21,9 @@ enum class WaitResult : std::uint32_t {
   // An alertable wait or delay ended because a user APC is queued for the
   // waiting thread; the caller runs the APCs. STATUS_USER_APC.
   UserApc = 0x000000C0,
+  // An alertable wait or delay ended because the waiting thread was alerted
+  // (KeAlertThread); the alert is cleared. STATUS_ALERTED.
+  Alerted = 0x00000101,
   Failed = 0xFFFFFFFF,
 };
 

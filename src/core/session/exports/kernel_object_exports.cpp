@@ -81,6 +81,11 @@ bool XenonSession::register_kernel_object_exports() {
         {0x07Fu, "KePulseEvent", &xbox::ke_pulse_event_export},
         {0x0E3u, "NtQueueApcThread", &xbox::nt_queue_apc_thread_export},
         {0x06Du, "KeInitializeApc", &xbox::ke_initialize_apc_export},
+        {0x04Fu, "KeAlertThread", &xbox::ke_alert_thread_export, true,
+         "one alert flag per thread: the alert mode is not distinguished"},
+        {0x04Eu, "KeAlertResumeThread", &xbox::ke_alert_resume_thread_export},
+        {0x0ACu, "KeTestAlertThread", &xbox::ke_test_alert_thread_export, true,
+         "one alert flag per thread: the alert mode is not distinguished"},
         {0x07Au, "KeInsertQueueApc", &xbox::ke_insert_queue_apc_export, true,
          "user-mode KAPCs run at the target's next alertable wait or delay; a "
          "kernel-mode KAPC is queued but never delivered (no kernel-mode APC "

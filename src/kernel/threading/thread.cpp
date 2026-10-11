@@ -165,6 +165,12 @@ std::vector<KernelThread::UserApc> KernelThread::take_user_apcs() {
   return apcs;
 }
 
+bool KernelThread::alert() {
+  const bool previous = alerted_.exchange(true, std::memory_order_acq_rel);
+  multi_waiters_.notify_always();
+  return previous;
+}
+
 bool KernelThread::remove_user_apc(std::uint32_t guest_apc) {
   std::scoped_lock lock(apc_mutex_);
   const auto found = std::find_if(user_apcs_.begin(), user_apcs_.end(),

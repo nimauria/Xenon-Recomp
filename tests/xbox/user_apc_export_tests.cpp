@@ -43,7 +43,10 @@ constexpr std::uint32_t kNtWaitForSingleObjectEx = 0x0FDu;
 constexpr std::uint32_t kKeInitializeApc = 0x06Du;
 constexpr std::uint32_t kKeInsertQueueApc = 0x07Au;
 constexpr std::uint32_t kKeRemoveQueueApc = 0x2F0u;
+constexpr std::uint32_t kKeAlertThread = 0x04Fu;
+constexpr std::uint32_t kKeTestAlertThread = 0x0ACu;
 constexpr std::uint32_t kStatusUserApc = 0x000000C0u;
+constexpr std::uint32_t kStatusAlerted = 0x00000101u;
 constexpr std::uint32_t kStatusTimeout = 0x00000102u;
 
 struct Call {
@@ -94,6 +97,8 @@ struct Fixture {
         {kKeInitializeApc, &xbox::ke_initialize_apc_export},
         {kKeInsertQueueApc, &xbox::ke_insert_queue_apc_export},
         {kKeRemoveQueueApc, &xbox::ke_remove_queue_apc_export},
+        {kKeAlertThread, &xbox::ke_alert_thread_export},
+        {kKeTestAlertThread, &xbox::ke_test_alert_thread_export},
     };
     for (const auto& [ordinal, handler] : kapc_exports) {
       core::ExportDescriptor descriptor{};
@@ -319,6 +324,28 @@ void test_kernel_mode_kapc_is_queued_but_not_delivered() {
   assert(result.load() == kStatusTimeout && f.calls.empty());
 }
 
+void test_ke_alert_thread_ends_an_alertable_wait() {
+  Fixture f;
+  constexpr std::uint32_t kKthread = 0x00446900u;
+  std::atomic<bool> ready{false};
+  std::atomic<std::uint32_t> result{0}, alerted_after{1};
+  auto guest = f.start(
+      [&](std::uint32_t id) {
+        const auto never = f.alloc(0x10);
+        f.call(kKeInitializeEvent, id, {never, 0, 0});
+        result = f.call(kKeWaitForSingleObject, id, {never, 0, 1, 1, 0});
+        alerted_after = f.call(kKeTestAlertThread, id, {1});
+      },
+      ready);
+  guest.thread->set_guest_kthread_address(kKthread);
+  ready = true;
+  std::this_thread::sleep_for(30ms);
+  assert(f.call(kKeAlertThread, 0, {kKthread, 1}) == 0u && "not previously alerted");
+  assert(guest.thread->join(5000));
+  assert(result.load() == kStatusAlerted && f.calls.empty());
+  assert(alerted_after.load() == 0u && "the wait cleared the alert");
+}
+
 void test_queue_apc_rejects_bad_targets() {
   Fixture f;
   assert(f.call(kNtQueueApcThread, 0, {0x7777u, 0x82001000u, 0, 0, 0}) == 0xC0000008u);
@@ -341,6 +368,7 @@ int main() {
   test_guest_kapc_runs_kernel_then_normal_routine();
   test_removed_kapc_is_not_delivered();
   test_kernel_mode_kapc_is_queued_but_not_delivered();
+  test_ke_alert_thread_ends_an_alertable_wait();
   test_queue_apc_rejects_bad_targets();
   std::cout << "All user APC export tests passed!\n";
   return 0;

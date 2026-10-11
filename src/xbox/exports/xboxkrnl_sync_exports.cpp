@@ -75,6 +75,7 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
     case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
     // An alertable wait ended to run user APCs; they ran before this returns.
     case kernel::WaitResult::UserApc: return 0x000000C0u;  // STATUS_USER_APC
+    case kernel::WaitResult::Alerted: return 0x00000101u;  // STATUS_ALERTED
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;

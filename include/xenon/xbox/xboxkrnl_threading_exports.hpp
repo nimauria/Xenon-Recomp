@@ -47,6 +47,19 @@ namespace xenon::xbox {
 [[nodiscard]] bool nt_queue_apc_thread_export(xenon::kernel::KernelProcess& process,
                                               xenon::core::ExportCallContext& context);
 
+// Thread alerts. KeAlertThread (0x4F): r3 = KTHREAD*, r4 = alert mode
+// (ignored) -> BOOLEAN previously alerted. KeAlertResumeThread (0x4E):
+// r3 = KTHREAD* -> previous suspend count; alerts, then resumes the thread.
+// KeTestAlertThread (0xAC): r3 = mode (ignored) -> BOOLEAN; returns and
+// clears the calling thread's alert. An alert ends the thread's next
+// alertable wait or delay with STATUS_ALERTED.
+[[nodiscard]] bool ke_alert_thread_export(xenon::kernel::KernelProcess& process,
+                                          xenon::core::ExportCallContext& context);
+[[nodiscard]] bool ke_alert_resume_thread_export(xenon::kernel::KernelProcess& process,
+                                                 xenon::core::ExportCallContext& context);
+[[nodiscard]] bool ke_test_alert_thread_export(xenon::kernel::KernelProcess& process,
+                                               xenon::core::ExportCallContext& context);
+
 // KeInitializeApc (0x6D): r3 = KAPC*, r4 = target KTHREAD*, r5 = kernel
 // routine, r6 = rundown routine, r7 = normal routine, r8 = processor mode
 // (0 kernel, 1 user), r9 = normal context -> void.
