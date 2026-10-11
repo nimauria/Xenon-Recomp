@@ -29,7 +29,7 @@ retail title works.
 | V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
 | V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
 | V3-04 | Kernel execution and interrupts | DONE | Linux, Windows, Xenon CI and coverage refresh green on `ccdadae`; evidence-gated items deferred with reasons (V3-04 progress). AC6 not run |
-| V3-05 | Guest services and ABI | IN PROGRESS | Registry ordinal check, four ABI defects fixed, profile settings implemented (see V3-05 progress) |
+| V3-05 | Guest services and ABI | IN PROGRESS | Registry ordinal check; ABI defects fixed in voice, enumerators, `XamUserGetXUID`, `XeCryptSha`, `ExCreateThread`, `XCONTENT_DATA`; profile settings and content packages implemented (see V3-05 progress) |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
 | V3-08 | Adaptive knowledge | NOT STARTED | |
@@ -813,17 +813,42 @@ against rexglue-sdk and xenia-canary:
   with no value and xenia-canary omits it; Xenon returns it with source 0
   (`XSOURCE_NO_VALUE`).
 
+- `92f23fb`: `XeCryptSha` wrote all 20 digest bytes regardless of
+  `output_size`; xenia, xenia-canary and rexglue-sdk write
+  min(20, output_size) (Xenon's note claimed rexglue-sdk ignored it).
+- `87e26bd`: `ExCreateThread` ignored r6, the `XapiThreadStartup` routine
+  XAPI's `CreateThread` passes. xenia and rexglue-sdk start the thread
+  there as `XapiThreadStartup(start_address, start_context)`; Xenon jumped
+  to `start_address`, skipping XAPI's per-thread setup and exit.
+- `d52f2a8`: `XCONTENT_DATA` is 0x134 bytes (two bytes of padding, both
+  references); Xenon used 306, misaligning every enumerated item after the
+  first.
+- `73456af`: content packages. `XamContentCreateEx` mounted nothing, so a
+  title's `save:\...` I/O after creating its save had no device, ignored
+  the creation disposition and kept content only in memory. Packages are
+  now host directories (xenia's layout, under `<save root>/Content`, or a
+  scratch directory removed at shutdown), mounted as `<root>:`; the five
+  dispositions, `XamContentCreate`, `XamContentClose`, `XamContentDelete`
+  and `XamContentFlush` follow xenia.
+
+Unverified, left as they are: `XamQueryTimeZoneInformation` (no reference
+implements it, so its ABI and structure are unknown), and the
+`XamUserCheckPrivilege` grant-all offline model.
+
 Tests: `xenon_export_ordinal_reference_tests`, `xenon_xam_export_ordinal_tests`
 (voice ordinals and behaviour), `xenon_guest_enumerator_tests`,
-`xenon_session_tests`, `xenon_xam_profile_settings_tests`. Each fix was
+`xenon_session_tests`, `xenon_xam_profile_settings_tests`,
+`xenon_misc_export_tests`, `xenon_thread_creation_tests`,
+`xenon_xam_content_package_tests`. Each fix was
 checked by reverting it: the test fails (the old `XamUserGetXUID` raises the
 guest page-protection fault).
 
 Kernel handlers use several argument idioms (`dispatch<N>`, helper
 functions), so the automated comparison covered XAM fully and xboxkrnl only
 where handlers read `gpr[N]` directly; the xboxkrnl hits were reviewed and
-are address arguments xenia types as `dword_t`, not defects. The xboxkrnl
-audit continues.
+are address arguments xenia types as `dword_t`, not defects. Handlers that
+delegate to helpers were then read by hand, which found the `XeCryptSha`
+and `ExCreateThread` defects above.
 
 ## Dependency graph
 
