@@ -11,12 +11,17 @@ namespace xenon::core {
 
 // ExCreateThread (ordinal 0x0D)
 // Guest ABI: r3 = PHANDLE out, r4 = stack size (0 = default), r5 = LPDWORD
-// thread-id out (optional, nullable), r6 = XApiThreadStartup (ignored -
-// Xenon calls start_address directly; it has no XAPI bootstrap trampoline to
-// reproduce), r7 = start address, r8 = start context (the single argument
-// passed to the thread function, matching PPC ABI gpr[3]), r9 = creation
-// flags (bit 0 = suspended; bits 24..31 = processor affinity, informational)
-// -> r3 = NTSTATUS.
+// thread-id out (optional, nullable), r6 = XapiThreadStartup, r7 = start
+// address, r8 = start context, r9 = creation flags (bit 0 = suspended; bits
+// 24..31 = processor affinity, informational) -> r3 = NTSTATUS.
+//
+// XAPI's CreateThread passes its own startup routine (the title's statically
+// linked XapiThreadStartup) in r6. When it is set, the thread starts there
+// as XapiThreadStartup(start_address, start_context), which sets up the
+// thread's XAPI state, calls the start routine and exits the thread; when
+// it is 0 the thread starts at start_address with start_context in r3. As
+// in xenia and rexglue-sdk (XThread::Execute). Earlier Xenon ignored r6 and
+// always started at start_address, skipping XAPI's per-thread setup.
 bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   if (!kernel_process_ || !memory_ || !loaded_xex_) {
     // No title loaded - this export cannot possibly succeed; report a
@@ -28,6 +33,7 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   auto stack_size = static_cast<std::uint32_t>(context.cpu.gpr[4]);
   const auto thread_id_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto xapi_thread_startup = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
   const auto start_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
   const auto start_context = context.cpu.gpr[8];
   const auto creation_flags = static_cast<std::uint32_t>(context.cpu.gpr[9]);
@@ -85,10 +91,14 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   // until start()).
   auto thread_id_slot = std::make_shared<std::atomic<std::uint32_t>>(0u);
   auto thread = kernel_process_->thread_manager().create_thread(
-      [this, start_address, start_context, stack_base, stack_size, tls,
+      [this, xapi_thread_startup, start_address, start_context, stack_base, stack_size, tls,
        thread_id_slot]() -> std::uint32_t {
         auto self = kernel_process_->thread_manager().get_thread(
             thread_id_slot->load(std::memory_order_acquire));
+        if (xapi_thread_startup != 0u) {
+          return run_created_guest_thread(std::move(self), xapi_thread_startup, start_address,
+                                          stack_base, stack_size, tls, start_context);
+        }
         return run_created_guest_thread(std::move(self), start_address, start_context,
                                         stack_base, stack_size, tls);
       },

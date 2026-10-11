@@ -75,7 +75,7 @@ std::uint32_t XenonSession::run_execution() {
 std::uint32_t XenonSession::run_created_guest_thread(
     std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
     std::uint64_t start_context, memory::GuestAddress stack_base,
-    std::uint32_t stack_size, GuestThreadTlsContext tls) {
+    std::uint32_t stack_size, GuestThreadTlsContext tls, std::uint64_t second_argument) {
   {
     static std::atomic<int> _thread_start_diag_count{0};
     const int _n = _thread_start_diag_count.fetch_add(1) + 1;
@@ -115,6 +115,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
   // thread stack setup and start_audio_guest_thread()'s callback stack.
   state.gpr[1] = static_cast<std::uint64_t>(stack_base) + stack_size - 64u;
   state.gpr[3] = start_context;
+  state.gpr[4] = second_argument;
   state.gpr[13] = tls.kpcr_address;
 
   const auto outcome = dispatch_guest_thread(state, start_address, thread);

@@ -118,10 +118,10 @@ void append_guest_bytes(Sha1& sha, ExportCallContext& context, cpu::GuestAddress
 // XeCryptSha (ordinal 0x192 / 402)
 // Guest ABI: r3/r4 = input1 ptr/size, r5/r6 = input2 ptr/size (optional,
 // nullable), r7/r8 = input3 ptr/size (optional, nullable), r9 = output
-// digest ptr, r10 = output size (real hardware always writes the full
-// 20-byte SHA-1 digest regardless of this value - verified against
-// rexglue-sdk's XeCryptSha_entry, which ignores output_size entirely) ->
-// r3 = 0 (STATUS_SUCCESS). Concatenates up to three optional input buffers
+// digest ptr, r10 = output size: the first min(20, output size) bytes of
+// the SHA-1 digest are written, as in xenia, xenia-canary and rexglue-sdk
+// (an earlier note here said the size was ignored, and Xenon wrote all 20
+// bytes past a shorter buffer) -> r3 = 0 (STATUS_SUCCESS). Concatenates up to three optional input buffers
 // (a real, common SHA-1 API shape - e.g. hashing a header and body
 // separately without requiring the caller to first concatenate them) and
 // writes the digest.
@@ -136,8 +136,9 @@ bool xe_crypt_sha_export(ExportCallContext& context) {
   const auto digest = sha.finalize();
 
   const auto output_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
+  const auto output_size = static_cast<std::uint32_t>(context.cpu.gpr[10]);
   if (output_ptr != 0u) {
-    for (std::size_t i = 0; i < digest.size(); ++i) {
+    for (std::size_t i = 0; i < digest.size() && i < output_size; ++i) {
       context.memory.write8(output_ptr + static_cast<cpu::GuestAddress>(i), digest[i]);
     }
   }

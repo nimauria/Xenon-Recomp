@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "xam/xam_overlapped.hpp"
@@ -35,11 +36,88 @@ std::string read_content_file_name(cpu::MemoryPort& memory, cpu::GuestAddress co
   return name;
 }
 
+// A NUL-terminated ANSI string (a content root name), at most 64 bytes.
+std::string read_c_string(cpu::MemoryPort& memory, cpu::GuestAddress address) {
+  std::string text;
+  if (address == 0u) return text;
+  for (std::uint32_t i = 0; i < 64u; ++i) {
+    const auto c = memory.read8(address + i);
+    if (c == 0u) break;
+    text.push_back(static_cast<char>(c));
+  }
+  return text;
+}
+
+// display_name_raw @8: up to 128 big-endian UTF-16 units, stored as UTF-8.
+std::string read_content_display_name(cpu::MemoryPort& memory, cpu::GuestAddress content_data_ptr) {
+  std::u16string wide;
+  for (std::uint32_t i = 0; i < 128u; ++i) {
+    const auto unit = memory.read16_be(content_data_ptr + 8u + i * 2u);
+    if (unit == 0u) break;
+    wide.push_back(static_cast<char16_t>(unit));
+  }
+  std::string text;
+  for (std::size_t i = 0; i < wide.size(); ++i) {
+    std::uint32_t code = wide[i];
+    if (code >= 0xD800u && code < 0xDC00u && i + 1 < wide.size() && wide[i + 1] >= 0xDC00u &&
+        wide[i + 1] < 0xE000u) {
+      code = 0x10000u + ((code - 0xD800u) << 10u) + (wide[++i] - 0xDC00u);
+    }
+    if (code < 0x80u) {
+      text.push_back(static_cast<char>(code));
+    } else if (code < 0x800u) {
+      text.push_back(static_cast<char>(0xC0u | (code >> 6u)));
+      text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+    } else if (code < 0x10000u) {
+      text.push_back(static_cast<char>(0xE0u | (code >> 12u)));
+      text.push_back(static_cast<char>(0x80u | ((code >> 6u) & 0x3Fu)));
+      text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+    } else {
+      text.push_back(static_cast<char>(0xF0u | (code >> 18u)));
+      text.push_back(static_cast<char>(0x80u | ((code >> 12u) & 0x3Fu)));
+      text.push_back(static_cast<char>(0x80u | ((code >> 6u) & 0x3Fu)));
+      text.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
+    }
+  }
+  return text;
+}
+
+// UTF-8 back to UTF-16 units for display_name_raw.
+std::u16string to_utf16(const std::string& text) {
+  std::u16string wide;
+  for (std::size_t i = 0; i < text.size();) {
+    const auto c = static_cast<unsigned char>(text[i]);
+    std::uint32_t code = c;
+    std::size_t extra = 0;
+    if (c >= 0xF0u) { code = c & 0x07u; extra = 3; }
+    else if (c >= 0xE0u) { code = c & 0x0Fu; extra = 2; }
+    else if (c >= 0xC0u) { code = c & 0x1Fu; extra = 1; }
+    ++i;
+    for (std::size_t k = 0; k < extra && i < text.size(); ++k, ++i) {
+      code = (code << 6u) | (static_cast<unsigned char>(text[i]) & 0x3Fu);
+    }
+    if (code >= 0x10000u) {
+      code -= 0x10000u;
+      wide.push_back(static_cast<char16_t>(0xD800u + (code >> 10u)));
+      wide.push_back(static_cast<char16_t>(0xDC00u + (code & 0x3FFu)));
+    } else {
+      wide.push_back(static_cast<char16_t>(code));
+    }
+  }
+  return wide;
+}
+
+constexpr XResult kErrorFileNotFound = 0x00000002u;
+constexpr XResult kErrorPathNotFound = 0x00000003u;
+constexpr XResult kErrorAlreadyExists = 0x000000B7u;
+
 // XCONTENT_DATA on-guest size: device_id(4) + content_type(4) +
-// display_name_raw(256) + file_name_raw(42) = 306 bytes - same layout
-// read_content_file_name()/XamContentCreateEx's parsing above already treat
-// as authoritative, kept symmetric here for serialization.
-constexpr std::uint32_t kContentDataSize = 306u;
+// display_name_raw(256) + file_name_raw(42) + padding(2) = 0x134 bytes, as
+// xenia and rexglue-sdk define it (static_assert_size(XCONTENT_DATA,
+// 0x134)). The padding is part of the struct, so it is also the stride of
+// an XamEnumerate result array; Xenon used 306, which misaligned every
+// item after the first.
+constexpr std::uint32_t kContentDataSize = 0x134u;
 
 std::vector<std::byte> serialize_content_data(const ContentData& item) {
   std::vector<std::byte> out(kContentDataSize, std::byte{0});
@@ -51,13 +129,12 @@ std::vector<std::byte> serialize_content_data(const ContentData& item) {
   };
   put_u32(0, item.device_id);
   put_u32(4, static_cast<std::uint32_t>(item.content_type));
-  // display_name_raw @8, 256 bytes, UTF-16BE, truncated to 127 chars + NUL.
+  // display_name_raw @8, 256 bytes, UTF-16BE, truncated to 127 units + NUL.
   const std::size_t max_chars = 256u / 2u - 1u;
-  std::size_t i = 0;
-  for (; i < item.display_name.size() && i < max_chars; ++i) {
-    const auto c = static_cast<unsigned char>(item.display_name[i]);
-    out[8 + i * 2 + 0] = std::byte{0};
-    out[8 + i * 2 + 1] = static_cast<std::byte>(c);
+  const auto wide = to_utf16(item.display_name);
+  for (std::size_t i = 0; i < wide.size() && i < max_chars; ++i) {
+    out[8 + i * 2 + 0] = static_cast<std::byte>((wide[i] >> 8u) & 0xFFu);
+    out[8 + i * 2 + 1] = static_cast<std::byte>(wide[i] & 0xFFu);
   }
   // file_name_raw @264, 42 ANSI bytes, truncated.
   for (std::size_t j = 0; j < item.file_name.size() && j < 42u; ++j) {
@@ -193,33 +270,35 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentClose (0x025A) - real ABI is (root_name: lpstring_t,
-  // overlapped_ptr), verified against xenia's XamContentClose_entry: it
-  // closes a content root previously opened by name via XamContentCreate(Ex)
-  // - a completely different handle namespace from the enumerator handle
-  // XamContentCreateEnumerator returns above (that one closes through the
-  // ordinary NtClose/CloseHandle kernel path instead, since it is a real
-  // kernel object). Xenon's own ContentManager/XamContentCreateEx do not
-  // track mounted roots by name (create_content() has no root_name/mount
-  // concept), so there is no real "was this root actually open" state to
-  // check here - same genuinely-absent-prerequisite situation as this
-  // codebase's own XamSessionCreateHandle/XamSessionRefObjByHandle. This at
-  // least reads the real parameter (rather than ignoring the call shape
-  // entirely) and keeps the same safe "always succeeds" outcome real
-  // hardware gives for the common case of closing a root with no pending
-  // async operations.
+  // XamContentClose (0x025A): (root_name, overlapped). Unmounts the root
+  // XamContentCreate(Ex) mounted; ERROR_FILE_NOT_FOUND when that root is
+  // not open, as in xenia.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XamContentClose";
     desc.ordinal = ordinal::XamContentClose;
-    desc.requirement = core::ExportRequirement::Stubbed;
-    desc.partial = true;
-    desc.partial_note =
-        "no mounted-root-by-name tracking exists in ContentManager (a "
-        "genuinely absent prerequisite, not a deferred implementation), so "
-        "this always succeeds instead of reporting a real root-not-open "
-        "failure for an invalid root_name";
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&content_manager, &session](core::ExportCallContext& ctx) -> bool {
+      const auto root_name = read_c_string(ctx.memory, static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]));
+      auto* vfs = session.filesystem();
+      ctx.cpu.gpr[3] = vfs == nullptr ? kErrorFileNotFound : content_manager.close_package(*vfs, root_name);
+      return true;
+    };
+    desc.handler = with_overlapped(session, 1, std::move(desc.handler));
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamContentFlush (0x0267): (root_name, overlapped). Writes through a
+  // mounted package go straight to the host directory, so there is nothing
+  // left to commit; succeeds for an open root, as in xenia (which succeeds
+  // for any root).
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamContentFlush";
+    desc.ordinal = ordinal::XamContentFlush;
+    desc.requirement = core::ExportRequirement::Required;
     desc.handler = [](core::ExportCallContext& ctx) -> bool {
       ctx.cpu.gpr[3] = result::Success;
       return true;
@@ -318,82 +397,134 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentCreateEx (0x0259) - delegates to ContentManager::create_content
-  // using the real device_id/content_type the guest XCONTENT_DATA struct
-  // carries, the struct's own file_name_raw as the content's identifying
-  // name, and the currently running title's real id (from the loaded XEX's
-  // execution info) - not a struct field on real hardware's XCONTENT_DATA
-  // either; the title is implicit in which process is running.
+  // XamContentCreate (0x0258): (user_index, root_name, content_data, flags,
+  // disposition_ptr, license_mask_ptr, overlapped).
+  // XamContentCreateEx (0x0259): (user_index, root_name, content_data, flags,
+  // disposition_ptr, license_mask_ptr, cache_size, content_size,
+  // overlapped), the overlapped from the stack. As in xenia: flags & 0xF is
+  // the creation disposition (CREATE_NEW 1, CREATE_ALWAYS 2, OPEN_EXISTING
+  // 3, OPEN_ALWAYS 4, TRUNCATE_EXISTING 5); the content's package is
+  // created or opened and mounted as "<root_name>:"; *disposition is 1 for
+  // created and 2 for opened. Through an XOVERLAPPED a failure completes as
+  // ERROR_FUNCTION_FAILED with HRESULT_FROM_WIN32(error) as the extended
+  // error and the disposition as the length.
   {
+    const auto create = [&content_manager, &session](core::ExportCallContext& ctx,
+                                                     cpu::GuestAddress overlapped) {
+      const auto root_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const auto content_data_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      const auto flags = static_cast<std::uint32_t>(ctx.cpu.gpr[6]);
+      const auto disposition_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
+      const auto license_mask_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[8]);
+      if (root_ptr == 0u || content_data_ptr == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return;
+      }
+      const auto root_name = read_c_string(ctx.memory, root_ptr);
+      ContentData data{};
+      data.device_id = ctx.memory.read32_be(content_data_ptr + 0u);
+      data.content_type = static_cast<ContentType>(ctx.memory.read32_be(content_data_ptr + 4u));
+      data.display_name = read_content_display_name(ctx.memory, content_data_ptr);
+      data.file_name = read_content_file_name(ctx.memory, content_data_ptr);
+      const auto* loaded = session.loaded_xex();
+      data.title_id = loaded != nullptr ? loaded->image.title_id : 0u;
+
+      const auto existing =
+          content_manager.find_content(data.device_id, data.content_type, data.title_id, data.file_name);
+      XResult result = result::Success;
+      bool make = false;
+      bool remove = false;
+      switch (flags & 0xFu) {
+        case 1u:  // CREATE_NEW
+          if (existing) result = kErrorAlreadyExists; else make = true;
+          break;
+        case 2u:  // CREATE_ALWAYS
+          remove = existing.has_value();
+          make = true;
+          break;
+        case 3u:  // OPEN_EXISTING
+          if (!existing) result = kErrorPathNotFound;
+          break;
+        case 4u:  // OPEN_ALWAYS
+          make = !existing;
+          break;
+        case 5u:  // TRUNCATE_EXISTING
+          if (!existing) result = kErrorPathNotFound; else remove = make = true;
+          break;
+        default:
+          result = result::InvalidParameter;
+          break;
+      }
+      const std::uint32_t disposition = make ? 1u : 2u;
+      if (disposition_ptr != 0u) write_u32_be(ctx.memory, disposition_ptr, disposition);
+
+      auto* vfs = session.filesystem();
+      std::uint32_t content_id = existing ? existing->content_id : 0u;
+      if (result == result::Success && vfs == nullptr) result = result::FunctionFailed;
+      if (result == result::Success && remove) result = content_manager.delete_content(content_id);
+      if (result == result::Success && make) result = content_manager.create_content(data, content_id);
+      if (result == result::Success) result = content_manager.open_package(*vfs, root_name, content_id);
+      if (result == result::Success && license_mask_ptr != 0u) {
+        write_u32_be(ctx.memory, license_mask_ptr, 0u);
+      }
+
+      if (overlapped == 0u) {
+        ctx.cpu.gpr[3] = result;
+        return;
+      }
+      const auto extended = result == 0u ? 0u : (0x80070000u | (result & 0xFFFFu));
+      ctx.cpu.gpr[3] = complete_overlapped(ctx, session.kernel_process(), overlapped,
+                                           result == 0u ? 0u : result::FunctionFailed, extended,
+                                           disposition);
+    };
+
     core::ExportDescriptor desc{};
     desc.library = "xam";
-    desc.name = "XamContentCreateEx";
-    desc.ordinal = ordinal::XamContentCreateEx;
+    desc.name = "XamContentCreate";
+    desc.ordinal = ordinal::XamContentCreate;
     desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note =
-        "disposition (create/open/overwrite) semantics are not modeled - "
-        "every call attempts a fresh create_content() regardless of the "
-        "flags argument's CREATE_NEW/OPEN_EXISTING/etc. value";
-    desc.handler = [&content_manager, &session](core::ExportCallContext& ctx) -> bool {
-      const auto content_data_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
-      const auto disposition_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
-      if (content_data_ptr == 0u) {
-        ctx.cpu.gpr[3] = result::InvalidParameter;
-        return true;
-      }
-      const auto device_id = ctx.memory.read32_be(content_data_ptr + 0u);
-      const auto content_type_raw = ctx.memory.read32_be(content_data_ptr + 4u);
-      const auto name = read_content_file_name(ctx.memory, content_data_ptr);
-      const auto* loaded = session.loaded_xex();
-      const std::uint64_t title_id = loaded != nullptr ? loaded->image.title_id : 0u;
-      std::uint32_t out_content_id = 0u;
-      const auto result_code = content_manager.create_content(
-          device_id, name, static_cast<ContentType>(content_type_raw), title_id, out_content_id);
-      if (disposition_ptr != 0u) write_u32_be(ctx.memory, disposition_ptr, 1u);  // kCreate
-      ctx.cpu.gpr[3] = result_code;
+    desc.handler = [create](core::ExportCallContext& ctx) -> bool {
+      create(ctx, static_cast<cpu::GuestAddress>(ctx.cpu.gpr[9]));
       return true;
     };
-    desc.handler = with_overlapped(session, 8, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
+
+    core::ExportDescriptor ex{};
+    ex.library = "xam";
+    ex.name = "XamContentCreateEx";
+    ex.ordinal = ordinal::XamContentCreateEx;
+    ex.requirement = core::ExportRequirement::Required;
+    ex.handler = [create](core::ExportCallContext& ctx) -> bool {
+      create(ctx, argument_u32(ctx, 8));
+      return true;
+    };
+    ok = registry.register_export(std::move(ex)) && ok;
   }
 
-  // XamContentDelete (0x025B) - delegates to ContentManager::delete_content.
-  // Real ABI identifies the content by its XCONTENT_DATA struct, not a
-  // content_id handle; this codebase's ContentManager keys deletion by the
-  // same integer content_id enumerate_content()/create_content() already
-  // use, so this looks the content up by (device_id, name) from the guest
-  // struct first.
+  // XamContentDelete (0x025B): (user_index, content_data, overlapped).
+  // Removes the running title's package named by the XCONTENT_DATA;
+  // ERROR_FILE_NOT_FOUND when there is none and ERROR_ACCESS_DENIED while it
+  // is mounted, as in xenia.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XamContentDelete";
     desc.ordinal = ordinal::XamContentDelete;
     desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note =
-        "looks up the content to delete by (device_id, display_name) among "
-        "currently enumerated content rather than a direct content_id - a "
-        "title that creates then immediately deletes unenumerated content "
-        "within the same call sequence will not find it";
-    desc.handler = [&content_manager](core::ExportCallContext& ctx) -> bool {
+    desc.handler = [&content_manager, &session](core::ExportCallContext& ctx) -> bool {
       const auto content_data_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
       if (content_data_ptr == 0u) {
         ctx.cpu.gpr[3] = result::InvalidParameter;
         return true;
       }
-      const auto device_id = ctx.memory.read32_be(content_data_ptr + 0u);
-      const auto content_type_raw = ctx.memory.read32_be(content_data_ptr + 4u);
-      const auto name = read_content_file_name(ctx.memory, content_data_ptr);
-      const auto existing =
-          content_manager.enumerate_content(device_id, static_cast<ContentType>(content_type_raw));
-      for (const auto& item : existing) {
-        if (item.file_name == name) {
-          ctx.cpu.gpr[3] = content_manager.delete_content(item.content_id);
-          return true;
-        }
-      }
-      ctx.cpu.gpr[3] = result::InvalidParameter;
+      const auto* loaded = session.loaded_xex();
+      const auto existing = content_manager.find_content(
+          ctx.memory.read32_be(content_data_ptr + 0u),
+          static_cast<ContentType>(ctx.memory.read32_be(content_data_ptr + 4u)),
+          loaded != nullptr ? loaded->image.title_id : 0u,
+          read_content_file_name(ctx.memory, content_data_ptr));
+      ctx.cpu.gpr[3] = existing ? content_manager.delete_content(existing->content_id)
+                                : kErrorFileNotFound;
       return true;
     };
     desc.handler = with_overlapped(session, 2, std::move(desc.handler));

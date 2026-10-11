@@ -35,6 +35,14 @@ namespace xenon::xbox {
 [[nodiscard]] bool xex_get_procedure_address_export(GuestModuleRegistry& registry,
                                                     core::ExportCallContext& context);
 
+// XexGetModuleSection (ordinal 0x196): r3 = module handle, r4 = section name
+// (ANSI, at most 8 characters), r5 = address out, r6 = size out ->
+// NTSTATUS. Looks the name up in the executable's XEX resource table
+// (XEX_HEADER_RESOURCE_INFO), as xenia's UserModule::GetSection does.
+[[nodiscard]] bool xex_get_module_section_export(GuestModuleRegistry& registry,
+                                                 const XexImage& image,
+                                                 core::ExportCallContext& context);
+
 // Convenience registrar for callers (tests/tools) that already have a
 // constructed XexImage. XenonSession::init_exports() instead registers a
 // lambda that lazily dereferences loaded_xex_ at call time (the XEX is not

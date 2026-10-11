@@ -182,4 +182,54 @@ bool register_xboxkrnl_xex_module_exports(core::ExportRegistry& registry, const 
   return registry.register_export(std::move(descriptor));
 }
 
+namespace {
+
+constexpr std::uint32_t kXexHeaderResourceInfo = 0x000002FFu;
+constexpr std::uint32_t kStatusNotFound = 0xC0000225u;
+
+}  // namespace
+
+// XEX_HEADER_RESOURCE_INFO points (its low byte is 0xFF: the value is an
+// offset into the header) at { u32 size; { char name[8]; u32 address;
+// u32 size; } entries[(size - 4) / 16]; }.
+bool xex_get_module_section_export(GuestModuleRegistry& registry, const XexImage& image,
+                                   core::ExportCallContext& context) {
+  const auto handle = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const auto name_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto data_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto size_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
+  if (!registry.is_module_handle(handle)) {
+    context.cpu.gpr[3] = kStatusInvalidHandle;
+    return true;
+  }
+  std::uint32_t table = 0u;
+  const auto& header = image.header_bytes;
+  if (!registry.is_executable_handle(handle) || name_ptr == 0u ||
+      !find_inline_optional_header(header, kXexHeaderResourceInfo, table) ||
+      static_cast<std::size_t>(table) + 4u > header.size()) {
+    context.cpu.gpr[3] = kStatusNotFound;
+    return true;
+  }
+  const auto name = read_guest_cstring(context.memory, name_ptr, 8u);
+  const auto table_size = read_be32(header, table);
+  const auto count = table_size < 4u ? 0u : (table_size - 4u) / 16u;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const auto entry = static_cast<std::size_t>(table) + 4u + static_cast<std::size_t>(i) * 16u;
+    if (entry + 16u > header.size()) break;
+    std::string entry_name;
+    for (std::size_t c = 0; c < 8u; ++c) {
+      const auto ch = static_cast<char>(header[entry + c]);
+      if (ch == '\0') break;
+      entry_name.push_back(ch);
+    }
+    if (entry_name != name) continue;
+    if (data_ptr != 0u) context.memory.write32_be(data_ptr, read_be32(header, entry + 8u));
+    if (size_ptr != 0u) context.memory.write32_be(size_ptr, read_be32(header, entry + 12u));
+    context.cpu.gpr[3] = 0u;
+    return true;
+  }
+  context.cpu.gpr[3] = kStatusNotFound;
+  return true;
+}
+
 }  // namespace xenon::xbox

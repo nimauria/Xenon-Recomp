@@ -206,12 +206,12 @@ void test_enumerate_reports_the_item_count_through_the_overlapped() {
   cpu.gpr[9] = handle_out;
   assert(f.call(kXamContentCreateEnumerator, cpu) == xam::result::Success);
   const auto handle = f.address_space->read32_be(handle_out);
-  const auto buffer = f.alloc(306u * 10u);
+  const auto buffer = f.alloc(308u * 10u);
   const auto o = f.overlapped();
   cpu = cpu::CpuState{};
   cpu.gpr[3] = handle;
   cpu.gpr[5] = buffer;
-  cpu.gpr[6] = 306u * 10u;
+  cpu.gpr[6] = 308u * 10u;
   cpu.gpr[7] = 0;  // items_returned: none with an overlapped
   cpu.gpr[8] = o;
   assert(f.call(kXamEnumerate, cpu) == kErrorIoPending);
@@ -221,7 +221,7 @@ void test_enumerate_reports_the_item_count_through_the_overlapped() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = handle;
   cpu.gpr[5] = buffer;
-  cpu.gpr[6] = 306u;
+  cpu.gpr[6] = 308u;
   cpu.gpr[8] = exhausted;
   assert(f.call(kXamEnumerate, cpu) == kErrorIoPending);
   assert(f.result_of(exhausted) == 0x12u && f.extended_of(exhausted) == 0x80070012u &&
@@ -233,14 +233,31 @@ void test_enumerate_reports_the_item_count_through_the_overlapped() {
 void test_a_stack_passed_overlapped_is_honoured() {
   Fixture f;
   const auto o = f.overlapped();
+  // A valid OPEN_ALWAYS request; this fixture has no file system to mount
+  // the package in, so the call fails with ERROR_FUNCTION_FAILED.
+  const auto root = f.alloc(8);
+  for (std::uint32_t i = 0; i < 5u; ++i) f.address_space->write8(root + i, "save"[i]);
+  const auto data = f.alloc(0x134);
+  for (std::uint32_t i = 0; i < 0x134u; i += 4u) f.address_space->write32_be(data + i, 0u);
+  f.address_space->write32_be(data, xam::storage_device::HardDisk);
+  f.address_space->write32_be(data + 4u, 1u);
+  for (std::uint32_t i = 0; i < 4u; ++i) f.address_space->write8(data + 264u + i, "slot"[i]);
+  const auto request = [&](cpu::CpuState& cpu) {
+    cpu.gpr[1] = f.stack_top;
+    cpu.gpr[4] = root;
+    cpu.gpr[5] = data;
+    cpu.gpr[6] = 4u;  // OPEN_ALWAYS
+  };
   cpu::CpuState sync{};
-  sync.gpr[1] = f.stack_top;
-  const auto sync_result = f.call(kXamContentCreateEx, sync);  // no content data: fails
+  request(sync);
+  f.address_space->write32_be(f.stack_top + 0x54u, 0u);
+  assert(f.call(kXamContentCreateEx, sync) == kErrorFunctionFailed);
   cpu::CpuState cpu{};
-  cpu.gpr[1] = f.stack_top;
+  request(cpu);
   f.address_space->write32_be(f.stack_top + 0x54u, o);
   assert(f.call(kXamContentCreateEx, cpu) == kErrorIoPending);
-  assert(f.result_of(o) == sync_result && "the overlapped carries the synchronous result");
+  assert(f.result_of(o) == kErrorFunctionFailed && f.extended_of(o) == 0x8007065Bu &&
+         "the overlapped carries the result");
   f.address_space->write32_be(f.stack_top + 0x54u, 0u);
 }
 

@@ -119,18 +119,40 @@ call.
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
 | 0x02CB | `XamShowDeviceSelectorUI` | ✅ Stubbed | Returns default HDD (real identity is part of the XamShow* UI family, not content storage) |
-| 0x025C | `XamContentCreateEnumerator` | ✅ Stubbed | Create content enumerator |
-| 0x025A | `XamContentClose` | ✅ Stubbed | Close content handle |
+| 0x025C | `XamContentCreateEnumerator` | Implemented | Lists the title's content packages (0x134-byte `XCONTENT_DATA` items) |
+| 0x0258 | `XamContentCreate` | Implemented | Create or open a package and mount it as `<root>:` |
+| 0x0259 | `XamContentCreateEx` | Implemented | As 0x0258, with cache and content sizes; overlapped on the stack |
+| 0x025A | `XamContentClose` | Implemented | Unmount a root; `ERROR_FILE_NOT_FOUND` if not open |
+| 0x025B | `XamContentDelete` | Implemented | Delete a package; refused while mounted |
+| 0x0267 | `XamContentFlush` | Implemented | Nothing to commit: package writes go straight to the host |
 | 0x025E | `XamContentGetDeviceData` | ✅ Implemented | Storage device capacity data |
 | 0x025F | `XamContentGetDeviceName` | ✅ Implemented | Storage device name |
+
+Content packages are host directories laid out as xenia lays them out,
+`<root>/<title id>/<content type>/<file name>/`, with the display name in
+`<file name>.display` beside each. The root is `<save root>/Content` when
+the session has a save root, and its existing packages are listed at start;
+otherwise packages live in a scratch directory removed at shutdown. The
+creation disposition (`flags & 0xF`) follows xenia: CREATE_NEW, CREATE_ALWAYS,
+OPEN_EXISTING, OPEN_ALWAYS and TRUNCATE_EXISTING, with `*disposition` 1 for
+created and 2 for opened.
 
 ### Phase 5: Notifications ✅
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x028A | `XamNotifyCreateListener` | ✅ Stubbed | Create notification listener |
-| 0x028B | `XNotifyGetNext` | ✅ Stubbed | Get next notification (real identity has no "Xam" prefix) |
-| 0x028C | `XNotifyPositionUI` | ✅ Stubbed | Position notification UI (no-op; real identity has no "Xam" prefix) |
+| 0x028A | `XamNotifyCreateListener` | Implemented | Waitable listener handle with its own queue, area mask and version filter |
+| 0x0291 | `XamNotifyCreateListenerInternal` | Implemented | As 0x028A, with `is_system` |
+| 0x028B | `XNotifyGetNext` | Implemented | Next notification, or the next with `match_id` (real identity has no "Xam" prefix) |
+| 0x028C | `XNotifyPositionUI` | Implemented | No system UI to position (real identity has no "Xam" prefix) |
+| 0x028D | `XNotifyDelayUI` | Implemented | No system UI to delay |
+
+Notification ids are XAM's own (`XN_SYS_SIGNINCHANGED` 0x0A and so on). The
+first listener whose mask includes the system area receives the startup
+notifications xenia and rexglue-sdk send: `XN_SYS_UI` on then off,
+`XN_SYS_SIGNINCHANGED` twice, and `XN_SYS_INPUTDEVICESCHANGED` and
+`XN_SYS_INPUTDEVICECONFIGCHANGED` twice each. `XamUserWriteProfileSettings`
+sends `XN_SYS_PROFILESETTINGCHANGED`.
 
 ### Phase 6: Achievements ✅
 
@@ -159,6 +181,13 @@ For dashboard/system UI calls Xenon cannot meaningfully reproduce, provide:
 1. **Sensible Native Equivalents**: Where possible (e.g., file picker for storage selection)
 2. **Explicit Unsupported Behaviour**: Clear diagnostic logging with appropriate error codes
 3. **No Success Pretense**: Never return success if the game depends on returned state
+
+Dialogs a title cannot proceed without are answered without drawing
+anything, as xenia does when it runs headless: `XamShowMessageBoxUI`
+(0x02CA) returns the focused button and `XamShowKeyboardUI` (0x02C1) the
+default text, each with `XN_SYS_UI` broadcast on then off and its
+XOVERLAPPED completed. `XamIsUIActive` (0x02EC) is false because no dialog
+stays open. `XamUserGetGamerTag` (0x020C) returns the profile's gamertag.
 
 ## AC6 Requirements
 

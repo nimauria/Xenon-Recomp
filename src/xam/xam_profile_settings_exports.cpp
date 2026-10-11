@@ -4,6 +4,7 @@
 #include "xam/xam_overlapped.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/xam/notification_manager.hpp"
 #include "xenon/xam/profile_settings.hpp"
 #include "xenon/xam/user_manager.hpp"
 #include "xenon/xam/xam_exports.hpp"
@@ -183,7 +184,8 @@ void read_profile_settings(core::ExportCallContext& ctx, core::XenonSession& ses
 }  // namespace
 
 bool register_profile_settings_exports(core::ExportRegistry& registry, UserManager& users,
-                                       ProfileSettings& settings, core::XenonSession& session) {
+                                       ProfileSettings& settings, NotificationManager& notifications,
+                                       core::XenonSession& session) {
   bool ok = true;
 
   {
@@ -223,17 +225,17 @@ bool register_profile_settings_exports(core::ExportRegistry& registry, UserManag
   // entry marked unset (data type 0xFF), or whose data type is not the type
   // its id declares, is skipped, as xenia-canary does. Binary and string
   // data longer than the id's declared size is cut to that size. A null
-  // data pointer stores zeroes, as in rexglue-sdk.
+  // data pointer stores zeroes, as in rexglue-sdk. Listeners then receive
+  // XN_SYS_PROFILESETTINGCHANGED with the writing user's bit (1 << index) as
+  // its parameter, as in xenia-canary.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XamUserWriteProfileSettings";
     desc.ordinal = ordinal::XamUserWriteProfileSettings;
     desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note =
-        "the XN_SYS_PROFILESETTINGCHANGED notification is not sent";
-    desc.handler = [&session, &users, &settings](core::ExportCallContext& ctx) -> bool {
+    desc.handler = [&session, &users, &settings,
+                    &notifications](core::ExportCallContext& ctx) -> bool {
       auto& memory = ctx.memory;
       const auto title_id_arg = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
       const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[4]);
@@ -273,6 +275,7 @@ bool register_profile_settings_exports(core::ExportRegistry& registry, UserManag
         }
         if (!settings.write(xuid, title_id, id, std::move(value))) saved = false;
       }
+      notifications.broadcast(notification::kProfileSettingChanged, 1u << user_index);
       // A title-specific setting the host could not save fails the call.
       finish(ctx, session, overlapped, saved ? result::Success : result::FunctionFailed);
       return true;

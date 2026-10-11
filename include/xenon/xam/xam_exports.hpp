@@ -94,10 +94,16 @@ constexpr std::uint32_t XamNotifyCreateListener = 0x028A;
 // separate export that does keep the prefix.
 constexpr std::uint32_t XNotifyGetNext = 0x028B;
 constexpr std::uint32_t XNotifyPositionUI = 0x028C;
+constexpr std::uint32_t XNotifyDelayUI = 0x028D;
+constexpr std::uint32_t XamShowKeyboardUI = 0x02C1;
+constexpr std::uint32_t XamIsUIActive = 0x02EC;
+constexpr std::uint32_t XamUserGetGamerTag = 0x020C;
+constexpr std::uint32_t XamNotifyCreateListenerInternal = 0x0291;
 
 // ---------------------------------------------------------------------------
 // Content and storage (xam_table.inc ~0x259-0x269)
 // ---------------------------------------------------------------------------
+constexpr std::uint32_t XamContentCreate = 0x0258;
 constexpr std::uint32_t XamContentCreateEx = 0x0259;
 constexpr std::uint32_t XamContentClose = 0x025A;
 constexpr std::uint32_t XamContentDelete = 0x025B;
