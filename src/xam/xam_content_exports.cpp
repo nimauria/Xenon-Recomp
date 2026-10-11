@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <vector>
 
+#include "xam/xam_overlapped.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/handle_table.hpp"
@@ -67,6 +68,19 @@ std::vector<std::byte> serialize_content_data(const ContentData& item) {
 
 }  // namespace
 
+namespace {
+
+// XamContentGetDeviceState through an XOVERLAPPED, as rexglue-sdk reports it:
+// a missing device completes with ERROR_FUNCTION_FAILED and the device error
+// as the extended error.
+OverlappedOutcome device_state_outcome(std::uint32_t result) {
+  constexpr std::uint32_t kErrorFunctionFailed = 0x0000065Bu;
+  if (result == 0u) return {0u, 0u, 0u};
+  return {kErrorFunctionFailed, result, 0u};
+}
+
+}  // namespace
+
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager,
                               core::XenonSession& session) {
   bool ok = true;
@@ -104,6 +118,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
+    desc.handler = with_overlapped(session, 5, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -209,6 +224,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
+    desc.handler = with_overlapped(session, 1, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -338,6 +354,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       ctx.cpu.gpr[3] = result_code;
       return true;
     };
+    desc.handler = with_overlapped(session, 8, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -379,6 +396,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       ctx.cpu.gpr[3] = result::InvalidParameter;
       return true;
     };
+    desc.handler = with_overlapped(session, 2, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -398,6 +416,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       ctx.cpu.gpr[3] = result::InvalidParameter;
       return true;
     };
+    desc.handler = with_overlapped(session, 4, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -419,6 +438,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
           content_manager.get_device(device_id).has_value() ? result::Success : result::InvalidParameter;
       return true;
     };
+    desc.handler = with_overlapped(session, 1, std::move(desc.handler), &device_state_outcome);
     ok = registry.register_export(std::move(desc)) && ok;
   }
 

@@ -1,4 +1,8 @@
+#include <chrono>
+
+#include "xam/xam_overlapped.hpp"
 #include "xenon/core/export_registry.hpp"
+#include "xenon/kernel/wait.hpp"
 #include "xenon/xam/xam_exports.hpp"
 
 namespace xenon::xam {
@@ -17,11 +21,56 @@ namespace xenon::xam {
 // succeeded. XMsgCancelIORequest's real contract does not depend on any app
 // registry at all (it only optionally waits on a caller-owned event handle),
 // so it is implemented in full rather than approximated.
-bool register_msg_exports(core::ExportRegistry& registry) {
+bool register_msg_exports(core::ExportRegistry& registry, core::XenonSession& session) {
   bool ok = true;
 
   // X_ERROR_NOT_FOUND (Win32 ERROR_NOT_FOUND) = 1168 = 0x490.
   constexpr std::uint32_t kErrorNotFound = 0x490u;
+
+  // XamGetOverlappedResult: r3 = XOVERLAPPED*, r4 = PDWORD length (nullable),
+  // r5 = wait -> the overlapped's result (a Win32 error code). As in
+  // rexglue-sdk's XamGetOverlappedResult_entry: a completed overlapped
+  // returns its Result (and Length, unless the result is a failure code); a
+  // pending one waits on its event when asked to, or returns
+  // ERROR_IO_INCOMPLETE. Every overlapped Xenon starts is completed before
+  // the call that started it returns, so the wait only matters for one the
+  // guest marks pending itself.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamGetOverlappedResult";
+    desc.ordinal = ordinal::XamGetOverlappedResult;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&session](core::ExportCallContext& ctx) -> bool {
+      const auto overlapped = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]);
+      const auto length_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const bool wait = static_cast<std::uint32_t>(ctx.cpu.gpr[5]) != 0u;
+      if (overlapped == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      auto status = ctx.memory.read32_be(overlapped + XOverlappedLayout::kResult);
+      if (status == kErrorIoPending) {
+        const auto event_handle = ctx.memory.read32_be(overlapped + XOverlappedLayout::kEvent);
+        kernel::HandleView view{};
+        auto* process = session.kernel_process();
+        if (!wait || event_handle == 0u || !process ||
+            process->handle_table().lookup(event_handle, view) != kernel::KernelIoCode::Success) {
+          ctx.cpu.gpr[3] = kErrorIoIncomplete;
+          return true;
+        }
+        static_cast<void>(kernel::wait_for_single_object(view.object, std::chrono::milliseconds(-1),
+                                                         ctx.thread_id));
+        status = ctx.memory.read32_be(overlapped + XOverlappedLayout::kResult);
+      }
+      if ((status & 0x80000000u) == 0u && length_ptr != 0u) {
+        ctx.memory.write32_be(length_ptr, ctx.memory.read32_be(overlapped + XOverlappedLayout::kLength));
+      }
+      ctx.cpu.gpr[3] = status;
+      return true;
+    };
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
 
   {
     core::ExportDescriptor desc{};
@@ -51,6 +100,7 @@ bool register_msg_exports(core::ExportRegistry& registry) {
       ctx.cpu.gpr[3] = kErrorNotFound;
       return true;
     };
+    desc.handler = with_overlapped(session, 2, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
   {
@@ -65,6 +115,7 @@ bool register_msg_exports(core::ExportRegistry& registry) {
       ctx.cpu.gpr[3] = kErrorNotFound;
       return true;
     };
+    desc.handler = with_overlapped(session, 2, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
   {

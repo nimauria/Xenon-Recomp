@@ -1,3 +1,4 @@
+#include "xam/xam_overlapped.hpp"
 #include "xenon/xam/xam_user_exports.hpp"
 
 #include "xenon/xam/xam_exports.hpp"
@@ -28,7 +29,8 @@ void write_string(cpu::MemoryPort& memory, cpu::GuestAddress addr,
 
 }  // namespace
 
-bool register_user_exports(core::ExportRegistry& registry, UserManager& user_manager) {
+bool register_user_exports(core::ExportRegistry& registry, UserManager& user_manager,
+                           core::XenonSession& session) {
   bool ok = true;
 
   // XamUserGetXUID (0x020A)
@@ -160,6 +162,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
+    desc.handler = with_overlapped(session, 4, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -239,6 +242,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
       ctx.cpu.gpr[3] = result::InvalidParameter;
       return true;
     };
+    desc.handler = with_overlapped(session, 8, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
@@ -257,6 +261,7 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
+    desc.handler = with_overlapped(session, 5, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
