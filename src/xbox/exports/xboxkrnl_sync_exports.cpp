@@ -1,5 +1,6 @@
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -42,6 +43,12 @@ namespace status = xenon::kernel::xbox::status;
 // xenon::kernel::xbox::status does not yet define.
 constexpr std::uint32_t kStatusMutantNotOwned = 0xC0000046u;
 constexpr std::uint32_t kStatusSemaphoreLimitExceeded = 0xC0000047u;
+constexpr std::uint32_t kStatusInvalidParameterMix = 0xC0000030u;
+
+// NT WAIT_TYPE: WaitAll is 0 and WaitAny is 1 (`typedef enum _WAIT_TYPE {
+// WaitAll, WaitAny, ... }`); xenia selects WaitAny for any nonzero value.
+constexpr std::uint32_t kWaitAll = 0u;
+constexpr std::uint32_t kWaitAny = 1u;
 
 std::uint32_t to_status(KernelIoCode code) {
   switch (code) {
@@ -430,19 +437,23 @@ bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
 
 // NtWaitForMultipleObjectsEx (ordinal 0xFE)
 // Guest ABI: r3 = count, r4 = PHANDLE array (guest array of dword handles),
-// r5 = wait type (0 = any/WaitAny, 1 = all/WaitAll), r6 = wait mode
+// r5 = wait type (NT WAIT_TYPE: 0 = WaitAll, 1 = WaitAny), r6 = wait mode
 // (ignored), r7 = alertable (ignored), r8 = PLARGE_INTEGER timeout
 // (nullable) -> r3 = NTSTATUS (STATUS_WAIT_0 + signaled index for WaitAny,
-// STATUS_SUCCESS for WaitAll).
+// STATUS_SUCCESS for WaitAll). As in NT's object-manager wait, a WaitAll
+// naming the same object twice (through any handles) fails with
+// STATUS_INVALID_PARAMETER_MIX: it could never be satisfied.
 bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
                                             ExportCallContext& context) {
   const auto count = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto handles_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
-  const auto wait_all = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  const bool wait_all = wait_type == kWaitAll;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
-  if (count == 0u || count > kMaxObjects || handles_ptr == 0u) {
+  if (count == 0u || count > kMaxObjects || handles_ptr == 0u ||
+      (wait_type != kWaitAll && wait_type != kWaitAny)) {
     context.cpu.gpr[3] = status::InvalidParameter;
     return true;
   }
@@ -460,6 +471,10 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
     }
     if (!kernel::is_waitable_object(view.object->type())) {
       context.cpu.gpr[3] = status::ObjectTypeMismatch;
+      return true;
+    }
+    if (wait_all && std::find(objects.begin(), objects.end(), view.object) != objects.end()) {
+      context.cpu.gpr[3] = kStatusInvalidParameterMix;
       return true;
     }
     objects.push_back(view.object);

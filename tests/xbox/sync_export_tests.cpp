@@ -387,7 +387,7 @@ void test_waits_report_a_mutant_abandoned_by_an_exiting_thread() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = handles;
-  cpu.gpr[5] = 0;  // wait type: any
+  cpu.gpr[5] = 1;  // wait type: WaitAny
   cpu.gpr[8] = zero_timeout;
   assert(f.invoke(0x0FEu, cpu, kWaitingThread).success);
   assert(cpu.gpr[3] == 0x00000081u);  // STATUS_ABANDONED_WAIT_0 + 1
@@ -425,7 +425,7 @@ void test_nt_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = handles_array;
-  cpu.gpr[5] = 0;  // wait type: any
+  cpu.gpr[5] = 1;  // wait type: WaitAny (NT WAIT_TYPE)
   cpu.gpr[8] = zero_timeout;
   auto result = f.invoke(0x0FEu, cpu);
   assert(result.handled && result.success);
@@ -435,11 +435,42 @@ void test_nt_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = handles_array;
-  cpu.gpr[5] = 1;  // wait type: all
+  cpu.gpr[5] = 0;  // wait type: WaitAll (NT WAIT_TYPE)
   cpu.gpr[8] = zero_timeout;
   result = f.invoke(0x0FEu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0x00000102u);  // STATUS_TIMEOUT
+}
+
+// NT WAIT_TYPE is WaitAll = 0, WaitAny = 1; anything else is rejected rather
+// than treated as one of them. A WaitAll naming one object twice can never be
+// satisfied and fails with STATUS_INVALID_PARAMETER_MIX; a WaitAny may.
+void test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1;  // count 1
+  cpu.gpr[6] = 2;
+  assert(f.invoke(0x0D5u, cpu).success && cpu.gpr[3] == 0u);  // NtCreateSemaphore
+  const auto handle = f.address_space->read32_be(handle_out);
+  const auto handles = f.alloc64();
+  f.address_space->write32_be(handles, handle);
+  f.address_space->write32_be(handles + 4u, handle);
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+  const auto wait = [&](std::uint32_t wait_type) {
+    cpu = cpu::CpuState{};
+    cpu.gpr[3] = 2;
+    cpu.gpr[4] = handles;
+    cpu.gpr[5] = wait_type;
+    cpu.gpr[8] = zero_timeout;
+    assert(f.invoke(0x0FEu, cpu).success);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  };
+  assert(wait(2u) == 0xC000000Du);  // STATUS_INVALID_PARAMETER
+  assert(wait(0u) == 0xC0000030u);  // WaitAll: STATUS_INVALID_PARAMETER_MIX
+  assert(wait(1u) == 0u && "a WaitAny may name an object twice");
 }
 
 void test_nt_create_timer_set_and_cancel() {
@@ -539,6 +570,7 @@ int main() {
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
   test_waits_report_a_mutant_abandoned_by_an_exiting_thread();
   test_nt_wait_for_multiple_objects_any_and_all();
+  test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();
 

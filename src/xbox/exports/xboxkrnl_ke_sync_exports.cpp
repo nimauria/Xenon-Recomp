@@ -216,7 +216,8 @@ bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCall
 // KeWaitForMultipleObjects (ordinal 0xAF)
 // Guest ABI (matching the real, stable NT KeWaitForMultipleObjects
 // signature): r3 = count, r4 = object header pointer array (guest array of
-// GUEST ADDRESSES, not handles), r5 = wait type (0 = WaitAny, 1 = WaitAll),
+// GUEST ADDRESSES, not handles), r5 = wait type (NT WAIT_TYPE: 0 = WaitAll,
+// 1 = WaitAny; `typedef enum _WAIT_TYPE { WaitAll, WaitAny, ... }`),
 // r6 = wait reason (ignored), r7 = processor mode (ignored), r8 = alertable
 // (ignored), r9 = PLARGE_INTEGER timeout (nullable), r10 = wait block array
 // (ignored - real-hardware-only kernel bookkeeping, not needed here) ->
@@ -225,11 +226,12 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
                                         ExportCallContext& context) {
   const auto count = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto headers_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
-  const auto wait_all = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  const bool wait_all = wait_type == 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
-  if (count == 0u || count > kMaxObjects || headers_ptr == 0u) {
+  if (count == 0u || count > kMaxObjects || headers_ptr == 0u || wait_type > 1u) {
     context.cpu.gpr[3] = status::InvalidParameter;
     return true;
   }

@@ -325,7 +325,7 @@ void test_ke_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = headers_array;
-  cpu.gpr[5] = 0;  // any
+  cpu.gpr[5] = 1;  // WaitAny (NT WAIT_TYPE)
   cpu.gpr[9] = zero_timeout;
   auto result = f.invoke(0x0AFu, cpu);  // KeWaitForMultipleObjects
   assert(result.handled && result.success);
@@ -334,11 +334,28 @@ void test_ke_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = headers_array;
-  cpu.gpr[5] = 1;  // all
+  cpu.gpr[5] = 0;  // WaitAll (NT WAIT_TYPE)
   cpu.gpr[9] = zero_timeout;
   result = f.invoke(0x0AFu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0x00000102u);  // header2 is not signaled -> timeout
+}
+
+void test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type() {
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 0;  // NotificationEvent
+  cpu.gpr[5] = 1;  // signalled
+  assert(f.invoke(0x070u, cpu).success);
+  const auto headers = f.alloc64();
+  f.address_space->write32_be(headers, header);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 1;
+  cpu.gpr[4] = headers;
+  cpu.gpr[5] = 2;  // neither WaitAll (0) nor WaitAny (1)
+  assert(f.invoke(0x0AFu, cpu).success && cpu.gpr[3] == 0xC000000Du);
 }
 
 void test_unsupported_dispatcher_type_is_rejected_not_misinterpreted() {
@@ -486,7 +503,7 @@ void test_semaphore_signal_state_is_its_count() {
   cpu::CpuState cpu{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = headers;
-  cpu.gpr[5] = 1;  // WaitAll
+  cpu.gpr[5] = 0;  // WaitAll
   cpu.gpr[9] = ke.zero_timeout;
   assert(f.invoke(0x0AFu, cpu).success && cpu.gpr[3] == 0u);
   assert(ke.signal_state(header) == 1u && ke.signal_state(event) == 0u);
@@ -580,6 +597,7 @@ int main() {
   test_repeated_calls_on_the_same_header_resolve_to_the_same_object();
   test_ke_semaphore_initialize_release_and_wait();
   test_ke_wait_for_multiple_objects_any_and_all();
+  test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type();
   test_unsupported_dispatcher_type_is_rejected_not_misinterpreted();
   test_ke_query_base_priority_thread_unknown_thread_is_safe();
   test_ke_resume_thread_unknown_pointer_returns_invalid_handle();
