@@ -33,7 +33,14 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
                            core::XenonSession& session) {
   bool ok = true;
 
-  // XamUserGetXUID (0x020A)
+  // XamUserGetXUID (0x020A): (user_index, type_mask, xuid_ptr) -> HRESULT,
+  // as in xenia, xenia-canary and rexglue-sdk. Earlier code took the XUID
+  // pointer from r4, which is type_mask, so it wrote eight bytes to a guest
+  // address of 1 to 7 and left the title's XUID unwritten. type_mask selects
+  // which XUID kinds the caller accepts (1 offline, 2 and 4 online); like
+  // the references, Xenon reports its profiles as kind 1|2, so a request for
+  // kind 4 alone finds no such user. The XUID is written (0 on failure)
+  // whenever the pointer is valid.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -41,20 +48,27 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     desc.ordinal = ordinal::XamUserGetXUID;
     desc.requirement = core::ExportRequirement::Required;
     desc.handler = [&user_manager](core::ExportCallContext& ctx) -> bool {
+      constexpr std::uint32_t kEInvalidArg = 0x80070057u;
+      constexpr std::uint32_t kENoSuchUser = 0x80070525u;
+      constexpr std::uint32_t kProfileKinds = 1u | 2u;
       const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
-      const auto out_xuid_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
-
-      if (!user_manager.is_signed_in(user_index)) {
-        ctx.cpu.gpr[3] = result::NotLoggedOn;
+      const auto type_mask = static_cast<std::uint32_t>(ctx.cpu.gpr[4]);
+      const auto xuid_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      if (xuid_ptr == 0u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
         return true;
       }
-
-      if (out_xuid_ptr != 0) {
-        const auto xuid = user_manager.xuid(user_index);
-        write_u64_be(ctx.memory, out_xuid_ptr, xuid);
+      write_u64_be(ctx.memory, xuid_ptr, 0u);
+      if (user_index >= 4u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
+        return true;
       }
-
-      ctx.cpu.gpr[3] = result::Success;
+      if (!user_manager.is_signed_in(user_index) || (type_mask & kProfileKinds) == 0u) {
+        ctx.cpu.gpr[3] = kENoSuchUser;
+        return true;
+      }
+      write_u64_be(ctx.memory, xuid_ptr, user_manager.xuid(user_index));
+      ctx.cpu.gpr[3] = 0u;
       return true;
     };
     ok = registry.register_export(std::move(desc)) && ok;

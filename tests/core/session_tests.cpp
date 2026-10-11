@@ -607,19 +607,33 @@ int main() {
     assert(!session.exports()->contains("xam", 0x0180u) &&
            "the old invented XamUserGetXUID ordinal (0x0180) must not resolve to anything");
 
-    xenon::cpu::CpuState state{};
-    state.gpr[3] = 0;  // user index 0 (default offline user, always signed in)
+    // XamUserGetXUID(user_index, type_mask, xuid_ptr) -> HRESULT, as in
+    // xenia, xenia-canary and rexglue-sdk; type_mask 1 asks for the offline
+    // XUID.
     xenon::memory::GuestAddress out_xuid{};
     assert(session.memory()->allocate(8, 8, xenon::memory::kReadWrite, false, out_xuid));
-    session.memory()->write64_be(out_xuid, 0xCCCCCCCCCCCCCCCCull);  // sentinel
-    state.gpr[4] = out_xuid;
-    xenon::core::ExportCallContext ctx{state, *session.memory(), 0, 0};
-    auto call_result = session.exports()->invoke("xam", 0x020Au, ctx);
-    assert(call_result.handled && "XamUserGetXUID should be handled at its real ordinal");
-    assert(state.gpr[3] == 0 && "XamUserGetXUID should report Success for the default user");
-    const auto written_xuid = session.memory()->read64_be(out_xuid);
-    assert(written_xuid == 0xE000000000000001ull &&
-           "XamUserGetXUID must write the real default offline XUID through the corrected ordinal");
+    const auto get_xuid = [&](std::uint32_t user_index, std::uint32_t type_mask,
+                              xenon::memory::GuestAddress xuid_ptr) {
+      session.memory()->write64_be(out_xuid, 0xCCCCCCCCCCCCCCCCull);  // sentinel
+      xenon::cpu::CpuState state{};
+      state.gpr[3] = user_index;
+      state.gpr[4] = type_mask;
+      state.gpr[5] = xuid_ptr;
+      xenon::core::ExportCallContext ctx{state, *session.memory(), 0, 0};
+      assert(session.exports()->invoke("xam", 0x020Au, ctx).handled &&
+             "XamUserGetXUID should be handled at its real ordinal");
+      return static_cast<std::uint32_t>(state.gpr[3]);
+    };
+    assert(get_xuid(0, 1, out_xuid) == 0u && "S_OK for the default offline user");
+    assert(session.memory()->read64_be(out_xuid) == 0xE000000000000001ull &&
+           "XamUserGetXUID must write the default offline XUID through r5");
+    assert(get_xuid(0, 3, out_xuid) == 0u);
+    assert(get_xuid(0, 4, out_xuid) == 0x80070525u && "no XUID of kind 4: E_NO_SUCH_USER");
+    assert(session.memory()->read64_be(out_xuid) == 0u);
+    assert(get_xuid(1, 1, out_xuid) == 0x80070525u && "user 1 is not signed in");
+    assert(session.memory()->read64_be(out_xuid) == 0u);
+    assert(get_xuid(4, 1, out_xuid) == 0x80070057u && "E_INVALIDARG for a bad user index");
+    assert(get_xuid(0, 1, 0u) == 0x80070057u && "E_INVALIDARG for a null XUID pointer");
     session.shutdown();
   }
 
