@@ -38,6 +38,8 @@
 // of (see the audio callback thread's own shutdown-ordering history).
 
 #include "xenon/core/session.hpp"
+#include "xenon/kernel/event.hpp"
+#include "xenon/kernel/wait.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 
 #include <atomic>
@@ -482,6 +484,64 @@ void test_a_blocked_callback_is_reported_while_it_blocks() {
   events::clear();
 }
 
+std::shared_ptr<kernel::KernelEvent> g_never_signalled;
+std::atomic<bool> g_callback_waiting{false};
+std::atomic<kernel::WaitResult> g_callback_wait_result{kernel::WaitResult::Success};
+
+// A vsync callback that blocks in a kernel wait nothing will ever satisfy, as
+// a guest interrupt handler stuck on a lock or event would.
+ExecutionResult wait_forever_callback_entry(ExecutionContext& context) {
+  if (!g_callback_waiting.exchange(true)) {
+    g_callback_wait_result = kernel::wait_for_single_object(
+        g_never_signalled, std::chrono::milliseconds(-1), 0u);
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// Shutdown must not hang on, or detach, a pump callback or a guest thread
+// blocked in an unbounded kernel wait: terminating each thread ends its wait.
+void test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads() {
+  g_never_signalled = std::make_shared<kernel::KernelEvent>(true, false);
+  g_callback_waiting.store(false);
+  g_callback_wait_result.store(kernel::WaitResult::Success);
+
+  constexpr GuestAddress kCallbackAddr = 0x5300u;
+  GpuPumpHarness harness(kCallbackAddr, &wait_forever_callback_entry);
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+
+  std::atomic<bool> worker_waiting{false};
+  std::atomic<kernel::WaitResult> worker_result{kernel::WaitResult::Success};
+  kernel::ThreadCreationParams params{};
+  auto worker = kernel_process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        worker_waiting = true;
+        worker_result = kernel::wait_for_single_object(g_never_signalled,
+                                                       std::chrono::milliseconds(-1), 0u);
+        return 0;
+      },
+      params);
+  assert(worker && worker->start());
+
+  for (int i = 0; i < 400 && !(g_callback_waiting.load() && worker_waiting.load()); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(g_callback_waiting.load() && worker_waiting.load());
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed && "a blocked wait must not hang shutdown");
+  assert(g_callback_wait_result.load() == kernel::WaitResult::Terminating);
+  assert(worker_result.load() == kernel::WaitResult::Terminating);
+  assert(worker->state() == kernel::ThreadState::Terminated);
+  g_never_signalled.reset();
+}
+
 }  // namespace
 
 int main() {
@@ -493,6 +553,7 @@ int main() {
   test_interrupt_callback_follows_function_handoffs();
   test_pm4_interrupt_reaches_guest_callback_with_source_one();
   test_a_blocked_callback_is_reported_while_it_blocks();
+  test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

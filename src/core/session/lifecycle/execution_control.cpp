@@ -105,13 +105,24 @@ SessionResult XenonSession::stop() {
   // kernel for, so the stall can be diagnosed from the log alone.
   report_stop_diagnostics();
 
-  // Already-running native compiled code cannot be preempted from here. The
-  // caller (runtime host) owns the actual hard-stop policy: wait for
-  // stop_requested()-aware code to exit cooperatively, then terminate the
-  // process if it does not. Report "Stopping" rather than blocking.
+  // Ends the kernel waits and delays guest threads are blocked in, after the
+  // report above has recorded them. Already-running native compiled code
+  // still cannot be preempted: a thread stops at its next block boundary.
+  // The caller (runtime host) owns the actual hard-stop policy: wait for the
+  // guest to exit cooperatively, then terminate the process if it does not.
+  // Report "Stopping" rather than blocking.
+  terminate_guest_threads(/*include_pumps=*/false);
   return SessionResult::ok(
       "Stop requested; waiting for guest execution to end cooperatively",
       SessionState::Stopping);
+}
+
+void XenonSession::terminate_guest_threads(bool include_pumps) noexcept {
+  if (!kernel_process_) return;
+  for (const auto& thread : kernel_process_->thread_manager().enumerate_threads()) {
+    if (!include_pumps && (thread == gpu_pump_thread_ || thread == audio_thread_)) continue;
+    static_cast<void>(thread->terminate(0));
+  }
 }
 
 }  // namespace xenon::core

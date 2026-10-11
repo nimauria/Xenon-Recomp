@@ -559,6 +559,11 @@ class XenonSession final : public cpu::RuntimeServices {
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
   // reached).
   void stop_gpu_pump_thread() noexcept;
+  // Terminates every guest thread (KernelThread::terminate()), which ends
+  // any kernel wait or delay it is blocked in; the dispatch loop then stops
+  // it at its next block boundary. The GPU and audio pump threads are left
+  // running unless include_pumps.
+  void terminate_guest_threads(bool include_pumps) noexcept;
   void load_native_extension();
   void unload_native_extension() noexcept;
   void start_memory_watch_poll();
