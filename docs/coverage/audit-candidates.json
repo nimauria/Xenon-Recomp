@@ -1,19 +1,19 @@
 {
-  "content_digest": "sha256:1dc6de937dbcb56ed06059b71cf65cc7fbd740c62b4718f558bcd720c01cfaa1",
+  "content_digest": "sha256:885ca492e9919fc632a3ab987617ad22a7ee952af3e087ab81c523465c1e44d3",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "4f5f69d853cd9228673d0d3f035a0f61a5031886",
+    "assessed_commit": "1ec37399c9ef0129f945ce837f3889c83825bf89",
     "worktree": "clean"
   },
   "problems": [
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 4f5f69d853cd",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 1ec37399c9ef",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
     },
     {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 4f5f69d853cd",
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 1ec37399c9ef",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
@@ -248,6 +248,7 @@
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexCheckExecutablePrivilege", "kind": "implementation_found"},
     {"category": "kernel", "detail": "guest variable export", "id": "kernel:registered:XexExecutableModuleHandle", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexGetModuleHandle", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexGetModuleSection", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XexGetProcedureAddress", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:_scprintf", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:_scwprintf", "kind": "implementation_found"},
