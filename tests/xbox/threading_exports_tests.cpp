@@ -177,6 +177,18 @@ void test_rwlock_try_variants() {
   assert(lock_count(f, lock) == -1);
 }
 
+// Waits up to 5 s for the guest word at `address` to read `expected`: a thread
+// about to block has registered itself as waiting, however late a loaded CI
+// runner started it. A fixed sleep raced that start on Windows CI.
+bool wait_for_word(Fixture& f, memory::GuestAddress address, std::uint32_t expected) {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (f.address_space->read32_be(address) != expected) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(1ms);
+  }
+  return true;
+}
+
 // A writer blocks while a reader holds the lock and runs once it is released.
 void test_rwlock_writer_waits_for_reader() {
   Fixture f;
@@ -190,9 +202,8 @@ void test_rwlock_writer_waits_for_reader() {
     writer_in = true;
     f.call(kOrdExRelease, lock, 0, 0, 2);
   });
-  std::this_thread::sleep_for(100ms);
+  assert(wait_for_word(f, lock + 4u, 1u) && "one writer is waiting");
   assert(!writer_in.load() && "the writer must wait for the reader");
-  assert(f.address_space->read32_be(lock + 4u) == 1u && "one writer is waiting");
 
   f.call(kOrdExRelease, lock, 0, 0, 1);
   writer.join();
@@ -214,8 +225,8 @@ void test_rwlock_writer_hands_off_to_writer() {
     second_in = true;
     f.call(kOrdExRelease, lock, 0, 0, 2);
   });
-  std::this_thread::sleep_for(100ms);
-  assert(!second_in.load() && f.address_space->read32_be(lock + 4u) == 1u);
+  assert(wait_for_word(f, lock + 4u, 1u) && "the second writer is waiting");
+  assert(!second_in.load());
   f.call(kOrdExRelease, lock, 0, 0, 1);
   second.join();
   assert(second_in.load() && "the waiting writer was woken by the releasing writer");
@@ -237,9 +248,8 @@ void test_rwlock_readers_wait_for_writer_and_are_released_together() {
       ++readers_in;
     });
   }
-  std::this_thread::sleep_for(150ms);
+  assert(wait_for_word(f, lock + 8u, 3u) && "three readers are waiting");
   assert(readers_in.load() == 0 && "readers wait while the writer holds the lock");
-  assert(f.address_space->read32_be(lock + 8u) == 3u && "three readers are waiting");
 
   f.call(kOrdExRelease, lock, 0, 0, 1);
   for (auto& t : readers) t.join();
