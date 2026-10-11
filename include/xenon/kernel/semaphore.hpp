@@ -18,6 +18,7 @@ class KernelSemaphore final : public KernelObject {
   [[nodiscard]] bool release(std::int32_t release_count, std::int32_t* previous_count = nullptr);
   [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
   [[nodiscard]] std::int32_t count() const;
+  [[nodiscard]] std::int32_t maximum_count() const noexcept { return maximum_count_; }
 
   // For a semaphore embedded in guest memory: from now on every count change
   // is stored into `mirror` (SignalState is the count), starting with the

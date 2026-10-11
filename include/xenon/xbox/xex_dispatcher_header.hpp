@@ -97,6 +97,17 @@ enum class DispatchObjectType : std::uint8_t {
     kernel::KernelProcess& process, cpu::MemoryPort& memory, cpu::GuestAddress header_address,
     std::string* error, kernel::GuestStateSync* sync = nullptr);
 
+// The guest pointer for an event or semaphore that was created by handle
+// (NtCreateEvent, NtCreateSemaphore), as ObReferenceObjectByHandle hands it
+// out. On hardware that pointer is the object itself, so a title can pass it
+// to KeSetEvent or KeWaitForSingleObject. On first use this places a
+// DISPATCHER_HEADER (and a semaphore's limit) for the object in the kernel
+// pool, stashed to resolve back to the same host object and kept current
+// like any resolved header; later calls return the same address. Returns 0
+// for other object types or when the pool is exhausted.
+[[nodiscard]] cpu::GuestAddress publish_dispatcher_header(
+    kernel::KernelProcess& process, const std::shared_ptr<kernel::KernelObject>& object);
+
 // Writes type/signal_state into a guest X_DISPATCH_HEADER and clears its
 // wait_list_flink/wait_list_blink fields (invalidating any previously
 // stashed host-object association at this address, exactly matching real

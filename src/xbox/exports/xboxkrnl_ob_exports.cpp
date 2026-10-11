@@ -8,6 +8,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/xbox/xex_dispatcher_header.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -67,9 +68,13 @@ bool ob_reference_object_by_handle_export(kernel::KernelProcess& process,
     if (object->type() == ObjectType::Thread) {
       native_address =
           static_cast<kernel::KernelThread&>(*object).guest_kthread_address();
+    } else {
+      // Events and semaphores get a real DISPATCHER_HEADER, so the Ke*
+      // exports work on the pointer and reach the handle's object.
+      native_address = publish_dispatcher_header(process, object);
     }
-    // Object types without a guest-visible representation yet (Event,
-    // Semaphore, Mutant, Timer, ...) get this sentinel instead of a
+    // Object types without a guest-visible representation yet (Mutant,
+    // Timer, ...) get this sentinel instead of a
     // fabricated address - callers that only pass it on to
     // ObDereferenceObject (which must special-case it the same way) round-
     // trip safely; a caller that actually dereferences it will fault
