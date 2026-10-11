@@ -17,7 +17,12 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
@@ -66,9 +71,25 @@ constexpr std::uint32_t kAlreadyExists = 0xB7u;
 constexpr std::uint32_t kIoPending = 0x3E5u;
 constexpr std::uint32_t kFunctionFailed = 0x65Bu;
 
+// Windows cannot remove a file that is still open, so cleanup must not
+// throw.
+void remove_tree(const std::filesystem::path& path) {
+  std::error_code error;
+  // A run that stopped mid-test may have left directories read-only.
+  if (std::filesystem::is_directory(path, error)) {
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::add, error);
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(path, error)) {
+      std::filesystem::permissions(entry.path(), std::filesystem::perms::owner_all,
+                                   std::filesystem::perm_options::add, error);
+    }
+  }
+  std::filesystem::remove_all(path, error);
+}
+
 std::filesystem::path scratch(const char* name) {
   auto path = std::filesystem::temp_directory_path() / "xenon_content_package_tests" / name;
-  std::filesystem::remove_all(path);
+  remove_tree(path);
   return path;
 }
 
@@ -190,9 +211,11 @@ void test_create_mounts_writes_reach_the_host_and_close_unmounts() {
 
   // xenia's layout: <root>/<title id>/<content type>/<file name>/.
   const auto package = root / "00000000" / "00000001" / "slot1";
-  std::ifstream host(package / "progress.dat");
   std::string contents;
-  std::getline(host, contents);
+  {
+    std::ifstream host(package / "progress.dat");
+    std::getline(host, contents);
+  }
   assert(contents == "level 3");
 
   assert(f.root_call(kFlush, "save") == xam::result::Success);
@@ -204,7 +227,7 @@ void test_create_mounts_writes_reach_the_host_and_close_unmounts() {
   assert(disposition == 2u && "opened");
   assert(f.exists("save:\\progress.dat") && "root names are case-insensitive");
   assert(f.root_call(kClose, "save") == xam::result::Success);
-  std::filesystem::remove_all(root);
+  remove_tree(root);
   std::cout << "test_create_mounts_writes_reach_the_host_and_close_unmounts passed\n";
 }
 
@@ -231,7 +254,7 @@ void test_creation_dispositions() {
   assert(f.create("save", f.content("..", u"x"), kOpenAlways) == xam::result::InvalidParameter);
   assert(f.create("save", f.content("a\\b", u"x"), kOpenAlways) == xam::result::InvalidParameter);
   assert(f.create("save", data, 0u) == xam::result::InvalidParameter);
-  std::filesystem::remove_all(root);
+  remove_tree(root);
   std::cout << "test_creation_dispositions passed\n";
 }
 
@@ -263,7 +286,7 @@ void test_delete_and_persistence_across_sessions() {
   assert(f.create("save", f.content("slot1", u"Pilot"), kOpenExisting, &disposition) ==
          xam::result::Success && disposition == 2u);
   assert(f.exists("save:\\progress.dat"));
-  std::filesystem::remove_all(root);
+  remove_tree(root);
   std::cout << "test_delete_and_persistence_across_sessions passed\n";
 }
 
@@ -292,8 +315,37 @@ void test_overlapped_results_and_xam_content_create() {
   assert(f.address_space->read32_be(overlapped) == 0u &&
          f.address_space->read32_be(overlapped + 4u) == 2u);
   assert(f.root_call(kClose, "save") == xam::result::Success);
-  std::filesystem::remove_all(root);
+  remove_tree(root);
   std::cout << "test_overlapped_results_and_xam_content_create passed\n";
+}
+
+// A package the host fails to remove stays listed and the delete reports
+// ERROR_ACCESS_DENIED instead of success. Made unremovable here by a
+// read-only parent directory, which only POSIX non-root processes honour
+// (on Windows a file left open has the same effect).
+void test_a_package_the_host_cannot_remove_is_not_reported_deleted() {
+#if !defined(_WIN32)
+  if (geteuid() == 0) return;
+  const auto root = scratch("undeletable");
+  Fixture f(root);
+  const auto data = f.content("slot1", u"Slot 1");
+  assert(f.create("save", data, kCreateNew) == xam::result::Success);
+  assert(f.write_file("save:\\progress.dat", "kept"));
+  assert(f.root_call(kClose, "save") == xam::result::Success);
+  const auto type_directory = root / "00000000" / "00000001";
+  std::filesystem::permissions(type_directory, std::filesystem::perms::owner_read |
+                                                   std::filesystem::perms::owner_exec);
+  std::filesystem::permissions(type_directory / "slot1",
+                               std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+  assert(f.remove(data) == kAccessDenied);
+  assert(f.content_manager.enumerate_content(xam::storage_device::HardDisk,
+                                             xam::ContentType::SavedGame).size() == 1u);
+  std::filesystem::permissions(type_directory / "slot1", std::filesystem::perms::owner_all);
+  std::filesystem::permissions(type_directory, std::filesystem::perms::owner_all);
+  assert(f.remove(data) == xam::result::Success);
+  remove_tree(root);
+  std::cout << "test_a_package_the_host_cannot_remove_is_not_reported_deleted passed\n";
+#endif
 }
 
 }  // namespace
@@ -303,6 +355,7 @@ int main() {
   test_creation_dispositions();
   test_delete_and_persistence_across_sessions();
   test_overlapped_results_and_xam_content_create();
+  test_a_package_the_host_cannot_remove_is_not_reported_deleted();
   std::cout << "All content package tests passed!\n";
   return 0;
 }

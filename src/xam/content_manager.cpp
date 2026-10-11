@@ -229,9 +229,12 @@ XResult ContentManager::delete_content(std::uint32_t content_id) {
   for (const auto& [root, package] : open_packages_) {
     if (package.content_id == content_id) return kErrorAccessDenied;
   }
+  // A package the host cannot remove (on Windows, one with a file still
+  // open) is reported as access denied and stays listed.
   const auto path = package_path(it->second);
   std::error_code error;
   std::filesystem::remove_all(path, error);
+  if (error || std::filesystem::exists(path)) return kErrorAccessDenied;
   std::filesystem::remove(path.parent_path() / (it->second.file_name + ".display"), error);
   content_.erase(it);
   return result::Success;
