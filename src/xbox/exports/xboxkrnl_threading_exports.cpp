@@ -18,6 +18,7 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
 #include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -313,6 +314,72 @@ bool nt_queue_apc_thread_export(kernel::KernelProcess& process, ExportCallContex
                           static_cast<std::uint32_t>(context.cpu.gpr[6]),
                           static_cast<std::uint32_t>(context.cpu.gpr[7])});
   context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+bool ke_initialize_apc_export(kernel::KernelProcess&, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  const auto normal_routine = static_cast<std::uint32_t>(context.cpu.gpr[7]);
+  memory.write16_be(apc + KapcLayout::kType, KapcLayout::kApcObjectType);
+  // An APC with no normal routine is a kernel APC whatever mode is asked for.
+  memory.write8(apc + KapcLayout::kApcMode,
+                normal_routine ? static_cast<std::uint8_t>(context.cpu.gpr[8] & 1u) : 0u);
+  memory.write8(apc + KapcLayout::kEnqueued, 0u);
+  memory.write32_be(apc + KapcLayout::kThread, static_cast<std::uint32_t>(context.cpu.gpr[4]));
+  memory.write64_be(apc + KapcLayout::kListEntry, 0u);
+  memory.write32_be(apc + KapcLayout::kKernelRoutine, static_cast<std::uint32_t>(context.cpu.gpr[5]));
+  memory.write32_be(apc + KapcLayout::kRundownRoutine, static_cast<std::uint32_t>(context.cpu.gpr[6]));
+  memory.write32_be(apc + KapcLayout::kNormalRoutine, normal_routine);
+  memory.write32_be(apc + KapcLayout::kNormalContext,
+                    normal_routine ? static_cast<std::uint32_t>(context.cpu.gpr[9]) : 0u);
+  memory.write32_be(apc + KapcLayout::kArgument1, 0u);
+  memory.write32_be(apc + KapcLayout::kArgument2, 0u);
+  return true;
+}
+
+bool ke_insert_queue_apc_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  context.cpu.gpr[3] = 0u;
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  auto* thread = thread_for_kthread(process, memory.read32_be(apc + KapcLayout::kThread));
+  if (!thread || thread->is_terminated() || memory.read8(apc + KapcLayout::kEnqueued) != 0u) {
+    return true;
+  }
+  memory.write32_be(apc + KapcLayout::kArgument1, static_cast<std::uint32_t>(context.cpu.gpr[4]));
+  memory.write32_be(apc + KapcLayout::kArgument2, static_cast<std::uint32_t>(context.cpu.gpr[5]));
+  memory.write8(apc + KapcLayout::kEnqueued, 1u);
+  if (memory.read8(apc + KapcLayout::kApcMode) == 0u) {
+    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "apc", [&] {
+      char line[160];
+      std::snprintf(line, sizeof(line),
+                    "KeInsertQueueApc: kernel-mode KAPC 0x%08X queued but not delivered "
+                    "(no kernel-mode APC delivery)",
+                    static_cast<unsigned>(apc));
+      return std::string(line);
+    });
+  } else {
+    kernel::KernelThread::UserApc queued{};
+    queued.guest_apc = apc;
+    thread->queue_user_apc(queued);
+  }
+  context.cpu.gpr[3] = 1u;
+  return true;
+}
+
+bool ke_remove_queue_apc_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  context.cpu.gpr[3] = 0u;
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  if (memory.read8(apc + KapcLayout::kEnqueued) == 0u) return true;
+  auto* thread = thread_for_kthread(process, memory.read32_be(apc + KapcLayout::kThread));
+  const bool user = memory.read8(apc + KapcLayout::kApcMode) != 0u;
+  if (user && !(thread && thread->remove_user_apc(apc))) return true;  // already being delivered
+  memory.write8(apc + KapcLayout::kEnqueued, 0u);
+  context.cpu.gpr[3] = 1u;
   return true;
 }
 

@@ -40,6 +40,9 @@ constexpr std::uint32_t kKeDelayExecutionThread = 0x05Au;
 constexpr std::uint32_t kNtCreateTimer = 0x0D7u;
 constexpr std::uint32_t kNtSetTimerEx = 0x0FAu;
 constexpr std::uint32_t kNtWaitForSingleObjectEx = 0x0FDu;
+constexpr std::uint32_t kKeInitializeApc = 0x06Du;
+constexpr std::uint32_t kKeInsertQueueApc = 0x07Au;
+constexpr std::uint32_t kKeRemoveQueueApc = 0x2F0u;
 constexpr std::uint32_t kStatusUserApc = 0x000000C0u;
 constexpr std::uint32_t kStatusTimeout = 0x00000102u;
 
@@ -55,12 +58,19 @@ struct Fixture {
   core::ExportRegistry registry;
   std::mutex calls_mutex;
   std::vector<Call> calls;
+  // Runs in place of a guest routine; may write through pointer arguments as
+  // a kernel routine would.
+  std::function<void(std::uint32_t routine, std::span<const std::uint64_t>)> on_call;
   core::GuestCall guest_call = [this](cpu::CpuState&, cpu::GuestAddress routine,
                                       std::span<const std::uint64_t> arguments) {
-    std::scoped_lock lock(calls_mutex);
-    calls.push_back({static_cast<std::uint32_t>(routine), {arguments.begin(), arguments.end()}});
+    {
+      std::scoped_lock lock(calls_mutex);
+      calls.push_back({static_cast<std::uint32_t>(routine), {arguments.begin(), arguments.end()}});
+    }
+    if (on_call) on_call(static_cast<std::uint32_t>(routine), arguments);
     return true;
   };
+  memory::GuestAddress stack_top{};
 
   Fixture() {
     address_space = std::make_shared<memory::AddressSpace>(memory::GuestTranslationMode::Compact);
@@ -79,11 +89,31 @@ struct Fixture {
       return xbox::nt_queue_apc_thread_export(*raw, ctx);
     };
     assert(registry.register_export(std::move(queue)));
+    using Handler = bool (*)(kernel::KernelProcess&, core::ExportCallContext&);
+    const std::pair<std::uint32_t, Handler> kapc_exports[] = {
+        {kKeInitializeApc, &xbox::ke_initialize_apc_export},
+        {kKeInsertQueueApc, &xbox::ke_insert_queue_apc_export},
+        {kKeRemoveQueueApc, &xbox::ke_remove_queue_apc_export},
+    };
+    for (const auto& [ordinal, handler] : kapc_exports) {
+      core::ExportDescriptor descriptor{};
+      descriptor.library = "xboxkrnl.exe";
+      descriptor.name = "kapc";
+      descriptor.ordinal = ordinal;
+      descriptor.handler = [raw, handler = handler](core::ExportCallContext& ctx) {
+        return handler(*raw, ctx);
+      };
+      assert(registry.register_export(std::move(descriptor)));
+    }
+    memory::GuestAddress stack{};
+    assert(address_space->allocate(0x10000, 0x1000, memory::kReadWrite, false, stack));
+    stack_top = stack + 0x10000u - 0x100u;
   }
 
   std::uint32_t call(std::uint32_t ordinal, std::uint32_t thread_id,
                      std::initializer_list<std::uint64_t> registers) {
     cpu::CpuState cpu{};
+    cpu.gpr[1] = stack_top;
     std::size_t r = 3;
     for (const auto value : registers) cpu.gpr[r++] = value;
     core::ExportCallContext context{cpu, *address_space, 0, thread_id};
@@ -198,6 +228,97 @@ void test_timer_routine_is_delivered_to_the_setting_thread() {
   assert(f.calls[0].arguments[1] != 0u || f.calls[0].arguments[2] != 0u);
 }
 
+// A guest KAPC: KeInitializeApc fills it, KeInsertQueueApc queues it, and the
+// alertable wait runs KernelRoutine(Apc, &NormalRoutine, &NormalContext,
+// &Argument1, &Argument2) and then NormalRoutine with whatever the kernel
+// routine left there.
+void test_guest_kapc_runs_kernel_then_normal_routine() {
+  Fixture f;
+  constexpr std::uint32_t kKthread = 0x00446600u;
+  constexpr std::uint32_t kKernelRoutine = 0x82004000u;
+  constexpr std::uint32_t kNormalRoutine = 0x82004100u;
+  const auto apc = f.alloc(40);
+  f.on_call = [&](std::uint32_t routine, std::span<const std::uint64_t> arguments) {
+    if (routine != kKernelRoutine) return;
+    assert(arguments.size() == 5 && arguments[0] == apc);
+    // The kernel routine rewrites the normal context through its pointer.
+    f.address_space->write32_be(static_cast<memory::GuestAddress>(arguments[2]), 0x99u);
+  };
+  std::atomic<bool> ready{false};
+  std::atomic<std::uint32_t> result{0};
+  auto guest = f.start(
+      [&](std::uint32_t id) {
+        const auto never = f.alloc(0x10);
+        f.call(kKeInitializeEvent, id, {never, 0, 0});
+        result = f.call(kKeWaitForSingleObject, id, {never, 0, 1, 1, 0});
+      },
+      ready);
+  guest.thread->set_guest_kthread_address(kKthread);
+  // r3 apc, r4 thread, r5 kernel, r6 rundown, r7 normal, r8 mode, r9 context
+  f.call(kKeInitializeApc, 0, {apc, kKthread, kKernelRoutine, 0, kNormalRoutine, 1, 0x10u});
+  assert(f.address_space->read16_be(apc) == 18u && "ApcObject");
+  assert(f.call(kKeInsertQueueApc, 0, {apc, 0x20u, 0x30u, 0}) == 1u);
+  assert(f.call(kKeInsertQueueApc, 0, {apc, 0x20u, 0x30u, 0}) == 0u && "already queued");
+  ready = true;
+  assert(guest.thread->join(5000));
+  assert(result.load() == kStatusUserApc);
+  assert(f.calls.size() == 2);
+  assert(f.calls[0].routine == kKernelRoutine);
+  assert(f.calls[1].routine == kNormalRoutine);
+  assert((f.calls[1].arguments == std::vector<std::uint64_t>{0x99u, 0x20u, 0x30u}));
+  assert(f.address_space->read8(apc + 3u) == 0u && "no longer enqueued");
+}
+
+void test_removed_kapc_is_not_delivered() {
+  Fixture f;
+  constexpr std::uint32_t kKthread = 0x00446700u;
+  const auto apc = f.alloc(40);
+  std::atomic<bool> ready{false};
+  std::atomic<std::uint32_t> result{0};
+  auto guest = f.start(
+      [&](std::uint32_t id) {
+        const auto never = f.alloc(0x10);
+        f.call(kKeInitializeEvent, id, {never, 0, 0});
+        const auto timeout = f.alloc(8);
+        f.address_space->write64_be(timeout, static_cast<std::uint64_t>(-10'000LL * 30));
+        result = f.call(kKeWaitForSingleObject, id, {never, 0, 1, 1, timeout});
+      },
+      ready);
+  guest.thread->set_guest_kthread_address(kKthread);
+  f.call(kKeInitializeApc, 0, {apc, kKthread, 0, 0, 0x82004100u, 1, 0});
+  assert(f.call(kKeInsertQueueApc, 0, {apc, 0, 0, 0}) == 1u);
+  assert(f.call(kKeRemoveQueueApc, 0, {apc}) == 1u);
+  assert(f.call(kKeRemoveQueueApc, 0, {apc}) == 0u && "nothing left to remove");
+  ready = true;
+  assert(guest.thread->join(5000));
+  assert(result.load() == kStatusTimeout && f.calls.empty());
+}
+
+// Kernel-mode APC delivery is not modelled (as in xenia and rexglue-sdk): the
+// KAPC is accepted and marked queued, but no wait runs it.
+void test_kernel_mode_kapc_is_queued_but_not_delivered() {
+  Fixture f;
+  constexpr std::uint32_t kKthread = 0x00446800u;
+  const auto apc = f.alloc(40);
+  std::atomic<bool> ready{false};
+  std::atomic<std::uint32_t> result{0};
+  auto guest = f.start(
+      [&](std::uint32_t id) {
+        const auto never = f.alloc(0x10);
+        f.call(kKeInitializeEvent, id, {never, 0, 0});
+        const auto timeout = f.alloc(8);
+        f.address_space->write64_be(timeout, static_cast<std::uint64_t>(-10'000LL * 30));
+        result = f.call(kKeWaitForSingleObject, id, {never, 0, 1, 1, timeout});
+      },
+      ready);
+  guest.thread->set_guest_kthread_address(kKthread);
+  f.call(kKeInitializeApc, 0, {apc, kKthread, 0x82004000u, 0, 0x82004100u, 0 /*kernel*/, 0});
+  assert(f.call(kKeInsertQueueApc, 0, {apc, 0, 0, 0}) == 1u);
+  ready = true;
+  assert(guest.thread->join(5000));
+  assert(result.load() == kStatusTimeout && f.calls.empty());
+}
+
 void test_queue_apc_rejects_bad_targets() {
   Fixture f;
   assert(f.call(kNtQueueApcThread, 0, {0x7777u, 0x82001000u, 0, 0, 0}) == 0xC0000008u);
@@ -217,6 +338,9 @@ int main() {
   test_queued_apc_runs_at_an_alertable_wait();
   test_queued_apc_ends_an_alertable_delay();
   test_timer_routine_is_delivered_to_the_setting_thread();
+  test_guest_kapc_runs_kernel_then_normal_routine();
+  test_removed_kapc_is_not_delivered();
+  test_kernel_mode_kapc_is_queued_but_not_delivered();
   test_queue_apc_rejects_bad_targets();
   std::cout << "All user APC export tests passed!\n";
   return 0;

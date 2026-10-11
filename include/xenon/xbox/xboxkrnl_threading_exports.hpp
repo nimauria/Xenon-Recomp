@@ -47,6 +47,22 @@ namespace xenon::xbox {
 [[nodiscard]] bool nt_queue_apc_thread_export(xenon::kernel::KernelProcess& process,
                                               xenon::core::ExportCallContext& context);
 
+// KeInitializeApc (0x6D): r3 = KAPC*, r4 = target KTHREAD*, r5 = kernel
+// routine, r6 = rundown routine, r7 = normal routine, r8 = processor mode
+// (0 kernel, 1 user), r9 = normal context -> void.
+[[nodiscard]] bool ke_initialize_apc_export(xenon::kernel::KernelProcess& process,
+                                            xenon::core::ExportCallContext& context);
+// KeInsertQueueApc (0x7A): r3 = KAPC*, r4 = argument 1, r5 = argument 2,
+// r6 = priority increment (ignored) -> BOOLEAN queued. A user-mode KAPC runs
+// at the target's next alertable wait or delay. A kernel-mode KAPC is queued
+// but not delivered (Xenon, like xenia and rexglue-sdk, has no kernel-mode
+// APC delivery); that is logged.
+[[nodiscard]] bool ke_insert_queue_apc_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+// KeRemoveQueueApc (0x2F0): r3 = KAPC* -> BOOLEAN removed.
+[[nodiscard]] bool ke_remove_queue_apc_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
 // KePulseEvent (0x7F): r3 = KEVENT*, r4 = increment, r5 = wait -> r3 = previous state.
 [[nodiscard]] bool ke_pulse_event_export(xenon::kernel::KernelProcess& process,
                                          xenon::core::ExportCallContext& context);

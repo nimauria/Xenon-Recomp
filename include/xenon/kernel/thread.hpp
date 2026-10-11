@@ -122,6 +122,10 @@ class KernelThread final : public KernelObject {
     std::uint32_t context{};
     std::uint32_t arg1{};
     std::uint32_t arg2{};
+    // For an APC the guest built in its own memory (KeInitializeApc and
+    // KeInsertQueueApc): the KAPC's guest address. Its routines, context and
+    // arguments are then read from the KAPC when it is delivered.
+    std::uint32_t guest_apc{};
   };
   // Queues `apc` and wakes an alertable wait this thread is in. APCs queued
   // to a thread that never waits alertably again are never run, as on
@@ -129,6 +133,8 @@ class KernelThread final : public KernelObject {
   void queue_user_apc(const UserApc& apc);
   // Removes and returns the queued APCs, oldest first.
   [[nodiscard]] std::vector<UserApc> take_user_apcs();
+  // Removes the queued APC for guest KAPC `guest_apc`; false if none is queued.
+  bool remove_user_apc(std::uint32_t guest_apc);
   [[nodiscard]] bool user_apc_pending() const noexcept {
     return user_apc_pending_.load(std::memory_order_acquire);
   }
