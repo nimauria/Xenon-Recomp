@@ -84,6 +84,8 @@ class GuestModuleRegistry {
 
   // Test/diagnostic: the handle of a known module record, if any.
   [[nodiscard]] bool is_module_handle(cpu::GuestAddress handle) const;
+  // Whether `handle` is the loaded executable's module record.
+  [[nodiscard]] bool is_executable_handle(cpu::GuestAddress handle) const;
 
  private:
   struct Module {

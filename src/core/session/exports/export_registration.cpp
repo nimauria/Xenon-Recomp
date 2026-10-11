@@ -207,6 +207,19 @@ bool XenonSession::register_session_bound_kernel_exports() {
       set_error("Failed to register xboxkrnl XexGetProcedureAddress export");
       return false;
     }
+    core::ExportDescriptor section_descriptor{};
+    section_descriptor.library = "xboxkrnl.exe";
+    section_descriptor.name = "XexGetModuleSection";
+    section_descriptor.ordinal = 0x196u;
+    section_descriptor.requirement = ExportRequirement::Required;
+    section_descriptor.handler = [this](ExportCallContext& ctx) -> bool {
+      if (!module_registry_ || !loaded_xex_) return false;
+      return xbox::xex_get_module_section_export(*module_registry_, loaded_xex_->image, ctx);
+    };
+    if (!export_registry_.register_export(std::move(section_descriptor))) {
+      set_error("Failed to register xboxkrnl XexGetModuleSection export");
+      return false;
+    }
   }
 
   // Register HalReturnToFirmware (ordinal 0x28 / 40). Real hardware: void
