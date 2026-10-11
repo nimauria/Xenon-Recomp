@@ -349,6 +349,50 @@ void test_ex_create_thread_runs_and_propagates_start_context_and_exit_code() {
   assert(thread.state() == kernel::ThreadState::Terminated);
 }
 
+// XAPI's CreateThread passes its startup routine in r6; the thread then
+// starts there as XapiThreadStartup(start_address, start_context), as in
+// xenia and rexglue-sdk, instead of at start_address.
+std::atomic<std::uint64_t> g_startup_r3{0};
+std::atomic<std::uint64_t> g_startup_r4{0};
+
+ExecutionResult xapi_startup_entry(ExecutionContext& context) {
+  g_startup_r3.store(context.state.gpr[3]);
+  g_startup_r4.store(context.state.gpr[4]);
+  context.state.gpr[3] = 0x77u;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+void test_ex_create_thread_starts_at_the_xapi_startup_routine() {
+  g_entry_ran.store(false);
+  g_startup_r3.store(0);
+  g_startup_r4.store(0);
+  ThreadCreationHarness harness(&echo_increment_entry);
+  harness.registry.entries.emplace(0x4000u, &xapi_startup_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[6] = 0x4000u;  // XapiThreadStartup
+  cpu.gpr[7] = 0x3000u;  // start address
+  cpu.gpr[8] = 0x41u;    // start context
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  assert(cpu.gpr[3] == 0u);
+
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(
+             harness.session.memory()->read32_be(handle_out), view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000));
+  assert(g_startup_r3.load() == 0x3000u && g_startup_r4.load() == 0x41u &&
+         "XapiThreadStartup(start_address, start_context)");
+  assert(!g_entry_ran.load() && "the startup routine, not the kernel, calls start_address");
+  assert(thread.exit_code() == 0x77u);
+}
+
 void test_ex_create_thread_honors_create_suspended() {
   g_entry_ran.store(false);
   ThreadCreationHarness harness(&echo_increment_entry);
@@ -970,6 +1014,7 @@ int main() {
 
   test_ex_create_thread_runs_and_propagates_start_context_and_exit_code();
   test_call_guest_routine_runs_nested_on_the_calling_thread();
+  test_ex_create_thread_starts_at_the_xapi_startup_routine();
   test_ex_create_thread_honors_create_suspended();
   test_ex_create_thread_affinity_alone_does_not_suspend();
   test_preemptive_safepoint_terminates_a_running_created_thread();

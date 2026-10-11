@@ -490,11 +490,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // docs/kernel/THREADING_V2.md. The exit code is the PPC ABI return value
   // (gpr[3]) on a natural return, matching real ExCreateThread/
   // ExTerminateThread semantics (returning from the thread function is an
-  // implicit ExTerminateThread(returnValue)).
+  // implicit ExTerminateThread(returnValue)). `second_argument` is passed
+  // in r4, for an XAPI startup routine called as (start, context).
   [[nodiscard]] std::uint32_t run_created_guest_thread(
       std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
       std::uint64_t start_context, memory::GuestAddress stack_base,
-      std::uint32_t stack_size, GuestThreadTlsContext tls);
+      std::uint32_t stack_size, GuestThreadTlsContext tls,
+      std::uint64_t second_argument = 0u);
   // ExCreateThread export handler: allocates a guest stack and KPCR/TLS
   // block, creates the KernelThread via kernel_process_->thread_manager()
   // (honoring ThreadCreationParams::create_suspended from the guest's
