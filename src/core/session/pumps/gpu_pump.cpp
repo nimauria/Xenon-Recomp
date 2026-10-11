@@ -294,7 +294,8 @@ bool XenonSession::invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
     return false;
   }
 
-  return run_guest_callback(state, callback, gpu_pump_thread_);
+  return run_guest_callback(state, callback, gpu_pump_thread_, gpu_callback_watch_,
+                            source == 0u ? "vsync interrupt" : "graphics interrupt");
 }
 
 }  // namespace xenon::core

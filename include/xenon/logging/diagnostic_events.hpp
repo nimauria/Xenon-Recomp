@@ -56,6 +56,12 @@ enum class EventKind : std::uint16_t {
   // As GuestStateAdopted, but the value cannot be the object's state (a
   // semaphore count outside 0 to its limit), so the object kept its own.
   GuestStateRejected = 9,
+  // A pump thread entered a guest callback (an interrupt or audio render
+  // callback). guest_address: the callback's entry; source: its kind, such
+  // as "vsync interrupt".
+  CallbackBegin = 10,
+  // It returned. value: its duration in milliseconds.
+  CallbackEnd = 11,
 };
 
 struct Event {
@@ -123,6 +129,11 @@ struct BlockedWait {
 // Derives the waits still open at the end of `events` (snapshot() order).
 // A thread whose WaitBegin was overwritten before the snapshot is not listed.
 [[nodiscard]] std::vector<BlockedWait> blocked_waits(std::span<const Event> events);
+
+// The guest callbacks still running at the end of `events`: per thread, a
+// CallbackBegin with no CallbackEnd after it. A thread listed here and in
+// blocked_waits() is a pump blocked inside a guest callback.
+[[nodiscard]] std::vector<Event> open_callbacks(std::span<const Event> events);
 
 // The GPU wait still parked at the end of `events`, if the last GpuWaitParked
 // has no GpuWaitResumed after it.

@@ -69,7 +69,13 @@ only while that client has **callback credits**:
    pump. A stalled vsync callback also stops ring draining and presentation.
    There is no watchdog or timeout. The stop-time report (`stop()` ->
    `report_stop_diagnostics()`) lists threads blocked inside kernel calls and
-   threads running guest code, which tells these cases apart.
+   threads running guest code, which tells these cases apart. It also always
+   prints each pump's `CallbackWatch` line: the callback it is inside and for
+   how long, how many callbacks took longer than a frame, and the longest.
+   With `XENON_DIAG_EVENTS=1`, a callback that began and never returned is
+   listed next to the open waits of the same thread. On hardware an
+   interrupt callback runs at raised IRQL and cannot block, so either finding
+   points at a semantics gap.
 3. **GPU-CPU handshakes through memory.** The stop report prints the
    `WAIT_REG_MEM` fence the command processor is parked on and the
    surrounding indirect-buffer words. The vsync ISR probe comments note that
@@ -95,7 +101,7 @@ process that runs the game (the runtime host).
 
 | Variable | Effect |
 |----------|--------|
-| `XENON_DIAG_EVENTS=1` | Records every guest wait, signal, spin-lock and critical-section acquire/release in a bounded in-memory ring (`xenon/logging/diagnostic_events.hpp`). The stop report then lists each thread still waiting, the object it waits on, and the thread that last signalled that object, including whether that signal came after the wait began. |
+| `XENON_DIAG_EVENTS=1` | Records every guest wait, signal, spin-lock and critical-section acquire/release, and every pump callback's begin and end, in a bounded in-memory ring (`xenon/logging/diagnostic_events.hpp`). The stop report then lists each thread still waiting, the object it waits on, and the thread that last signalled that object, including whether that signal came after the wait began. |
 | `XENON_PROBE_LOGS=1` | Writes the `*_diag.log` investigation probes listed below to the working directory. Each file is replaced by its first record in a run and capped at 4 MiB per run. |
 | `XENON_WRITE_TRAP=<hex>[,<hex>...]` | Reports every 32-bit guest store to up to four guest addresses in `signal_write_trap_diag.log`, with the host stack on Windows. Needs `XENON_PROBE_LOGS=1`. The two handshake events' `SignalState` words are `XENON_WRITE_TRAP=0x62D78,0x62DC8`. The kernel's own `SignalState` write-backs are reported too. |
 

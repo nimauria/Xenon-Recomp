@@ -198,6 +198,26 @@ void test_blocked_waits_name_the_waiter_and_the_last_signaller() {
 
 }  // namespace
 
+// A pump thread that entered a guest callback and has not returned from it,
+// beside one whose callback ended and began again and ended.
+void test_open_callbacks_name_the_callback_still_running() {
+  const std::vector<Event> events = {
+      at(1, 5, EventKind::CallbackBegin, 0x10, 0, "vsync interrupt"),
+      at(2, 6, EventKind::CallbackBegin, 0x20, 0, "audio render"),
+      at(3, 6, EventKind::CallbackEnd, 0x20, 1, "audio render"),
+      at(4, 5, EventKind::WaitBegin, 30, 0xFFFFFFFFu, "KeWaitForSingleObject"),
+      at(5, 6, EventKind::CallbackBegin, 0x20, 0, "audio render"),
+      at(6, 6, EventKind::CallbackEnd, 0x20, 2, "audio render"),
+  };
+  const auto open = open_callbacks(events);
+  assert(open.size() == 1);
+  assert(open[0].guest_thread_id == 5 && open[0].sequence == 1);
+  assert(std::string(open[0].source) == "vsync interrupt");
+  const auto waits = blocked_waits(events);
+  assert(waits.size() == 1 && waits[0].guest_thread_id == 5 &&
+         "the same thread is blocked in a wait inside that callback");
+}
+
 int main() {
   std::cout << "Testing diagnostic event ring...\n";
   test_disabled_recording_keeps_nothing();
@@ -206,6 +226,7 @@ int main() {
   test_clear_forgets_earlier_events();
   test_concurrent_writers_never_produce_torn_events();
   test_blocked_waits_name_the_waiter_and_the_last_signaller();
+  test_open_callbacks_name_the_callback_still_running();
   events::set_enabled(false);
   std::cout << "All diagnostic event ring tests passed!\n";
   return 0;

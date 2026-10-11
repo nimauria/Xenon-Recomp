@@ -148,6 +148,8 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
         if (event.object_id != 0) last_signal[event.object_id] = &event;
         break;
       case EventKind::GuestStateRejected:
+      case EventKind::CallbackBegin:
+      case EventKind::CallbackEnd:
       case EventKind::LockAcquired:
       case EventKind::LockReleased:
       case EventKind::GpuWaitParked:
@@ -177,6 +179,19 @@ std::vector<BlockedWait> blocked_waits(std::span<const Event> events) {
     }
   }
   return waits;
+}
+
+std::vector<Event> open_callbacks(std::span<const Event> events) {
+  std::map<std::uint32_t, std::optional<Event>> open;
+  for (const auto& event : events) {
+    if (event.kind == EventKind::CallbackBegin) open[event.guest_thread_id] = event;
+    if (event.kind == EventKind::CallbackEnd) open[event.guest_thread_id].reset();
+  }
+  std::vector<Event> callbacks;
+  for (const auto& [thread, begin] : open) {
+    if (begin) callbacks.push_back(*begin);
+  }
+  return callbacks;
 }
 
 std::optional<Event> parked_gpu_wait(std::span<const Event> events) {

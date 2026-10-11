@@ -38,6 +38,7 @@
 // of (see the audio callback thread's own shutdown-ordering history).
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 
 #include <atomic>
 #include <cassert>
@@ -47,6 +48,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -100,6 +102,9 @@ struct SessionExecutionTestAccess {
   }
   [[nodiscard]] static bool gpu_pump_thread_alive(const XenonSession& session) noexcept {
     return session.gpu_pump_thread_ != nullptr;
+  }
+  [[nodiscard]] static CallbackWatch::Snapshot gpu_callback(const XenonSession& session) noexcept {
+    return session.gpu_callback_watch_.snapshot();
   }
 };
 
@@ -405,6 +410,78 @@ void test_interrupt_callback_follows_function_handoffs() {
   assert(shutdown_completed);
 }
 
+std::atomic<int> g_blocking_calls{0};
+std::atomic<bool> g_release_blocking{false};
+
+// A vsync callback whose first call does not return until the test releases
+// it, as a guest callback blocked in a wait or spinning on a lock would.
+ExecutionResult blocking_callback_entry(ExecutionContext& context) {
+  if (g_blocking_calls.fetch_add(1) == 0) {
+    while (!g_release_blocking.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// A pump stuck inside a guest callback is visible while it is stuck: the
+// always-on watch names the callback and how long it has run, and the
+// diagnostic events show the callback as still open. Once it returns, the
+// watch counts it as longer than a frame.
+void test_a_blocked_callback_is_reported_while_it_blocks() {
+  namespace events = xenon::logging::events;
+  g_blocking_calls.store(0);
+  g_release_blocking.store(false);
+  events::set_enabled(true);
+  events::clear();
+
+  constexpr GuestAddress kCallbackAddr = 0x5200u;
+  GpuPumpHarness harness(kCallbackAddr, &blocking_callback_entry);
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+
+  for (int i = 0; i < 400 && g_blocking_calls.load() == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(g_blocking_calls.load() == 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+  using xenon::core::CallbackWatch;
+  const auto stuck = xenon::core::SessionExecutionTestAccess::gpu_callback(harness.session);
+  const auto now = CallbackWatch::now_ns();
+  assert(stuck.in_callback && stuck.entry == kCallbackAddr);
+  assert(std::string(stuck.kind) == "vsync interrupt");
+  assert(now - stuck.since_ns >= 50'000'000);
+  assert(CallbackWatch::describe("GPU pump", stuck, now)
+             .find("inside vsync interrupt callback 0x00005200") != std::string::npos);
+  const auto open = events::open_callbacks(events::snapshot());
+  assert(open.size() == 1 && open[0].guest_address == kCallbackAddr);
+  assert(std::string(open[0].source) == "vsync interrupt");
+
+  g_release_blocking.store(true);
+  for (int i = 0; i < 400 && g_blocking_calls.load() < 2; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  events::set_enabled(false);
+
+  const auto after = xenon::core::SessionExecutionTestAccess::gpu_callback(harness.session);
+  assert(!after.in_callback && after.calls >= 2);
+  assert(after.slow_calls >= 1 && after.longest_ns >= 50'000'000 &&
+         after.longest_entry == kCallbackAddr);
+  bool ended_slowly = false;
+  for (const auto& event : events::snapshot()) {
+    if (event.kind == events::EventKind::CallbackEnd && event.value >= 50u) ended_slowly = true;
+  }
+  assert(ended_slowly && "CallbackEnd carries the callback's duration in ms");
+  assert(events::open_callbacks(events::snapshot()).empty());
+  events::clear();
+}
+
 }  // namespace
 
 int main() {
@@ -415,6 +492,7 @@ int main() {
   test_gpu_pump_thread_presents_and_fires_interrupt_callback();
   test_interrupt_callback_follows_function_handoffs();
   test_pm4_interrupt_reaches_guest_callback_with_source_one();
+  test_a_blocked_callback_is_reported_while_it_blocks();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

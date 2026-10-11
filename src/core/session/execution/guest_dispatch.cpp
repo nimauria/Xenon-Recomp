@@ -4,6 +4,7 @@
 #include <string>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -295,9 +296,25 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
 }
 
 bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,
-                                    const std::shared_ptr<kernel::KernelThread>& thread) {
+                                    const std::shared_ptr<kernel::KernelThread>& thread,
+                                    CallbackWatch& watch, const char* kind) {
+  const auto record = [&](logging::events::EventKind event_kind, std::uint32_t value) {
+    if (!logging::events::enabled()) return;
+    logging::events::Event event{};
+    event.kind = event_kind;
+    event.guest_thread_id = thread ? thread->thread_id() : 0u;
+    event.guest_address = static_cast<std::uint32_t>(entry);
+    event.value = value;
+    event.source = kind;
+    logging::events::record(event);
+  };
+  record(logging::events::EventKind::CallbackBegin, 0u);
+  watch.begin(static_cast<std::uint32_t>(entry), kind, CallbackWatch::now_ns());
   // Callbacks fire tens of times a second; per-dispatch tracing would drown the log.
   const auto outcome = dispatch_guest_thread(state, entry, thread, /*trace_dispatches=*/false);
+  const auto duration_ns = watch.end(CallbackWatch::now_ns());
+  record(logging::events::EventKind::CallbackEnd,
+         static_cast<std::uint32_t>(duration_ns / 1'000'000));
   if (outcome.crashed) {
     if (config_.enable_logging) {
       std::scoped_lock console_log_lock(console_log_mutex());
