@@ -28,7 +28,7 @@ retail title works.
 | V3-01 | CI and build correctness | DONE | Linux and Windows green on `6c23b0b` (runs 38124710875, 38124710898, 38124710980). Residual: `ilammy/msvc-dev-cmd` still runs on Node 20; no Node 24 release exists upstream |
 | V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
 | V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
-| V3-04 | Kernel execution and interrupts | IN PROGRESS | Pump callback watch (`d6708af`) and `RtlRaiseException` (`54d36c2`); see V3-04 progress |
+| V3-04 | Kernel execution and interrupts | IN PROGRESS | Pump callback watch, `RtlRaiseException`, and interruptible waits with a non-hanging stop and shutdown; see V3-04 progress |
 | V3-05 | Guest services and ABI | NOT STARTED | |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
@@ -639,11 +639,40 @@ than changing interrupt ordering.
   call returns. `KernelThread::name()` now returns a copy under the
   thread's lock.
 
+- **Terminated threads' waits end** (`e58d458`). `terminate()` could not
+  interrupt a kernel wait, so a guest thread parked in an unbounded wait
+  could never be stopped. A `KernelThread`'s waits now also register on its
+  own thread, and return `Terminating` (`STATUS_THREAD_IS_TERMINATING`)
+  without taking anything; `KeDelayExecutionThread` is interruptible too.
+  `RtlEnterCriticalSection` takes no ownership in that case and leaves the
+  waiter's `LockCount` registration, as hardware does. Reproducer
+  `xenon_kernel_wait_termination_tests` timed out on `join()` before the
+  change. Waiting for another thread to finish still uses `join()` and is
+  not interruptible.
+- **Stop and shutdown** (`3c20d56`). `stop()` now terminates the guest's
+  threads after printing the stall report, so a guest blocked in a wait
+  exits cooperatively instead of reaching the runtime host's hard `_Exit`.
+  `shutdown()` terminates threads before joining the main thread and each
+  pump, and terminates and joins every guest thread before unloading the
+  native extension (the KNOWN ISSUE in `shutdown.cpp` is gone). Tested with
+  a vsync callback and a worker both blocked in infinite waits
+  (`xenon_gpu_pump_tests`); without the pump terminate, shutdown hangs.
+  Analysis and plan for both by the earlier `xenon-recomp-ad` session.
+
+Verification for the last two: 50 repetitions and 15 ThreadSanitizer runs
+of the termination suite, no failures or reports; mutations (no
+own-thread registration, no critical-section guard, no pump terminate)
+each fail a test; session, kernel and export suites 42/42 and runtime-host
+suites 6/6. Full CTest at `3c20d56`, Debug, `--parallel 2 --timeout 900`:
+155/155 in 23 min 34 s (`prepare_worker` 889 s, compile-bound as before).
+
 Still open in V3-04: a guest SEH unwinder (needs the PPC `.pdata` and
 unwind contract verified first), APC/DPC delivery and alertable waits
-(waiting for evidence), IRQL during interrupt callbacks, and decoupling a
-blocked callback from its pump, which needs the ordering model the plan
-asks for.
+(waiting for evidence), IRQL during interrupt callbacks, decoupling a
+blocked callback from its pump (needs the ordering model the plan asks
+for), and the bounded join-then-detach in `ThreadManager::shutdown()` and
+`~KernelThread()`, still reached by a thread spinning in compiled code with
+no block boundary.
 
 ## Dependency graph
 
