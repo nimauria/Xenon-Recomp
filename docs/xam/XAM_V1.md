@@ -125,8 +125,8 @@ Each user receives a unique offline XUID in the `0xE000000000000000` range.
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x02EE | `XamUserCreateAchievementEnumerator` | ✅ Stubbed | Create achievement enumerator |
-| 0x02F7 | `XamUserCreateStatsEnumerator` | ✅ Stubbed | Create stats enumerator |
+| 0x02EE | `XamUserCreateAchievementEnumerator` | Partial | Real, empty enumerator (no XDBF achievement table is read); handle and buffer size in r10/r9 |
+| 0x02F7 | `XamUserCreateStatsEnumerator` | Partial | Real, empty enumerator (leaderboards are online-only); buffer size 0 |
 
 `XamUserWriteAchievements`, `XamUserReadStats`, and `XamUserWriteStats`
 (previously listed at invented ordinals 0x0280-0x0282) have been removed:
