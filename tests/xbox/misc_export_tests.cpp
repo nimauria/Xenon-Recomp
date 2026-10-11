@@ -117,6 +117,29 @@ void test_xe_crypt_sha_multiple_inputs_concatenate() {
             << std::endl;
 }
 
+// Only the first min(20, output_size) digest bytes are written.
+void test_xe_crypt_sha_honours_the_output_size() {
+  std::cout << "[TEST] XeCryptSha writes no more than output_size bytes..." << std::endl;
+  Fixture fx;
+  const auto full = hash_single_buffer(fx, "abc");
+  memory::GuestAddress input{}, output{};
+  assert(fx.address_space.allocate(4u, 4u, memory::kReadWrite, false, input));
+  assert(fx.address_space.allocate(24u, 4u, memory::kReadWrite, false, output));
+  for (std::uint32_t i = 0; i < 3u; ++i) fx.address_space.write8(input + i, "abc"[i]);
+  for (std::uint32_t i = 0; i < 24u; ++i) fx.address_space.write8(output + i, 0xEEu);
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = input;
+  cpu.gpr[4] = 3u;
+  cpu.gpr[9] = output;
+  cpu.gpr[10] = 16u;
+  assert(fx.invoke(0x192u, cpu).handled);
+  for (std::uint32_t i = 0; i < 16u; ++i) assert(fx.address_space.read8(output + i) == full[i]);
+  for (std::uint32_t i = 16u; i < 24u; ++i) {
+    assert(fx.address_space.read8(output + i) == 0xEEu && "nothing past output_size");
+  }
+  std::cout << "  \xE2\x9C\x93 XeCryptSha truncates to output_size" << std::endl;
+}
+
 void test_ex_get_xconfig_setting_values_and_validation() {
   std::cout << "[TEST] ExGetXConfigSetting values and validation..." << std::endl;
   Fixture fx;
@@ -229,6 +252,7 @@ int main() {
 
   test_xe_crypt_sha_deterministic_and_sensitive();
   test_xe_crypt_sha_multiple_inputs_concatenate();
+  test_xe_crypt_sha_honours_the_output_size();
   test_ex_get_xconfig_setting_values_and_validation();
   test_ex_register_title_terminate_notification_succeeds();
 
