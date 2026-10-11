@@ -3,11 +3,11 @@
 <desc id="desc">Treemaps of audited source-declared operations. Percentages are verified lower bounds; unassessed entries remain unknown.</desc>
 <rect width="1200" height="1057" fill="#101721"/>
 <text x="30" y="49" fill="#f4f7fb" font-size="30" font-family="sans-serif" font-weight="700">XENON  /  IMPLEMENTATION AUDIT</text>
-<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/864 (≥3.4%) test verified in the listed source subset • overall hardware coverage unknown</text>
-<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 99298e1</text>
+<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/871 (≥3.3%) test verified in the listed source subset • overall hardware coverage unknown</text>
+<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 12052fe</text>
 <rect x="30" y="105" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="135" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox kernel exports</text>
-<text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">254 listed · 33 classified · ≥7.9% test verified</text>
+<text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">261 listed · 33 classified · ≥7.7% test verified</text>
 <rect x="46.0" y="169" width="9" height="9" fill="#3dbb79"/>
 <text x="59.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">20 verified</text>
 <rect x="135.0" y="169" width="9" height="9" fill="#55a6e9"/>
@@ -19,54 +19,60 @@
 <rect x="366.0" y="169" width="9" height="9" fill="#88919e"/>
 <text x="379.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
 <rect x="479.0" y="169" width="9" height="9" fill="#514c72"/>
-<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">221 unassessed</text>
+<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">228 unassessed</text>
 <rect x="42" y="189" width="264" height="29" rx="3" fill="#223044"/>
 <text x="46" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Debug  ·  3  ·  0 verified (≥0.0%)</text>
 <rect x="46.00" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPoint: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
 <rect x="131.33" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPointWithStatus: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
 <rect x="216.67" y="207.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgPrompt: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
 <rect x="42" y="221" width="264" height="36" rx="3" fill="#223044"/>
-<text x="46" y="234" fill="#e5edf6" font-size="12" font-family="sans-serif">Kernel  ·  40  ·  9 verified (≥22.5%)</text>
+<text x="46" y="234" fill="#e5edf6" font-size="12" font-family="sans-serif">Kernel  ·  46  ·  9 verified (≥19.6%)</text>
 <rect x="46.00" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="57.13" y="239.00" width="10.13" height="6" fill="#f2bc5a"><title>kernel:time:KeDelayExecutionThread: partial; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
-<rect x="68.26" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnableFpuExceptions: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
-<rect x="79.39" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnterCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="90.52" y="239.00" width="10.13" height="6" fill="#55a6e9"><title>kernel:registered:KeFlushUserModeTb: implemented_unverified; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
-<rect x="101.65" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeGetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
-<rect x="112.78" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeGetImagePageTableEntry: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="123.91" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="135.04" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="146.17" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLeaveCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="157.30" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
-<rect x="168.43" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KePulseEvent: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="179.57" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeQueryBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="190.70" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQueryPerformanceFrequency: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
-<rect x="201.83" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQuerySystemTime: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
-<rect x="212.96" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeRaiseIrqlToDpcLevel: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="224.09" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="235.22" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSpinLockFromRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="246.35" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="257.48" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResumeThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="268.61" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetAffinityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="279.74" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="290.87" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeSetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
-<rect x="46.00" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetDisableBoostThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="57.13" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="68.26" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeStallExecutionProcessor: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
-<rect x="79.39" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="90.52" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsAlloc: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
-<rect x="101.65" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsFree: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
-<rect x="112.78" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsGetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
-<rect x="123.91" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsSetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
-<rect x="135.04" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeTryToAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="146.17" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeUnlockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
-<rect x="157.30" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForMultipleObjects: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="168.43" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForSingleObject: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
-<rect x="179.57" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfAcquireSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="190.70" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfLowerIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="201.83" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfRaiseIrql: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
-<rect x="212.96" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfReleaseSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
-<rect x="224.09" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KiApcNormalRoutineNop: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="57.13" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeAlertResumeThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="68.26" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeAlertThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="79.39" y="239.00" width="10.13" height="6" fill="#f2bc5a"><title>kernel:time:KeDelayExecutionThread: partial; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="90.52" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnableFpuExceptions: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="101.65" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeEnterCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="112.78" y="239.00" width="10.13" height="6" fill="#55a6e9"><title>kernel:registered:KeFlushUserModeTb: implemented_unverified; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="123.91" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeGetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
+<rect x="135.04" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeGetImagePageTableEntry: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="146.17" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeApc: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="157.30" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="168.43" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInitializeSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="179.57" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeInsertQueueApc: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="190.70" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLeaveCriticalRegion: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="201.83" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeLockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="212.96" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KePulseEvent: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="224.09" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeQueryBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="235.22" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQueryPerformanceFrequency: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="246.35" y="239.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeQuerySystemTime: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="257.48" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeRaiseIrqlToDpcLevel: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="268.61" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="279.74" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeReleaseSpinLockFromRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="290.87" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeRemoveQueueApc: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="46.00" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="57.13" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeResumeThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="68.26" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetAffinityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="79.39" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetBasePriorityThread: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="90.52" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeSetCurrentProcessType: verified; src/xbox/exports/xboxkrnl_process_exports.cpp</title></rect>
+<rect x="101.65" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetDisableBoostThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="112.78" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSetEvent: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="123.91" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:time:KeStallExecutionProcessor: verified; src/xbox/exports/xboxkrnl_time_exports.cpp</title></rect>
+<rect x="135.04" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="146.17" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeTestAlertThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="157.30" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsAlloc: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="168.43" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsFree: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="179.57" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsGetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="190.70" y="246.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:KeTlsSetValue: verified; src/xbox/exports/xboxkrnl_tls_exports.cpp</title></rect>
+<rect x="201.83" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeTryToAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="212.96" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeUnlockL2: unassessed; src/xbox/exports/xboxkrnl_memory_exports.cpp</title></rect>
+<rect x="224.09" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForMultipleObjects: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="235.22" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeWaitForSingleObject: unassessed; src/xbox/exports/xboxkrnl_ke_sync_exports.cpp</title></rect>
+<rect x="246.35" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfAcquireSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="257.48" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfLowerIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="268.61" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfRaiseIrql: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="279.74" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KfReleaseSpinLock: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
+<rect x="290.87" y="246.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KiApcNormalRoutineNop: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
 <rect x="42" y="260" width="264" height="29" rx="3" fill="#223044"/>
 <text x="46" y="273" fill="#e5edf6" font-size="12" font-family="sans-serif">Memory  ·  12  ·  0 verified (≥0.0%)</text>
 <rect x="46.00" y="278.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmAllocatePhysicalMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
@@ -140,7 +146,7 @@
 <rect x="68.26" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlMultiByteToUnicodeN: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
 <rect x="79.39" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlMultiByteToUnicodeSize: unassessed; src/xbox/exports/xboxkrnl_rtl_string_exports.cpp</title></rect>
 <rect x="90.52" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlNtStatusToDosError: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
-<rect x="101.65" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlRaiseException: unassessed; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
+<rect x="101.65" y="381.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:RtlRaiseException: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
 <rect x="112.78" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTimeFieldsToTime: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
 <rect x="123.91" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTimeToTimeFields: verified; src/xbox/exports/xboxkrnl_rtl_exports.cpp</title></rect>
 <rect x="135.04" y="381.00" width="10.13" height="6" fill="#3dbb79"><title>kernel:registered:RtlTryEnterCriticalSection: verified; src/xbox/exports/xboxkrnl_rtl_critical_section_exports.cpp</title></rect>
@@ -226,7 +232,7 @@
 <rect x="395.33" y="310.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XexGetModuleHandle: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
 <rect x="480.67" y="310.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:XexGetProcedureAddress: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
 <rect x="306" y="324" width="264" height="36" rx="3" fill="#223044"/>
-<text x="310" y="337" fill="#e5edf6" font-size="12" font-family="sans-serif">NT / I/O  ·  40  ·  0 verified (≥0.0%)</text>
+<text x="310" y="337" fill="#e5edf6" font-size="12" font-family="sans-serif">NT / I/O  ·  41  ·  0 verified (≥0.0%)</text>
 <rect x="310.00" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:IoDismountVolume: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
 <rect x="321.13" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:IoDismountVolumeByFileHandle: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
 <rect x="332.26" y="342.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtAllocateEncryptedMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
@@ -253,20 +259,21 @@
 <rect x="310.00" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
 <rect x="321.13" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryVirtualMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
 <rect x="332.26" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueryVolumeInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
-<rect x="343.39" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
-<rect x="354.52" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFileScatter: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
-<rect x="365.65" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseMutant: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="376.78" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="387.91" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtResumeThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="399.04" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="410.17" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
-<rect x="421.30" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetTimerEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="432.43" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSignalAndWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="443.57" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="454.70" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForMultipleObjectsEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="465.83" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="476.96" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWriteFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
-<rect x="488.09" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtYieldExecution: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
+<rect x="343.39" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtQueueApcThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="354.52" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="365.65" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReadFileScatter: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="376.78" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseMutant: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="387.91" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtReleaseSemaphore: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="399.04" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtResumeThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="410.17" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetEvent: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="421.30" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetInformationFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="432.43" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSetTimerEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="443.57" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSignalAndWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="454.70" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtSuspendThread: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="465.83" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForMultipleObjectsEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="476.96" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWaitForSingleObjectEx: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="488.09" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtWriteFile: unassessed; src/xbox/exports/xboxkrnl_io_exports.cpp</title></rect>
+<rect x="499.22" y="349.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:NtYieldExecution: unassessed; src/xbox/exports/xboxkrnl_threading_exports.cpp</title></rect>
 <rect x="306" y="363" width="264" height="29" rx="3" fill="#223044"/>
 <text x="310" y="376" fill="#e5edf6" font-size="12" font-family="sans-serif">Variables  ·  10  ·  0 verified (≥0.0%)</text>
 <rect x="310.00" y="381.00" width="24.60" height="6" fill="#514c72"><title>kernel:registered:ExLoadedCommandLine: unassessed; src/core/session/exports/kernel_variables.cpp</title></rect>
