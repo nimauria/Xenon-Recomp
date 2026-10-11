@@ -25,9 +25,9 @@ retail title works.
 | ID | Phase | State | Notes |
 | --- | --- | --- | --- |
 | V3-00 | Audit and baseline | DONE | This document; baseline below |
-| V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); one intermittent Windows thread test and the `ilammy/msvc-dev-cmd` Node 20 warning remain |
-| V3-02 | Diagnostics contracts | IN PROGRESS | Acceptance criteria met locally (see V3-02 progress); waiting for CI on the final batch |
-| V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll and event-driven WaitAny done (pulled forward by owner decision to unblock CI); remaining items listed under V3-03 below |
+| V3-01 | CI and build correctness | IN PROGRESS | D3D12 fix confirmed on Windows (`6ee8852`); the thread test that failed once passed on the next two Windows runs; the `ilammy/msvc-dev-cmd` Node 20 warning remains (no Node 24 release upstream) |
+| V3-02 | Diagnostics contracts | IN PROGRESS | Acceptance met locally; Windows failed `xenon_probe_log_tests` on `99298e1` (text-mode newlines), fixed in `641b17e`, needs a Windows run |
+| V3-03 | Guest scheduler and waits | IN PROGRESS | Atomic WaitAll, event-driven WaitAny, mutant abandonment, guest `SignalState` consistency, Ob/Ke object identity and per-object wait lists done locally; open items under V3-03 below |
 | V3-04 | Kernel execution and interrupts | NOT STARTED | |
 | V3-05 | Guest services and ABI | NOT STARTED | |
 | V3-06 | Discovery database | NOT STARTED | |
@@ -178,7 +178,7 @@ operations are unassessed, which means unknown, not missing.
 | Gen 7 dynamic fallback | implemented+tested (bounded) | Unsupported instructions trap rather than NOP; the interpreter is deliberately limited |
 | Gen 8 semantic verification | partial | Fail-closed but narrow, see above; no differential checkpoint system by design |
 | Memory V2 | implemented+tested | 21/21 brief phases; 81 MB metadata for 512 MiB guest RAM. Open: findings 5 (commit handshake depends on x86 store/load ordering) and 6 (`InterlockedPopEntrySList` link read) in `RESTRUCTURE_FINDINGS.md` |
-| Kernel objects (events, semaphores, mutants, timers) | implemented+tested individually | Single-object waits are covered by `xenon_kernel_synchronization_tests` |
+| Kernel objects (events, semaphores, mutants, timers) | implemented+tested individually | Single-object waits are covered by `xenon_kernel_synchronization_tests`; mutant abandonment on owner exit and guest `SignalState` consistency since V3-03 |
 | Kernel multi-object waits | implemented+tested (since the V3-03 fix) | At the baseline, `wait.cpp` WaitAll consumed objects one at a time (a timeout left earlier objects consumed), a zero-timeout WaitAll always timed out, and WaitAny polled every 1 ms. Fixed; see V3-03 |
 | APC, DPC, interrupts | missing (APC/DPC), partial (interrupts) | Only `KiApcNormalRoutineNop` is registered; no `KeInitializeApc`, `KeInsertQueueApc`, `KeInitializeDpc` or `KeInsertQueueDpc`. GPU interrupts are delivered synchronously on the GPU pump thread |
 | Guest SEH and exceptions | partial | `RtlRaiseException`, `RtlUnwind`, `RtlCaptureContext`, `__C_specific_handler` declare partial; `setjmp`/`longjmp` has dedicated tests |
@@ -242,7 +242,8 @@ observed in source or by execution during V3-00.
 9. **Memory ordering assumes x86-64** for the reservation commit handshake
    (finding 5). Correct on the only supported host; not portable to ARM64.
    V3-11.
-10. **Kernel objects read guest `SignalState` once** (confirmed in source).
+10. **Kernel objects read guest `SignalState` once** (confirmed in source;
+    fixed in V3-03, `b907c97`).
     `resolve_dispatcher_object()` (`src/xbox/xex_dispatcher_header.cpp`)
     reads `SignalState` only when it creates and stashes the host object;
     later guest writes to that field are not observed. Whether titles write
@@ -410,6 +411,14 @@ unchanged; the next Windows runs decide.
 
 ## V3-02 progress
 
+Run 38082406059 (`99298e1`, Windows): 151/152; `xenon_probe_log_tests`
+failed. `append_probe_log()` opened files in text mode, so MSVC's CRT wrote
+a carriage return before every newline and the file no longer held the
+bytes the 4 MiB cap counted. Files are now opened in binary mode
+(`641b17e`). Linux cannot show the difference; the next Windows run
+confirms it. The same run passed `xenon_thread_creation_tests` (43 s) and
+`registry_numeric_format` at 823 s, `prepare_worker` at 381 s.
+
 Status as of `01563c1`. Off by default; see "Diagnostics" in
 `docs/runtime/AC6_RUNTIME_INVESTIGATION.md` for the switches.
 
@@ -509,19 +518,83 @@ Verification:
 | Sync-related test durations before and after | No regression (for example `xenon_xboxkrnl_ke_sync_export_tests` 2.30 s to 2.17 s, `xenon_thread_creation_tests` 8.38 s to 7.14 s) |
 | Windows MSVC build and tests | Not run; needs CI |
 
+Second batch, 11 October 2026 (local, not pushed):
+
+- **Mutant abandonment** (`8941755`). Nothing called
+  `KernelMutant::abandon()`, so a thread that exited owning a mutant left it
+  owned forever and every later waiter hung; `WaitResult::Abandoned` was
+  never produced. A mutant now records the host thread that acquired it
+  (guest thread ids are per `ThreadManager` and repeat across sessions in one
+  process). When a `KernelThread`'s host thread finishes, after guest code
+  has stopped and before the thread is signalled, it abandons every live
+  mutant it still owns. Doing it in `terminate()` instead would free the
+  mutant while the thread may still be inside the critical section. The
+  next wait takes ownership and returns `STATUS_ABANDONED_WAIT_0` plus the
+  satisfying index for a WaitAny, or index 0 for a WaitAll.
+- **Guest `SignalState` kept consistent both ways** (`b907c97`). Events and
+  semaphores resolved from a guest header store every state change into
+  `SignalState` under their own mutex, through the process's address space.
+  Each later `Ke*` resolution adopts a value the guest wrote directly and
+  records `GuestStateAdopted` (or `GuestStateRejected` for a semaphore count
+  outside 0..limit). As on hardware, a direct write wakes no thread already
+  blocked. This closes weakness 10 and answers AC6 hypothesis 4 from the
+  event ring on the next run.
+- **`ObReferenceObjectByHandle` for events and semaphores** (`b94565a`)
+  returned the sentinel `0xDEADF00D`, so a title passing the pointer to
+  `KeSetEvent` or a `Ke*` wait failed to resolve it. The first reference now
+  places a `DISPATCHER_HEADER` (and a semaphore's limit) in the kernel pool,
+  stashed to resolve to the handle's own object; later references return the
+  same address. Mutants and timers keep the sentinel.
+- **Dispatched timers under multi-object waits** (`585036f`): tests for
+  WaitAny waking at the due time, a synchronization timer releasing one of
+  two waiters, and WaitAll completing when the timer fires.
+- **Per-object multi-wait lists** (`d5a0f28`). Every signal used to wake
+  every multi-object wait in progress. Each object now keeps a list of the
+  multi-object waits on it, as the NT dispatcher does, and a change wakes
+  only that list.
+
+Semantics provenance (research policy, section 5):
+
+| Question | Source | Certainty | Implemented |
+| --- | --- | --- | --- |
+| Owner exit abandons a mutant; next waiter gets ownership and `STATUS_ABANDONED` | Win32 `WaitForSingleObject`/`WaitForMultipleObjects` documentation; NT dispatcher (WRK `KiWaitSatisfyMutant`, recalled, not re-read) | High for NT; Xbox 360 by NT derivation, unverified on hardware | Yes |
+| WaitAny abandoned status is `0x80 + index`; WaitAll is `0x80` | WRK `KeWaitForMultipleObjects` (recalled) | Medium | Yes |
+| `SignalState` is the object's state; a direct write takes effect at the next wait or signal and wakes no blocked waiter | NT `DISPATCHER_HEADER` semantics: waits test `SignalState`, waking is done by `KiWaitTest` on signal paths | High for NT | Yes |
+| `ObReferenceObjectByHandle` returns the object body | NT object manager contract | High | Events and semaphores |
+
+Verification (Debug unless noted, this host):
+
+| Check | Result |
+| --- | --- |
+| `xenon_kernel_mutant_abandonment_tests` (9 tests, new) | Pass; 200 repetitions with no failure |
+| `xenon_kernel_wait_semantics_tests` (14 tests) | Pass; 50 repetitions |
+| `xenon_kernel_timer_dispatch_tests` (8 tests) | Pass; 50 repetitions |
+| `xenon_xboxkrnl_ke_sync_export_tests`, `xenon_xboxkrnl_sync_export_tests`, `xenon_xbox_ob_exports_tests` | Pass; Ke tests 50 repetitions |
+| ThreadSanitizer, GCC 13, the three kernel suites | 20 runs each, no reports |
+| Mutation: remove the exit-time abandonment; the abandoned flag; the abandoned index in the status; the `SignalState` store; the reconcile; the Ob header; each object's multi-wait wake (event, semaphore, mutant release and abandon, timer set and fire, thread exit and `terminate()`) | Each fails a test (removing the store hangs the cross-thread test, which CTest's timeout would report) |
+| Source-ownership audit | 0 errors |
+| Full CTest at `d5a0f28`, Debug, `--parallel 2 --timeout 900` | 153/154 in 16 min 44 s; `xenon_prepare_worker_tests` timed out at 900 s while running beside `registry_numeric_format` (317 s), then passed alone in 720 s. Compile-bound (finding 3), as on earlier runs on this host; timeout unchanged |
+| Wake cost, `-O2`, 20,000 set/reset pairs on an event nobody waits on, three runs | Before `d5a0f28`: 0.7 us per signal with 4 idle WaitAny waiters, 27 to 42 us with 16, about 176 us (273 us CPU) with 64. After: about 0.04 us with 0 to 64 |
+
 Still open in V3-03:
 
-- Guest `SignalState` read once (weakness 10).
-- `WaitResult::Abandoned` is never reported; an abandoned mutant satisfies a
-  wait as an ordinary success, as before this change.
-- Duplicate objects in one WaitAll are consumed once; Xbox kernel behaviour
-  is unverified.
-- Every signal wakes every registered multi-object waiter. The cost under
-  many concurrent waiters has not been measured.
-- Alertable waits, APC delivery during waits, and mixed `Ke*`/`Nt*` flows on
-  the same guest object need tests through the export registry.
-- Timer firing through `TimerManager` is not covered by the latency test,
-  which uses an immediate `set(0)`.
+- Duplicate objects in one WaitAll are consumed once. NT's
+  `NtWaitForMultipleObjects` is understood to reject duplicates with
+  `STATUS_INVALID_PARAMETER_MIX`; not verified for the Xbox kernel, so
+  unchanged.
+- Alertable waits and APC delivery during waits need APCs, which do not
+  exist yet (V3-04).
+- A thread that runs guest code on a host thread not started by
+  `KernelThread::thread_main()` does not abandon its mutants on exit; every
+  guest thread created through `ExCreateThread` does.
+- `terminate()` signals a waiter on the thread before the terminated
+  thread has stopped running guest code (unchanged; mutants are abandoned
+  later, at the real exit).
+- `TimerManager` runs timer callbacks while holding its own mutex, so a
+  callback that re-schedules a timer would deadlock. Production passes no
+  callback today; recorded, not changed.
+- AC6 has not been run; whether any of these changes moves its stall is
+  unknown.
 
 ## Dependency graph
 
@@ -579,3 +652,5 @@ and the compilation graph.
 | 2026-10-10 | The V3-00 audit itself changed no source | V3-00 is documentation-only |
 | 2026-10-10 | After `03b26e5` broke every workflow, fix the build and coverage test, and pull the V3-03 wait fix forward rather than register a failing test or drop the reproducers | Owner decision; the defect was confirmed and the reproducers already existed |
 | 2026-10-10 | Fixes stay local until the owner pushes | Owner decision |
+| 2026-10-11 | Abandon mutants at the owning host thread's real exit, not at `terminate()` | `terminate()` can run while the thread is still inside the critical section its mutant guards |
+| 2026-10-11 | A direct guest write to `SignalState` is adopted at the next `Ke*` call and wakes no blocked waiter | Matches NT dispatcher semantics; waking blocked waiters on memory writes would need polling that hardware does not do |
