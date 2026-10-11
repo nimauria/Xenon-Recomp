@@ -739,9 +739,23 @@ removal, kernel-mode, bad targets), and the nested call through a real
 session in `xenon_thread_creation_tests`. Mutations removing delivery or
 the timer routine fail them; ThreadSanitizer clean over 15 runs.
 
-Still open: XAM overlapped completion routines (Xenon's XAM has no
-asynchronous overlapped model to queue them from), kernel-mode APC
-delivery, thread alerts (`NtAlertThread`, `STATUS_ALERTED`).
+- `3a99684`: XOVERLAPPED completion. Every XAM export ignored its
+  overlapped and returned synchronously, and `XamGetOverlappedResult` was
+  unregistered, so a title waiting on the overlapped's event or result
+  waited forever. Calls given an overlapped now complete it at once (Result,
+  ExtendedError, Length; event signalled; completion routine queued as a
+  user APC) and return `ERROR_IO_PENDING`, as xenia and rexglue-sdk do with
+  `CompleteOverlappedImmediate`; applied to the twelve registered exports
+  that take one, reading a ninth argument and beyond from the stack.
+  `XamGetOverlappedResult` (0x1FB) added. Tests: `xenon_xam_overlapped_tests`.
+- `a7c8dcf`: thread alerts (`KeAlertThread`, `KeAlertResumeThread`,
+  `KeTestAlertThread`; rexglue-sdk stubs them). An alertable wait or delay
+  returns `STATUS_ALERTED` and clears the alert, before a pending APC as in
+  NT. One flag per thread, since Xenon has no distinct processor mode.
+
+Still open: kernel-mode APC delivery and DPCs (neither reference delivers
+them; AC6 runs in-game without them); XAM exports that take an overlapped
+but are not registered yet (V3-05's inventory).
 
 Environment note: after the Codespace restarted, PulseAudio was no longer
 installed, so sessions with audio enabled failed `initialize()` ("dsp: No
