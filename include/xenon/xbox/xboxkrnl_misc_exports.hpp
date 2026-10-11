@@ -8,4 +8,8 @@ namespace xenon::xbox {
 // (XeCryptSha, ExGetXConfigSetting, ExRegisterTitleTerminateNotification).
 [[nodiscard]] bool register_xboxkrnl_misc_exports(core::ExportRegistry& registry);
 
+// XeCrypt hashes and RC4, XeCryptBnQw_SwapDwQwLeBe and RtlComputeCrc32
+// (src/xbox/exports/xboxkrnl_crypt_exports.cpp).
+[[nodiscard]] bool register_xboxkrnl_crypt_exports(core::ExportRegistry& registry);
+
 }  // namespace xenon::xbox

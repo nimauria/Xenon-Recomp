@@ -111,6 +111,10 @@ bool XenonSession::register_process_free_kernel_exports() {
     set_error("Failed to register xboxkrnl misc exports");
     return false;
   }
+  if (!xbox::register_xboxkrnl_crypt_exports(export_registry_)) {
+    set_error("Failed to register xboxkrnl crypt exports");
+    return false;
+  }
 
   // Register the xboxkrnl formatted-output family (sprintf/_snprintf/vsprintf/...
   // and their wide variants) and DbgPrint - native host code, no KernelProcess.

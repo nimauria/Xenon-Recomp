@@ -77,6 +77,7 @@ if(XENON_ENABLE_KERNEL AND XENON_ENABLE_MEMORY)
     exports/xboxkrnl_ke_sync_exports.cpp
     exports/xboxkrnl_ke_irql_exports.cpp
     exports/xboxkrnl_misc_exports.cpp
+    exports/xboxkrnl_crypt_exports.cpp
     exports/xboxkrnl_ob_exports.cpp
     exports/xboxkrnl_string_exports.cpp
     exports/xboxkrnl_rtl_string_exports.cpp
