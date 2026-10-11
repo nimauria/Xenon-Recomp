@@ -94,6 +94,17 @@ Each user receives a unique offline XUID in the `0xE000000000000000` range.
 | 0x0210 | `XamUserGetSigninState` | ✅ Implemented | Get sign-in state |
 | 0x020E | `XamUserGetName` | ✅ Implemented | Get gamertag |
 | 0x0212 | `XamUserCheckPrivilege` | ✅ Stubbed | Check user privilege (grants all offline) |
+| 0x0219 | `XamUserReadProfileSettings` | Implemented | Read profile settings (`xam::ProfileSettings`) |
+| 0x021A | `XamUserWriteProfileSettings` | Partial | Write profile settings; no change notification |
+| 0x022A | `XamUserReadProfileSettingsEx` | Implemented | As 0x0219, buffer and overlapped on the stack |
+
+Profile settings start at the defaults xenia and rexglue-sdk give a new
+profile. Title-specific settings (ids `0x3F00`-`0x3FFF`, such as
+`XPROFILE_TITLE_SPECIFIC1` `0x63E83FFF`) start with no value, are kept per
+profile and title, and are saved under `<save root>/ProfileSettings/<XUID>/
+<title id>/<setting id>` when the session has a save root. A setting with no
+value reads back with source 0 (`XSOURCE_NO_VALUE`) instead of failing the
+call.
 
 ### Phase 2: Locale & Language ✅
 
@@ -125,8 +136,8 @@ Each user receives a unique offline XUID in the `0xE000000000000000` range.
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x02EE | `XamUserCreateAchievementEnumerator` | ✅ Stubbed | Create achievement enumerator |
-| 0x02F7 | `XamUserCreateStatsEnumerator` | ✅ Stubbed | Create stats enumerator |
+| 0x02EE | `XamUserCreateAchievementEnumerator` | Partial | Real, empty enumerator (no XDBF achievement table is read); handle and buffer size in r10/r9 |
+| 0x02F7 | `XamUserCreateStatsEnumerator` | Partial | Real, empty enumerator (leaderboards are online-only); buffer size 0 |
 
 `XamUserWriteAchievements`, `XamUserReadStats`, and `XamUserWriteStats`
 (previously listed at invented ordinals 0x0280-0x0282) have been removed:

@@ -2,7 +2,7 @@
   "content_digest": "sha256:101ac3225f06703364319689e3bd511f2ba5ba43c8c06abc2679adb1afdfc419",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "ccdadae5df02788440f013d864ad874d539203cd",
+    "assessed_commit": "cfb0e8a5b3c7554f6532929d28fb1b8de256e03e",
     "worktree": "clean"
   },
   "problems": [],

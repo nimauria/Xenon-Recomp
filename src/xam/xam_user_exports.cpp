@@ -33,7 +33,14 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
                            core::XenonSession& session) {
   bool ok = true;
 
-  // XamUserGetXUID (0x020A)
+  // XamUserGetXUID (0x020A): (user_index, type_mask, xuid_ptr) -> HRESULT,
+  // as in xenia, xenia-canary and rexglue-sdk. Earlier code took the XUID
+  // pointer from r4, which is type_mask, so it wrote eight bytes to a guest
+  // address of 1 to 7 and left the title's XUID unwritten. type_mask selects
+  // which XUID kinds the caller accepts (1 offline, 2 and 4 online); like
+  // the references, Xenon reports its profiles as kind 1|2, so a request for
+  // kind 4 alone finds no such user. The XUID is written (0 on failure)
+  // whenever the pointer is valid.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
@@ -41,20 +48,27 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
     desc.ordinal = ordinal::XamUserGetXUID;
     desc.requirement = core::ExportRequirement::Required;
     desc.handler = [&user_manager](core::ExportCallContext& ctx) -> bool {
+      constexpr std::uint32_t kEInvalidArg = 0x80070057u;
+      constexpr std::uint32_t kENoSuchUser = 0x80070525u;
+      constexpr std::uint32_t kProfileKinds = 1u | 2u;
       const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
-      const auto out_xuid_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
-
-      if (!user_manager.is_signed_in(user_index)) {
-        ctx.cpu.gpr[3] = result::NotLoggedOn;
+      const auto type_mask = static_cast<std::uint32_t>(ctx.cpu.gpr[4]);
+      const auto xuid_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      if (xuid_ptr == 0u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
         return true;
       }
-
-      if (out_xuid_ptr != 0) {
-        const auto xuid = user_manager.xuid(user_index);
-        write_u64_be(ctx.memory, out_xuid_ptr, xuid);
+      write_u64_be(ctx.memory, xuid_ptr, 0u);
+      if (user_index >= 4u) {
+        ctx.cpu.gpr[3] = kEInvalidArg;
+        return true;
       }
-
-      ctx.cpu.gpr[3] = result::Success;
+      if (!user_manager.is_signed_in(user_index) || (type_mask & kProfileKinds) == 0u) {
+        ctx.cpu.gpr[3] = kENoSuchUser;
+        return true;
+      }
+      write_u64_be(ctx.memory, xuid_ptr, user_manager.xuid(user_index));
+      ctx.cpu.gpr[3] = 0u;
       return true;
     };
     ok = registry.register_export(std::move(desc)) && ok;
@@ -196,53 +210,6 @@ bool register_user_exports(core::ExportRegistry& registry, UserManager& user_man
       ctx.cpu.gpr[3] = result::Success;
       return true;
     };
-    ok = registry.register_export(std::move(desc)) && ok;
-  }
-
-  // XamUserReadProfileSettings (0x0219) - no profile-setting storage is
-  // implemented (UserManager has no setting-by-id lookup), so this matches
-  // rexglue-sdk's own conservative "any requested setting id that is not
-  // modeled fails the whole call" behavior rather than fabricating setting
-  // data. A request for zero settings has nothing to be missing, and
-  // trivially succeeds with an empty result, matching the real contract for
-  // "give me nothing."
-  //
-  // Guest ABI (real XDK signature, verified against an AC6 crash repro -
-  // register values dumped from a real call showed r7=3 (a small literal
-  // count, not a pointer) and r8=a real 0x82xxxxxx guest address, matching
-  // dwNumSettingIds/pSettingIds, not the setting_count/buffer_size_ptr pair
-  // this handler previously read from r5/r7): r3 = title id, r4 = user
-  // index, r5 = XUID count, r6 = XUID array ptr, r7 = setting count, r8 =
-  // setting-id array ptr, r9 = pcbResults (buffer size out-ptr), r10 =
-  // results out-ptr. The previous r5/r7 mapping (one XDK parameter pair too
-  // early) meant a real nonzero setting_count in r7 was misread as a never-
-  // checked value while r7 itself got blindly treated as buffer_size_ptr and
-  // dereferenced - a genuine Xenon-side guest memory fault (observed: write
-  // to guest address 3, i.e. the literal setting count) whenever a title
-  // asked for real profile settings, not merely the documented "fails with
-  // InvalidParameter" limitation.
-  {
-    core::ExportDescriptor desc{};
-    desc.library = "xam";
-    desc.name = "XamUserReadProfileSettings";
-    desc.ordinal = ordinal::XamUserReadProfileSettings;
-    desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note =
-        "no profile-setting storage is implemented; any setting_count > 0 "
-        "fails with InvalidParameter instead of returning real setting data";
-    desc.handler = [](core::ExportCallContext& ctx) -> bool {
-      const auto setting_count = static_cast<std::uint32_t>(ctx.cpu.gpr[7]);
-      const auto buffer_size_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[9]);
-      if (setting_count == 0u) {
-        if (buffer_size_ptr != 0u) write_u32_be(ctx.memory, buffer_size_ptr, 0u);
-        ctx.cpu.gpr[3] = result::Success;
-        return true;
-      }
-      ctx.cpu.gpr[3] = result::InvalidParameter;
-      return true;
-    };
-    desc.handler = with_overlapped(session, 8, std::move(desc.handler));
     ok = registry.register_export(std::move(desc)) && ok;
   }
 

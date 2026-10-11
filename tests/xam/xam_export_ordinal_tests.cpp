@@ -23,6 +23,7 @@
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xam/types.hpp"
 #include "xenon/xam/xam_exports.hpp"
 
 using namespace xenon;
@@ -279,6 +280,51 @@ void test_net_exports_use_real_ordinals() {
   std::cout << "  \xE2\x9C\x93 NetDll_* exports match the real xam.xex ordinal table" << std::endl;
 }
 
+// The voice family was registered one place off at 0x30D-0x30F until the
+// registry-wide check (tests/xbox/export_ordinal_reference_tests.py) found
+// it; xenia's table and the xkelib export list xamext21256.0.def agree on
+// these ordinals. Each handler is driven through the registry so a title's
+// call reaches the behaviour named by its ordinal.
+void test_voice_exports_use_real_ordinals() {
+  std::cout << "[TEST] Voice exports registered under real ordinals..." << std::endl;
+
+  core::ExportRegistry registry;
+  xam::XamSession xam;
+  assert(xam.initialize());
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
+
+  expect_export(registry, 0x030Cu, "XamVoiceCreate");
+  expect_export(registry, 0x030Du, "XamVoiceHeadsetPresent");
+  expect_export(registry, 0x030Eu, "XamVoiceSubmitPacket");
+  expect_export(registry, 0x030Fu, "XamVoiceClose");
+
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+  memory::GuestAddress out{};
+  assert(memory.allocate(0x1000, 0x1000, memory::kReadWrite, false, out));
+  memory.write32_be(out, 0xAAAAAAAAu);
+  const auto call = [&](std::uint32_t ordinal, std::uint64_t r3, std::uint64_t r4,
+                        std::uint64_t r5) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = r3;
+    cpu.gpr[4] = r4;
+    cpu.gpr[5] = r5;
+    core::ExportCallContext context{cpu, memory, 0, 0};
+    assert(registry.invoke("xam", ordinal, context).handled);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  };
+  // XamVoiceCreate(unk, unk, out_voice): no voice device, so no handle.
+  assert(call(0x030Cu, 0, 0xF, out) == xam::result::AccessDenied);
+  assert(memory.read32_be(out) == 0u);
+  assert(call(0x030Du, 0, 0, 0) == 0u && "no headset present");
+  assert(call(0x030Eu, 0, 0, 0) == xam::result::InvalidParameter &&
+         "no handle XamVoiceCreate returned can be valid");
+  assert(call(0x030Fu, 0, 0, 0) == xam::result::Success);
+
+  std::cout << "  \xE2\x9C\x93 Voice ordinals and behaviour correct" << std::endl;
+}
+
 void test_input_ordinals_unchanged() {
   std::cout << "[TEST] XAM input ordinals verified against the real table (no changes needed)..."
             << std::endl;
@@ -310,6 +356,7 @@ int main() {
   test_achievement_exports_use_real_ordinals_and_drop_fabricated_ones();
   test_system_exports_use_real_ordinals();
   test_net_exports_use_real_ordinals();
+  test_voice_exports_use_real_ordinals();
   test_input_ordinals_unchanged();
 
   std::cout << "\n\xE2\x9C\x85 All tests passed!" << std::endl;

@@ -6,6 +6,7 @@
 #include "xenon/xam/content_manager.hpp"
 #include "xenon/xam/locale_manager.hpp"
 #include "xenon/xam/notification_manager.hpp"
+#include "xenon/xam/profile_settings.hpp"
 #include "xenon/xam/user_manager.hpp"
 
 namespace xenon::core {
@@ -53,12 +54,15 @@ class XamSession {
   [[nodiscard]] AchievementManager& achievements() { return *achievement_manager_; }
   [[nodiscard]] const AchievementManager& achievements() const { return *achievement_manager_; }
 
+  [[nodiscard]] ProfileSettings& profile_settings() { return *profile_settings_; }
+
  private:
   std::unique_ptr<UserManager> user_manager_;
   std::unique_ptr<LocaleManager> locale_manager_;
   std::unique_ptr<ContentManager> content_manager_;
   std::unique_ptr<NotificationManager> notification_manager_;
   std::unique_ptr<AchievementManager> achievement_manager_;
+  std::unique_ptr<ProfileSettings> profile_settings_;
   bool initialized_{false};
 };
 

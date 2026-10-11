@@ -20,6 +20,7 @@
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xam/achievement_manager.hpp"
 #include "xenon/xam/content_manager.hpp"
 #include "xenon/xam/guest_enumerator.hpp"
 #include "xenon/xam/notification_manager.hpp"
@@ -29,6 +30,9 @@ namespace xenon::xam {
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager,
                               core::XenonSession& session);
 bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& session);
+bool register_achievement_exports(core::ExportRegistry& registry,
+                                  AchievementManager& achievement_manager,
+                                  core::XenonSession& session);
 bool register_notification_exports(core::ExportRegistry& registry,
                                    NotificationManager& notification_manager);
 }  // namespace xenon::xam
@@ -285,6 +289,67 @@ void test_notify_get_next_writes_real_payload() {
   std::cout << "test_notify_get_next_writes_real_payload passed\n";
 }
 
+// XamUserCreateAchievementEnumerator (0x02EE) and XamUserCreateStatsEnumerator
+// (0x02F7) take eight arguments, the buffer size and handle out-pointers in
+// r9 and r10. Each returns a real, empty enumerator: XamEnumerate reports
+// ERROR_NO_MORE_FILES and NtClose closes it. Earlier code wrote a fake
+// handle through r7 (the achievement offset) and left r9/r10 unwritten.
+void test_achievement_and_stats_enumerators_use_the_real_abi() {
+  ContentFixture f;
+  xam::AchievementManager achievements;
+  achievements.initialize();
+  assert(xam::register_achievement_exports(f.registry, achievements, f.session));
+
+  const auto offset_target = f.alloc32();
+  f.address_space->write32_be(offset_target, 0x11111111u);
+  const auto buffer_size_ptr = f.alloc32();
+  const auto handle_ptr = f.alloc32();
+  const auto create = [&](std::uint32_t ordinal, std::uint32_t flags, std::uint32_t count) {
+    f.address_space->write32_be(buffer_size_ptr, 0xAAAAAAAAu);
+    f.address_space->write32_be(handle_ptr, 0xBBBBBBBBu);
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = 0x4D5307D6u;  // title id
+    cpu.gpr[4] = 0;            // user index
+    cpu.gpr[5] = 0;
+    cpu.gpr[6] = flags;
+    cpu.gpr[7] = offset_target;  // achievement offset: a value, never written through
+    cpu.gpr[8] = count;
+    cpu.gpr[9] = buffer_size_ptr;
+    cpu.gpr[10] = handle_ptr;
+    assert(f.invoke(ordinal, cpu).handled);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  };
+  const auto enumerate_then_close = [&](kernel::Handle handle) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = handle;
+    cpu.gpr[5] = f.alloc32();
+    cpu.gpr[6] = 4;
+    cpu.gpr[7] = f.alloc32();
+    assert(f.invoke(0x0250u, cpu).handled);  // XamEnumerate
+    assert(static_cast<std::uint32_t>(cpu.gpr[3]) == xam::result::NoMoreFiles);
+    assert(f.session.kernel_process()->handle_table().close(handle) ==
+           kernel::KernelIoCode::Success);
+  };
+
+  // Strings requested: 36 + 464 bytes per entry.
+  assert(create(0x02EEu, 7u, 5u) == xam::result::Success);
+  assert(f.address_space->read32_be(buffer_size_ptr) == 500u * 5u);
+  assert(f.address_space->read32_be(offset_target) == 0x11111111u);
+  enumerate_then_close(f.address_space->read32_be(handle_ptr));
+  // No strings: 36 bytes per entry.
+  assert(create(0x02EEu, 0u, 3u) == xam::result::Success);
+  assert(f.address_space->read32_be(buffer_size_ptr) == 36u * 3u);
+  enumerate_then_close(f.address_space->read32_be(handle_ptr));
+  assert(create(0x02EEu, 7u, 0u) == xam::result::InvalidParameter);
+  assert(f.address_space->read32_be(handle_ptr) == 0xBBBBBBBBu);
+
+  assert(create(0x02F7u, 1u, 1u) == xam::result::Success);
+  assert(f.address_space->read32_be(buffer_size_ptr) == 0u && "no offline stats");
+  assert(f.address_space->read32_be(offset_target) == 0x11111111u);
+  enumerate_then_close(f.address_space->read32_be(handle_ptr));
+  std::cout << "test_achievement_and_stats_enumerators_use_the_real_abi passed\n";
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +359,7 @@ int main() {
   test_enumerate_unknown_handle_is_invalid();
   test_notify_create_listener_returns_handle_directly();
   test_notify_get_next_writes_real_payload();
+  test_achievement_and_stats_enumerators_use_the_real_abi();
   std::cout << "All guest_enumerator_tests passed!\n";
   return 0;
 }

@@ -192,9 +192,9 @@ constexpr std::uint32_t XamLoaderTerminateTitle = 0x01A9;
 // a working voice channel.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamVoiceCreate = 0x030C;
-constexpr std::uint32_t XamVoiceClose = 0x030D;
-constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030E;
-constexpr std::uint32_t XamVoiceSubmitPacket = 0x030F;
+constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030D;
+constexpr std::uint32_t XamVoiceSubmitPacket = 0x030E;
+constexpr std::uint32_t XamVoiceClose = 0x030F;
 
 // ---------------------------------------------------------------------------
 // XAM background tasks (xam_table.inc 0x1AF/0x1B1/0x1B3) - XamTaskSchedule
@@ -254,9 +254,11 @@ constexpr std::uint32_t XamShowDirtyDiscErrorUI = 0x02D9;
 constexpr std::uint32_t XamShowMessageBoxUIEx = 0x02DC;
 
 // ---------------------------------------------------------------------------
-// User profile additions (xam_table.inc 0x219) and gamer tile (0x2F0)
+// Profile settings (xam_table.inc 0x219, 0x21A, 0x22A) and gamer tile (0x2F0)
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamUserReadProfileSettings = 0x0219;
+constexpr std::uint32_t XamUserWriteProfileSettings = 0x021A;
+constexpr std::uint32_t XamUserReadProfileSettingsEx = 0x022A;
 constexpr std::uint32_t XamWriteGamerTile = 0x02F0;
 
 // ---------------------------------------------------------------------------

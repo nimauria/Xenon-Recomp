@@ -28,8 +28,8 @@ retail title works.
 | V3-01 | CI and build correctness | DONE | Linux and Windows green on `6c23b0b` (runs 38124710875, 38124710898, 38124710980). Residual: `ilammy/msvc-dev-cmd` still runs on Node 20; no Node 24 release exists upstream |
 | V3-02 | Diagnostics contracts | DONE | Acceptance met locally; the Windows probe-log fix (`641b17e`) passed on `6c23b0b` |
 | V3-03 | Guest scheduler and waits | DONE | Acceptance met on both platforms at `6c23b0b`; deferrals listed under V3-03 below. AC6 not run |
-| V3-04 | Kernel execution and interrupts | IN PROGRESS | Acceptance items tested locally (see V3-04 progress); evidence-gated items deferred with reasons; waiting for CI on the latest batch |
-| V3-05 | Guest services and ABI | NOT STARTED | |
+| V3-04 | Kernel execution and interrupts | DONE | Linux, Windows, Xenon CI and coverage refresh green on `ccdadae`; evidence-gated items deferred with reasons (V3-04 progress). AC6 not run |
+| V3-05 | Guest services and ABI | IN PROGRESS | Registry ordinal check, four ABI defects fixed, profile settings implemented (see V3-05 progress) |
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
 | V3-08 | Adaptive knowledge | NOT STARTED | |
@@ -766,6 +766,65 @@ dependencies, which ninja then never rebuilt (a stale
 `title_update_integration_tests.o` overflowed its stack-allocated
 `XenonSession`); deleting them restored correct rebuilds.
 
+## V3-05 progress
+
+Started 11 October 2026. No title image or import list is available here,
+so blockers are found by auditing the live registry against independent
+references, not from an AC6 run.
+
+**Ordinal check.** `xenon_export_ordinal_reference_tests` dumps the
+production registry (`import-scanner --registry`, with audio) and checks
+every registered (library, ordinal, name, kind) against pinned research
+tables: xenia's xboxkrnl table (already used by the coverage dashboard) and
+now its XAM table (`tools/coverage/reference/xenia_xam_997d055.json`).
+Every registered ordinal was also checked against the independent xkelib
+export lists (`xamext21256.0.def`, `kernelext21256.0.def`); the only
+differences are spelling (`_swprintf`) and xkelib listing ordinal 296 as a
+second `RtlFreeAnsiString` (the same routine). The check found one defect:
+
+- `ed2678f`: `XamVoiceHeadsetPresent`, `XamVoiceSubmitPacket` and
+  `XamVoiceClose` were rotated one place (0x30D-0x30F); a title's
+  `XamVoiceClose` reached the `SubmitPacket` handler. 331/331 registered
+  exports now match.
+
+**ABI audit.** Each XAM handler's argument registers were compared with
+xenia's typed export signatures (399 signatures from the xam and xboxkrnl
+sources at the pinned commit), and every difference was checked by hand
+against rexglue-sdk and xenia-canary:
+
+- `bfa22a9`: `XamUserCreateAchievementEnumerator` and
+  `XamUserCreateStatsEnumerator` take eight arguments with the buffer size
+  and handle pointers in r9/r10; Xenon wrote a fixed fake handle through r7
+  (the achievement offset) and left both outputs unwritten. Both now return
+  real, empty enumerator handles (no XDBF achievement table is read; stats
+  are online-only) and the required buffer size.
+- `8f1354a`: `XamUserGetXUID` is (user_index, type_mask, xuid_ptr) and
+  returns an HRESULT. Xenon took the XUID pointer from r4 (type_mask), so a
+  title's call wrote eight bytes to guest address 1..7: a page-protection
+  fault on the path every title takes at startup. The session test had
+  encoded the same wrong ABI and now uses the documented one.
+- `3be87c2`: profile settings. `XamUserReadProfileSettings` failed any
+  request for settings with InvalidParameter (Xenon's own notes record an
+  AC6 call asking for three) and answered no size query;
+  `XamUserWriteProfileSettings` and `XamUserReadProfileSettingsEx` were
+  missing. `xam::ProfileSettings` now holds the defaults the references give
+  a new profile and per-title title-specific settings, saved under the save
+  root. Unresolved between references: rexglue-sdk fails a read of a setting
+  with no value and xenia-canary omits it; Xenon returns it with source 0
+  (`XSOURCE_NO_VALUE`).
+
+Tests: `xenon_export_ordinal_reference_tests`, `xenon_xam_export_ordinal_tests`
+(voice ordinals and behaviour), `xenon_guest_enumerator_tests`,
+`xenon_session_tests`, `xenon_xam_profile_settings_tests`. Each fix was
+checked by reverting it: the test fails (the old `XamUserGetXUID` raises the
+guest page-protection fault).
+
+Kernel handlers use several argument idioms (`dispatch<N>`, helper
+functions), so the automated comparison covered XAM fully and xboxkrnl only
+where handlers read `gpr[N]` directly; the xboxkrnl hits were reviewed and
+are address arguments xenia types as `dword_t`, not defects. The xboxkrnl
+audit continues.
+
 ## Dependency graph
 
 ```text
@@ -824,3 +883,4 @@ and the compilation graph.
 | 2026-10-10 | Fixes stay local until the owner pushes | Owner decision |
 | 2026-10-11 | Abandon mutants at the owning host thread's real exit, not at `terminate()` | `terminate()` can run while the thread is still inside the critical section its mutant guards |
 | 2026-10-11 | A direct guest write to `SignalState` is adopted at the next `Ke*` call and wakes no blocked waiter | Matches NT dispatcher semantics; waking blocked waiters on memory writes would need polling that hardware does not do |
+| 2026-10-11 | A profile setting with no value reads back as `XSOURCE_NO_VALUE` rather than failing the read | The references disagree (rexglue-sdk fails, xenia-canary omits); the documented source field covers the case without inventing data |
