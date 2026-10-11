@@ -48,7 +48,9 @@ void append_probe_log(const char* file_name, const char* format, ...) {
   const auto [entry, first] = g_written.try_emplace(file_name, 0u);
   auto& written = entry->second;
   if (written >= kProbeLogByteLimit) return;
-  FILE* file = std::fopen(file_name, first ? "w" : "a");
+  // Binary mode keeps the file the size the cap counts; Windows text mode
+  // would add a carriage return before every newline.
+  FILE* file = std::fopen(file_name, first ? "wb" : "ab");
   if (!file) return;
   if (written + length > kProbeLogByteLimit) {
     std::fputs("[probe log truncated: per-run limit reached]\n", file);
