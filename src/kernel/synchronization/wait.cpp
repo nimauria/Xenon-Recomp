@@ -142,7 +142,8 @@ bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout,
 WaitResult wait_for_single_object(
     const std::shared_ptr<KernelObject>& object,
     std::chrono::milliseconds timeout,
-    std::uint32_t waiting_thread_id) {
+    std::uint32_t waiting_thread_id,
+    bool alertable) {
   if (!object || !is_waitable_object(object->type())) {
     return WaitResult::Failed;
   }
@@ -154,7 +155,7 @@ WaitResult wait_for_single_object(
   if (KernelThread::current() && object->type() != ObjectType::Thread) {
     std::uint32_t index = 0;
     return wait_for_multiple_objects(std::span(&object, 1), false, timeout, &index,
-                                     waiting_thread_id);
+                                     waiting_thread_id, alertable);
   }
 
   if (object->type() == ObjectType::Mutant) {
@@ -177,7 +178,8 @@ WaitResult wait_for_multiple_objects(
     bool wait_all,
     std::chrono::milliseconds timeout,
     std::uint32_t* signaled_index,
-    std::uint32_t waiting_thread_id) {
+    std::uint32_t waiting_thread_id,
+    bool alertable) {
 
   if (objects.empty() || objects.size() > kMaxWaitObjects) {
     return WaitResult::Failed;
@@ -245,15 +247,20 @@ WaitResult wait_for_multiple_objects(
   // block it was in when terminate() was called.
   auto* self = KernelThread::current();
   const auto terminating = [self] { return self && self->is_terminated(); };
+  const auto apc_pending = [self, alertable] {
+    return alertable && self && self->user_apc_pending();
+  };
   if (terminating()) return WaitResult::Terminating;
 
   // A wait that is satisfied at once, or has a zero timeout, never registers.
   if (try_satisfy()) return satisfied();
+  if (apc_pending()) return WaitResult::UserApc;
   if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
 
   // Registered on every object before the next check, so any change after
   // that check wakes this block (see multi_wait_list.hpp). A KernelThread
-  // also registers on its own thread, so terminate() wakes it.
+  // also registers on its own thread, so terminate() and a queued user APC
+  // wake it.
   detail::MultiWaitBlock block;
   for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
   KernelObject* own_thread = nullptr;
@@ -279,6 +286,7 @@ WaitResult wait_for_multiple_objects(
     }
     if (terminating()) return WaitResult::Terminating;
     if (try_satisfy()) return satisfied();
+    if (apc_pending()) return WaitResult::UserApc;
     if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
 
     std::unique_lock lock(block.mutex);
@@ -292,13 +300,15 @@ WaitResult wait_for_multiple_objects(
   }
 }
 
-WaitResult delay_current_thread(std::chrono::milliseconds delay) {
+WaitResult delay_current_thread(std::chrono::milliseconds delay, bool alertable) {
   auto* self = KernelThread::current();
   if (!self) {
     if (delay.count() > 0) std::this_thread::sleep_for(delay);
     return WaitResult::Success;
   }
+  const auto apc_pending = [&] { return alertable && self->user_apc_pending(); };
   if (self->is_terminated()) return WaitResult::Terminating;
+  if (apc_pending()) return WaitResult::UserApc;
   if (delay.count() <= 0) return WaitResult::Success;
 
   detail::MultiWaitBlock block;
@@ -312,8 +322,10 @@ WaitResult delay_current_thread(std::chrono::milliseconds delay) {
   const auto deadline = std::chrono::steady_clock::now() + delay;
   std::unique_lock lock(block.mutex);
   // Registered before this check, so a terminate() after it wakes the block.
-  block.condition.wait_until(lock, deadline, [&] { return self->is_terminated(); });
-  return self->is_terminated() ? WaitResult::Terminating : WaitResult::Success;
+  block.condition.wait_until(lock, deadline,
+                             [&] { return self->is_terminated() || apc_pending(); });
+  if (self->is_terminated()) return WaitResult::Terminating;
+  return apc_pending() ? WaitResult::UserApc : WaitResult::Success;
 }
 
 }  // namespace xenon::kernel

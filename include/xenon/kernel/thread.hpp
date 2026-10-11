@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -112,6 +113,26 @@ class KernelThread final : public KernelObject {
   // KeSetDisableBoostThread: whether scheduler priority boosts are disabled for
   // this thread. Returns the previous value. Xenon runs guest threads as host
   // threads and applies no dynamic boost, so the flag is pure guest-visible state.
+  // A user-mode APC: NormalRoutine(NormalContext, SystemArgument1,
+  // SystemArgument2), run on this thread when it next makes an alertable wait
+  // or delay (KeWaitFor*, NtWaitFor*Ex, KeDelayExecutionThread with
+  // Alertable set), which then returns STATUS_USER_APC.
+  struct UserApc {
+    std::uint32_t routine{};
+    std::uint32_t context{};
+    std::uint32_t arg1{};
+    std::uint32_t arg2{};
+  };
+  // Queues `apc` and wakes an alertable wait this thread is in. APCs queued
+  // to a thread that never waits alertably again are never run, as on
+  // hardware.
+  void queue_user_apc(const UserApc& apc);
+  // Removes and returns the queued APCs, oldest first.
+  [[nodiscard]] std::vector<UserApc> take_user_apcs();
+  [[nodiscard]] bool user_apc_pending() const noexcept {
+    return user_apc_pending_.load(std::memory_order_acquire);
+  }
+
   bool exchange_boost_disabled(bool disabled) noexcept {
     return boost_disabled_.exchange(disabled, std::memory_order_acq_rel);
   }
@@ -197,6 +218,9 @@ class KernelThread final : public KernelObject {
   // Multi-object waits on this thread; woken when it terminates.
   detail::MultiWaitList multi_waiters_;
   std::atomic<bool> boost_disabled_{false};
+  std::mutex apc_mutex_;
+  std::deque<UserApc> user_apcs_;
+  std::atomic<bool> user_apc_pending_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned
   // naturally, or the thread was terminated before ever running entry_()),

@@ -147,6 +147,24 @@ void KernelThread::set_processor_affinity(std::uint32_t affinity) noexcept {
 #endif
 }
 
+void KernelThread::queue_user_apc(const UserApc& apc) {
+  {
+    std::scoped_lock lock(apc_mutex_);
+    user_apcs_.push_back(apc);
+    user_apc_pending_.store(true, std::memory_order_release);
+  }
+  // An alertable wait registers on this thread's own list; see wait.cpp.
+  multi_waiters_.notify_always();
+}
+
+std::vector<KernelThread::UserApc> KernelThread::take_user_apcs() {
+  std::scoped_lock lock(apc_mutex_);
+  std::vector<UserApc> apcs(user_apcs_.begin(), user_apcs_.end());
+  user_apcs_.clear();
+  user_apc_pending_.store(false, std::memory_order_release);
+  return apcs;
+}
+
 std::string KernelThread::name() const {
   std::scoped_lock lock(mutex_);
   return name_;
