@@ -553,6 +553,15 @@ Second batch, 11 October 2026 (local, not pushed):
   multi-object waits on it, as the NT dispatcher does, and a change wakes
   only that list.
 
+- **Multi-object wait type was inverted.** Both exports took 0 as WaitAny
+  and nonzero as WaitAll. NT's `WAIT_TYPE` is `{ WaitAll, WaitAny, ... }`
+  (0 = WaitAll), and xenia selects WaitAny for any nonzero value, so every
+  guest multi-object wait ran as the other type: a WaitAny on a work event
+  and a quit event became a WaitAll that needs both. Fixed; other values are
+  now rejected, and `NtWaitForMultipleObjectsEx` rejects a WaitAll naming one
+  object twice with `STATUS_INVALID_PARAMETER_MIX`. This is a candidate cause
+  of AC6's permanent waits; unconfirmed until AC6 is run.
+
 Semantics provenance (research policy, section 5):
 
 | Question | Source | Certainty | Implemented |
@@ -561,6 +570,8 @@ Semantics provenance (research policy, section 5):
 | WaitAny abandoned status is `0x80 + index`; WaitAll is `0x80` | WRK `KeWaitForMultipleObjects` (recalled) | Medium | Yes |
 | `SignalState` is the object's state; a direct write takes effect at the next wait or signal and wakes no blocked waiter | NT `DISPATCHER_HEADER` semantics: waits test `SignalState`, waking is done by `KiWaitTest` on signal paths | High for NT | Yes |
 | `ObReferenceObjectByHandle` returns the object body | NT object manager contract | High | Events and semaphores |
+| `WAIT_TYPE`: WaitAll = 0, WaitAny = 1 | NT headers (ntdoc `_WAIT_TYPE`); xenia `XObject::WaitMultiple` (nonzero = WaitAny) | High | Yes |
+| Nt WaitAll with a duplicate object fails `STATUS_INVALID_PARAMETER_MIX` | ReactOS `ntoskrnl/ob/obwait.c`; Win32 `WaitForMultipleObjects` documentation | High for NT; Xbox unverified | Nt only; Ke still consumes a duplicate once |
 
 Verification (Debug unless noted, this host):
 
@@ -578,10 +589,8 @@ Verification (Debug unless noted, this host):
 
 Still open in V3-03:
 
-- Duplicate objects in one WaitAll are consumed once. NT's
-  `NtWaitForMultipleObjects` is understood to reject duplicates with
-  `STATUS_INVALID_PARAMETER_MIX`; not verified for the Xbox kernel, so
-  unchanged.
+- `KeWaitForMultipleObjects` with a duplicate object in a WaitAll consumes
+  it once; NT leaves that case undefined for kernel callers.
 - Alertable waits and APC delivery during waits need APCs, which do not
   exist yet (V3-04).
 - A thread that runs guest code on a host thread not started by
