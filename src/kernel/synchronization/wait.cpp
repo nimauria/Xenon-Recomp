@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <thread>
 
 
 namespace xenon::kernel {
@@ -146,6 +147,16 @@ WaitResult wait_for_single_object(
     return WaitResult::Failed;
   }
 
+  // A KernelThread's wait must end when the thread is terminated, which only
+  // the multi-object path (registered on the waiter's own thread) provides.
+  // Waiting for another thread to finish still goes through join(), which
+  // terminate() cannot interrupt.
+  if (KernelThread::current() && object->type() != ObjectType::Thread) {
+    std::uint32_t index = 0;
+    return wait_for_multiple_objects(std::span(&object, 1), false, timeout, &index,
+                                     waiting_thread_id);
+  }
+
   if (object->type() == ObjectType::Mutant) {
     bool abandoned = false;
     if (!static_cast<KernelMutant&>(*object).acquire(waiting_thread_id, timeout, &abandoned)) {
@@ -230,21 +241,35 @@ WaitResult wait_for_multiple_objects(
   const auto deadline =
       std::chrono::steady_clock::now() + (infinite ? std::chrono::milliseconds(0) : timeout);
 
+  // A terminated thread takes nothing: its guest code is only finishing the
+  // block it was in when terminate() was called.
+  auto* self = KernelThread::current();
+  const auto terminating = [self] { return self && self->is_terminated(); };
+  if (terminating()) return WaitResult::Terminating;
+
   // A wait that is satisfied at once, or has a zero timeout, never registers.
   if (try_satisfy()) return satisfied();
   if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
 
   // Registered on every object before the next check, so any change after
-  // that check wakes this block (see multi_wait_list.hpp).
+  // that check wakes this block (see multi_wait_list.hpp). A KernelThread
+  // also registers on its own thread, so terminate() wakes it.
   detail::MultiWaitBlock block;
   for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
+  KernelObject* own_thread = nullptr;
+  if (self && std::find(distinct.begin(), distinct.end(), self) == distinct.end()) {
+    own_thread = self;
+    detail::WaitAccess::wait_list(*own_thread).add(&block);
+  }
   struct Unregister {
     std::span<KernelObject* const> objects;
+    KernelObject* own_thread;
     detail::MultiWaitBlock* block;
     ~Unregister() {
       for (auto* object : objects) detail::WaitAccess::wait_list(*object).remove(block);
+      if (own_thread) detail::WaitAccess::wait_list(*own_thread).remove(block);
     }
-  } unregister{distinct, &block};
+  } unregister{distinct, own_thread, &block};
 
   while (true) {
     std::uint64_t observed = 0;
@@ -252,6 +277,7 @@ WaitResult wait_for_multiple_objects(
       std::scoped_lock lock(block.mutex);
       observed = block.wakeups;
     }
+    if (terminating()) return WaitResult::Terminating;
     if (try_satisfy()) return satisfied();
     if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
 
@@ -264,6 +290,30 @@ WaitResult wait_for_multiple_objects(
       (void)block.condition.wait_until(lock, deadline, woken);
     }
   }
+}
+
+WaitResult delay_current_thread(std::chrono::milliseconds delay) {
+  auto* self = KernelThread::current();
+  if (!self) {
+    if (delay.count() > 0) std::this_thread::sleep_for(delay);
+    return WaitResult::Success;
+  }
+  if (self->is_terminated()) return WaitResult::Terminating;
+  if (delay.count() <= 0) return WaitResult::Success;
+
+  detail::MultiWaitBlock block;
+  auto& own = detail::WaitAccess::wait_list(*self);
+  own.add(&block);
+  struct Unregister {
+    detail::MultiWaitList& list;
+    detail::MultiWaitBlock* block;
+    ~Unregister() { list.remove(block); }
+  } unregister{own, &block};
+  const auto deadline = std::chrono::steady_clock::now() + delay;
+  std::unique_lock lock(block.mutex);
+  // Registered before this check, so a terminate() after it wakes the block.
+  block.condition.wait_until(lock, deadline, [&] { return self->is_terminated(); });
+  return self->is_terminated() ? WaitResult::Terminating : WaitResult::Success;
 }
 
 }  // namespace xenon::kernel

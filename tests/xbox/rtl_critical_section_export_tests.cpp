@@ -19,6 +19,7 @@
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_rtl_critical_section_exports.hpp"
 
@@ -390,6 +391,48 @@ void test_owner_is_guest_kthread_not_host_thread_id() {
   assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == kKthreadB);
 }
 
+// A thread terminated while it waits to enter takes no ownership. Its waiter
+// registration stays in LockCount, as on hardware, and the section still
+// hands off correctly to the next thread when the owner leaves.
+void test_a_terminated_waiter_takes_no_ownership() {
+  Fixture fixture;
+  const auto cs = fixture.alloc_cs();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdInitialize, cpu).success);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdEnter, cpu, /*thread_id=*/7u).success);
+
+  std::atomic<bool> entering{false};
+  kernel::ThreadCreationParams params{};
+  auto waiter = std::make_shared<kernel::KernelThread>(
+      [&]() -> std::uint32_t {
+        cpu::CpuState local{};
+        local.gpr[3] = cs;
+        entering = true;
+        assert(fixture.invoke(kOrdEnter, local, /*thread_id=*/8u).success);
+        return 0;
+      },
+      params);
+  assert(waiter->start());
+  while (!entering.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  assert(waiter->terminate(0));
+  assert(waiter->join(2000) && "terminate() ends the wait inside RtlEnterCriticalSection");
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 7u);
+  assert(fixture.address_space->read32_be(cs + kRecursionCountOffset) == 1u);
+  assert(static_cast<std::int32_t>(fixture.address_space->read32_be(cs + kLockCountOffset)) == 1);
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdLeave, cpu, 7u).success);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = cs;
+  assert(fixture.invoke(kOrdEnter, cpu, 9u).success);
+  assert(fixture.address_space->read32_be(cs + kOwningThreadOffset) == 9u);
+}
+
 int main() {
   std::cout << "Testing xboxkrnl Rtl*CriticalSection exports...\n";
   test_owner_is_guest_kthread_not_host_thread_id();
@@ -402,6 +445,7 @@ int main() {
   test_enter_blocks_and_wakes_across_real_threads();
   test_lock_count_survives_handoff_with_multiple_waiters();
   test_try_enter_does_not_steal_a_pending_handoff();
+  test_a_terminated_waiter_takes_no_ownership();
 
   std::cout << "All Rtl*CriticalSection export tests passed!\n";
   return 0;

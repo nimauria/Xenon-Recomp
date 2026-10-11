@@ -323,7 +323,14 @@ bool KernelThread::set_tls(std::uint32_t slot, std::uint64_t value) {
   return true;
 }
 
+namespace {
+thread_local KernelThread* t_current_thread = nullptr;
+}  // namespace
+
+KernelThread* KernelThread::current() noexcept { return t_current_thread; }
+
 void KernelThread::thread_main() {
+  t_current_thread = this;
   // Honors CREATE_SUSPENDED: park here until resume() drops suspend_count_
   // to zero, or terminate() is called while still parked - either way, this
   // never runs entry_() before the thread has actually been resumed at
@@ -375,6 +382,7 @@ void KernelThread::thread_main() {
       multi_waiters_.notify_always();
     }
   }
+  t_current_thread = nullptr;
   completion_promise_.set_value();
 }
 

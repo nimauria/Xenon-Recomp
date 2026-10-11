@@ -59,6 +59,9 @@ class KernelThread final : public KernelObject {
   ~KernelThread() override;
 
   [[nodiscard]] std::uint32_t thread_id() const noexcept { return thread_id_; }
+  // The KernelThread whose thread_main() is running on the calling host
+  // thread, or null on any other host thread.
+  [[nodiscard]] static KernelThread* current() noexcept;
   [[nodiscard]] ThreadState state() const noexcept;
   [[nodiscard]] ThreadPriority priority() const noexcept;
   [[nodiscard]] std::uint32_t exit_code() const noexcept;

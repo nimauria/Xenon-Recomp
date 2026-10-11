@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "xenon/kernel/time.hpp"
+#include "xenon/kernel/wait.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 
 namespace xenon::xbox {
@@ -38,15 +39,14 @@ bool ke_query_system_time(ExportCallContext& context) {
 // thread here genuinely suspends only this guest thread - other guest
 // threads (each their own host thread) keep running, matching real Xbox 360
 // per-thread delay semantics without needing the scheduler-safepoint work
-// tracked separately for suspend()/terminate().
+// tracked separately for suspend()/terminate(). A guest thread terminated while
+// it sleeps returns at once; its dispatch loop then stops it.
 bool ke_delay_execution_thread(ExportCallContext& context) {
   const auto interval_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
   if (interval_ptr != 0u) {
     const auto raw = static_cast<std::int64_t>(context.memory.read64_be(interval_ptr));
     const auto delay = xbox_timeout_to_relative_ms(raw);
-    if (delay.count() > 0) {
-      TimeServices::sleep(static_cast<std::uint32_t>(delay.count()));
-    }
+    static_cast<void>(kernel::delay_current_thread(delay));
   }
   context.cpu.gpr[3] = 0u;  // STATUS_SUCCESS
   return true;

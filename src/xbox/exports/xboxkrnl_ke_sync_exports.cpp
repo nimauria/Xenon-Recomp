@@ -60,6 +60,9 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
     case kernel::WaitResult::Timeout: return status::Timeout;
     // STATUS_ABANDONED_WAIT_0 + index, like STATUS_WAIT_0 + index.
     case kernel::WaitResult::Abandoned: return 0x00000080u + signaled_index_as_status;
+    // The waiting thread is being terminated; the dispatch loop stops it at
+    // its next block boundary.
+    case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;

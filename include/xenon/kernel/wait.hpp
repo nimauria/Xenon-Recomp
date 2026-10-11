@@ -15,6 +15,9 @@ enum class WaitResult : std::uint32_t {
   Success = 0,
   Timeout = 0x00000102,
   Abandoned = 0x00000080,
+  // The waiting thread was terminated (KernelThread::terminate()) while it
+  // waited, or before it began; the wait took nothing. STATUS_THREAD_IS_TERMINATING.
+  Terminating = 0xC000004B,
   Failed = 0xFFFFFFFF,
 };
 
@@ -39,6 +42,11 @@ enum class WaitResult : std::uint32_t {
     std::chrono::milliseconds timeout,
     std::uint32_t* signaled_index = nullptr,
     std::uint32_t waiting_thread_id = 0);
+
+// Sleeps the calling thread for `delay` (KeDelayExecutionThread). On a
+// KernelThread the sleep ends early, returning Terminating, if the thread is
+// terminated; otherwise it returns Success.
+[[nodiscard]] WaitResult delay_current_thread(std::chrono::milliseconds delay);
 
 // Helper to check if an object is waitable
 [[nodiscard]] bool is_waitable_object(ObjectType type);
