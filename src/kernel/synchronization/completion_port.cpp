@@ -8,6 +8,7 @@ void IoCompletionPort::post(CompletionPacket packet) {
   {
     std::scoped_lock lock(mutex_);
     queue_.push_back(std::move(packet));
+    ready_->set();
   }
   condition_.notify_one();
 }
@@ -17,6 +18,7 @@ bool IoCompletionPort::try_remove(CompletionPacket& out_packet) {
   if (queue_.empty()) return false;
   out_packet = std::move(queue_.front());
   queue_.pop_front();
+  if (queue_.empty()) ready_->reset();
   return true;
 }
 
@@ -28,6 +30,7 @@ bool IoCompletionPort::remove_for(std::chrono::milliseconds timeout,
   }
   out_packet = std::move(queue_.front());
   queue_.pop_front();
+  if (queue_.empty()) ready_->reset();
   return true;
 }
 

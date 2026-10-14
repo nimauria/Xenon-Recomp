@@ -1,5 +1,7 @@
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
+#include "xenon/kernel/completion_port.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -92,6 +94,92 @@ std::chrono::milliseconds read_timeout(ExportCallContext& context,
 }
 
 }  // namespace
+
+bool nt_create_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (handle_out == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+  Handle handle{};
+  const auto code = process.handle_table().insert(std::make_shared<kernel::IoCompletionPort>(),
+                                                  0xFFFFFFFFu, HandleFlags::None, handle);
+  if (code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(code);
+    return true;
+  }
+  context.memory.write32_be(handle_out, handle);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+namespace {
+
+std::shared_ptr<kernel::IoCompletionPort> lookup_port(kernel::KernelProcess& process, Handle handle) {
+  kernel::HandleView view{};
+  if (process.handle_table().lookup(handle, view) != KernelIoCode::Success || !view.object ||
+      view.object->type() != kernel::ObjectType::IoCompletionPort) {
+    return nullptr;
+  }
+  return std::static_pointer_cast<kernel::IoCompletionPort>(view.object);
+}
+
+}  // namespace
+
+bool nt_set_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto port = lookup_port(process, static_cast<Handle>(context.cpu.gpr[3]));
+  if (!port) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  kernel::CompletionPacket packet{};
+  packet.key = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  packet.context = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  // The guest's NTSTATUS travels in the packet's request id; IoStatus's own
+  // code field is the host I/O result, which a guest-posted packet has none of.
+  packet.status.request_id = static_cast<std::uint32_t>(context.cpu.gpr[6]);
+  packet.status.information = static_cast<std::uint32_t>(context.cpu.gpr[7]);
+  port->post(packet);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+bool nt_remove_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto port = lookup_port(process, static_cast<Handle>(context.cpu.gpr[3]));
+  const auto key_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto apc_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto iosb_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
+  if (!port) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  const auto timeout = read_timeout(context, static_cast<cpu::GuestAddress>(context.cpu.gpr[7]));
+  const bool infinite = timeout == xbox_infinite_timeout();
+  const auto deadline = std::chrono::steady_clock::now() + (infinite ? std::chrono::milliseconds(0) : timeout);
+  kernel::CompletionPacket packet{};
+  while (!port->try_remove(packet)) {
+    auto remaining = infinite ? timeout
+                              : std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    deadline - std::chrono::steady_clock::now());
+    if (!infinite && remaining.count() < 0) remaining = std::chrono::milliseconds(0);
+    const auto result = kernel::wait_for_single_object(port->ready_event(), remaining,
+                                                       context.thread_id);
+    if (result == kernel::WaitResult::Success) continue;  // another remover may win it
+    context.cpu.gpr[3] = to_status(result, 0u);
+    return true;
+  }
+  if (key_ptr != 0u) context.memory.write32_be(key_ptr, static_cast<std::uint32_t>(packet.key));
+  if (apc_ptr != 0u) context.memory.write32_be(apc_ptr, static_cast<std::uint32_t>(packet.context));
+  if (iosb_ptr != 0u) {
+    const auto completion_status = packet.status.request_id != 0u
+                                       ? static_cast<std::uint32_t>(packet.status.request_id)
+                                       : to_status(packet.status.code);
+    context.memory.write32_be(iosb_ptr, completion_status);
+    context.memory.write32_be(iosb_ptr + 4u, static_cast<std::uint32_t>(packet.status.information));
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
 
 // NtCreateEvent (ordinal 0xD1)
 // Guest ABI: r3 = PHANDLE out, r4 = POBJECT_ATTRIBUTES (unnamed-only support -
@@ -763,6 +851,9 @@ constexpr SyncExportSpec kSyncExports[] = {
     {0x0F5u, "NtResumeThread"},
     {0x0CFu, "NtClose"},
     {0x0FBu, "NtSignalAndWaitForSingleObjectEx"},
+    {0x0D3u, "NtCreateIoCompletion"},
+    {0x0F8u, "NtSetIoCompletion"},
+    {0x0F4u, "NtRemoveIoCompletion"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -823,6 +914,15 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   }
   if (name == "NtClose") {
     return [&process](ExportCallContext& ctx) { return nt_close_export(process, ctx); };
+  }
+  if (name == "NtCreateIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_create_io_completion_export(process, ctx); };
+  }
+  if (name == "NtSetIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_set_io_completion_export(process, ctx); };
+  }
+  if (name == "NtRemoveIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_remove_io_completion_export(process, ctx); };
   }
   if (name == "NtSignalAndWaitForSingleObjectEx") {
     return [&process](ExportCallContext& ctx) {
