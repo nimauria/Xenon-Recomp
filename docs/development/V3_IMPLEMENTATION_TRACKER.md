@@ -93,6 +93,17 @@ Decisions recorded (not implemented):
   explicit stop. Development builds may select Gen 7 explicitly and every
   interpreted block stays visible in the capability report. Owned by
   V3-09, with the event kinds added to the V3-02 event model then.
+- Strict AOT reuses the existing learning loop (owner suggestion, 14
+  October 2026). Compiled-lookup misses are already recorded as adaptive
+  observations (`record_compiled_lookup_miss`, capped at 65,536 facts per
+  session) and `xenon-prepare --observations` feeds them into the next
+  preparation, filtered by image hash and part of the cache key, so a
+  target interpreted once is compiled on the next Play. V3-09 keeps this:
+  development runs interpret and record; strict runs stop on a miss and
+  still record it, so the following preparation compiles it. Limits: only
+  executed code is learned; a learning run is only as correct as Gen 7;
+  observed targets stay candidates that discovery must validate as code;
+  runtime-generated or self-modified code cannot be learned this way.
 - Launcher and standalone packages share one preparation graph (Gen 10
   store); only link and package stages differ. The standalone bootstrap
   and the launcher adapter are thin hosts over the same `xenon_core`
