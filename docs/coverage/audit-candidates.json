@@ -1,19 +1,19 @@
 {
-  "content_digest": "sha256:885ca492e9919fc632a3ab987617ad22a7ee952af3e087ab81c523465c1e44d3",
+  "content_digest": "sha256:83969afb444a6b914cbd0411fd76d2e9cb35ca30373180b7a16408a83571a97a",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "1ec37399c9ef0129f945ce837f3889c83825bf89",
+    "assessed_commit": "859d9bab161e2fb2a76eca035966bc7100fe3403",
     "worktree": "clean"
   },
   "problems": [
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 1ec37399c9ef",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 859d9bab161e",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
     },
     {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 1ec37399c9ef",
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 859d9bab161e",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
@@ -144,6 +144,7 @@
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:ObCreateSymbolicLink", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:ObDeleteSymbolicLink", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::ob_dereference_object_export", "id": "kernel:registered:ObDereferenceObject", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler xbox::ob_lookup_thread_by_thread_id_export", "id": "kernel:registered:ObLookupThreadByThreadId", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::ob_reference_object_by_handle_export", "id": "kernel:registered:ObReferenceObjectByHandle", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:RtlAnsiStringToUnicodeString", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:RtlAppendStringToString", "kind": "implementation_found"},
