@@ -127,6 +127,7 @@ bool XenonSession::register_kernel_object_exports() {
         {0x0C7u, "MmSetAddressProtect", &xbox::mm_set_address_protect_export},
         {0x110u, "ObReferenceObjectByHandle", &xbox::ob_reference_object_by_handle_export},
         {0x105u, "ObDereferenceObject", &xbox::ob_dereference_object_export},
+        {0x10Bu, "ObLookupThreadByThreadId", &xbox::ob_lookup_thread_by_thread_id_export},
         {0x0DAu, "NtDuplicateObject", &xbox::nt_duplicate_object_export},
         {0x0CEu, "NtClearEvent", &xbox::nt_clear_event_export},
         {0x0F6u, "NtSetEvent", &xbox::nt_set_event_export},

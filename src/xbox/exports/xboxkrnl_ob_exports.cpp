@@ -92,6 +92,21 @@ bool ob_dereference_object_export(kernel::KernelProcess&, ExportCallContext& con
   return true;
 }
 
+bool ob_lookup_thread_by_thread_id_export(kernel::KernelProcess& process,
+                                          ExportCallContext& context) {
+  constexpr std::uint32_t kStatusNotFound = 0xC0000225u;
+  const auto thread_id = static_cast<std::uint32_t>(context.cpu.gpr[3]);
+  const auto out_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto thread = process.thread_manager().get_thread(thread_id);
+  if (!thread || thread->guest_kthread_address() == 0u) {
+    context.cpu.gpr[3] = kStatusNotFound;
+    return true;
+  }
+  if (out_ptr != 0u) context.memory.write32_be(out_ptr, thread->guest_kthread_address());
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
 namespace {
 
 std::uint32_t to_status(KernelIoCode code) {

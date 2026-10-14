@@ -37,6 +37,13 @@ namespace xenon::xbox {
 [[nodiscard]] bool ob_dereference_object_export(kernel::KernelProcess& process,
                                                 core::ExportCallContext& context);
 
+// ObLookupThreadByThreadId (ordinal 0x10B): r3 = thread id, r4 = object
+// pointer out -> NTSTATUS. Writes the thread's guest KTHREAD address;
+// STATUS_NOT_FOUND for an unknown id or a thread with no guest KTHREAD, as
+// in xenia.
+[[nodiscard]] bool ob_lookup_thread_by_thread_id_export(kernel::KernelProcess& process,
+                                                        core::ExportCallContext& context);
+
 // NtDuplicateObject (ordinal 0xDA)
 // Guest ABI: r3 = source handle, r4 = optional guest pointer to receive the
 // new handle, r5 = options (1 = DUPLICATE_CLOSE_SOURCE, close the source
