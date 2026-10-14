@@ -1,19 +1,19 @@
 {
-  "content_digest": "sha256:751bef8672d299dd47d78eb817ba71755ccd1fb932dea65ffd76fd6eacb2210e",
+  "content_digest": "sha256:623b3708f8c4b5e7187b66aa4668a67711ccb76749060b2f5747431fbb9aeb3f",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "af65b5708a3064dfa7c09ed88c52e0803142af38",
+    "assessed_commit": "5c487cafc7f54e374e0eabe60b553cbfdbdce669",
     "worktree": "clean"
   },
   "problems": [
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision af65b5708a30",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 5c487cafc7f5",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
     },
     {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision af65b5708a30",
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 5c487cafc7f5",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
@@ -110,6 +110,7 @@
     {"category": "kernel", "detail": "handler xbox::nt_close_export", "id": "kernel:registered:NtClose", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_create_event_export", "id": "kernel:registered:NtCreateEvent", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler NtCreateFile_thunk", "id": "kernel:registered:NtCreateFile", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler xbox::nt_create_io_completion_export", "id": "kernel:registered:NtCreateIoCompletion", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_create_mutant_export", "id": "kernel:registered:NtCreateMutant", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_create_semaphore_export", "id": "kernel:registered:NtCreateSemaphore", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_create_timer_export", "id": "kernel:registered:NtCreateTimer", "kind": "implementation_found"},
@@ -131,9 +132,11 @@
     {"category": "kernel", "detail": "handler NtReadFileScatter_thunk", "id": "kernel:registered:NtReadFileScatter", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_release_mutant_export", "id": "kernel:registered:NtReleaseMutant", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_release_semaphore_export", "id": "kernel:registered:NtReleaseSemaphore", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler xbox::nt_remove_io_completion_export", "id": "kernel:registered:NtRemoveIoCompletion", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_resume_thread_export", "id": "kernel:registered:NtResumeThread", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_set_event_export", "id": "kernel:registered:NtSetEvent", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler NtSetInformationFile_thunk", "id": "kernel:registered:NtSetInformationFile", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler xbox::nt_set_io_completion_export", "id": "kernel:registered:NtSetIoCompletion", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_set_timer_ex_export", "id": "kernel:registered:NtSetTimerEx", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_signal_and_wait_for_single_object_ex_export", "id": "kernel:registered:NtSignalAndWaitForSingleObjectEx", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler xbox::nt_suspend_thread_export", "id": "kernel:registered:NtSuspendThread", "kind": "implementation_found"},
