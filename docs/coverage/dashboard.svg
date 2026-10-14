@@ -3,11 +3,11 @@
 <desc id="desc">Treemaps of audited source-declared operations. Percentages are verified lower bounds; unassessed entries remain unknown.</desc>
 <rect width="1200" height="1057" fill="#101721"/>
 <text x="30" y="49" fill="#f4f7fb" font-size="30" font-family="sans-serif" font-weight="700">XENON  /  IMPLEMENTATION AUDIT</text>
-<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/885 (≥3.3%) test verified in the listed source subset • overall hardware coverage unknown</text>
-<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 859d9ba</text>
+<text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/888 (≥3.3%) test verified in the listed source subset • overall hardware coverage unknown</text>
+<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at af65b57</text>
 <rect x="30" y="105" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="135" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox kernel exports</text>
-<text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">275 listed · 33 classified · ≥7.3% test verified</text>
+<text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">278 listed · 33 classified · ≥7.2% test verified</text>
 <rect x="46.0" y="169" width="9" height="9" fill="#3dbb79"/>
 <text x="59.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">20 verified</text>
 <rect x="135.0" y="169" width="9" height="9" fill="#55a6e9"/>
@@ -19,23 +19,24 @@
 <rect x="366.0" y="169" width="9" height="9" fill="#88919e"/>
 <text x="379.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">0 unimplemented</text>
 <rect x="479.0" y="169" width="9" height="9" fill="#514c72"/>
-<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">242 unassessed</text>
+<text x="492.0" y="177" fill="#c5d1dd" font-size="10" font-family="sans-serif">245 unassessed</text>
 <rect x="42" y="189" width="264" height="29" rx="3" fill="#223044"/>
-<text x="46" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Crypto  ·  14  ·  0 verified (≥0.0%)</text>
-<rect x="46.00" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptBnQw_SwapDwQwLeBe: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="64.29" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptHmacSha: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="82.57" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="100.86" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4Ecb: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="119.14" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4Key: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="137.43" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
-<rect x="155.71" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Final: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="174.00" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Init: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="192.29" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Update: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="210.57" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaFinal: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="228.86" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaInit: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="247.14" y="207.00" width="17.29" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaUpdate: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
-<rect x="265.43" y="207.00" width="17.29" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsolePrivateKeySign: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
-<rect x="283.71" y="207.00" width="17.29" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsoleSignatureVerification: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<text x="46" y="202" fill="#e5edf6" font-size="12" font-family="sans-serif">Executive  ·  15  ·  0 verified (≥0.0%)</text>
+<rect x="46.00" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="63.07" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="80.13" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="97.20" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolTypeWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="114.27" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="131.33" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExCreateThread: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
+<rect x="148.40" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExFreePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="165.47" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExGetXConfigSetting: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="182.53" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExInitializeReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="199.60" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExQueryPoolBlockSize: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="216.67" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExRegisterTitleTerminateNotification: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="233.73" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExReleaseReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="250.80" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTerminateThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
+<rect x="267.87" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<rect x="284.93" y="207.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
 <rect x="42" y="221" width="264" height="36" rx="3" fill="#223044"/>
 <text x="46" y="234" fill="#e5edf6" font-size="12" font-family="sans-serif">Kernel  ·  46  ·  9 verified (≥19.6%)</text>
 <rect x="46.00" y="239.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:KeAcquireSpinLockAtRaisedIrql: unassessed; src/xbox/exports/xboxkrnl_ke_irql_exports.cpp</title></rect>
@@ -215,27 +216,29 @@
 <rect x="554.87" y="207.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioSuspendRenderDriverClients: unassessed; src/audio/exports.cpp</title></rect>
 <rect x="310.00" y="214.00" width="10.13" height="6" fill="#514c72"><title>kernel:registered:XAudioUnregisterRenderDriverClient: unassessed; src/audio/exports.cpp</title></rect>
 <rect x="306" y="228" width="264" height="29" rx="3" fill="#223044"/>
-<text x="310" y="241" fill="#e5edf6" font-size="12" font-family="sans-serif">Debug  ·  3  ·  0 verified (≥0.0%)</text>
-<rect x="310.00" y="246.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPoint: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
-<rect x="395.33" y="246.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPointWithStatus: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
-<rect x="480.67" y="246.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgPrompt: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<text x="310" y="241" fill="#e5edf6" font-size="12" font-family="sans-serif">Crypto  ·  17  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptAesCbc: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="325.06" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptAesEcb: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="340.12" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptAesKey: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="355.18" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptBnQw_SwapDwQwLeBe: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="370.24" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptHmacSha: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="385.29" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="400.35" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4Ecb: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="415.41" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptRc4Key: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="430.47" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="445.53" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Final: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="460.59" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Init: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="475.65" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptSha256Update: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="490.71" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaFinal: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="505.76" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaInit: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="520.82" y="246.00" width="14.06" height="6" fill="#514c72"><title>kernel:registered:XeCryptShaUpdate: unassessed; src/xbox/exports/xboxkrnl_crypt_exports.cpp</title></rect>
+<rect x="535.88" y="246.00" width="14.06" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsolePrivateKeySign: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
+<rect x="550.94" y="246.00" width="14.06" height="6" fill="#d98b6a"><title>kernel:crypto:XeKeysConsoleSignatureVerification: stub; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
 <rect x="306" y="260" width="264" height="29" rx="3" fill="#223044"/>
-<text x="310" y="273" fill="#e5edf6" font-size="12" font-family="sans-serif">Executive  ·  15  ·  0 verified (≥0.0%)</text>
-<rect x="310.00" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="327.07" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="344.13" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="361.20" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolTypeWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="378.27" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExAllocatePoolWithTag: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="395.33" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExCreateThread: unassessed; src/core/session/exports/export_registration.cpp</title></rect>
-<rect x="412.40" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExFreePool: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="429.47" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExGetXConfigSetting: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
-<rect x="446.53" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExInitializeReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="463.60" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExQueryPoolBlockSize: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="480.67" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExRegisterTitleTerminateNotification: unassessed; src/xbox/exports/xboxkrnl_misc_exports.cpp</title></rect>
-<rect x="497.73" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExReleaseReadWriteLock: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="514.80" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTerminateThread: unassessed; src/xbox/exports/xboxkrnl_sync_exports.cpp</title></rect>
-<rect x="531.87" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockExclusive: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
-<rect x="548.93" y="278.00" width="16.07" height="6" fill="#514c72"><title>kernel:registered:ExTryToAcquireReadWriteLockShared: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>
+<text x="310" y="273" fill="#e5edf6" font-size="12" font-family="sans-serif">Debug  ·  3  ·  0 verified (≥0.0%)</text>
+<rect x="310.00" y="278.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPoint: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="395.33" y="278.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgBreakPointWithStatus: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
+<rect x="480.67" y="278.00" width="84.33" height="6" fill="#514c72"><title>kernel:registered:DbgPrompt: unassessed; src/xbox/exports/xboxkrnl_string_exports.cpp</title></rect>
 <rect x="306" y="292" width="264" height="29" rx="3" fill="#223044"/>
 <text x="310" y="305" fill="#e5edf6" font-size="12" font-family="sans-serif">Memory  ·  12  ·  0 verified (≥0.0%)</text>
 <rect x="310.00" y="310.00" width="20.33" height="6" fill="#514c72"><title>kernel:registered:MmAllocatePhysicalMemory: unassessed; src/core/session/exports/kernel_object_exports.cpp</title></rect>

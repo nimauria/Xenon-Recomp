@@ -1,19 +1,19 @@
 {
-  "content_digest": "sha256:83969afb444a6b914cbd0411fd76d2e9cb35ca30373180b7a16408a83571a97a",
+  "content_digest": "sha256:751bef8672d299dd47d78eb817ba71755ccd1fb932dea65ffd76fd6eacb2210e",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "859d9bab161e2fb2a76eca035966bc7100fe3403",
+    "assessed_commit": "af65b5708a3064dfa7c09ed88c52e0803142af38",
     "worktree": "clean"
   },
   "problems": [
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 859d9bab161e",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision af65b5708a30",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
     },
     {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision 859d9bab161e",
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision af65b5708a30",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
@@ -234,6 +234,9 @@
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XMASetOutputBufferReadOffset", "kind": "implementation_found"},
     {"category": "kernel", "detail": "registered without a statically visible handler", "id": "kernel:registered:XMASetOutputBufferValid", "kind": "implementation_found"},
     {"category": "kernel", "detail": "guest variable export", "id": "kernel:registered:XboxKrnlVersion", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptAesCbc", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptAesEcb", "kind": "implementation_found"},
+    {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptAesKey", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptBnQw_SwapDwQwLeBe", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptHmacSha", "kind": "implementation_found"},
     {"category": "kernel", "detail": "handler lambda", "id": "kernel:registered:XeCryptRc4", "kind": "implementation_found"},
@@ -332,6 +335,7 @@
     {"category": "kernel", "detail": "mentioned by xenon_audio_xma_tests", "id": "kernel:registered:XMAEnableContext", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_audio_export_tests", "id": "kernel:registered:XMASetLoopData", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_session_tests", "id": "kernel:registered:XboxKrnlVersion", "kind": "test_evidence_found"},
+    {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptAesKey", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptBnQw_SwapDwQwLeBe", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptHmacSha", "kind": "test_evidence_found"},
     {"category": "kernel", "detail": "mentioned by xenon_misc_export_tests", "id": "kernel:registered:XeCryptRc4", "kind": "test_evidence_found"},
