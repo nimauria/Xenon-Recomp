@@ -1,8 +1,9 @@
 # Xenon V3 implementation tracker
 
 This is the single maintained status record for the Xenon V3 programme
-(Xbox 360 platform fidelity, advanced recompilation and adaptive
-compatibility). It records what the tree actually does, measured on a named
+(Xbox 360 native recompilation, platform fidelity and dual-format game
+delivery; specification amended 14 October 2026, see "Plan amendment"
+below). It records what the tree actually does, measured on a named
 revision, and what each phase must deliver. Executable tests and the
 configured CMake graph remain the source of truth; where this file disagrees
 with them, this file is wrong.
@@ -33,16 +34,70 @@ retail title works.
 | V3-06 | Discovery database | NOT STARTED | |
 | V3-07 | Deep analysis and decompiler views | NOT STARTED | |
 | V3-08 | Adaptive knowledge | NOT STARTED | |
-| V3-09 | AOT compilation | NOT STARTED | |
+| V3-09 | AOT compilation and strict mode | NOT STARTED | Strict-AOT blockers recorded under "Plan amendment" |
 | V3-10 | CPU semantics and verifier | NOT STARTED | |
 | V3-11 | Memory fidelity and efficiency | NOT STARTED | |
 | V3-12 | Xenos command frontend | NOT STARTED | |
 | V3-13 | Vulkan/D3D12 parity | NOT STARTED | |
 | V3-14 | Audio and timing | NOT STARTED | |
 | V3-15 | Replay and compatibility lab | NOT STARTED | |
-| V3-16 | Standalone SDK and host | NOT STARTED | |
-| V3-17 | Preparation and packaging | NOT STARTED | |
+| V3-16 | Standalone SDK and dual hosts | NOT STARTED | One game core under the launcher module or a standalone bootstrap |
+| V3-17 | CLI and dual-format packaging | NOT STARTED | `launcher` / `standalone` / `both` from one preparation |
 | V3-18 | Cross-title qualification | NOT STARTED | |
+
+## Plan amendment (14 October 2026)
+
+The owner amended the specification. Changes against the version this
+tracker was started from:
+
+- **Strict AOT.** Release and gameplay builds must not interpret PowerPC at
+  runtime; a compiled-lookup miss must fail with a structured diagnostic.
+  Gen 7 interpretation stays, as an explicit developer and reference option.
+- **Two products from one preparation graph:** a launcher-loadable module
+  and a standalone native executable/package, selected as `launcher`,
+  `standalone` or `both`, sharing discovery, IR, generated code and
+  compatible objects. Optional deterministic source export. A standalone
+  package need not be a single file.
+- **Phase changes.** V3-02 gains structured `aot_missing_target`,
+  `dynamic_code_detected`, `unsupported_guest_instruction` and
+  `unresolved_indirect_flow` events; V3-09 becomes "AOT compilation and
+  strict mode"; V3-12 adds statically preparable shaders and resources;
+  V3-16 becomes dual hosts; V3-17 becomes CLI and dual-format packaging;
+  V3-18 qualifies both paths. The acceptance framework adds strict-AOT
+  and packaging-parity checks.
+- **V3-00 additions:** audit Qt independence of source/module export, the
+  launcher module ABI, standalone-host state, Gen 7 callsites and
+  strict-AOT blockers, and record the decisions. Done below; nothing was
+  implemented.
+
+### V3-00 audit delta: strict AOT and dual output
+
+Measured on `fbf0678`.
+
+| Question | Finding |
+| --- | --- |
+| Where does Gen 7 run? | `DynamicFallbackExecutor` is created in `XenonSession::init_cpu()` when `SessionConfig::enable_dynamic_fallback` is set, which is the **default** (`true`), and bound to each `ExecutionContext` in `guest_dispatch.cpp`. Generated C++ calls `context.try_dynamic_fallback()` after every compiled-lookup miss on an indirect call or branch (emitted by `backend_cpp_aot.cpp` and `instruction_emission.cpp`), and thread-entry dispatch does the same (`guest_dispatch.cpp`). So every build today interprets a missed target silently. |
+| What happens with the fallback off? | A call miss goes to `XenonSession::call()`: the `ExecutableCodeCache` (native translations only; the session installs no runtime compiler), then import thunks, then a trap; a branch miss returns `FlowReason::Branch` to the dispatcher; a thread entry miss crashes the thread with a message. No structured event names the missing target. |
+| Other runtime code generation? | `ExecutableCodeCache` accepts an optional runtime compile callback; none is installed. Strict mode must forbid installing one as well as Gen 7. |
+| Launcher module ABI | The session loads a native module with `dlopen`/`LoadLibrary` and calls `Xenon_BindCompiledRegistry(ExecutionContext&)` (`native_extension.cpp`): a same-toolchain C++ interface, no version negotiation (weakness 7). |
+| Standalone host | `xenon_runtime_host` links only `xenon_core` (no Qt; `ldd` shows none) but is generic: it is driven by the launcher's `launch-config.json`, `status.json` and `stop.signal` contract and loads a separately built module. There is no per-game executable or bootstrap and no package manifest. |
+| Preparation | `xenon-prepare` is Qt-free and builds the CMake target `xenon_game_module` from generated C++ in its cache root. Flags: `--content`, `--cache-root`, `--module` (a hint package directory), `--module-id`, `--title-update`, `--config`, `--status-file`, `--stop-signal`, `--observations`, `--knowledge`, `--recomp-root`, `--force`, `--query`. No `--package`, platform `--target`, `--output` or `--emit-source`. |
+| Naming conflicts with the proposed CLI | The proposal takes the image positionally and an `--output` directory; today they are `--content` and `--cache-root`. `--module` already means hints, not the package mode. V3-17's compatibility audit must keep the existing flags working. |
+| Strict-AOT blockers | Indirect targets discovery does not resolve (each currently reaches Gen 7); runtime-generated or self-modified code (`ExecutableCodeCache` invalidation exists, but nothing compiles a replacement); the default-on fallback; no structured miss event; thread entries reached only through function pointers. AOT coverage (confirmed functions, resolved indirect edges) is not measured anywhere yet. |
+
+Decisions recorded (not implemented):
+
+- Strict AOT will be a session and package policy: release/gameplay
+  packages run with the Gen 7 executor absent and no runtime compile
+  callback, and a miss produces an `aot_missing_target` event and an
+  explicit stop. Development builds may select Gen 7 explicitly and every
+  interpreted block stays visible in the capability report. Owned by
+  V3-09, with the event kinds added to the V3-02 event model then.
+- Launcher and standalone packages share one preparation graph (Gen 10
+  store); only link and package stages differ. The standalone bootstrap
+  and the launcher adapter are thin hosts over the same `xenon_core`
+  session. Owned by V3-16 and V3-17; the existing
+  `Xenon_BindCompiledRegistry` path keeps working through an adapter.
 
 ## V3-00 baseline (10 October 2026)
 
@@ -941,3 +996,5 @@ and the compilation graph.
 | 2026-10-11 | Abandon mutants at the owning host thread's real exit, not at `terminate()` | `terminate()` can run while the thread is still inside the critical section its mutant guards |
 | 2026-10-11 | A direct guest write to `SignalState` is adopted at the next `Ke*` call and wakes no blocked waiter | Matches NT dispatcher semantics; waking blocked waiters on memory writes would need polling that hardware does not do |
 | 2026-10-11 | A profile setting with no value reads back as `XSOURCE_NO_VALUE` rather than failing the read | The references disagree (rexglue-sdk fails, xenia-canary omits); the documented source field covers the case without inventing data |
+| 2026-10-14 | Strict AOT is a session/package policy: release packages run without Gen 7 or a runtime compile callback and stop with an `aot_missing_target` event on a miss; Gen 7 is an explicit development option | Owner's amended specification; today the fallback defaults on and interprets misses silently |
+| 2026-10-14 | Launcher and standalone outputs come from one preparation graph, with thin hosts over the same session | Owner's amended specification; avoids two analysis pipelines and duplicated guest semantics |
