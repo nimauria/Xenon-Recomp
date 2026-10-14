@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <string_view>
 #include <system_error>
 
@@ -266,6 +267,29 @@ XResult ContentManager::open_package(filesystem::VirtualFileSystem& vfs,
   }
   open_packages_.emplace(key, std::move(package));
   return result::Success;
+}
+
+XResult ContentManager::read_thumbnail(std::uint32_t content_id,
+                                      std::vector<std::uint8_t>& out) const {
+  std::scoped_lock lock(mutex_);
+  const auto it = content_.find(content_id);
+  if (it == content_.end()) return kErrorFileNotFound;
+  std::ifstream file(package_path(it->second) / "__thumbnail.png", std::ios::binary);
+  if (!file) return kErrorFileNotFound;
+  out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  return result::Success;
+}
+
+XResult ContentManager::write_thumbnail(std::uint32_t content_id,
+                                       const std::vector<std::uint8_t>& png) {
+  std::scoped_lock lock(mutex_);
+  const auto it = content_.find(content_id);
+  if (it == content_.end()) return kErrorFileNotFound;
+  std::ofstream file(package_path(it->second) / "__thumbnail.png",
+                     std::ios::binary | std::ios::trunc);
+  if (!file) return kErrorAccessDenied;
+  file.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+  return file ? result::Success : kErrorAccessDenied;
 }
 
 XResult ContentManager::close_package(filesystem::VirtualFileSystem& vfs,

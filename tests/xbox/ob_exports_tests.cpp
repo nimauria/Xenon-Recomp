@@ -260,6 +260,35 @@ void test_referenced_mutant_still_gets_the_sentinel() {
   assert(reference(f, f.address_space->read32_be(handle_out)) == kSentinel);
 }
 
+// ObLookupThreadByThreadId returns the thread's guest KTHREAD address.
+void test_lookup_thread_by_thread_id() {
+  Fixture f;
+  core::ExportDescriptor lookup{};
+  lookup.library = "xboxkrnl.exe";
+  lookup.name = "ObLookupThreadByThreadId";
+  lookup.ordinal = 0x10Bu;
+  auto* raw_process = f.process.get();
+  lookup.handler = [raw_process](core::ExportCallContext& ctx) {
+    return xbox::ob_lookup_thread_by_thread_id_export(*raw_process, ctx);
+  };
+  assert(f.registry.register_export(std::move(lookup)));
+
+  kernel::ThreadCreationParams params{};
+  params.create_suspended = true;
+  auto thread = f.process->thread_manager().create_thread([]() -> std::uint32_t { return 0; }, params);
+  assert(thread);
+  const auto out = f.alloc32();
+  f.address_space->write32_be(out, 0xAAAAAAAAu);
+  assert(f.call(0x10Bu, thread->thread_id(), out) == 0xC0000225u &&
+         "no guest KTHREAD yet: STATUS_NOT_FOUND");
+  thread->set_guest_kthread_address(0x80051234u);
+  assert(f.call(0x10Bu, thread->thread_id(), out) == 0u);
+  assert(f.address_space->read32_be(out) == 0x80051234u);
+  assert(f.call(0x10Bu, 0xFFFFu, out) == 0xC0000225u && "unknown thread id");
+  static_cast<void>(thread->terminate(0));
+  std::cout << "test_lookup_thread_by_thread_id passed\n";
+}
+
 int main() {
   std::cout << "Testing xboxkrnl Ob exports...\n";
 
@@ -270,6 +299,7 @@ int main() {
   test_referenced_event_pointer_works_with_ke_exports();
   test_referenced_semaphore_pointer_works_with_ke_exports();
   test_referenced_mutant_still_gets_the_sentinel();
+  test_lookup_thread_by_thread_id();
 
   std::cout << "All Ob export tests passed!\n";
   return 0;

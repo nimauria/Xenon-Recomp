@@ -41,6 +41,21 @@ namespace xenon::xbox {
                                          xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_set_event_export(xenon::kernel::KernelProcess& process,
                                        xenon::core::ExportCallContext& context);
+
+// I/O completion ports, as in xenia: NtCreateIoCompletion (0xD3: r3 =
+// PHANDLE out, r4 access, r5 attributes, r6 concurrency), NtSetIoCompletion
+// (0xF8: r3 = handle, r4 key context, r5 APC context, r6 status, r7 bytes)
+// and NtRemoveIoCompletion (0xF4: r3 = handle, r4 = key out, r5 = APC
+// context out, r6 = IO_STATUS_BLOCK out, r7 = PLARGE_INTEGER timeout,
+// NULL = infinite) -> NTSTATUS. The remove waits through the kernel wait
+// machinery, so it times out, and ends with STATUS_THREAD_IS_TERMINATING
+// when its thread is terminated.
+[[nodiscard]] bool nt_create_io_completion_export(xenon::kernel::KernelProcess& process,
+                                                  xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_set_io_completion_export(xenon::kernel::KernelProcess& process,
+                                               xenon::core::ExportCallContext& context);
+[[nodiscard]] bool nt_remove_io_completion_export(xenon::kernel::KernelProcess& process,
+                                                  xenon::core::ExportCallContext& context);
 [[nodiscard]] bool nt_pulse_event_export(xenon::kernel::KernelProcess& process,
                                          xenon::core::ExportCallContext& context);
 [[nodiscard]] bool ex_terminate_thread_export(xenon::kernel::KernelProcess& process,

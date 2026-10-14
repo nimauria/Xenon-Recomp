@@ -11,6 +11,7 @@
 #include "xenon/xam/content_graph.hpp"
 #include "xenon/xam/guest_enumerator.hpp"
 #include "xenon/xam/xam_exports.hpp"
+#include "xenon/xam/xam_session.hpp"
 #include "xenon/memory/address_space.hpp"
 
 namespace xenon::xam {
@@ -531,20 +532,127 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
     ok = registry.register_export(std::move(desc)) && ok;
   }
 
-  // XamContentSetThumbnail (0x0260) - no content-thumbnail storage is
-  // implemented (ContentManager has no thumbnail field/method), so this
-  // honestly reports the real "no such content" outcome for any call
-  // instead of silently discarding the PNG data a title hands it.
+  // The running title's content named by an XCONTENT_DATA.
+  const auto find_guest_content = [&content_manager, &session](core::ExportCallContext& ctx,
+                                                               cpu::GuestAddress data) {
+    const auto* loaded = session.loaded_xex();
+    return content_manager.find_content(
+        ctx.memory.read32_be(data + 0u),
+        static_cast<ContentType>(ctx.memory.read32_be(data + 4u)),
+        loaded != nullptr ? loaded->image.title_id : 0u, read_content_file_name(ctx.memory, data));
+  };
+
+  // XamContentSetThumbnail (0x0260): (user_index, content_data, buffer,
+  // buffer_size, overlapped). Stores the PNG with the package, as xenia
+  // does; unlike xenia, which creates the package directory if needed,
+  // content that does not exist is ERROR_FILE_NOT_FOUND.
   {
     core::ExportDescriptor desc{};
     desc.library = "xam";
     desc.name = "XamContentSetThumbnail";
     desc.ordinal = ordinal::XamContentSetThumbnail;
     desc.requirement = core::ExportRequirement::Required;
-    desc.partial = true;
-    desc.partial_note = "no content-thumbnail storage is implemented";
-    desc.handler = [](core::ExportCallContext& ctx) -> bool {
-      ctx.cpu.gpr[3] = result::InvalidParameter;
+    desc.handler = [&content_manager, find_guest_content](core::ExportCallContext& ctx) -> bool {
+      const auto data = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const auto buffer = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      const auto size = static_cast<std::uint32_t>(ctx.cpu.gpr[6]);
+      if (data == 0u || (buffer == 0u && size != 0u)) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      const auto content = find_guest_content(ctx, data);
+      if (!content) {
+        ctx.cpu.gpr[3] = kErrorFileNotFound;
+        return true;
+      }
+      std::vector<std::uint8_t> png(size);
+      for (std::uint32_t i = 0; i < size; ++i) png[i] = ctx.memory.read8(buffer + i);
+      ctx.cpu.gpr[3] = content_manager.write_thumbnail(content->content_id, png);
+      return true;
+    };
+    desc.handler = with_overlapped(session, 4, std::move(desc.handler));
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamContentGetThumbnail (0x0261): (user_index, content_data, buffer,
+  // buffer_size_ptr, overlapped). *buffer_size_ptr becomes the thumbnail's
+  // size; with a buffer the PNG is copied, or ERROR_INSUFFICIENT_BUFFER if
+  // the buffer is smaller (a null buffer is a size query), as in xenia.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamContentGetThumbnail";
+    desc.ordinal = ordinal::XamContentGetThumbnail;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&content_manager, find_guest_content](core::ExportCallContext& ctx) -> bool {
+      constexpr std::uint32_t kErrorInsufficientBuffer = 0x7Au;
+      const auto data = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const auto buffer = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      const auto size_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[6]);
+      if (data == 0u || size_ptr == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      const auto capacity = ctx.memory.read32_be(size_ptr);
+      const auto content = find_guest_content(ctx, data);
+      std::vector<std::uint8_t> png;
+      const auto found =
+          content ? content_manager.read_thumbnail(content->content_id, png) : kErrorFileNotFound;
+      ctx.memory.write32_be(size_ptr, static_cast<std::uint32_t>(png.size()));
+      if (found != result::Success) {
+        ctx.cpu.gpr[3] = found;
+        return true;
+      }
+      if (buffer != 0u) {
+        if (capacity < png.size()) {
+          ctx.cpu.gpr[3] = kErrorInsufficientBuffer;
+          return true;
+        }
+        for (std::size_t i = 0; i < png.size(); ++i) {
+          ctx.memory.write8(buffer + static_cast<std::uint32_t>(i), png[i]);
+        }
+      }
+      ctx.cpu.gpr[3] = result::Success;
+      return true;
+    };
+    desc.handler = with_overlapped(session, 4, std::move(desc.handler));
+    ok = registry.register_export(std::move(desc)) && ok;
+  }
+
+  // XamContentGetCreator (0x0262): (user_index, content_data,
+  // is_creator_ptr, creator_xuid_ptr, overlapped). As in xenia: saved games
+  // are always created by the user, so *is_creator is 1 and the creator is
+  // that user's XUID; other content reports 0. ERROR_PATH_NOT_FOUND when the
+  // content does not exist.
+  {
+    core::ExportDescriptor desc{};
+    desc.library = "xam";
+    desc.name = "XamContentGetCreator";
+    desc.ordinal = ordinal::XamContentGetCreator;
+    desc.requirement = core::ExportRequirement::Required;
+    desc.handler = [&session, find_guest_content](core::ExportCallContext& ctx) -> bool {
+      const auto user_index = static_cast<std::uint32_t>(ctx.cpu.gpr[3]);
+      const auto data = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[4]);
+      const auto is_creator_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
+      const auto xuid_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[6]);
+      if (data == 0u || is_creator_ptr == 0u) {
+        ctx.cpu.gpr[3] = result::InvalidParameter;
+        return true;
+      }
+      const auto content = find_guest_content(ctx, data);
+      if (!content) {
+        ctx.cpu.gpr[3] = kErrorPathNotFound;
+        return true;
+      }
+      const bool saved_game = content->content_type == ContentType::SavedGame;
+      std::uint64_t xuid = 0u;
+      if (saved_game && session.xam() != nullptr && user_index < 4u &&
+          session.xam()->users().is_signed_in(user_index)) {
+        xuid = session.xam()->users().xuid(user_index);
+      }
+      ctx.memory.write32_be(is_creator_ptr, saved_game ? 1u : 0u);
+      if (xuid_ptr != 0u) ctx.memory.write64_be(xuid_ptr, xuid);
+      ctx.cpu.gpr[3] = result::Success;
       return true;
     };
     desc.handler = with_overlapped(session, 4, std::move(desc.handler));

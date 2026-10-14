@@ -122,6 +122,13 @@ class ContentManager {
   [[nodiscard]] XResult close_package(filesystem::VirtualFileSystem& vfs,
                                       const std::string& root_name);
 
+  // A package's thumbnail (PNG bytes), kept as __thumbnail.png inside the
+  // package as xenia keeps it. ERROR_FILE_NOT_FOUND when the content or its
+  // thumbnail does not exist.
+  [[nodiscard]] XResult read_thumbnail(std::uint32_t content_id, std::vector<std::uint8_t>& out) const;
+  [[nodiscard]] XResult write_thumbnail(std::uint32_t content_id,
+                                        const std::vector<std::uint8_t>& png);
+
   // Content Services V1 Integration
   
   // Initialize content services (TU manager, DLC manager, Save manager)

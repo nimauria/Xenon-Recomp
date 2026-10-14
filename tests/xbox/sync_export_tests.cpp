@@ -7,10 +7,12 @@
 // codes) is correct, not just the underlying kernel:: objects in isolation.
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
@@ -556,6 +558,91 @@ void test_nt_signal_and_wait_signals_then_waits() {
   assert(bad_result.success && bad_cpu.gpr[3] != 0u);
 }
 
+// I/O completion ports: packets come out in order with their key, APC
+// context, status and byte count; an empty port times out; a remove blocked
+// with no timeout ends when its thread is terminated.
+void test_io_completion_ports() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  assert(f.invoke(0x0D3u, cpu).success && cpu.gpr[3] == 0u);
+  const auto port = f.address_space->read32_be(handle_out);
+
+  const auto set = [&](std::uint32_t key, std::uint32_t apc, std::uint32_t status, std::uint32_t bytes) {
+    cpu::CpuState c{};
+    c.gpr[3] = port;
+    c.gpr[4] = key;
+    c.gpr[5] = apc;
+    c.gpr[6] = status;
+    c.gpr[7] = bytes;
+    assert(f.invoke(0x0F8u, c).success && c.gpr[3] == 0u);
+  };
+  set(0x11u, 0x22u, 0u, 512u);
+  set(0x33u, 0x44u, 0xC0000011u, 0u);  // STATUS_END_OF_FILE
+
+  const auto key = f.alloc32();
+  const auto apc = f.alloc32();
+  const auto iosb = f.alloc64();
+  const auto timeout = f.alloc64();
+  f.address_space->write64_be(timeout, 0u);  // poll
+  const auto remove = [&](memory::GuestAddress timeout_ptr, std::uint32_t thread_id = 0u) {
+    cpu::CpuState c{};
+    c.gpr[3] = port;
+    c.gpr[4] = key;
+    c.gpr[5] = apc;
+    c.gpr[6] = iosb;
+    c.gpr[7] = timeout_ptr;
+    assert(f.invoke(0x0F4u, c, thread_id).success);
+    return static_cast<std::uint32_t>(c.gpr[3]);
+  };
+  assert(remove(timeout) == 0u);
+  assert(f.address_space->read32_be(key) == 0x11u && f.address_space->read32_be(apc) == 0x22u);
+  assert(f.address_space->read32_be(iosb) == 0u && f.address_space->read32_be(iosb + 4u) == 512u);
+  assert(remove(timeout) == 0u);
+  assert(f.address_space->read32_be(key) == 0x33u);
+  assert(f.address_space->read32_be(iosb) == 0xC0000011u && "the posted status is kept");
+  assert(remove(timeout) == 0x102u && "STATUS_TIMEOUT on an empty port");
+  f.address_space->write64_be(timeout, static_cast<std::uint64_t>(-200000));  // 20 ms relative
+  const auto started = std::chrono::steady_clock::now();
+  assert(remove(timeout) == 0x102u);
+  assert(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(15));
+
+  // A packet posted while a remover waits wakes it.
+  std::atomic<std::uint32_t> woken{0};
+  kernel::ThreadCreationParams params{};
+  auto waiter = f.process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        woken = remove(0u, kernel::KernelThread::current()->thread_id());
+        return 0;
+      },
+      params);
+  assert(waiter->start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  set(0x55u, 0u, 0u, 1u);
+  assert(waiter->join(5000));
+  assert(woken.load() == 0u && f.address_space->read32_be(key) == 0x55u);
+
+  // An infinite remove on an empty port ends when its thread is terminated.
+  std::atomic<std::uint32_t> terminated_status{0};
+  auto blocked = f.process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        terminated_status = remove(0u, kernel::KernelThread::current()->thread_id());
+        return 0;
+      },
+      params);
+  assert(blocked->start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  static_cast<void>(blocked->terminate(0));
+  assert(blocked->join(5000));
+  assert(terminated_status.load() == 0xC000004Bu && "STATUS_THREAD_IS_TERMINATING");
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 0x1234u;
+  assert(f.invoke(0x0F8u, cpu).success && cpu.gpr[3] == 0xC0000008u && "STATUS_INVALID_HANDLE");
+  std::cout << "test_io_completion_ports passed\n";
+}
+
 }  // namespace
 
 int main() {
@@ -573,6 +660,7 @@ int main() {
   test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();
+  test_io_completion_ports();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";
   return 0;

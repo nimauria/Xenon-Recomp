@@ -386,6 +386,48 @@ void test_rc4_crc32_and_qword_swap() {
   std::cout << "  \xE2\x9C\x93 RC4, CRC-32 and qword swap match" << std::endl;
 }
 
+// XeCryptAesKey/Ecb/Cbc against FIPS-197 (C.1) and NIST SP 800-38A (F.2.1).
+void test_aes_ecb_and_cbc() {
+  std::cout << "[TEST] XeCryptAesKey/Ecb/Cbc against FIPS-197 and SP 800-38A..." << std::endl;
+  CryptFixture f;
+  const auto from_hex = [](const std::string& hex) {
+    std::string bytes;
+    for (std::size_t i = 0; i < hex.size(); i += 2) {
+      bytes.push_back(static_cast<char>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+    }
+    return bytes;
+  };
+  memory::GuestAddress state{};
+  assert(f.address_space.allocate(0x160u, 8u, memory::kReadWrite, false, state));
+
+  f.call(0x159u, {state, f.bytes(from_hex("000102030405060708090a0b0c0d0e0f"))});
+  assert(f.hex(state + 160u, 16u) == "13111d7fe3944a17f307a78b4d2b30c5" && "round key 10");
+  assert(f.hex(state + 0xB0u, 16u) == "13111d7fe3944a17f307a78b4d2b30c5" &&
+         "the inverse schedule starts with round key 10");
+  assert(f.hex(state + 0x150u, 16u) == "000102030405060708090a0b0c0d0e0f");
+  const auto block = f.bytes(from_hex("00112233445566778899aabbccddeeff"));
+  const auto out = f.bytes(std::string(16, '\0'));
+  f.call(0x15Au, {state, block, out, 1u});
+  assert(f.hex(out, 16u) == "69c4e0d86a7b0430d8cdb78070b4c55a");
+  f.call(0x15Au, {state, out, out, 0u});
+  assert(f.hex(out, 16u) == "00112233445566778899aabbccddeeff" && "decrypt in place");
+
+  f.call(0x159u, {state, f.bytes(from_hex("2b7e151628aed2a6abf7158809cf4f3c"))});
+  const auto plain = f.bytes(from_hex("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"));
+  const auto cipher = f.bytes(std::string(32, '\0'));
+  const auto iv = f.bytes(from_hex("000102030405060708090a0b0c0d0e0f"));
+  f.call(0x15Bu, {state, plain, 16u, cipher, iv, 1u});
+  f.call(0x15Bu, {state, plain + 16u, 16u, cipher + 16u, iv, 1u});
+  assert(f.hex(cipher, 32u) ==
+         "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2" &&
+         "the feed carries the chain across calls");
+  assert(f.hex(iv, 16u) == "5086cb9b507219ee95db113a917678b2");
+  const auto iv2 = f.bytes(from_hex("000102030405060708090a0b0c0d0e0f"));
+  f.call(0x15Bu, {state, cipher, 32u, cipher, iv2, 0u});
+  assert(f.hex(cipher, 32u) == f.hex(plain, 32u) && "decrypt in place");
+  std::cout << "  \xE2\x9C\x93 AES vectors match" << std::endl;
+}
+
 }  // namespace
 
 int main() {
@@ -397,6 +439,7 @@ int main() {
   test_incremental_sha1_and_sha256();
   test_hmac_sha1_rfc2202();
   test_rc4_crc32_and_qword_swap();
+  test_aes_ecb_and_cbc();
   test_ex_get_xconfig_setting_values_and_validation();
   test_ex_register_title_terminate_notification_succeeds();
 

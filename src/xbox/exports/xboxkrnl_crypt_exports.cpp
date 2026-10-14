@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xboxkrnl_misc_exports.hpp"
 
 // XeCrypt hash and stream-cipher exports titles use for save checksums and
@@ -17,6 +18,11 @@ namespace xenon::xbox {
 namespace {
 
 using core::ExportCallContext;
+using crypto::AesBlock;
+using crypto::AesKey;
+using crypto::aes128_decrypt_block;
+using crypto::aes128_encrypt_block;
+using crypto::aes128_expand_key;
 
 std::uint32_t arg(ExportCallContext& ctx, int index) {
   return static_cast<std::uint32_t>(ctx.cpu.gpr[3 + index]);
@@ -200,6 +206,65 @@ void hash_write_out(ExportCallContext& ctx, cpu::GuestAddress out, std::uint32_t
   if (out != 0u) write_bytes(ctx, out, digest, std::min<std::size_t>(digest_size, out_size));
 }
 
+// XECRYPT_AES_STATE (0x160): the encryption key schedule (11 round keys)
+// at 0 and the inverse-cipher schedule at 0xB0 - round key 10, then
+// InvMixColumns of round keys 9..1, then round key 0 - as xenia fills it.
+// Round key 0 is the key, so the cipher calls take the key from there.
+std::uint8_t xtime(std::uint8_t a) {
+  return static_cast<std::uint8_t>((a << 1) ^ ((a & 0x80u) != 0u ? 0x1Bu : 0u));
+}
+std::uint8_t gf_mul(std::uint8_t a, std::uint8_t b) {
+  std::uint8_t r = 0;
+  while (b != 0u) {
+    if ((b & 1u) != 0u) r ^= a;
+    a = xtime(a);
+    b >>= 1u;
+  }
+  return r;
+}
+
+void aes_key(ExportCallContext& ctx, cpu::GuestAddress state, cpu::GuestAddress key_ptr) {
+  AesKey key{};
+  for (std::uint32_t i = 0; i < 16u; ++i) key[i] = static_cast<std::byte>(ctx.memory.read8(key_ptr + i));
+  const auto enc = aes128_expand_key(key);
+  for (std::uint32_t i = 0; i < 176u; ++i) ctx.memory.write8(state + i, static_cast<std::uint8_t>(enc[i]));
+  for (std::uint32_t round = 0; round <= 10u; ++round) {
+    const auto source = static_cast<std::size_t>(10u - round) * 16u;
+    for (std::uint32_t column = 0; column < 4u; ++column) {
+      std::array<std::uint8_t, 4> c{};
+      for (std::uint32_t row = 0; row < 4u; ++row) {
+        c[row] = static_cast<std::uint8_t>(enc[source + column * 4u + row]);
+      }
+      std::array<std::uint8_t, 4> d = c;
+      if (round != 0u && round != 10u) {
+        for (std::uint32_t row = 0; row < 4u; ++row) {
+          d[row] = static_cast<std::uint8_t>(gf_mul(c[row], 14) ^ gf_mul(c[(row + 1) % 4], 11) ^
+                                             gf_mul(c[(row + 2) % 4], 13) ^ gf_mul(c[(row + 3) % 4], 9));
+        }
+      }
+      for (std::uint32_t row = 0; row < 4u; ++row) {
+        ctx.memory.write8(state + 0xB0u + round * 16u + column * 4u + row, d[row]);
+      }
+    }
+  }
+}
+
+AesKey aes_state_key(ExportCallContext& ctx, cpu::GuestAddress state) {
+  AesKey key{};
+  for (std::uint32_t i = 0; i < 16u; ++i) key[i] = static_cast<std::byte>(ctx.memory.read8(state + i));
+  return key;
+}
+
+AesBlock read_block(ExportCallContext& ctx, cpu::GuestAddress address) {
+  AesBlock block{};
+  for (std::uint32_t i = 0; i < 16u; ++i) block[i] = static_cast<std::byte>(ctx.memory.read8(address + i));
+  return block;
+}
+
+void write_block(ExportCallContext& ctx, cpu::GuestAddress address, const AesBlock& block) {
+  for (std::uint32_t i = 0; i < 16u; ++i) ctx.memory.write8(address + i, static_cast<std::uint8_t>(block[i]));
+}
+
 struct CryptExport {
   std::uint32_t ordinal;
   const char* name;
@@ -333,6 +398,53 @@ const CryptExport kExports[] = {
          for (int b = 0; b < 8; ++b) swapped = (swapped << 8u) | ((w >> (b * 8)) & 0xFFu);
          ctx.memory.write64_be(out + i * 8u, swapped);
        }
+       return true;
+     }},
+    // XeCryptAesKey(state, key): a 16-byte AES-128 key.
+    {0x159u, "XeCryptAesKey",
+     [](ExportCallContext& ctx) {
+       aes_key(ctx, arg(ctx, 0), arg(ctx, 1));
+       return true;
+     }},
+    // XeCryptAesEcb(state, in, out, encrypt): one 16-byte block.
+    {0x15Au, "XeCryptAesEcb",
+     [](ExportCallContext& ctx) {
+       const auto key = aes_state_key(ctx, arg(ctx, 0));
+       AesBlock out{};
+       if (arg(ctx, 3) != 0u) aes128_encrypt_block(key, read_block(ctx, arg(ctx, 1)), out);
+       else aes128_decrypt_block(key, read_block(ctx, arg(ctx, 1)), out);
+       write_block(ctx, arg(ctx, 2), out);
+       return true;
+     }},
+    // XeCryptAesCbc(state, in, size, out, feed, encrypt): CBC over size/16
+    // blocks; feed is the IV and is left holding the last ciphertext block,
+    // so successive calls continue the chain (in may equal out), as in
+    // xenia.
+    {0x15Bu, "XeCryptAesCbc",
+     [](ExportCallContext& ctx) {
+       const auto key = aes_state_key(ctx, arg(ctx, 0));
+       const auto in = arg(ctx, 1);
+       const auto size = arg(ctx, 2);
+       const auto out = arg(ctx, 3);
+       const auto feed_ptr = arg(ctx, 4);
+       const bool encrypt = arg(ctx, 5) != 0u;
+       auto feed = read_block(ctx, feed_ptr);
+       for (std::uint32_t offset = 0; offset + 16u <= size; offset += 16u) {
+         const auto block = read_block(ctx, in + offset);
+         AesBlock result{};
+         if (encrypt) {
+           AesBlock mixed{};
+           for (int i = 0; i < 16; ++i) mixed[i] = block[i] ^ feed[i];
+           aes128_encrypt_block(key, mixed, result);
+           feed = result;
+         } else {
+           aes128_decrypt_block(key, block, result);
+           for (int i = 0; i < 16; ++i) result[i] ^= feed[i];
+           feed = block;
+         }
+         write_block(ctx, out + offset, result);
+       }
+       write_block(ctx, feed_ptr, feed);
        return true;
      }},
     // RtlComputeCrc32(seed, buffer, length) -> CRC-32 (zlib, reflected

@@ -2,18 +2,18 @@
 
 Reference: [Xenia xboxkrnl table at `997d055`](https://github.com/xenia-project/xenia/blob/997d0555dbd6358dffd2950097424993763051af/src/xenia/kernel/xboxkrnl/xboxkrnl_table.inc). This is a pinned research inventory, not an official Microsoft ABI specification or a version-qualified Xbox 360 kernel guarantee.
 
-**922 reference entries:** 274 exact Xenon source registrations (29.7%); 648 entries have no matching Xenon source registration. These are registration counts, not implementation or game-compatibility percentages.
+**922 reference entries:** 281 exact Xenon source registrations (30.5%); 641 entries have no matching Xenon source registration. These are registration counts, not implementation or game-compatibility percentages.
 
 | Subsystem | Reference entries | Exact Xenon registrations | No matching source registration |
 | --- | ---: | ---: | ---: |
-| Crypto | 155 | 14 | 141 |
+| Crypto | 155 | 17 | 138 |
 | Debug | 6 | 3 | 3 |
 | Executive | 29 | 15 | 14 |
 | Kernel | 120 | 46 | 74 |
 | Memory | 25 | 12 | 13 |
 | Modules | 38 | 4 | 34 |
-| NT / I/O | 87 | 41 | 46 |
-| Objects | 16 | 4 | 12 |
+| NT / I/O | 87 | 44 | 43 |
+| Objects | 16 | 5 | 11 |
 | Other | 288 | 66 | 222 |
 | RTL | 56 | 39 | 17 |
 | Variables | 35 | 10 | 25 |

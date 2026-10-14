@@ -6,7 +6,8 @@ against the pinned research tables in tools/coverage/reference/. A guest
 import names only an ordinal, so a wrong ordinal sends a title's call to a
 different export's handler: XamVoiceClose, XamVoiceHeadsetPresent and
 XamVoiceSubmitPacket were registered one place off (0x30D-0x30F) until this
-test was added.
+test was added. It also requires every export registered as stubbed or
+partial to carry a note saying what it does not do.
 
 usage: export_ordinal_reference_tests.py <import-scanner> <reference-dir>
 """
@@ -38,6 +39,19 @@ def parse_registry(text):
         library, ordinal, name, kind = fields[0], int(fields[1]), fields[2], fields[3]
         rows.append((library, ordinal, name, kind))
     return rows
+
+
+def unexplained_gaps(text):
+    """Exports registered as stubbed or partial without a note saying why."""
+    gaps = []
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 6 or fields[0] == "library" or fields[0].startswith("["):
+            continue
+        note = fields[6].strip() if len(fields) > 6 else ""
+        if (fields[4] == "stubbed" or fields[5] == "1") and not note:
+            gaps.append(f"{fields[0]} 0x{int(fields[1]):X} {fields[2]}")
+    return gaps
 
 
 def check(rows, references):
@@ -97,6 +111,12 @@ def main():
         print("MISMATCH", problem)
     assert not problems, f"{len(problems)} registered exports disagree with the reference"
     print(f"{len(rows)} registered exports match the reference ordinal tables")
+
+    # A stubbed or partial export must say what it does not do.
+    gaps = unexplained_gaps(result.stdout)
+    for gap in gaps:
+        print("NO NOTE", gap)
+    assert not gaps, f"{len(gaps)} stubbed or partial exports have no partial_note"
 
 
 if __name__ == "__main__":

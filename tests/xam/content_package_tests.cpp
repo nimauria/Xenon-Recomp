@@ -31,6 +31,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/content_manager.hpp"
+#include "xenon/xam/xam_session.hpp"
 #include "xenon/xam/types.hpp"
 
 namespace xenon::xam {
@@ -47,6 +48,8 @@ struct SessionExecutionTestAccess {
     session.kernel_memory_ = std::make_shared<kernel::KernelMemory>(memory);
     session.kernel_process_ = std::make_shared<kernel::KernelProcess>(session.kernel_memory_);
     session.filesystem_ = std::make_shared<filesystem::VirtualFileSystem>();
+    session.xam_ = std::make_unique<xam::XamSession>();
+    static_cast<void>(session.xam_->initialize());
   }
 };
 }  // namespace xenon::core
@@ -262,7 +265,7 @@ void test_delete_and_persistence_across_sessions() {
   const auto root = scratch("persistence");
   {
     Fixture f(root);
-    const auto data = f.content("slot1", u"Pilot é");
+    const auto data = f.content("slot1", u"Pilot \u00E9");
     assert(f.create("save", data, kCreateNew) == xam::result::Success);
     assert(f.write_file("save:\\progress.dat", "kept"));
     assert(f.remove(data) == kAccessDenied && "open content cannot be deleted");
@@ -348,6 +351,68 @@ void test_a_package_the_host_cannot_remove_is_not_reported_deleted() {
 #endif
 }
 
+// XamContentSetThumbnail/GetThumbnail keep a PNG with the package;
+// XamContentGetCreator reports the signed-in user as a saved game's creator.
+void test_thumbnails_and_creator() {
+  const auto root = scratch("thumbnails");
+  Fixture f(root);
+  const auto data = f.content("slot1", u"Slot 1");
+  assert(f.create("save", data, kCreateNew) == xam::result::Success);
+  assert(f.root_call(kClose, "save") == xam::result::Success);
+
+  const std::string png = "\x89PNG\r\n\x1a\n-thumbnail-";
+  const auto png_ptr = f.text(png);
+  cpu::CpuState cpu{};
+  cpu.gpr[4] = data;
+  cpu.gpr[5] = png_ptr;
+  cpu.gpr[6] = static_cast<std::uint32_t>(png.size());
+  assert(f.call(0x0260u, cpu) == xam::result::Success);
+  assert(std::filesystem::exists(root / "00000000" / "00000001" / "slot1" / "__thumbnail.png"));
+
+  const auto size_ptr = f.alloc(4);
+  const auto get = [&](memory::GuestAddress buffer, std::uint32_t capacity, memory::GuestAddress which) {
+    f.address_space->write32_be(size_ptr, capacity);
+    cpu::CpuState c{};
+    c.gpr[4] = which;
+    c.gpr[5] = buffer;
+    c.gpr[6] = size_ptr;
+    return f.call(0x0261u, c);
+  };
+  assert(get(0u, 0u, data) == xam::result::Success && "a size query");
+  assert(f.address_space->read32_be(size_ptr) == png.size());
+  const auto out = f.alloc(64);
+  assert(get(out, 4u, data) == 0x7Au && "ERROR_INSUFFICIENT_BUFFER");
+  assert(get(out, 64u, data) == xam::result::Success);
+  for (std::size_t i = 0; i < png.size(); ++i) {
+    assert(f.address_space->read8(out + static_cast<std::uint32_t>(i)) == static_cast<std::uint8_t>(png[i]));
+  }
+  const auto missing = f.content("nothing", u"x");
+  assert(get(out, 64u, missing) == kFileNotFound);
+  cpu = cpu::CpuState{};
+  cpu.gpr[4] = missing;
+  cpu.gpr[5] = png_ptr;
+  cpu.gpr[6] = 4u;
+  assert(f.call(0x0260u, cpu) == kFileNotFound && "no phantom package is created");
+  assert(!std::filesystem::exists(root / "00000000" / "00000001" / "nothing"));
+
+  const auto is_creator = f.alloc(4);
+  const auto xuid = f.alloc(8);
+  const auto creator = [&](memory::GuestAddress which) {
+    cpu::CpuState c{};
+    c.gpr[3] = 0;
+    c.gpr[4] = which;
+    c.gpr[5] = is_creator;
+    c.gpr[6] = xuid;
+    return f.call(0x0262u, c);
+  };
+  assert(creator(data) == xam::result::Success);
+  assert(f.address_space->read32_be(is_creator) == 1u);
+  assert(f.address_space->read64_be(xuid) == xam::UserManager::kDefaultOfflineXuid);
+  assert(creator(missing) == kPathNotFound);
+  remove_tree(root);
+  std::cout << "test_thumbnails_and_creator passed\n";
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +421,7 @@ int main() {
   test_delete_and_persistence_across_sessions();
   test_overlapped_results_and_xam_content_create();
   test_a_package_the_host_cannot_remove_is_not_reported_deleted();
+  test_thumbnails_and_creator();
   std::cout << "All content package tests passed!\n";
   return 0;
 }
