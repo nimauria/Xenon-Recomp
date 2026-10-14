@@ -262,7 +262,7 @@ void test_delete_and_persistence_across_sessions() {
   const auto root = scratch("persistence");
   {
     Fixture f(root);
-    const auto data = f.content("slot1", u"Pilot é");
+    const auto data = f.content("slot1", u"Pilot \u00E9");
     assert(f.create("save", data, kCreateNew) == xam::result::Success);
     assert(f.write_file("save:\\progress.dat", "kept"));
     assert(f.remove(data) == kAccessDenied && "open content cannot be deleted");
