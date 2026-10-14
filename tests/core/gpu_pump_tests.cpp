@@ -549,8 +549,10 @@ std::atomic<int> g_frames_signalled{0};
 // the usual way a title paces its render thread to vertical blank.
 ExecutionResult signal_frame_callback_entry(ExecutionContext& context) {
   if (g_frame_event) {
-    g_frame_event->set();
+    // Counted before the signal: the woken thread may finish and the test
+    // check the count before this callback runs another instruction.
     g_frames_signalled.fetch_add(1);
+    g_frame_event->set();
   }
   context.state.gpr[3] = 0;
   context.state.lr = 0u;
