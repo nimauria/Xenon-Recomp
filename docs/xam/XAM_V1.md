@@ -125,6 +125,9 @@ call.
 | 0x025A | `XamContentClose` | Implemented | Unmount a root; `ERROR_FILE_NOT_FOUND` if not open |
 | 0x025B | `XamContentDelete` | Implemented | Delete a package; refused while mounted |
 | 0x0267 | `XamContentFlush` | Implemented | Nothing to commit: package writes go straight to the host |
+| 0x0260 | `XamContentSetThumbnail` | Implemented | PNG stored as `__thumbnail.png` in the package |
+| 0x0261 | `XamContentGetThumbnail` | Implemented | Size query, copy, `ERROR_INSUFFICIENT_BUFFER` |
+| 0x0262 | `XamContentGetCreator` | Implemented | Saved games: the signed-in user is the creator |
 | 0x025E | `XamContentGetDeviceData` | ✅ Implemented | Storage device capacity data |
 | 0x025F | `XamContentGetDeviceName` | ✅ Implemented | Storage device name |
 
