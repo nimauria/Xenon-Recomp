@@ -113,11 +113,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(sum(row["kind"] == "variable" for row in rows), 35)
         self.assertEqual((rows[0]["ordinal"], rows[-1]["ordinal"]), (1, 931))
         result = generate.reconcile_kernel_reference(rows, generate.kernel_registration_rows())
-        self.assertEqual(len(result["matched"]), 275)
-        self.assertEqual(len(result["missing"]), 647)
+        self.assertEqual(len(result["matched"]), 278)
+        self.assertEqual(len(result["missing"]), 644)
         report = generate.render_kernel_reference_report(provenance, rows, result)
         self.assertEqual(report, generate.render_kernel_reference_report(provenance, rows, result))
-        self.assertIn("275 exact Xenon source registrations (29.8%)", report)
+        self.assertIn("278 exact Xenon source registrations (30.2%)", report)
         self.assertIn("not implementation or game-compatibility percentages", report)
 
     def test_invalid_kernel_reference_rows(self):

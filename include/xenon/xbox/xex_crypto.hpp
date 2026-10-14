@@ -26,6 +26,10 @@ using AesBlock = std::array<std::byte, 16>;
 [[nodiscard]] const AesKey& retail_key() noexcept;
 [[nodiscard]] const AesKey& devkit_key() noexcept;
 
+// The AES-128 key schedule (FIPS-197 KeyExpansion): 11 round keys of 16
+// bytes, round 0 being the key itself.
+[[nodiscard]] std::array<std::byte, 176> aes128_expand_key(const AesKey& key) noexcept;
+
 // Single AES-128 block operations (FIPS-197). Used directly to unwrap the
 // 16-byte encrypted image key (a single ECB block, no chaining).
 void aes128_encrypt_block(const AesKey& key, const AesBlock& plaintext,
