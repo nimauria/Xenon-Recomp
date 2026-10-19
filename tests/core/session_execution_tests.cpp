@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -66,6 +67,13 @@ struct SessionExecutionTestAccess {
 
   static const std::string& last_error(const XenonSession& session) {
     return session.last_error_;
+  }
+
+  static void record_pump_activity(XenonSession& session) {
+    session.gpu_interrupts_delivered_.store(37u);
+    session.gpu_callback_watch_.begin(0x821E63F0u, "vsync interrupt", CallbackWatch::now_ns());
+    session.audio_callback_watch_.begin(0x82450000u, "audio render", 0);
+    static_cast<void>(session.audio_callback_watch_.end(1'000'000));
   }
 };
 
@@ -192,6 +200,30 @@ void test_tail_branch_to_import_runs_once_and_returns_to_lr() {
   assert(g_import_calls == 1 && "the export must run exactly once");
 }
 
+ExecutionResult read_unmapped(ExecutionContext& context) {
+  static_cast<void>(context.memory.read32_be(0x10u));
+  return {FlowReason::Halt, 0u, 0u};
+}
+
+// Regression (AC6): the GPU/audio pump state was only logged by a clean
+// stop, so a run that ended in a guest fault gave no evidence of whether
+// vsync interrupts and audio callbacks were still being delivered.
+void test_crash_reports_pump_state() {
+  SessionHarness harness(&read_unmapped);
+  xenon::core::SessionExecutionTestAccess::record_pump_activity(harness.session);
+  std::ostringstream captured;
+  auto* const previous = std::cout.rdbuf(captured.rdbuf());
+  const auto exit_code = harness.run();
+  std::cout.rdbuf(previous);
+  const auto log = captured.str();
+  assert(exit_code != 0u && "an unmapped read is a crash");
+  assert(log.find("Pump state (main thread crashed)") != std::string::npos);
+  assert(log.find("GPU pump: inside vsync interrupt callback 0x821E63F0") != std::string::npos);
+  assert(log.find("Audio pump: idle; 1 callbacks") != std::string::npos);
+  assert(log.find("GPU vsync interrupt: callback=0x0 context=0x0 delivered=37 failed=0") !=
+         std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -203,6 +235,7 @@ int main() {
   test_return_with_zero_link_register_is_clean();
   test_stop_request_is_clean();
   test_tail_branch_to_import_runs_once_and_returns_to_lr();
+  test_crash_reports_pump_state();
   std::cout << "Session execution tests passed\n";
   return 0;
 }

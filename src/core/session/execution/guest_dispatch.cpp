@@ -339,6 +339,7 @@ bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress en
       std::cout << "[XenonSession] Guest callback 0x" << std::hex << entry << std::dec
                 << " crashed: " << outcome.crash_message << std::endl;
     }
+    report_pump_state("pump callback crashed");
     return false;
   }
   return outcome.final_result.reason != cpu::FlowReason::Trap;

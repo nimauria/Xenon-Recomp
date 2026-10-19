@@ -17,22 +17,49 @@
 
 namespace xenon::core {
 
+std::vector<std::string> XenonSession::describe_pump_state() {
+  std::vector<std::string> lines;
+  // A pump that stopped because a guest callback never returned.
+  const auto now = CallbackWatch::now_ns();
+  lines.push_back(CallbackWatch::describe("GPU pump", gpu_callback_watch_.snapshot(), now));
+  lines.push_back(CallbackWatch::describe("Audio pump", audio_callback_watch_.snapshot(), now));
+  const auto interrupt = kernel_process_ ? kernel_process_->gpu_interrupt_callback()
+                                         : kernel::KernelProcess::GpuInterruptCallbackState{};
+  std::ostringstream vsync;
+  vsync << "GPU vsync interrupt: callback=0x" << std::hex << interrupt.callback_address
+        << " context=0x" << interrupt.context << std::dec
+        << " delivered=" << gpu_interrupts_delivered_.load()
+        << " failed=" << gpu_interrupts_failed_.load();
+  lines.push_back(vsync.str());
+#if defined(XENON_HAS_AUDIO)
+  if (audio_) {
+    // Why each render client's callbacks stopped, if they did: a callback
+    // needs a credit, and a credit returns only when a submitted frame has
+    // been consumed.
+    const auto clients = audio_->render_client_stats();
+    lines.push_back("Audio render clients: " + std::to_string(clients.size()) +
+                    "; submissions to unregistered handles: " +
+                    std::to_string(audio_->rejected_unregistered_submissions()));
+    for (const auto& client : clients) lines.push_back("  " + audio::AudioSystem::describe(client));
+  }
+#endif
+  return lines;
+}
+
+void XenonSession::report_pump_state(std::string_view reason) {
+  if (!config_.enable_logging) return;
+  const auto lines = describe_pump_state();
+  std::scoped_lock console_log_lock(console_log_mutex());
+  std::cout << "[XenonSession] Pump state (" << reason << "):" << std::endl;
+  for (const auto& line : lines) std::cout << "[XenonSession]   " << line << std::endl;
+}
+
 // Stop-time evidence for a guest that is still executing: what each thread
 // last asked the kernel for, GPU ring/fence state, every guest thread's
 // registers and the memory-watch history. Diagnostic-only; reads are racy by
 // design.
 void XenonSession::report_stop_diagnostics() {
-  if (config_.enable_logging) {
-    // Always on: a pump that stopped because a guest callback never returned.
-    const auto now = CallbackWatch::now_ns();
-    std::scoped_lock console_log_lock(console_log_mutex());
-    std::cout << "[XenonSession] "
-              << CallbackWatch::describe("GPU pump", gpu_callback_watch_.snapshot(), now)
-              << std::endl;
-    std::cout << "[XenonSession] "
-              << CallbackWatch::describe("Audio pump", audio_callback_watch_.snapshot(), now)
-              << std::endl;
-  }
+  report_pump_state("stop requested");
   // A stop that finds the guest still executing usually means it is stalled
   // (blocked in a kernel wait or spinning). Say what each thread last asked the
   // kernel for, so the stall can be diagnosed from the log alone.
@@ -64,20 +91,6 @@ void XenonSession::report_stop_diagnostics() {
                 << std::endl;
     }
   }
-#if defined(XENON_HAS_AUDIO)
-  if (config_.enable_logging && audio_) {
-    // Why each render client's callbacks stopped, if they did: a callback
-    // needs a credit, and a credit returns only when a submitted frame has
-    // been consumed.
-    const auto clients = audio_->render_client_stats();
-    std::scoped_lock console_log_lock(console_log_mutex());
-    std::cout << "[XenonSession] Audio render clients: " << clients.size()
-              << "; submissions to unregistered handles: "
-              << audio_->rejected_unregistered_submissions() << std::endl;
-    for (const auto& client : clients)
-      std::cout << "[XenonSession]   " << audio::AudioSystem::describe(client) << std::endl;
-  }
-#endif
   if (config_.enable_logging && export_trace_.enabled()) {
     const auto recent = export_trace_.recent_global(16u);
     std::scoped_lock console_log_lock(console_log_mutex());
@@ -121,12 +134,6 @@ void XenonSession::report_stop_diagnostics() {
           }
         }
       }
-      const auto interrupt = kernel_process_ ? kernel_process_->gpu_interrupt_callback()
-                                             : kernel::KernelProcess::GpuInterruptCallbackState{};
-      std::cout << "[XenonSession] GPU vsync interrupt: callback=0x" << std::hex
-                << interrupt.callback_address << " context=0x" << interrupt.context << std::dec
-                << " delivered=" << gpu_interrupts_delivered_.load()
-                << " failed=" << gpu_interrupts_failed_.load() << std::endl;
       if (graphics_system_ && kernel_process_) {
         // Racy diagnostic read of counters the pump thread updates.
         const auto& gpu_stats = graphics_system_->command_processor().statistics();

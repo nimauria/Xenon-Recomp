@@ -51,6 +51,7 @@ std::uint32_t XenonSession::run_execution() {
 
   if (outcome.crashed) {
     set_error(outcome.crash_message);
+    report_pump_state("main thread crashed");
     return outcome.crash_exit_code;
   }
   if (outcome.thread_terminated) {
@@ -141,6 +142,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
                 << (thread ? thread->thread_id() : 0u)
                 << " crashed: " << outcome.crash_message << std::endl;
     }
+    report_pump_state("guest thread crashed");
   } else if (outcome.thread_terminated) {
     // terminate() was called on this thread (possibly mid-dispatch, via the
     // preemptive safepoint) - its own committed exit code is authoritative,

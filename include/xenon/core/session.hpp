@@ -589,6 +589,12 @@ class XenonSession final : public cpu::RuntimeServices {
   // Stall evidence logged by stop() when the guest is still executing
   // (src/core/session/diagnostics/stop_report.cpp).
   void report_stop_diagnostics();
+  // GPU and audio pump state, one line each: the guest callback each pump is
+  // in, vsync interrupt deliveries and each audio render client's credits.
+  // Logged by the stop report and whenever a guest thread crashes, so a run
+  // that ends in a fault still shows whether the pumps were still running.
+  [[nodiscard]] std::vector<std::string> describe_pump_state();
+  void report_pump_state(std::string_view reason);
 
   SessionConfig config_{};
   GuestMemoryWatch memory_watch_{};
