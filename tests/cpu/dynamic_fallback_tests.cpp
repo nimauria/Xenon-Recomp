@@ -41,6 +41,9 @@ class ImportThunkRuntimeServices final : public RuntimeServices {
     ++call_count;
     last_call_target = target;
     state.gpr[3] = 0x99u;
+    // XenonSession::call() reports a completed import as Fallthrough at
+    // state.cia; the original mock returned Return, which hid the AC6 bug.
+    if (session_convention) return {FlowReason::Fallthrough, static_cast<GuestAddress>(state.cia), 0u};
     return {FlowReason::Return, static_cast<GuestAddress>(state.lr), 0u};
   }
   ExecutionResult syscall(std::uint32_t level, CpuState& state, MemoryPort&) override {
@@ -54,6 +57,7 @@ class ImportThunkRuntimeServices final : public RuntimeServices {
   std::uint64_t read_time_base(const CpuState& state) override { return state.time_base; }
 
   const GuestAddress thunk_address_;
+  bool session_convention = false;
   int call_count = 0;
   GuestAddress last_call_target = 0;
 };
@@ -183,6 +187,33 @@ int main() {
   assert(thunk_state.gpr[3] == 0x99u);
   assert(thunk_fallback.unsupported_instructions() == 0u &&
          "the thunk's placeholder bytes must never be decoded as PPC");
+
+  // Regression (AC6 NetDll_socket/NetDll_bind ran twice): compiled code that
+  // tail-branches to a thunk returns Branch(thunk) to the dispatcher, which
+  // hands the thunk itself to the fallback. With the session's real
+  // Fallthrough-at-cia convention the import must run once and complete at LR;
+  // forwarding Fallthrough re-executed the wrapper's `b thunk`.
+  {
+    ImportThunkRuntimeServices session_runtime(kThunk);
+    session_runtime.session_convention = true;
+    CpuState branch_state{};
+    branch_state.cia = kCode + 0x10u;  // the wrapper's `b thunk`
+    branch_state.lr = kReturn;
+    DynamicFallbackExecutor branch_fallback;
+    ExecutionContext branch_context(branch_state, memory, session_runtime);
+    branch_fallback.bind(branch_context);
+    const auto from_branch = branch_context.try_dynamic_fallback(kThunk, CompiledLookupKind::Branch);
+    assert(from_branch.handled);
+    assert(from_branch.result.reason == FlowReason::Return &&
+           from_branch.result.next_address == kReturn &&
+           "an import reached by a tail branch completes at LR, not at the branch");
+    assert(session_runtime.call_count == 1);
+
+    // A linked call site keeps Fallthrough: it resumes at its own return address.
+    const auto from_call = branch_context.try_dynamic_fallback(kThunk, CompiledLookupKind::Call);
+    assert(from_call.handled && from_call.result.reason == FlowReason::Fallthrough);
+    assert(session_runtime.call_count == 2);
+  }
 
   // Guest self-modifying code invalidates the active fallback source snapshot.
   // stw r4,4(r3) rewrites the next instruction on the executable page; the

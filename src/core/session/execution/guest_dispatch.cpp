@@ -179,6 +179,14 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
           auto* next_fn =
               context.lookup_compiled(result.next_address,
                                       cpu::CompiledLookupKind::Branch);
+          if (!next_fn && is_recognized_import_thunk(result.next_address)) {
+            // A compiled function tail-branched to an import thunk. Imports
+            // are runtime services, never interpreted code, so this must not
+            // depend on the Gen 7 fallback being enabled.
+            ++dispatch_count;
+            result = cpu::call_import_from_branch(*this, result.next_address, state, *memory_);
+            continue;
+          }
           if (!next_fn) {
             const auto fallback = context.try_dynamic_fallback(
                 result.next_address, cpu::CompiledLookupKind::Branch);

@@ -42,6 +42,24 @@ struct SessionExecutionTestAccess {
     session.compiled_registry_binder_ = std::move(binder);
   }
 
+  // Declares a callable import thunk at `thunk` for (library, ordinal) and
+  // registers `handler` for it, as load_game() and init_exports() would.
+  static void add_import(XenonSession& session, std::string library, std::uint32_t ordinal,
+                         GuestAddress thunk, ExportHandler handler) {
+    if (!session.code_cache_) session.code_cache_ = std::make_unique<xenon::cpu::ExecutableCodeCache>();
+    xenon::xbox::XexImport import{};
+    import.module = library;
+    import.ordinal = static_cast<std::uint16_t>(ordinal);
+    import.guest_thunk = thunk;
+    import.kind = xenon::xbox::XexImportKind::FunctionThunk;
+    session.loaded_xex_->image.imports.push_back(import);
+    ExportDescriptor descriptor{};
+    descriptor.library = std::move(library);
+    descriptor.ordinal = ordinal;
+    descriptor.handler = std::move(handler);
+    assert(session.export_registry_.register_export(std::move(descriptor)));
+  }
+
   static void request_stop(XenonSession& session) {
     session.stop_requested_.store(true);
   }
@@ -144,6 +162,36 @@ void test_stop_request_is_clean() {
   assert(harness.run() == 0u);
 }
 
+constexpr GuestAddress kImportThunk = 0x3000u;
+int g_import_calls = 0;
+
+// A title's argument-shuffling wrapper: sets the caller id, puts the return
+// address (the compiled function at 0x2000) in LR, then `b thunk`.
+ExecutionResult tail_branch_to_import(ExecutionContext& context) {
+  context.state.lr = 0x2000u;
+  context.state.gpr[3] = 1u;
+  context.state.cia = 0x1010u;  // the wrapper's own `b`
+  return {FlowReason::Branch, kImportThunk, 0u};
+}
+
+// Regression (AC6 NetDll_socket/NetDll_bind ran twice, the second time with
+// the first call's result as its first argument): an import reached by a
+// tail branch runs exactly once and continues at LR. It must also not need
+// the Gen 7 fallback, which strict AOT will not have; this harness binds none.
+void test_tail_branch_to_import_runs_once_and_returns_to_lr() {
+  SessionHarness harness(&tail_branch_to_import, &halt);
+  g_import_calls = 0;
+  xenon::core::SessionExecutionTestAccess::add_import(
+      harness.session, "testlib", 7u, kImportThunk, [](xenon::core::ExportCallContext& call) {
+        ++g_import_calls;
+        assert(call.cpu.gpr[3] == 1u && "the export must see the wrapper's arguments");
+        call.cpu.gpr[3] = 0xABCDu;
+        return true;
+      });
+  assert(harness.run() == 0u);
+  assert(g_import_calls == 1 && "the export must run exactly once");
+}
+
 }  // namespace
 
 int main() {
@@ -154,6 +202,7 @@ int main() {
   test_invalid_branch_is_failure();
   test_return_with_zero_link_register_is_clean();
   test_stop_request_is_clean();
+  test_tail_branch_to_import_runs_once_and_returns_to_lr();
   std::cout << "Session execution tests passed\n";
   return 0;
 }

@@ -111,7 +111,12 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   // a nested call below) rather than on every compiled-call hot path.
   if (context.runtime.is_recognized_import_thunk(target)) {
     out.public_result.handled = true;
-    out.public_result.result = context.runtime.call(target, context.state, context.memory);
+    // A Call site resumes at its own return address; a Branch reached the
+    // thunk as a tail call and must return to LR (call_import_from_branch).
+    out.public_result.result =
+        kind == CompiledLookupKind::Branch
+            ? call_import_from_branch(context.runtime, target, context.state, context.memory)
+            : context.runtime.call(target, context.state, context.memory);
     return out;
   }
 
@@ -217,26 +222,10 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
       out.reason = DynamicFallbackStopReason::CompiledHandoff;
       out.exit = branch_target;
       out.public_result.handled = true;
-      auto result = context.runtime.call(branch_target, context.state, context.memory);
-      // XenonSession::call()'s Fallthrough convention ("the export ran;
-      // continue at state.cia") is only meaningful to a caller that already
-      // knows the real continuation address itself - a linked `bl` call site
-      // does (its own expected_return, computed from pc+4 - see
-      // execute_call()/finish_call() above), so it can safely ignore
-      // Fallthrough's next_address field entirely. An UNLINKED tail branch
-      // has no such fallback: state.cia at this point is still this bx
-      // instruction's own address (nothing updates it before the call), so
-      // forwarding Fallthrough as-is would make the OUTER dispatch loop
-      // re-dispatch this exact same branch forever. A tail branch never
-      // expects control back at all - it IS this function's own return, so
-      // completing it means returning to the function's real caller via the
-      // untouched LR, exactly as the equivalent real guest bytes
-      // (`bl <import-thunk-copy>`/`blr`, or the loader-owned thunk's own
-      // `mtctr`/`bctr`) would.
-      if (result.reason == FlowReason::Fallthrough) {
-        result = {FlowReason::Return, static_cast<GuestAddress>(context.state.lr & ~3ull), 0u};
-      }
-      out.public_result.result = result;
+      // An unlinked tail branch never gets control back, so the import's
+      // completion is this function's own return to LR.
+      out.public_result.result =
+          call_import_from_branch(context.runtime, branch_target, context.state, context.memory);
       return true;
     }
     return false;

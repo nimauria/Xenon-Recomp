@@ -109,6 +109,24 @@ class RuntimeServices {
   }
 };
 
+// Runs the import thunk `target` reached by an UNLINKED branch, such as the
+// `b thunk` at the end of a title's argument-shuffling wrapper. call()
+// reports a completed import as Fallthrough at state.cia, which only a linked
+// call site may use: it knows its own return address. Here state.cia is the
+// branch itself, so forwarding Fallthrough re-executes the branch and runs the
+// export a second time (AC6 created two sockets and bound one twice). A tail
+// branch never gets control back: the import's completion is the branching
+// function's own return to the untouched LR, as the console thunk's bctr is.
+[[nodiscard]] inline ExecutionResult call_import_from_branch(RuntimeServices& runtime,
+                                                             GuestAddress target,
+                                                             CpuState& state,
+                                                             MemoryPort& memory) {
+  auto result = runtime.call(target, state, memory);
+  if (result.reason == FlowReason::Fallthrough)
+    result = {FlowReason::Return, static_cast<GuestAddress>(state.lr & ~3ull), 0u};
+  return result;
+}
+
 // CPU V2 native-entry ABI. A caller creates one context for a guest execution
 // chain and compiled functions reuse its Memory V2 access view rather than
 // reacquiring the legacy polymorphic MemoryPort boundary on every guest call.
