@@ -567,6 +567,41 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
+// drain at startup): the write pointer can sit inside a packet the guest is
+// still writing. The drain must stop before that packet, with everything
+// before it applied exactly once, and continue it when the rest arrives. A
+// failed drain made the next one replay the earlier packets.
+void test_ring_waits_for_a_packet_past_the_write_pointer(AddressSpace& memory,
+                                                         CommandProcessor& cp,
+                                                         RegisterFile& regs) {
+  constexpr std::uint32_t ring = 0x01006200;
+  constexpr std::uint32_t capacity = 16;
+  constexpr std::uint32_t counter = 0x01216000;
+  store_be32(memory, counter, 0u);
+  // MEM_WRITE of 1 to `counter`, then SET_CONSTANT2 of two registers.
+  write_words(memory, ring,
+              {make_packet_type3(Type3Opcode::MemWrite, 2),
+               counter | static_cast<std::uint32_t>(Endian::Swap8In32), 1u,
+               make_packet_type3(Type3Opcode::SetConstant2, 3), 0x2F10u, 0xAAAA0000u,
+               0xBBBB0000u});
+  const auto writes_before = cp.statistics().physical_writes;
+  const auto incomplete_before = cp.statistics().incomplete_ring_packets;
+
+  // Only the header and first value of SET_CONSTANT2 are submitted.
+  const auto first = cp.execute_ring(ring, capacity, 0, 5);
+  assert(first == 3u && "the read position stays at the incomplete packet");
+  assert(cp.statistics().incomplete_ring_packets == incomplete_before + 1u);
+  assert(cp.statistics().physical_writes == writes_before + 1u);
+  assert(regs.read(0x2F10u) != 0xAAAA0000u && "an incomplete packet is not executed");
+
+  const auto second = cp.execute_ring(ring, capacity, first, 7);
+  assert(second == 7u);
+  assert(regs.read(0x2F10u) == 0xAAAA0000u && regs.read(0x2F11u) == 0xBBBB0000u);
+  assert(cp.statistics().physical_writes == writes_before + 1u &&
+         "packets before the incomplete one are not replayed");
+}
+
 // Regression (Ace Combat 6): a WAIT_REG_MEM in the ring whose memory value is
 // produced by CPU code used to spin the one host thread that also delivers vsync
 // interrupts, so the CPU code that would satisfy it never ran. At ring level an
@@ -1386,6 +1421,7 @@ int main() {
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);
   test_scratch_register_writeback_satisfies_memory_wait(memory, cp, regs);

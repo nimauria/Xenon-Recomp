@@ -168,6 +168,16 @@ class CommandProcessor::Reader {
     return value;
   }
 
+  // The next dword, without consuming it.
+  [[nodiscard]] std::uint32_t peek() const {
+    if (!remaining_) throw std::runtime_error("truncated GPU command packet");
+    std::array<std::byte, 4> snapshot{};
+    if (!memory_.copy_physical_range(base_ + index_ * 4u, snapshot)) {
+      throw std::runtime_error("GPU command read from invalid physical RAM");
+    }
+    return load_be32(snapshot.data());
+  }
+
   void skip(std::uint32_t dwords) {
     if (dwords > remaining_) {
       throw std::runtime_error("truncated PM4 conditional execution block");
@@ -256,6 +266,18 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   Reader reader(memory_, physical_address, capacity_dwords, read_index, available);
   while (reader.remaining()) {
     const std::uint32_t packet_start = reader.index();
+    // The write pointer can sit inside a packet the guest is still writing.
+    // The command processor then waits for the rest, as the hardware fetcher
+    // does: everything before it is applied and the read position is the
+    // packet's start. Failing the drain instead made the next drain replay
+    // every packet before it (draws, memory writes, fences, interrupts).
+    if (reader.remaining() < 1u + decode_packet_header(reader.peek()).count) {
+      ++stats_.incomplete_ring_packets;
+      resume_pending_ = false;
+      resume_frames_.clear();
+      resuming_ = false;
+      return packet_start;
+    }
     try {
       execute_packet(reader, 0);
     } catch (const WaitStalled&) {

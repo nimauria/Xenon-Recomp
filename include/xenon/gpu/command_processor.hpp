@@ -69,6 +69,9 @@ class CommandProcessor {
     // Type-3 packets with no executor (NOP excepted), emitted as unlowered
     // ir::Type3Packet. Nonzero is a real gap in the command processor.
     std::uint64_t unexecuted_packets{};
+    // Ring drains that stopped before a packet extending past the write
+    // pointer, to continue once the guest submits the rest.
+    std::uint64_t incomplete_ring_packets{};
     // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
     // fallback audit"): a guest register write whose index is outside the
     // known register file. emit_register_write() still throws for this (a
