@@ -1,6 +1,7 @@
 // Generic worker pool correctness (Part 3/21 of the Recomp Analysis V2
 // pass): independent of the Recomp Driver's own use of it.
 
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -20,6 +21,15 @@ int main() {
   assert(resolve_worker_count(7) == 7);
   assert(resolve_worker_count(std::nullopt) >= 1);
   assert(resolve_worker_count(0) == resolve_worker_count(std::nullopt));
+
+  // resolve_native_build_jobs(): explicit values pass through uncapped;
+  // "auto" (nullopt or 0) is the memory-bounded default.
+  assert(xenon::recomp::resolve_native_build_jobs(30) == 30);
+  assert(xenon::recomp::resolve_native_build_jobs(1) == 1);
+  assert(xenon::recomp::resolve_native_build_jobs(std::nullopt) ==
+         std::min(xenon::recomp::kDefaultNativeBuildJobs, resolve_worker_count(std::nullopt)));
+  assert(xenon::recomp::resolve_native_build_jobs(0) ==
+         xenon::recomp::resolve_native_build_jobs(std::nullopt));
 
   // Every index in [0, count) runs exactly once, and results land at the
   // index that produced them regardless of which worker/thread ran it -

@@ -1,5 +1,8 @@
 // xenon-prepare command-line options.
 
+#include <charconv>
+#include <system_error>
+
 #include "prepare_internal.hpp"
 
 namespace xenon::prepare_tool {
@@ -12,7 +15,9 @@ void print_usage() {
       "                     [--status-file <path>] [--stop-signal <path>]\n"
       "                     [--observations <adaptive-observations.jsonl>]\n"
       "                     [--knowledge <knowledge.jsonl>]\n"
-      "                     [--recomp-root <path>] [--force] [--query]\n";
+      "                     [--recomp-root <path>] [--jobs auto|N] [--force] [--query]\n"
+      "  --jobs sets how many compiler processes build the native module;\n"
+      "  'auto' (default) is min(8, logical CPUs - 1).\n";
 }
 
 bool parse_args(int argc, char** argv, Options& options, std::string& error) {
@@ -32,6 +37,21 @@ bool parse_args(int argc, char** argv, Options& options, std::string& error) {
     else if (arg == "--observations") options.observations = next();
     else if (arg == "--knowledge") options.knowledge = next();
     else if (arg == "--config") options.config = next();
+    else if (arg == "--jobs") {
+      const auto value = next();
+      if (value == "auto") {
+        options.jobs.reset();
+      } else {
+        std::size_t parsed = 0;
+        const auto* const end = value.data() + value.size();
+        const auto [stop, ec] = std::from_chars(value.data(), end, parsed);
+        if (value.empty() || ec != std::errc{} || stop != end || parsed == 0) {
+          error = "--jobs must be 'auto' or a positive integer, got '" + value + "'";
+          return false;
+        }
+        options.jobs = parsed;
+      }
+    }
     else if (arg == "--force") options.force = true;
     else if (arg == "--query") options.query = true;
     else if (arg == "--help" || arg == "-h") { print_usage(); std::exit(0); }

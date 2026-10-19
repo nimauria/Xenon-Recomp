@@ -119,11 +119,12 @@ ModuleBuildResult prepare_one_module(const xenon::xbox::XexImage& effective_imag
     return result;
   }
 
-  status.report(Phase::Compiling, 70, "Compiling and linking native code");
+  const auto build_jobs = xenon::recomp::resolve_native_build_jobs(options.jobs);
+  status.report(Phase::Compiling, 70,
+                "Compiling and linking native code (" + std::to_string(build_jobs) + " jobs)");
   const std::vector<std::string> build_args = {
       XENON_CMAKE_COMMAND, "--build", build_dir.string(), "--target", "xenon_game_module",
-      "--parallel", std::to_string(std::min<std::size_t>(8, xenon::recomp::resolve_worker_count({}))),
-      "--config", options.config};
+      "--parallel", std::to_string(build_jobs), "--config", options.config};
   if (!run_cancellable_command(build_args, options.stop_signal, command_error, cancelled)) {
     staging.discard();
     status.report(cancelled ? Phase::Cancelled : Phase::Failed, 70,

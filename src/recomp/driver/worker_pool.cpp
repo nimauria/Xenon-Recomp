@@ -12,6 +12,11 @@ std::size_t resolve_worker_count(std::optional<std::size_t> requested) noexcept 
   return static_cast<std::size_t>(hardware) - 1u;
 }
 
+std::size_t resolve_native_build_jobs(std::optional<std::size_t> requested) noexcept {
+  if (requested.has_value() && *requested != 0) return *requested;
+  return std::min(kDefaultNativeBuildJobs, resolve_worker_count(std::nullopt));
+}
+
 void WorkerPool::parallel_for(std::size_t count, const std::function<void(std::size_t)>& fn) const {
   if (count == 0) return;
 

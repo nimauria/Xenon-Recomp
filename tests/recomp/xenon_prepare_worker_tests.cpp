@@ -226,7 +226,7 @@ int main() {
     command << quote(prepare_exe) << " --content " << quote(content_dir) << " --module "
             << quote(module_dir) << " --module-id xenon_test_module --cache-root "
             << quote(cache_root) << " --status-file " << quote(status_file) << " --recomp-root "
-            << quote(source_root);
+            << quote(source_root) << " --jobs 2";
     if (query) command << " --query";
     if (force) command << " --force";
     return run_system(command.str());
@@ -344,6 +344,18 @@ int main() {
   }
   assert(staging_entries == 0);
   std::cout << "  [PASS] A pre-signalled cancellation exits cleanly and disturbs nothing\n";
+
+  // --jobs must be 'auto' or a positive integer; anything else is a usage
+  // error (exit 1) before any work. The runs above built with --jobs 2.
+  for (const char* bad : {"0", "-3", "eight", "4x"}) {
+    const auto bad_root = root / "bad-jobs-cache";
+    std::ostringstream command;
+    command << quote(prepare_exe) << " --content " << quote(content_dir) << " --cache-root "
+            << quote(bad_root) << " --recomp-root " << quote(source_root) << " --jobs " << bad;
+    assert(run_system(command.str()) == 1);
+    assert(!std::filesystem::exists(bad_root / "workspaces"));
+  }
+  std::cout << "  [PASS] An invalid --jobs value is a usage error\n";
 
 #if defined(_WIN32)
   // A cache root too long for MSVC's MAX_PATH limit is refused before any
