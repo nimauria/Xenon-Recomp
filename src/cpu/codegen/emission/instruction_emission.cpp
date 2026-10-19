@@ -288,15 +288,21 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       if (i.op == Op::VAnd || i.op == Op::VAndNot || i.op == Op::VOr || i.op == Op::VXor || i.op == Op::VNot)
         return decl(i, "aot::vector_logic<" + enum_name(i) + ">(" + arg(i,0) + "," + arg(i,1) + ")");
       
-      // Native vector splat
+      // Native vector splat. The element index (vsplt[bhw], vspltw128) and the
+      // signed immediate (vspltis[bhw], vspltisw128) are the 5-bit field at
+      // bits 16-20 of the instruction word in both the VX and VMX128 forms,
+      // as aot_semantics' vx_imm5/vx128_imm3 decode it. imm0 is the lifter's
+      // mnemonic tag, not an operand: using it made AC6's VMX memset fill
+      // with 0x2A ('*') instead of the requested byte.
       if (i.op == Op::VSplat) {
         const auto m = guest_mnemonic(i);
-        if (m.find("vspltb") == 0) return decl(i, "aot::vector_splat_byte<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
-        if (m.find("vsplth") == 0) return decl(i, "aot::vector_splat_halfword<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
-        if (m.find("vspltw") == 0) return decl(i, "aot::vector_splat_word<" + enum_name(i) + ">(" + arg(i,0) + "," + std::to_string(i.imm0) + ")");
-        if (m.find("vspltisb") == 0) return decl(i, "aot::vector_splat_immediate_byte<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
-        if (m.find("vspltish") == 0) return decl(i, "aot::vector_splat_immediate_halfword<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
-        if (m.find("vspltisw") == 0) return decl(i, "aot::vector_splat_immediate_word<" + enum_name(i) + ">(" + std::to_string(i.imm0) + ")");
+        const auto field = std::to_string((i.guest_word >> 16) & 31u);
+        if (m.find("vspltb") == 0) return decl(i, "aot::vector_splat_byte<" + enum_name(i) + ">(" + arg(i,0) + "," + field + ")");
+        if (m.find("vsplth") == 0) return decl(i, "aot::vector_splat_halfword<" + enum_name(i) + ">(" + arg(i,0) + "," + field + ")");
+        if (m.find("vspltw") == 0) return decl(i, "aot::vector_splat_word<" + enum_name(i) + ">(" + arg(i,0) + "," + field + ")");
+        if (m.find("vspltisb") == 0) return decl(i, "aot::vector_splat_immediate_byte<" + enum_name(i) + ">(" + field + ")");
+        if (m.find("vspltish") == 0) return decl(i, "aot::vector_splat_immediate_halfword<" + enum_name(i) + ">(" + field + ")");
+        if (m.find("vspltisw") == 0) return decl(i, "aot::vector_splat_immediate_word<" + enum_name(i) + ">(" + field + ")");
       }
       
       // Native modular vector arithmetic
