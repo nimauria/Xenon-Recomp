@@ -1384,6 +1384,70 @@ int main() {
   }
   std::cout << "  [PASS] Gen 6 resolves immutable pointer-table calls end-to-end\n";
 
+  // Regression (AC6 0x821a6bc0): a switch dispatcher with only weak boundary
+  // evidence (here gap recovery; in AC6 a method reached only through a
+  // vtable) must still own its jump-table cases. Before the fix each case
+  // stayed a separate overlapping function, so a branch from one case into
+  // the middle of a sibling case left its "owner" with no dispatchable entry
+  // and code generation failed entry-integrity validation.
+  {
+    const auto dispatcher = base + 0x04u;
+    const auto case_a = base + 0x20u;
+    const auto case_b = base + 0x28u;
+    const auto join = base + 0x2Cu;
+    const auto case_c = base + 0x34u;
+    const std::vector<std::uint32_t> words = {
+        kBlr,                                    // +0x00 entry point
+        mflr_word(12u),                          // +0x04 dispatcher: weak, gap-recovered
+        cmplwi_word(3u, 2u),                     // +0x08 bound check
+        bc_word(base + 0x0Cu, case_c, 12u, 1u),  // +0x0C bgt default
+        kBctr,                                   // +0x10 switch dispatch
+        case_a, case_b, case_c,                  // +0x14 inline jump table
+        0u,                                      // +0x20 placeholder, replaced below
+    };
+    std::vector<std::uint32_t> text = words;
+    text.resize(14u, kBlr);
+    text[8] = addi_word(3u, 3u, 1u);             // +0x20 case A
+    text[9] = b_word(base + 0x24u, join);        // +0x24 into the middle of case B
+    text[10] = addi_word(3u, 3u, 2u);            // +0x28 case B
+    text[11] = addi_word(4u, 4u, 1u);            // +0x2C join point
+    text[12] = kBlr;                             // +0x30
+    text[13] = kBlr;                             // +0x34 case C / default
+    const auto xex_bytes = make_xex(text);
+    const auto test_root = root / "weak_switch_owner";
+    remove_all_tolerant(test_root);
+    std::filesystem::create_directories(test_root);
+
+    DriverOptions options{};
+    options.input = test_root / "fixture.xex";
+    options.output = test_root / "generated";
+    options.analysis_jobs = 1u;
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error));
+    const auto* owner = find_function(report, dispatcher);
+    assert(owner != nullptr && owner->compiled);
+    assert(has_source(*owner, DiscoverySource::GapRecovery));
+    assert(!has_source(*owner, DiscoverySource::DirectCall) &&
+           !has_source(*owner, DiscoverySource::EntryPoint) &&
+           "the dispatcher must carry only weak evidence for this to reproduce");
+    for (const auto case_start : {case_a, case_b}) {
+      assert(find_function(report, case_start) == nullptr &&
+             "a jump-table case of a root dispatcher is its block, not a function");
+      const auto* entry = find_entry(report, case_start);
+      assert(entry != nullptr && entry->kind == GuestEntryKind::AlternateBlock &&
+             entry->owner_function == dispatcher);
+    }
+    error.clear();
+    assert(generate_project(options, report, error) && error.empty());
+    remove_all_tolerant(test_root);
+  }
+  std::cout << "  [PASS] Jump-table cases of a weakly evidenced dispatcher are absorbed into it\n";
+
   std::cout << "All Recomp Analysis V3 + Gen 6 discovery quality tests passed!\n";
   return 0;
 }
