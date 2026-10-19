@@ -66,6 +66,9 @@ class CommandProcessor {
     std::uint64_t viz_query_visible_results{};
     std::uint64_t interrupt_packets{};
     std::uint64_t interrupt_dispatches{};
+    // Type-3 packets with no executor (NOP excepted), emitted as unlowered
+    // ir::Type3Packet. Nonzero is a real gap in the command processor.
+    std::uint64_t unexecuted_packets{};
     // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
     // fallback audit"): a guest register write whose index is outside the
     // known register file. emit_register_write() still throws for this (a

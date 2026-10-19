@@ -1318,6 +1318,42 @@ void test_unknown_register_write_is_counted(AddressSpace& memory, CommandProcess
   assert(cp.statistics().unknown_register_writes == before + 1u);
 }
 
+// Regression (AC6 logs were full of "unhandled GPU command variant"): the
+// semantic IR variants are records of packets the command processor already
+// executed, so the backend has nothing left to do for them. Recognized
+// packets the command processor never executed used to be emitted with the
+// same variants, so the two could not be told apart. They now arrive as an
+// unlowered Type3Packet and are counted.
+void test_unexecuted_packets_are_unlowered(AddressSpace& memory, CommandProcessor& cp,
+                                           xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t commands = 0x0100A000;
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::EventWrite, 1), 0x00000016u,
+               make_packet_type3(Type3Opcode::Nop, 1), 0x12345678u,
+               make_packet_type3(Type3Opcode::WaitForIdle, 1), 0u,
+               make_packet_type3(Type3Opcode::EventWriteZPassDone, 1), 0u,
+               make_packet_type3(Type3Opcode::ContextUpdate, 1), 0u});
+  const auto before = cp.statistics().unexecuted_packets;
+  const auto first = stream.size();
+  cp.execute_buffer(commands, 10);
+  assert(cp.statistics().unexecuted_packets == before + 3u);
+
+  std::vector<const xenon::gpu::ir::Command*> emitted;
+  for (std::size_t i = first; i < stream.size(); ++i) {
+    const auto& command = stream.commands()[i];
+    if (!std::holds_alternative<xenon::gpu::ir::RegisterWrite>(command)) emitted.push_back(&command);
+  }
+  assert(emitted.size() == 5u);
+  const auto* event = std::get_if<xenon::gpu::ir::EventPacket>(emitted[0]);
+  assert(event && event->opcode == Type3Opcode::EventWrite && "an executed packet keeps its record");
+  const Type3Opcode unlowered[] = {Type3Opcode::Nop, Type3Opcode::WaitForIdle,
+                                   Type3Opcode::EventWriteZPassDone, Type3Opcode::ContextUpdate};
+  for (std::size_t i = 0; i < 4u; ++i) {
+    const auto* packet = std::get_if<xenon::gpu::ir::Type3Packet>(emitted[i + 1u]);
+    assert(packet && packet->opcode == unlowered[i] && packet->payload.size() == 1u);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1347,6 +1383,7 @@ int main() {
   test_visibility_queries(memory, cp, regs);
   test_interrupt_dispatch(memory, cp);
   test_mem_write(memory, cp);
+  test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);

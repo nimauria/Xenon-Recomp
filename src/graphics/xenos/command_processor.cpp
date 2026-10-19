@@ -77,74 +77,6 @@ namespace {
   }
 }
 
-[[nodiscard]] bool is_shader_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::ImLoad:
-    case Type3Opcode::ImLoadImmediate:
-    case Type3Opcode::ImStore:
-    case Type3Opcode::SetShaderBases:
-    case Type3Opcode::SetShaderConstants:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_sync_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::WaitForIdle:
-    case Type3Opcode::WaitRegMem:
-    case Type3Opcode::WaitRegEq:
-    case Type3Opcode::WaitRegGte:
-    case Type3Opcode::WaitUntilRead:
-    case Type3Opcode::WaitIndirectBufferPfdComplete:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_event_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::VizQuery:
-    case Type3Opcode::EventWrite:
-    case Type3Opcode::EventWriteShaderDone:
-    case Type3Opcode::EventWriteCacheFlush:
-    case Type3Opcode::EventWriteExtent:
-    case Type3Opcode::EventWriteZPassDone:
-    case Type3Opcode::Interrupt:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_state_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::RegRmw:
-    case Type3Opcode::SetState:
-    case Type3Opcode::SetConstant:
-    case Type3Opcode::SetConstant2:
-    case Type3Opcode::LoadConstantContext:
-    case Type3Opcode::LoadAluConstant:
-    case Type3Opcode::InvalidateState:
-    case Type3Opcode::CondExec:
-    case Type3Opcode::CondWrite:
-    case Type3Opcode::ContextUpdate:
-    case Type3Opcode::SetBinBaseOffset:
-    case Type3Opcode::SetBinMask:
-    case Type3Opcode::SetBinSelect:
-    case Type3Opcode::SetBinMaskLow:
-    case Type3Opcode::SetBinMaskHigh:
-    case Type3Opcode::SetBinSelectLow:
-    case Type3Opcode::SetBinSelectHigh:
-    case Type3Opcode::MeInit:
-      return true;
-    default:
-      return false;
-  }
-}
-
 [[nodiscard]] std::uint32_t constant_register_base(std::uint32_t type) {
   switch (type) {
     case 0: return 0x4000u;  // ALU constants.
@@ -1299,8 +1231,9 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       stream_.emit(ir::ShaderPacket{header.opcode, payload});
       return;
     }
-    // Unknown/shared instruction-store selectors remain losslessly represented.
-    stream_.emit(ir::ShaderPacket{header.opcode, std::move(payload)});
+    // Unknown/shared instruction-store selectors were not executed.
+    ++stats_.unexecuted_packets;
+    stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
     return;
   }
 
@@ -1490,26 +1423,13 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     return;
   }
 
-  if (is_shader_opcode(header.opcode)) {
-    stream_.emit(ir::ShaderPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_sync_opcode(header.opcode)) {
-    stream_.emit(ir::SynchronizationPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_event_opcode(header.opcode)) {
-    stream_.emit(ir::EventPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_state_opcode(header.opcode)) {
-    stream_.emit(ir::StatePacket{header.opcode, std::move(payload)});
-    return;
-  }
-
-  // Unknown/undocumented type-3 values are retained exactly. This is not a
-  // runtime emulation fallback: it is lossless frontend IR so a later analysis
-  // or backend can diagnose/implement the command without corrupting the stream.
+  // Everything above executed its packet before emitting it; the semantic IR
+  // variants (ShaderPacket, SynchronizationPacket, EventPacket, StatePacket)
+  // are records of work already done. A packet that reaches this point was
+  // not executed, whether or not its opcode is recognized, so it is emitted
+  // as an unlowered Type3Packet and counted: it must never look executed.
+  // The payload is retained exactly so it can be diagnosed or implemented.
+  ++stats_.unexecuted_packets;
   stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
 }
 

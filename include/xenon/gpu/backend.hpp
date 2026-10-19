@@ -42,7 +42,7 @@ struct GpuPerformanceCounters {
 // any nonzero value is real, actionable evidence of a gap, not noise to be
 // hidden.
 struct GpuUnsupportedCounters {
-  std::uint64_t unknown_packets{};                 // IR command variant consume() has no handler for.
+  std::uint64_t unknown_packets{};                 // PM4 type-3 packet the command processor did not execute.
   std::uint64_t unknown_registers{};                // Xenos register index outside the known register file.
   std::uint64_t unsupported_fetch_formats{};        // Vertex/texture fetch format the shader lowerer rejects.
   std::uint64_t unsupported_texture_formats{};      // Guest texture format with no host equivalent.

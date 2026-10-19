@@ -13,24 +13,32 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
   collect_retired_resources();
   ++command_count;
   ++performance.commands;
-  // Part 7 of the AC6 Runtime Readiness pass: RegisterWrite/DrawPacket/
-  // ShaderLoad are the only Command variants this backend actually consumes
-  // below. PhysicalMemoryWrite/IndirectBuffer/ShaderPacket/
-  // SynchronizationPacket/EventPacket/StatePacket/Type3Packet reaching here
-  // have no handler at all - previously silently dropped. Type3Packet's own
-  // doc comment (ir.hpp) is explicit that "packets are never silently
-  // discarded merely because the host backend does not consume them yet";
-  // this is the observability half of that promise; consuming them is
-  // separate future work.
-  if (!std::holds_alternative<ir::RegisterWrite>(command) &&
-      !std::holds_alternative<ir::DrawPacket>(command) &&
-      !std::holds_alternative<ir::ShaderLoad>(command)) {
+  // RegisterWrite/DrawPacket/ShaderLoad carry state the host renderer needs.
+  // PhysicalMemoryWrite/IndirectBuffer/ShaderPacket/SynchronizationPacket/
+  // EventPacket/StatePacket record work the command processor has already
+  // executed: memory writes reach guest memory (and its GPU coherency
+  // tracking) through AddressSpace, fences and interrupts are delivered, and
+  // constant/state packets are re-emitted as RegisterWrites. The renderer has
+  // nothing left to do for them. A Type3Packet other than NOP is a packet
+  // the command processor did not execute, which is a real gap.
+  if (const auto* packet = std::get_if<ir::Type3Packet>(&command)) {
+    if (packet->opcode == Type3Opcode::Nop) return;
     ++unsupported.unknown_packets;
     xenon::logging::Logger::instance().log_if_enabled(
         xenon::logging::Level::Warning, "gpu", [&] {
-          return "unhandled GPU command variant (index=" +
-                 std::to_string(command.index()) + ")";
+          return "unexecuted PM4 type-3 packet (opcode=0x" +
+                 [](std::uint32_t value) {
+                   char text[8];
+                   std::snprintf(text, sizeof(text), "%02X", value);
+                   return std::string(text);
+                 }(static_cast<std::uint32_t>(packet->opcode)) +
+                 ", " + std::to_string(packet->payload.size()) + " dwords)";
         });
+    return;
+  }
+  if (!std::holds_alternative<ir::RegisterWrite>(command) &&
+      !std::holds_alternative<ir::DrawPacket>(command) &&
+      !std::holds_alternative<ir::ShaderLoad>(command)) {
     return;
   }
   if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
