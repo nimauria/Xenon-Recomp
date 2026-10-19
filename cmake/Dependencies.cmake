@@ -286,11 +286,14 @@ function(_xenon_make_ffmpeg_external_target out_target out_include root_path all
     find_path(_include libavcodec/avcodec.h
       HINTS "${root_path}" "${root_path}/include"
       NO_DEFAULT_PATH NO_CACHE)
+    # FFmpeg's MSVC `make install` puts the avcodec.lib/avutil.lib import
+    # libraries in bin/ beside the DLLs; the bootstrap's readiness check
+    # (_candidate_lib in tools/deps/bootstrap.py) searches the same three.
     find_library(_ffmpeg_avcodec NAMES avcodec libavcodec
-      HINTS "${root_path}/lib" "${root_path}/lib64"
+      HINTS "${root_path}/lib" "${root_path}/lib64" "${root_path}/bin"
       NO_DEFAULT_PATH NO_CACHE)
     find_library(_ffmpeg_avutil NAMES avutil libavutil
-      HINTS "${root_path}/lib" "${root_path}/lib64"
+      HINTS "${root_path}/lib" "${root_path}/lib64" "${root_path}/bin"
       NO_DEFAULT_PATH NO_CACHE)
   elseif(allow_system)
     find_package(PkgConfig QUIET)
