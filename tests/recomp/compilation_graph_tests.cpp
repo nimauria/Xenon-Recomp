@@ -36,6 +36,13 @@
 #include <array>
 #include <chrono>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 using namespace xenon::recomp;
 using namespace xenon::recomp::analysis;
 namespace xbox = xenon::xbox;
@@ -195,6 +202,21 @@ Fixture make_fixture(const std::string& name, const std::vector<std::byte>& xex_
 // calibrates against the actual measured per-function generated size rather
 // than a hardcoded byte count, so it stays correct if the C++ AOT backend's
 // emitted boilerplate ever changes size.
+// True off Windows (no MAX_PATH), and on Windows when the system-wide
+// LongPathsEnabled policy is set.
+bool windows_long_path_policy_enabled() {
+#if defined(_WIN32)
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  return RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\FileSystem",
+                      L"LongPathsEnabled", RRF_RT_REG_DWORD, nullptr, &value,
+                      &size) == ERROR_SUCCESS &&
+         value != 0;
+#else
+  return true;
+#endif
+}
+
 void test_shard_byte_budget() {
   const auto xex = make_xex(
       {branch_word(12, true), branch_word(16, true), kBlr, 0x38600001, kBlr, 0x38600002, kBlr}, 0x40);
@@ -365,6 +387,23 @@ int main() {
   g::Node shared{"source","test",{{"race","same"}}, {}};
   WorkerPool(8).parallel_for(24,[&](std::size_t){ assert(store.publish(shared,"same bytes").bytes=="same bytes"); });
   assert(store.lookup(shared)->bytes=="same bytes");
+  // Regression: on Windows a cache root deep enough to put the staging
+  // manifest past MAX_PATH (260) failed every publish ("graph cache write
+  // failed") because no Xenon executable declared longPathAware. The
+  // manifest is only honoured while the OS LongPathsEnabled policy is on.
+  if (!windows_long_path_policy_enabled()) {
+    std::cout << "  [SKIP] long cache root: Windows LongPathsEnabled policy is off on this host\n";
+  } else {
+    auto long_root = fixture.root / "long";
+    while (long_root.string().size() < 200) long_root /= "nested-cache-directory";
+    const g::Store long_store(long_root / "cas");
+    g::Node deep{"source","test",{{"long","path"}}, {}};
+    assert((long_store.root() / "staging" / (deep.key() + "-0000000000-0000") / "manifest.json")
+               .string().size() > 260);
+    assert(long_store.publish(deep,"deep bytes").bytes=="deep bytes");
+    assert(long_store.lookup(deep)->bytes=="deep bytes");
+    std::filesystem::remove_all(fixture.root / "long");
+  }
 
   DriverOptions options;options.input=fixture.input;options.output=fixture.output;
   options.graph_cache=store.root();options.shard_function_count=1;options.analysis_jobs=1;options.codegen_jobs=1;

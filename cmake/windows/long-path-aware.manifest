@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Merged into every Xenon executable built with MSVC (CompilerOptions.cmake).
+     Without it Windows caps file paths at MAX_PATH (260) even when the
+     LongPathsEnabled policy is on, and preparation fails writing deep cache
+     paths such as graph-v1/staging/<key>/manifest.json under a long cache root. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>
