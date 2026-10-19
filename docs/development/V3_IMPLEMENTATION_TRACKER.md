@@ -1043,12 +1043,44 @@ runs for about 9 s, then faults. Defects found from that run, all generic:
   a clean stop. It is now logged on any guest thread or pump callback crash.
   Regression in `xenon_session_execution_tests`.
 
-Open from these runs: the earlier "GPU pump and audio only work once"
-symptom has not been re-checked since the memset and double-import fixes;
-both could plausibly cause it (zeroed ring/voice state filled with `0x2A`,
-credit/fence handshakes run twice), but that is not established. "Unhandled
-GPU command variant" warnings (indices 1, 2, 6, 7, 8) remain, and
-`xenon-prepare` still hard-codes `--parallel 8` for the module build.
+**AC6 later runs (same day).** With the splat fix AC6 ran past 9 s and the
+following were found and fixed, each with a regression test:
+
+- *The "unhandled GPU command variant" warnings were records, not gaps.*
+  The command processor executes those packets itself; the backend now
+  accepts the records, and packets the command processor never executes
+  (`WAIT_FOR_IDLE`, `EVENT_WRITE_ZPD`, `CONTEXT_UPDATE`, `ME_INIT`, ...)
+  arrive as unlowered `Type3Packet`s and are counted
+  (`Statistics::unexecuted_packets`). AC6 sends `ME_INIT` (0x48) twice.
+- *A lifetime cap of 1,000,000 outer dispatches killed AC6 about 30 s in*
+  while it ran correctly (returns through the restore helper `0x82382A80`
+  pass through the outer loop). Removed: a guest thread runs until it ends.
+- *Audio stopped after one callback because every guest thread read
+  processor 0.* Titles read their hardware-thread number from KPCR+0x10C.
+  `ExCreateThread`'s processor mask and `KeSetAffinityThread` were recorded
+  but never written there. AC6's audio threads rendezvous through a 64-bit
+  word with one byte per processor (`0x823AC7E8`); with every thread writing
+  byte 0 the rendezvous never completed and the audio render callback
+  blocked in `KeWaitForMultipleObjects` forever. After the fix the audio
+  client ran 3,598 callbacks in 60 s with every submitted frame consumed,
+  and the GPU pump delivered vsync interrupts throughout (the old "GPU pump
+  and audio only work once" symptom).
+- *A ring packet straddling the guest's write pointer was replayed.* The
+  drain threw "truncated Xenos type-3 packet" and the next drain re-executed
+  everything before it. It now stops at the incomplete packet.
+- *Guest threads spinning inside one compiled function could not be
+  suspended or terminated*, so shutdown unloaded the module under them and
+  the host hung or crashed. Every compiled loop back-edge now polls a
+  per-thread safepoint flag (`ExecutionContext::poll_safepoint()`), and
+  shutdown keeps the module loaded if a thread still will not stop.
+- The stop report now names threads, prints each running thread's callers
+  and each Ke wait's dispatcher objects; pump state is logged on crashes too;
+  `xenon-prepare --jobs N` sets the module build's parallelism.
+
+Open: AC6 renders very little (27 draws in 40 s at the last run); the GPU
+was last seen parked on `WAIT_REG_MEM` for the word at `0x1F0C2004` to
+become 0 while it held 1. Not yet re-checked with the ring and safepoint
+fixes.
 
 Kernel handlers use several argument idioms (`dispatch<N>`, helper
 functions), so the automated comparison covered XAM fully and xboxkrnl only
