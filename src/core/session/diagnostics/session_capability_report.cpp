@@ -201,12 +201,12 @@ JsonValue XenonSession::capability_report() const {
     std::size_t implemented = 0u, safe_stub = 0u, partial = 0u, missing = 0u;
     JsonValue partial_notes = JsonValue::make_array();
     for (const auto& import : loaded_xex_->image.imports) {
-      if (import.is_function_address()) continue;  // Not separately resolved - see resolve_xex_imports().
-
-      const auto* descriptor = !import.symbol.empty()
-                                    ? export_registry_.resolve(import.module, import.symbol)
-                                    : export_registry_.resolve(import.module, import.ordinal);
-      switch (classify_import(descriptor)) {
+      // Same rule as resolve_xex_imports(): address records are skipped and
+      // variable imports resolve in the variable namespace.
+      const auto resolution = classify_xex_import(export_registry_, import);
+      if (!resolution) continue;
+      const auto* descriptor = resolution->function;
+      switch (resolution->status) {
         case ImportClassification::Implemented: ++implemented; break;
         case ImportClassification::SafeStub: ++safe_stub; break;
         case ImportClassification::Partial: ++partial; break;

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -17,6 +18,47 @@
 #include "xenon/core/import_classification.hpp"
 #include "xenon/core/json.hpp"
 #include "xenon/core/session.hpp"
+
+namespace {
+
+// Initializes `session` with every subsystem this build compiled in, most
+// complete first, so its registry holds what a Normal Play session
+// registers. A subsystem whose host backend cannot start here (no audio
+// device, no GPU) is dropped and the fallback is reported on stderr, because
+// that subsystem's exports would then be absent.
+bool initialize_registry_session(const std::string& tool, xenon::core::XenonSession& session) {
+  struct Attempt {
+    const char* label;
+    bool graphics, input, audio, network;
+  };
+  static constexpr Attempt kAttempts[] = {
+      {"graphics+input+audio+network", true, true, true, true},
+      {"graphics+input+network (no audio)", true, true, false, true},
+      {"input+network (no graphics/audio)", false, true, false, true},
+      {"network only", false, false, false, true},
+  };
+  for (const auto& attempt : kAttempts) {
+    xenon::core::SessionConfig config{};
+    config.enable_logging = false;
+    config.enable_graphics = attempt.graphics;
+    config.enable_input = attempt.input;
+    config.enable_audio = attempt.audio;
+    config.enable_network = attempt.network;
+    // The registry does not depend on a controller being attached.
+    config.input_drivers = {"automatic", "null"};
+    const auto initialized = session.initialize(config);
+    if (initialized.success) {
+      std::cerr << tool << ": registry from a session with " << attempt.label << "\n";
+      return true;
+    }
+    std::cerr << tool << ": session with " << attempt.label << " failed to initialize ("
+              << initialized.message << "); trying a smaller set\n";
+    session.shutdown();
+  }
+  return false;
+}
+
+}  // namespace
 #endif
 
 int main(int argc, char** argv) {
@@ -74,36 +116,8 @@ int main(int argc, char** argv) {
     // device, no GPU) is dropped, and the fallback is reported on stderr -
     // never silently, because the dump would then omit that subsystem's
     // exports.
-    struct Attempt {
-      const char* label;
-      bool graphics, input, audio, network;
-    };
-    static constexpr Attempt kAttempts[] = {
-        {"graphics+input+audio+network", true, true, true, true},
-        {"graphics+input+network (no audio)", true, true, false, true},
-        {"input+network (no graphics/audio)", false, true, false, true},
-        {"network only", false, false, false, true},
-    };
     xenon::core::XenonSession session;
-    bool ready = false;
-    for (const auto& attempt : kAttempts) {
-      xenon::core::SessionConfig config{};
-      config.enable_logging = false;
-      config.enable_graphics = attempt.graphics;
-      config.enable_input = attempt.input;
-      config.enable_audio = attempt.audio;
-      config.enable_network = attempt.network;
-      const auto initialized = session.initialize(config);
-      if (initialized.success) {
-        std::cerr << tool << ": registry dumped from a session with " << attempt.label << "\n";
-        ready = true;
-        break;
-      }
-      std::cerr << tool << ": session with " << attempt.label
-                << " failed to initialize (" << initialized.message << "); trying a smaller set\n";
-      session.shutdown();
-    }
-    if (!ready) {
+    if (!initialize_registry_session(tool, session)) {
       std::cerr << tool << ": could not initialize any XenonSession configuration\n";
       return 2;
     }
@@ -289,13 +303,11 @@ int main(int argc, char** argv) {
     // ordinal table that could silently drift from what actually resolves
     // at runtime. Game-agnostic: works for any XEX passed on the command
     // line.
+    // The session carries every subsystem this build has (input and audio
+    // register XamInput* and XAudio* exports), as a Normal Play session does;
+    // a minimal session reported those imports MISSING.
     xenon::core::XenonSession session;
-    xenon::core::SessionConfig config{};
-    config.enable_logging = false;
-    config.enable_graphics = false;
-    config.enable_input = false;
-    config.enable_audio = false;
-    const bool session_ready = session.initialize(config).success;
+    const bool session_ready = initialize_registry_session(tool, session);
     if (!session_ready) {
       std::cerr << tool
                 << ": warning: could not initialize a XenonSession to resolve imports "
@@ -332,20 +344,45 @@ int main(int argc, char** argv) {
     // distinct import module, so they are broken out as an "xboxkrnl
     // (audio)" sub-group by resolved name prefix instead of by (nonexistent)
     // separate module string.
+    // Variable exports carry no descriptor; each has its own guest address,
+    // which names it in the registry's variable table.
+    std::map<xenon::cpu::GuestAddress, std::string> variable_names;
+    if (session_ready) {
+      for (const auto& variable : session.exports()->enumerate_variables()) {
+        variable_names[variable.guest_address] = variable.name;
+      }
+    }
+
+    // Each function import also has a FunctionAddress record that
+    // classify_xex_import() skips, so every import is counted once.
     std::map<std::string, std::vector<ClassifiedImport>> groups;
     for (const auto& item : report.image.imports) {
-      const auto* descriptor =
-          session_ready ? session.exports()->resolve(item.module, item.ordinal) : nullptr;
+      std::optional<xenon::core::XexImportResolution> resolution;
+      if (session_ready) {
+        resolution = xenon::core::classify_xex_import(*session.exports(), item);
+      } else if (!item.is_function_address()) {
+        resolution = xenon::core::XexImportResolution{};  // Missing.
+      }
+      if (!resolution) continue;
+      const auto* descriptor = resolution->function;
 
       std::string group = item.module;
-      if (descriptor != nullptr && item.module == "xboxkrnl" &&
+      if (descriptor != nullptr && item.module.rfind("xboxkrnl", 0) == 0 &&
           descriptor->name.rfind("XAudio", 0) == 0) {
         group = "xboxkrnl (audio)";
       }
-      const auto status = xenon::core::classify_import(descriptor);
-      const std::string resolved_name = descriptor != nullptr ? descriptor->name : "<none>";
+      std::string resolved_name = "<none>";
+      if (descriptor != nullptr) {
+        resolved_name = descriptor->name;
+      } else if (resolution->variable_address) {
+        const auto name = variable_names.find(*resolution->variable_address);
+        resolved_name =
+            (name != variable_names.end() ? name->second : std::string("<variable>")) +
+            " (variable)";
+      }
       const std::string partial_note = descriptor != nullptr ? descriptor->partial_note : "";
-      groups[group].push_back(ClassifiedImport{&item, status, resolved_name, partial_note});
+      groups[group].push_back(
+          ClassifiedImport{&item, resolution->status, resolved_name, partial_note});
     }
 
     std::size_t total_implemented = 0, total_safe_stub = 0, total_partial = 0, total_missing = 0;
@@ -449,7 +486,9 @@ int main(int argc, char** argv) {
     }
 
     if (session_ready) session.shutdown();
-    if (!overall_pass) return 4;
+    // The exit status is the import verdict alone; unresolved control flow
+    // in the analysis report is not an import failure.
+    return overall_pass ? 0 : 4;
 #else
     for (const auto& item : report.image.imports)
       std::cout << item.module << "!" << item.symbol << " ordinal=" << item.ordinal << " thunk=0x" << std::hex << item.guest_thunk << "\n";

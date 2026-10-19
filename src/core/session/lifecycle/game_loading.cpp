@@ -2,6 +2,7 @@
 #include <iostream>
 #include <mutex>
 
+#include "xenon/core/import_classification.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/xam/content_graph.hpp"
 
@@ -171,21 +172,11 @@ bool XenonSession::resolve_xex_imports() {
   // type-1 callable thunk. Only the callable thunk participates in function
   // export resolution. Standalone type-0 records are genuine variable
   // imports and resolve through the guest-backed variable-export registry.
+  // classify_xex_import() is shared with import-scanner's capability report.
   unresolved_imports_.clear();
   for (const auto& import : loaded_xex_->image.imports) {
-    if (import.is_function_address()) continue;
-
-    bool resolved = false;
-    if (import.is_variable()) {
-      resolved = !import.symbol.empty()
-                     ? export_registry_.resolve_variable(import.module, import.symbol).has_value()
-                     : export_registry_.contains_variable(import.module, import.ordinal);
-    } else if (import.callable()) {
-      resolved = !import.symbol.empty()
-                     ? export_registry_.contains(import.module, import.symbol)
-                     : export_registry_.contains(import.module, import.ordinal);
-    }
-    if (resolved) continue;
+    const auto resolution = classify_xex_import(export_registry_, import);
+    if (!resolution || resolution->status != ImportClassification::Missing) continue;
 
     const bool already_reported = std::any_of(
         unresolved_imports_.begin(), unresolved_imports_.end(),
