@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "xenon/core/guest_stack_walk.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #if defined(XENON_HAS_AUDIO)
@@ -102,7 +103,14 @@ void XenonSession::report_stop_diagnostics() {
       for (const auto& [thread_id, call] : in_flight_exports_) {
         const auto waited_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - call.since).count();
-        std::cout << "[XenonSession]   t" << thread_id << " in ";
+        std::cout << "[XenonSession]   t" << thread_id;
+        if (const auto* kernel_thread =
+                kernel_process_ ? kernel_process_->thread_manager().get_thread_ptr(thread_id)
+                                : nullptr) {
+          if (const auto name = kernel_thread->name(); !name.empty())
+            std::cout << " (" << name << ')';
+        }
+        std::cout << " in ";
         if (call.descriptor) {
           std::cout << call.descriptor->library << '!' << call.descriptor->name;
         } else {
@@ -112,6 +120,28 @@ void XenonSession::report_stop_diagnostics() {
                   << call.arguments[0] << " r4=0x" << call.arguments[1] << " r5=0x"
                   << call.arguments[2] << " r6=0x" << call.arguments[3] << std::dec
                   << std::endl;
+        // A Ke wait names guest dispatcher objects directly; show each one's
+        // DISPATCHER_HEADER (Type at +0, SignalState at +4) so a wait on an
+        // object nothing signals is visible.
+        if (call.descriptor && memory_ &&
+            (call.descriptor->name == "KeWaitForSingleObject" ||
+             call.descriptor->name == "KeWaitForMultipleObjects")) {
+          const bool multiple = call.descriptor->name == "KeWaitForMultipleObjects";
+          const auto count = multiple ? std::min<std::uint64_t>(call.arguments[0], 16u) : 1u;
+          std::cout << "[XenonSession]     objects:" << std::hex;
+          for (std::uint64_t i = 0; i < count; ++i) {
+            try {
+              const auto object = multiple
+                  ? memory_->read32_be(static_cast<cpu::GuestAddress>(call.arguments[1] + i * 4u))
+                  : static_cast<std::uint32_t>(call.arguments[0]);
+              std::cout << " 0x" << object << "{type=" << unsigned(memory_->read8(object))
+                        << " signal=0x" << memory_->read32_be(object + 4u) << '}';
+            } catch (const memory::MemoryFault&) {
+              std::cout << " <unreadable>";
+            }
+          }
+          std::cout << std::dec << std::endl;
+        }
         // A thread stuck acquiring a spin lock: the lock word holds the owner's id.
         if (call.descriptor && call.descriptor->name.find("SpinLock") != std::string::npos &&
             memory_) {
@@ -210,11 +240,27 @@ void XenonSession::report_stop_diagnostics() {
                    "recorded control-flow point):" << std::endl;
       for (const auto& [thread_id, guest_state] : guest_thread_states_) {
         if (in_flight_exports_.contains(thread_id)) continue;
-        std::cout << "[XenonSession]   t" << thread_id << " cia=0x" << std::hex
+        std::cout << "[XenonSession]   t" << thread_id;
+        if (const auto* kernel_thread =
+                kernel_process_ ? kernel_process_->thread_manager().get_thread_ptr(thread_id)
+                                : nullptr) {
+          if (const auto name = kernel_thread->name(); !name.empty())
+            std::cout << " (" << name << ')';
+        }
+        std::cout << " cia=0x" << std::hex
                   << guest_state->cia << " nia=0x" << guest_state->nia << " lr=0x"
                   << guest_state->lr << " ctr=0x" << guest_state->ctr << " r1=0x"
                   << guest_state->gpr[1] << " r3=0x" << guest_state->gpr[3] << " r4=0x"
                   << guest_state->gpr[4] << std::dec << std::endl;
+        // Its callers, which say what a thread spinning in guest code is
+        // waiting for (see walk_guest_stack() for the frame convention).
+        if (memory_) {
+          std::cout << "[XenonSession]     stack:" << std::hex;
+          for (const auto& frame :
+               walk_guest_stack(*memory_, static_cast<std::uint32_t>(guest_state->gpr[1])))
+            std::cout << " 0x" << frame.return_address;
+          std::cout << std::dec << std::endl;
+        }
         if (config_.verbose_logging) {
           // A stopped thread that is spinning entirely in guest code often has
           // no recent export to identify what it is waiting for. Preserve the

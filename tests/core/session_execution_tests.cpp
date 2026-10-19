@@ -1,6 +1,8 @@
 #include <array>
 #include <atomic>
 #include <cassert>
+#include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -68,6 +70,31 @@ struct SessionExecutionTestAccess {
   static const std::string& last_error(const XenonSession& session) {
     return session.last_error_;
   }
+
+  // Publishes a running thread's registers and a thread blocked in a Ke
+  // wait, as dispatch_guest_thread() and the export bridge do, then logs
+  // the stop report.
+  static void report_stop_with(XenonSession& session, std::uint32_t running_id,
+                               const xenon::cpu::CpuState& running, std::uint32_t waiting_id,
+                               const ExportDescriptor& wait, std::uint32_t objects,
+                               std::uint32_t count) {
+    session.export_trace_.set_enabled(true);
+    {
+      std::scoped_lock lock(session.in_flight_exports_mutex_);
+      session.guest_thread_states_[running_id] = &running;
+      XenonSession::InFlightExport call{};
+      call.descriptor = &wait;
+      call.arguments = {count, objects, 1u, 3u};
+      call.since = std::chrono::steady_clock::now();
+      session.in_flight_exports_[waiting_id] = call;
+    }
+    session.report_stop_diagnostics();
+    std::scoped_lock lock(session.in_flight_exports_mutex_);
+    session.guest_thread_states_.erase(running_id);
+    session.in_flight_exports_.erase(waiting_id);
+  }
+
+  static xenon::memory::AddressSpace& memory(XenonSession& session) { return *session.memory_; }
 
   static void record_pump_activity(XenonSession& session) {
     session.gpu_interrupts_delivered_.store(37u);
@@ -220,6 +247,54 @@ void test_long_running_thread_is_not_capped() {
   assert(xenon::core::SessionExecutionTestAccess::last_error(harness.session).empty());
 }
 
+// The stop report must say where a thread spinning in guest code was called
+// from, and what a thread blocked in a Ke wait is waiting on. AC6's audio
+// callback spun at 0x823AC8D0 for 85 s with no caller information, while
+// two threads waited in KeWaitForMultipleObjects on objects not shown.
+void test_stop_report_shows_spinning_callers_and_wait_objects() {
+  SessionHarness harness(&halt);
+  auto& memory = xenon::core::SessionExecutionTestAccess::memory(harness.session);
+  xenon::memory::GuestAddress stack{};
+  assert(memory.allocate(0x4000u, 0x1000u, xenon::memory::kReadWrite, false, stack));
+  // Frames: inner -> middle -> outer, LR saved at -8 from each caller's r1.
+  const std::uint32_t top = stack + 0x3000u, outer = top - 0x100u, inner = outer - 0x90u;
+  memory.write32_be(top, 0u);
+  memory.write32_be(top - 8u, 0x82000010u);
+  memory.write32_be(outer, top);
+  memory.write32_be(outer - 8u, 0x82000020u);
+  memory.write32_be(inner, outer);
+  xenon::cpu::CpuState running{};
+  running.cia = 0x823AC8D0u;
+  running.gpr[1] = inner;
+
+  // Two dispatcher objects: an unsignalled event (type 1) and a signalled one.
+  const std::uint32_t objects = stack + 0x100u, event_a = stack + 0x200u, event_b = stack + 0x220u;
+  memory.write32_be(objects, event_a);
+  memory.write32_be(objects + 4u, event_b);
+  memory.write8(event_a, 1u);
+  memory.write32_be(event_a + 4u, 0u);
+  memory.write8(event_b, 1u);
+  memory.write32_be(event_b + 4u, 1u);
+  xenon::core::ExportDescriptor wait{};
+  wait.library = "xboxkrnl.exe";
+  wait.name = "KeWaitForMultipleObjects";
+
+  std::ostringstream captured;
+  auto* const previous = std::cout.rdbuf(captured.rdbuf());
+  xenon::core::SessionExecutionTestAccess::report_stop_with(harness.session, 21u, running, 23u,
+                                                            wait, objects, 2u);
+  std::cout.rdbuf(previous);
+  // Hex case depends on stream flags earlier output left set.
+  auto log = captured.str();
+  for (auto& c : log) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  assert(log.find("t21 cia=0x823ac8d0") != std::string::npos);
+  assert(log.find("stack: 0x82000020 0x82000010") != std::string::npos);
+  std::ostringstream expected;
+  expected << "objects: 0x" << std::hex << event_a << "{type=1 signal=0x0} 0x" << event_b
+           << "{type=1 signal=0x1}";
+  assert(log.find(expected.str()) != std::string::npos);
+}
+
 ExecutionResult read_unmapped(ExecutionContext& context) {
   static_cast<void>(context.memory.read32_be(0x10u));
   return {FlowReason::Halt, 0u, 0u};
@@ -257,6 +332,7 @@ int main() {
   test_tail_branch_to_import_runs_once_and_returns_to_lr();
   test_crash_reports_pump_state();
   test_long_running_thread_is_not_capped();
+  test_stop_report_shows_spinning_callers_and_wait_objects();
   std::cout << "Session execution tests passed\n";
   return 0;
 }
