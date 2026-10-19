@@ -546,6 +546,58 @@ void test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread() {
   assert(thread.join(2000));
 }
 
+// Never returns to the dispatcher: a compiled loop, polling at its back-edge
+// as generated code does (backend_cpp_aot.cpp).
+ExecutionResult spinning_in_one_function_entry(ExecutionContext& context) {
+  for (;;) {
+    g_loop_iterations.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+    context.poll_safepoint();
+  }
+}
+
+// Regression (AC6 shutdown hang): a thread spinning inside one compiled
+// function was out of reach of the dispatcher's safepoint, so terminate()
+// and suspend() did nothing and teardown unloaded the module under it.
+void test_a_thread_spinning_in_one_function_can_be_suspended_and_terminated() {
+  g_loop_iterations.store(0);
+  ThreadCreationHarness harness(&spinning_in_one_function_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  const auto handle = harness.session.memory()->read32_be(handle_out);
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  while (g_loop_iterations.load(std::memory_order_relaxed) < 200)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+  assert(thread.suspend());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto parked = g_loop_iterations.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  assert(g_loop_iterations.load(std::memory_order_relaxed) == parked &&
+         "a suspended thread parks at its loop's back-edge");
+
+  assert(thread.resume());
+  bool progressed = false;
+  for (int i = 0; i < 200 && !progressed; ++i) {
+    progressed = g_loop_iterations.load(std::memory_order_relaxed) > parked;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(progressed && "a resumed thread continues its loop");
+
+  assert(thread.terminate(0x5151u));
+  assert(thread.join(2000) && "a terminated thread leaves the compiled loop");
+  assert(thread.exit_code() == 0x5151u);
+}
+
 void test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit() {
   g_entry_ran.store(false);
   ThreadCreationHarness harness(&trapping_entry);
@@ -1020,6 +1072,7 @@ int main() {
   test_ex_create_thread_affinity_alone_does_not_suspend();
   test_preemptive_safepoint_terminates_a_running_created_thread();
   test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread();
+  test_a_thread_spinning_in_one_function_can_be_suspended_and_terminated();
   test_two_concurrent_created_threads_have_independent_tls();
   test_read_time_base_tracks_real_elapsed_time_and_spr_access_is_accounted();
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();

@@ -125,6 +125,13 @@ class KernelThread final : public KernelObject {
     return terminated_.load(std::memory_order_acquire);
   }
 
+  // True while the thread is suspended or terminated: the flag compiled
+  // loops poll (cpu::ExecutionContext::safepoint_flag), so a thread spinning
+  // in one compiled function still stops when asked.
+  [[nodiscard]] const std::atomic<bool>* safepoint_flag() const noexcept {
+    return &safepoint_requested_;
+  }
+
   // KeSetDisableBoostThread: whether scheduler priority boosts are disabled for
   // this thread. Returns the previous value. Xenon runs guest threads as host
   // threads and applies no dynamic boost, so the flag is pure guest-visible state.
@@ -188,6 +195,9 @@ class KernelThread final : public KernelObject {
   // 0xFFFFFFFF waits forever, matching the existing INFINITE convention used
   // elsewhere in this codebase (see kernel::WaitResult/wait.cpp).
   [[nodiscard]] bool join(std::uint32_t timeout_ms = 0xFFFFFFFF);
+  // Whether start() created the host thread (join() is false for one that
+  // never started, which is not a thread still running).
+  [[nodiscard]] bool started() const noexcept { return host_thread_ != nullptr; }
 
   // TLS support
   [[nodiscard]] std::optional<std::uint64_t> get_tls(std::uint32_t slot) const;
@@ -251,6 +261,7 @@ class KernelThread final : public KernelObject {
   // alongside every state_ = ThreadState::Terminated transition (terminate()
   // and thread_main()'s natural-completion path).
   std::atomic<bool> terminated_{false};
+  std::atomic<bool> safepoint_requested_{false};
   // Multi-object waits on this thread; woken when it terminates.
   detail::MultiWaitList multi_waiters_;
   std::atomic<bool> boost_disabled_{false};
@@ -320,7 +331,10 @@ class ThreadManager {
   // not immediate on join().
   std::size_t reap_finished_threads();
 
-  void shutdown();
+  // Terminates every thread and joins each with a bound. Returns the ids of
+  // threads still running afterwards (stuck outside any safepoint): their
+  // code and memory must not be released.
+  std::vector<std::uint32_t> shutdown();
 
   [[nodiscard]] std::vector<std::shared_ptr<KernelThread>> enumerate_threads() const;
   [[nodiscard]] std::size_t thread_count() const;

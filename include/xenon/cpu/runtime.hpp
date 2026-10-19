@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string_view>
 
@@ -47,6 +48,12 @@ struct ExecutionResult {
   }
 };
 
+// Thrown by RuntimeServices::enter_safepoint() to take a terminated guest
+// thread out of compiled code; the dispatcher that runs the thread catches it.
+// Deliberately not a std::exception, so no generic handler mistakes it for a
+// fault.
+struct GuestThreadTerminated {};
+
 // Host/runtime services reachable from compiled CPU code. This is deliberately
 // not a kernel implementation: it is the narrow boundary used by generated
 // code for control transfers and architecturally-visible privileged events.
@@ -80,6 +87,13 @@ class RuntimeServices {
   // owned native helpers use it for process-lifetime services such as the
   // guest heap. Test/minimal runtimes may leave this null.
   virtual xenon::kernel::KernelProcess* current_process() noexcept { return nullptr; }
+
+  // Called by compiled code at a loop back-edge once the executing thread's
+  // safepoint flag (ExecutionContext::safepoint_flag) is set: a suspended
+  // thread parks here, and a terminated one leaves compiled code by throwing
+  // GuestThreadTerminated. A runtime that never sets the flag is never
+  // called, which is why this default does nothing.
+  virtual void enter_safepoint(CpuState& state) { static_cast<void>(state); }
 
   // CPU-v1 compatibility hook for imported platform calls. CPU v2 may replace
   // how imports reach this boundary, but subsystem handlers remain unchanged.
@@ -170,6 +184,17 @@ struct ExecutionContext {
   CompiledLookupMissCallback compiled_lookup_miss{};
   void* dynamic_fallback_executor{};
   DynamicFallbackCallback dynamic_fallback{};
+  // Set while the executing guest thread has been asked to suspend or
+  // terminate. Compiled loops poll it at every backward branch, so a thread
+  // spinning inside one compiled function stays preemptible, as on hardware.
+  // Appended last so modules built against the earlier layout still work.
+  const std::atomic<bool>* safepoint_flag{};
+
+  // A loop back-edge: hand the thread to the runtime if it must stop.
+  void poll_safepoint() {
+    if (safepoint_flag && safepoint_flag->load(std::memory_order_relaxed)) [[unlikely]]
+      runtime.enter_safepoint(state);
+  }
 
   [[nodiscard]] NativeCompiledEntry lookup_compiled(
       GuestAddress target,

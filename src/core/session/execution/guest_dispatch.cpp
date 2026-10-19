@@ -43,6 +43,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   } state_registration{this, tracked_thread_id, outer_state};
 
   cpu::ExecutionContext context(state, *memory_, *this);
+  if (thread) context.safepoint_flag = thread->safepoint_flag();
   if (dynamic_fallback_) dynamic_fallback_->bind(context);
   if (!config_.adaptive_observation_path.empty() ||
       !config_.adaptive_observation_mirror_path.empty()) {
@@ -245,6 +246,9 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     if (!crashed && thread && thread->is_terminated()) {
       thread_terminated_mid_dispatch = true;
     }
+  } catch (const cpu::GuestThreadTerminated&) {
+    // Terminated while running a compiled loop (see enter_safepoint()).
+    thread_terminated_mid_dispatch = true;
   } catch (const memory::MemoryFault& fault) {
     // Real connection to the guest exception path (not a new subsystem):
     // Memory V2 already throws this on a genuine guest memory fault; route
@@ -294,6 +298,17 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   }
 
   return outcome;
+}
+
+void XenonSession::enter_safepoint(cpu::CpuState& state) {
+  static_cast<void>(state);
+  const auto thread =
+      kernel_process_ ? kernel_process_->thread_manager().current_thread() : nullptr;
+  if (!thread) return;
+  // Everything architectural is already in CpuState and guest memory at a
+  // back-edge, so the thread can park here and continue the loop on resume.
+  thread->wait_while_suspended();
+  if (thread->is_terminated()) throw cpu::GuestThreadTerminated{};
 }
 
 bool XenonSession::run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,

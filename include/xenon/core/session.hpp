@@ -375,6 +375,9 @@ class XenonSession final : public cpu::RuntimeServices {
   void write_spr(std::uint32_t spr, std::uint64_t value, cpu::CpuState& state) override;
   std::uint64_t read_time_base(const cpu::CpuState& state) override;
   kernel::KernelProcess* current_process() noexcept override { return kernel_process_.get(); }
+  // Parks a suspended guest thread at a compiled loop back-edge, or takes a
+  // terminated one out of compiled code (cpu::GuestThreadTerminated).
+  void enter_safepoint(cpu::CpuState& state) override;
   bool external_call(std::string_view module, std::uint32_t ordinal,
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
   bool is_recognized_import_thunk(cpu::GuestAddress target) override;

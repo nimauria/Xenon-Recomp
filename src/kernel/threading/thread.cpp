@@ -224,6 +224,7 @@ bool KernelThread::suspend() {
   if (old_count == 0) {
     state_ = ThreadState::Suspended;
   }
+  safepoint_requested_.store(true, std::memory_order_release);
   return true;
 }
 
@@ -246,6 +247,7 @@ bool KernelThread::resume() {
   const auto new_count = suspend_count_.fetch_sub(1, std::memory_order_release);
   if (new_count == 1) {  // Was 1, now 0
     state_ = ThreadState::Ready;
+    safepoint_requested_.store(false, std::memory_order_release);
     // Wakes a thread_main() still parked at entry (create_suspended, never
     // yet resumed) so it can proceed to Running and call entry_(). A no-op
     // wait notification for a thread that is already past that point.
@@ -263,6 +265,7 @@ bool KernelThread::terminate(std::uint32_t exit_code) {
   exit_code_ = exit_code;
   state_ = ThreadState::Terminated;
   terminated_.store(true, std::memory_order_release);
+  safepoint_requested_.store(true, std::memory_order_release);
   multi_waiters_.notify_always();
   // Wakes a thread_main() parked at entry (create_suspended, never resumed),
   // or mid-execution at a dispatch_guest_thread() safepoint via
@@ -503,7 +506,7 @@ std::size_t ThreadManager::reap_finished_threads() {
   return finished.size();
 }
 
-void ThreadManager::shutdown() {
+std::vector<std::uint32_t> ThreadManager::shutdown() {
   std::vector<std::shared_ptr<KernelThread>> threads_copy;
   {
     std::scoped_lock lock(mutex_);
@@ -521,10 +524,13 @@ void ThreadManager::shutdown() {
   // timeout - reached here too if a thread is still joinable when
   // threads_copy is destroyed at the end of this function).
   constexpr std::uint32_t kShutdownJoinTimeoutMs = 5000;
+  for (auto& thread : threads_copy) static_cast<void>(thread->terminate(0));
+  std::vector<std::uint32_t> still_running;
   for (auto& thread : threads_copy) {
-    static_cast<void>(thread->terminate(0));
-    static_cast<void>(thread->join(kShutdownJoinTimeoutMs));
+    if (thread->started() && !thread->join(kShutdownJoinTimeoutMs))
+      still_running.push_back(thread->thread_id());
   }
+  return still_running;
 }
 
 std::vector<std::shared_ptr<KernelThread>> ThreadManager::enumerate_threads() const {
