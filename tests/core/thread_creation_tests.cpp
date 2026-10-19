@@ -202,19 +202,7 @@ std::atomic<std::uint64_t> g_loop_iterations{0};
 // Branches to itself forever - a synthetic tight guest loop, so the
 // preemptive safepoint (dispatch_guest_thread()'s per-block-boundary
 // suspend/terminate check) has something real to interrupt.
-//
-// Throttled to roughly 20,000 dispatches/second: dispatch_guest_thread()'s
-// top-level loop has a real, pre-existing kMaxTopLevelDispatches (1,000,000)
-// safety cap intended for genuinely runaway compiled guest code. A trivial
-// native lambda dispatched with no throttling reaches that cap in well under
-// a second, which raced with (and intermittently pre-empted) this test's own
-// explicit terminate() call - the thread would already be Terminated by the
-// time the test called it, since hitting the cap falls through
-// dispatch_guest_thread() as an ordinary "natural" exit. Real compiled guest
-// code returns to the top-level dispatch loop far less often than every
-// single instruction (only at actual function-call/return boundaries), so
-// this cap is not reachable in practice at anywhere near this rate - only
-// this synthetic microbenchmark-speed test loop can hit it artificially fast.
+// Throttled so the loop does not monopolise a core while the test waits.
 ExecutionResult looping_entry(ExecutionContext&) {
   g_loop_iterations.fetch_add(1, std::memory_order_relaxed);
   std::this_thread::sleep_for(std::chrono::microseconds(50));

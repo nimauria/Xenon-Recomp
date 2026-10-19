@@ -112,12 +112,13 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
                 << " r3=0x" << state.gpr[3] << std::dec << std::endl;
     }
 
-    constexpr std::uint32_t kMaxTopLevelDispatches = 1'000'000u;
-    std::uint32_t dispatch_count = 0u;
-    for (;
-         !crashed && !stop_requested_.load() &&
-         !(thread && thread->is_terminated()) &&
-         dispatch_count < kMaxTopLevelDispatches;) {
+    // No dispatch budget: a guest thread runs until it returns, terminates,
+    // faults or the session stops, as on hardware. A title's main loop and
+    // its worker threads legitimately never return, and returns through
+    // shared restore helpers come back through this loop, so any lifetime
+    // cap is eventually reached by correct code (AC6 hit a 1,000,000 cap
+    // about 30 s in). A thread that spins is diagnosed by the stop report.
+    while (!crashed && !stop_requested_.load() && !(thread && thread->is_terminated())) {
       // Preemptive safepoint: parks if `thread` was suspend()ed by another
       // host thread (cheap no-op otherwise), then re-checks termination in
       // case terminate() raced with the suspend/resume - a thread must not
@@ -183,7 +184,6 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
             // A compiled function tail-branched to an import thunk. Imports
             // are runtime services, never interpreted code, so this must not
             // depend on the Gen 7 fallback being enabled.
-            ++dispatch_count;
             result = cpu::call_import_from_branch(*this, result.next_address, state, *memory_);
             continue;
           }
@@ -199,10 +199,8 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
               fail_execution(diagnostic.str(), 0xC000001Du);
               break;
             }
-            ++dispatch_count;
             result = fallback.result;
           } else {
-            ++dispatch_count;
             result = next_fn(context);
           }
           if (trace_dispatches && config_.enable_logging) {
@@ -243,21 +241,6 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
           break;
       }
       break;
-    }
-    // Distinguishes "the loop genuinely exhausted its dispatch budget" from
-    // "a terminal case (Halt/Trap/a real Return-with-null-sentinel/...)
-    // explicitly broke out of the switch" by checking the real counter
-    // rather than inferring it from result.reason - Return can now reach
-    // this point via either path (see the Return case above), so
-    // result.reason alone can no longer tell them apart the way it could
-    // when only Branch/Fallthrough ever re-entered the loop.
-    if (!crashed && !stop_requested_.load() && !(thread && thread->is_terminated()) &&
-        dispatch_count >= kMaxTopLevelDispatches) {
-      // A guest that spins without ever leaving compiled/fallback code is almost
-      // always retrying a kernel call that keeps failing, so name the last calls.
-      fail_execution(detail::describe_dispatch_limit(
-                         state, export_trace_, thread ? thread->thread_id() : 0u),
-                     0xC000001Du);
     }
     if (!crashed && thread && thread->is_terminated()) {
       thread_terminated_mid_dispatch = true;

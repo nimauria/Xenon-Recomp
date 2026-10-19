@@ -200,6 +200,26 @@ void test_tail_branch_to_import_runs_once_and_returns_to_lr() {
   assert(g_import_calls == 1 && "the export must run exactly once");
 }
 
+std::uint32_t g_outer_dispatches = 0;
+
+// Each call is one outer-loop dispatch, like a return through a shared
+// register-restore helper; after 1,500,000 of them the guest finishes.
+ExecutionResult long_running_loop(ExecutionContext&) {
+  if (++g_outer_dispatches == 1'500'000u) return {FlowReason::Halt, 0u, 0u};
+  return {FlowReason::Branch, 0x2000u, 0u};
+}
+
+// Regression (AC6, about 30 s in): the outer dispatch loop had a lifetime cap
+// of 1,000,000 dispatches and failed the thread when correct, still-running
+// code reached it. A guest thread runs until it finishes, however long.
+void test_long_running_thread_is_not_capped() {
+  SessionHarness harness(&long_running_loop, &long_running_loop);
+  g_outer_dispatches = 0;
+  assert(harness.run() == 0u);
+  assert(g_outer_dispatches == 1'500'000u);
+  assert(xenon::core::SessionExecutionTestAccess::last_error(harness.session).empty());
+}
+
 ExecutionResult read_unmapped(ExecutionContext& context) {
   static_cast<void>(context.memory.read32_be(0x10u));
   return {FlowReason::Halt, 0u, 0u};
@@ -236,6 +256,7 @@ int main() {
   test_stop_request_is_clean();
   test_tail_branch_to_import_runs_once_and_returns_to_lr();
   test_crash_reports_pump_state();
+  test_long_running_thread_is_not_capped();
   std::cout << "Session execution tests passed\n";
   return 0;
 }

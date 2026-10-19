@@ -164,30 +164,4 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
   return diagnostic.str();
 }
 
-std::string describe_dispatch_limit(const cpu::CpuState& state, const ExportTrace& export_trace,
-                                    std::uint32_t thread_id) {
-  std::ostringstream spin;
-  spin << "Guest execution exceeded the top-level dispatch limit [cia=0x" << std::hex
-       << std::uppercase << state.cia << " lr=0x" << state.lr << std::dec
-       << " last_exports=[";
-  const auto recent =
-      export_trace.recent_for_thread(thread_id, 12u);
-  for (std::size_t i = 0; i < recent.size(); ++i) {
-    const auto& trace = recent[i];
-    if (i != 0u) spin << ' ';
-    spin << trace.library_view() << '!';
-    if (!trace.name_view().empty()) {
-      spin << trace.name_view();
-    } else {
-      spin << trace.ordinal;
-    }
-    spin << "(ord=" << trace.ordinal << ",lr=0x" << std::hex << trace.lr << ",r3in=0x"
-         << trace.arguments[0] << ",r4=0x" << trace.arguments[1] << ",r5=0x"
-         << trace.arguments[2] << ",r6=0x" << trace.arguments[3] << ",ret=0x"
-         << trace.result_r3 << std::dec << ")";
-  }
-  spin << "]]";
-  return spin.str();
-}
-
 }  // namespace xenon::core::detail

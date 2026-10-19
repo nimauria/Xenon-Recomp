@@ -386,8 +386,8 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
   // walks an 80-entry constructor table right after entry), so yield at the
   // next instruction as an ordinary Branch: all architectural state is already
   // in CpuState/guest memory, and the dispatcher re-enters here (or in a
-  // compiled function) at `pc`. A truly endless guest loop is still bounded by
-  // the session's top-level dispatch limit.
+  // compiled function) at `pc`. An endless guest loop runs until the thread
+  // is terminated or the session stops, as on hardware.
   out.reason = DynamicFallbackStopReason::InstructionLimit;
   out.exit = pc;
   context.state.cia = pc;
