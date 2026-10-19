@@ -142,6 +142,30 @@ void XenonSession::report_stop_diagnostics() {
           }
           std::cout << std::dec << std::endl;
         }
+        // A critical section names its owner: X_RTL_CRITICAL_SECTION has
+        // LockCount at +0x10, RecursionCount at +0x14 and the owning
+        // thread's KTHREAD at +0x18.
+        if (call.descriptor && memory_ && call.descriptor->name == "RtlEnterCriticalSection") {
+          const auto cs = static_cast<cpu::GuestAddress>(call.arguments[0]);
+          try {
+            const auto lock_count = static_cast<std::int32_t>(memory_->read32_be(cs + 0x10u));
+            const auto recursion = memory_->read32_be(cs + 0x14u);
+            const auto owner = memory_->read32_be(cs + 0x18u);
+            std::cout << "[XenonSession]     critical section 0x" << std::hex << cs
+                      << ": lock_count=" << std::dec << lock_count << " recursion=" << recursion
+                      << " owner_kthread=0x" << std::hex << owner << std::dec;
+            if (kernel_process_) {
+              for (const auto& candidate : kernel_process_->thread_manager().enumerate_threads()) {
+                if (owner != 0u && candidate->guest_kthread_address() == owner) {
+                  std::cout << " (t" << candidate->thread_id() << ' ' << candidate->name()
+                            << (candidate->is_terminated() ? ", terminated" : "") << ')';
+                }
+              }
+            }
+            std::cout << std::endl;
+          } catch (const memory::MemoryFault&) {
+          }
+        }
         // A thread stuck acquiring a spin lock: the lock word holds the owner's id.
         if (call.descriptor && call.descriptor->name.find("SpinLock") != std::string::npos &&
             memory_) {

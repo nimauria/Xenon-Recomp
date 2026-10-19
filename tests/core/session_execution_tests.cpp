@@ -293,6 +293,27 @@ void test_stop_report_shows_spinning_callers_and_wait_objects() {
   expected << "objects: 0x" << std::hex << event_a << "{type=1 signal=0x0} 0x" << event_b
            << "{type=1 signal=0x1}";
   assert(log.find(expected.str()) != std::string::npos);
+
+  // A thread blocked entering a critical section: the report names the
+  // section's counts and its owner (AC6: t22 waited 39 s on 0x829147F4).
+  const std::uint32_t cs = stack + 0x300u;
+  memory.write32_be(cs + 0x10u, 1u);            // held, one waiter
+  memory.write32_be(cs + 0x14u, 1u);
+  memory.write32_be(cs + 0x18u, 0x40001234u);   // owner KTHREAD
+  xenon::core::ExportDescriptor enter{};
+  enter.library = "xboxkrnl.exe";
+  enter.name = "RtlEnterCriticalSection";
+  std::ostringstream cs_captured;
+  auto* const cs_previous = std::cout.rdbuf(cs_captured.rdbuf());
+  xenon::core::SessionExecutionTestAccess::report_stop_with(harness.session, 21u, running, 22u,
+                                                            enter, 0u, cs);  // r3 = cs
+  std::cout.rdbuf(cs_previous);
+  auto cs_log = cs_captured.str();
+  for (auto& c : cs_log) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  std::ostringstream cs_expected;
+  cs_expected << "critical section 0x" << std::hex << cs
+              << ": lock_count=1 recursion=1 owner_kthread=0x40001234";
+  assert(cs_log.find(cs_expected.str()) != std::string::npos);
 }
 
 ExecutionResult read_unmapped(ExecutionContext& context) {
