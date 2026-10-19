@@ -1,4 +1,4 @@
-﻿# Every executable opts in to Windows long paths. The OS policy
+# Every executable opts in to Windows long paths. The OS policy
 # (LongPathsEnabled) only takes effect for processes whose manifest declares
 # longPathAware; preparation caches nest content-addressed keys deeply enough
 # to pass 260 characters under an ordinary user cache directory.
