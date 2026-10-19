@@ -941,6 +941,115 @@ Tests: `xenon_export_ordinal_reference_tests`, `xenon_xam_export_ordinal_tests`
 checked by reverting it: the test fails (the old `XamUserGetXUID` raises the
 guest page-protection fault).
 
+**AC6 import audit (19 October 2026, owner's Windows host).** First run
+against a real title: AC6 `default.xex` (sha256 `6eefba42...bbbc`, the
+owner's lawful local copy; nothing committed), Windows 11, MSVC 14.51,
+Release. `import-scanner` first reported FAIL with 32 missing imports. All
+were reporting defects, not missing exports:
+
+- The ten xboxkrnl imports reported missing are the variable exports
+  `kernel_variables.cpp` registers (`KeTimeStampBundle`, `XboxKrnlVersion`,
+  `XexExecutableModuleHandle`, ...). The scanner and the session's
+  `capability_report()` looked variable records up in the function
+  namespace; the load path (`resolve_xex_imports`) did not, so execution
+  was unaffected.
+- `XamInputGetCapabilities`/`GetState`/`SetState`/`GetKeystrokeEx` were
+  reported missing because the scanner's session had input disabled; a
+  Normal Play session registers them.
+- Every function import was counted twice (its FunctionAddress record and
+  its thunk), and the scanner exited 4 whenever analysis left unresolved
+  control flow, against its documented "nonzero only on FAIL" contract.
+
+Fix: `classify_xex_import()` (`import_classification.cpp`) is now the one
+rule for the load path, the capability report and the scanner; the scanner
+builds its session like `--registry` (every compiled subsystem, fallbacks
+reported). Corrected result: **239 imports, 0 missing, 202 implemented, 37
+partial** (`PASS_WITH_FALLBACK`). The partial set is networking/Live,
+`XMsg*` app registry, SEH/unwind (`RtlUnwind`, `RtlCaptureContext`,
+`__C_specific_handler`, non-thread-naming `RtlRaiseException`),
+`XamLoaderLaunchTitle`, STFS device and console-key exports, each with its
+registry note. Tests: `xenon_import_capability_report_tests` (variable,
+address-record and thunk cases) and `xenon_guest_import_negative_tests`
+(a variable record in the live capability report); both fail against the
+previous code. AC6's blockers are therefore not unregistered imports; the
+next V3-05 evidence must come from running it.
+
+Windows build fix found on the same host: FFmpeg's MSVC install puts
+`avcodec.lib`/`avutil.lib` in `bin/`; the bootstrap's readiness check
+searched `bin/` but `cmake/Dependencies.cmake` did not, so a fresh managed
+Windows configure failed after reporting FFmpeg ready.
+
+Second Windows defect: `xenon-prepare` on AC6 failed with "graph cache
+write failed" at a 260-character `graph-v1/staging/<key>-<pid>-<n>/manifest.json`.
+No Xenon executable declared `longPathAware`, so Windows applied
+`MAX_PATH` even with the `LongPathsEnabled` policy on; any cache root longer
+than about 110 characters broke preparation. Every MSVC executable now
+embeds `cmake/windows/long-path-aware.manifest`. Regression:
+`xenon_compilation_graph_tests` publishes and reads back a graph entry whose
+staging manifest path exceeds 260 characters (aborts without the manifest;
+skipped with a stated reason where the OS policy is off).
+
+Third defect, in analysis (V3-07 territory, fixed here because it blocked
+preparing AC6): code generation failed entry-integrity with "edge
+0x821a6e10 -> 0x821a6d8c leaves owner 0x821a6df0". `0x821a6bc0` is a
+method reached only through a vtable; it dispatches a 40-case switch
+through an inline jump table. Discovery correctly gave it every case
+block, but each case target also stayed a separate overlapping function,
+because weak candidates were absorbed only into owners with semantic
+boundary evidence and a vtable-only method has none. A case branching into
+the middle of a sibling case then had no dispatchable entry. Absorption now
+also accepts a root owner (a compiled function whose start is no other
+function's block), which can never itself be absorbed, so no owner chain
+can form. AC6's compiled function count fell from about 13,840 to 11,949.
+Regression: `xenon_discovery_quality_tests` (a gap-recovered dispatcher
+whose case A branches into case B); it fails under the old owner rule.
+
+Fourth: MSVC's compiler and PDB writer stop at `MAX_PATH` even in a
+long-path-aware process (C1041 thousands of objects into the module build).
+`xenon-prepare` now rejects, before any work, a Windows cache root that
+leaves fewer than `kNativeBuildPathHeadroom` (160) characters for the
+deepest workspace path (measured 146). Regression in
+`xenon_prepare_worker_tests`.
+
+**AC6 first runs (same host).** AC6 prepares, loads, binds its module and
+runs for about 9 s, then faults. Defects found from that run, all generic:
+
+- *Imports reached by a tail branch ran twice.* `XenonSession::call`
+  reports a completed import as `Fallthrough` at `cia`, which is right
+  after a `bl` but not after `b thunk` from an argument-shuffling wrapper:
+  the dispatcher resumed at the thunk and ran the import again with the
+  first call's result as its first argument (seen as `NetDll_socket`/
+  `NetDll_bind` pairs). `cpu::call_import_from_branch` makes a branch to an
+  import complete as a `Return` to LR, in the guest dispatcher and the
+  dynamic fallback. Regressions in `xenon_session_execution_tests` and
+  `xenon_dynamic_fallback_tests`.
+- *VDP sockets failed.* Guest protocol 254 (VDP) is now created as UDP on
+  the host, as Xenia does. Regression in `xenon_xam_net_socket_tests`.
+- *Fault reports printed junk callers.* They read LR at `frame+8` (the SysV
+  slot); Xbox 360 prologues store it at `-8` from the caller's stack pointer.
+  `walk_guest_stack()` follows the back chain correctly, and the report now
+  includes r11, r12 and r14-r31. Regression: `xenon_guest_stack_walk_tests`.
+- *The 9 s fault itself: `memset(p, 0, n)` filled memory with `0x2A`.* The
+  native vector splat path emitted IR `imm0`, which holds the lifter's
+  mnemonic tag, as the splat element/immediate. AC6's VMX memset
+  (`0x821F3BF0`) builds its fill vector with `vspltisb`/`vspltb`, so
+  zero-initialised structures were filled with `'*'` and a later
+  dereference of a field faulted at `0x2A2A2A2A`. The immediate now comes
+  from bits 16-20 of the guest word. Regression: `xenon_cpu_vector_splat`
+  generates and executes all eight splat forms for all 32 field values
+  (fails before the fix).
+- *Pump state was missing from crash logs.* The GPU/audio pump evidence
+  (callback in progress, vsync deliveries, audio credits) was only logged by
+  a clean stop. It is now logged on any guest thread or pump callback crash.
+  Regression in `xenon_session_execution_tests`.
+
+Open from these runs: the earlier "GPU pump and audio only work once"
+symptom has not been re-checked since the memset and double-import fixes;
+both could plausibly cause it (zeroed ring/voice state filled with `0x2A`,
+credit/fence handshakes run twice), but that is not established. "Unhandled
+GPU command variant" warnings (indices 1, 2, 6, 7, 8) remain, and
+`xenon-prepare` still hard-codes `--parallel 8` for the module build.
+
 Kernel handlers use several argument idioms (`dispatch<N>`, helper
 functions), so the automated comparison covered XAM fully and xboxkrnl only
 where handlers read `gpr[N]` directly; the xboxkrnl hits were reviewed and
