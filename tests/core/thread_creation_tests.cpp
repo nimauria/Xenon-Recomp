@@ -119,7 +119,15 @@ std::atomic<std::uint64_t> g_observed_start_context{0};
 // returns it incremented by one, matching real PPC ABI (gpr[3] is both the
 // single argument ExCreateThread's StartContext passes and the function's
 // return value).
+std::atomic<int> g_observed_processor{-1};
+
 ExecutionResult echo_increment_entry(ExecutionContext& context) {
+  // What the title reads as its processor number: r13+0x10C (this harness's
+  // run_execution() main thread has no KPCR).
+  if (context.state.gpr[13] != 0u) {
+    g_observed_processor.store(context.memory.read8(
+        static_cast<GuestAddress>(context.state.gpr[13]) + 0x10Cu));
+  }
   g_entry_ran.store(true);
   g_observed_start_context.store(context.state.gpr[3]);
   context.state.gpr[3] = context.state.gpr[3] + 1u;
@@ -428,7 +436,7 @@ void test_ex_create_thread_affinity_alone_does_not_suspend() {
   xenon::cpu::CpuState cpu{};
   cpu.gpr[3] = handle_out;
   cpu.gpr[7] = 0x3000u;
-  cpu.gpr[9] = 0x02000000u;  // run on processor 2, not suspended
+  cpu.gpr[9] = 0x02000000u;  // processor mask 0x02 (hardware thread 1), not suspended
   auto call = make_call(cpu, *harness.session.memory());
   assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
   const auto handle = harness.session.memory()->read32_be(handle_out);
@@ -439,6 +447,11 @@ void test_ex_create_thread_affinity_alone_does_not_suspend() {
   auto& thread = static_cast<kernel::KernelThread&>(*view.object);
   assert(thread.join(2000) && "an unsuspended thread runs without being resumed");
   assert(g_entry_ran.load());
+  // Regression (AC6 audio): the requested processor is the thread's
+  // processor number at r13+0x10C, which titles use to index per-processor
+  // state. Every thread used to read 0.
+  assert(thread.guest_kpcr_address() != 0u);
+  assert(g_observed_processor.load() == 1);
 }
 
 void test_preemptive_safepoint_terminates_a_running_created_thread() {

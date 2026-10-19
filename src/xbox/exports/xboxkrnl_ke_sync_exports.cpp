@@ -388,6 +388,12 @@ bool ke_set_affinity_thread_export(kernel::KernelProcess& process, ExportCallCon
     context.memory.write32_be(previous_affinity_ptr, target->processor_affinity());
   }
   target->set_processor_affinity(affinity);
+  // The thread now runs on the requested hardware thread, and code that
+  // reads its processor number (r13+0x10C) must see that one.
+  if (const auto kpcr = target->guest_kpcr_address(); kpcr != 0u) {
+    context.memory.write8(kpcr + kernel::kGuestKpcrCurrentCpuOffset,
+                          kernel::guest_processor_for_affinity(affinity));
+  }
   context.cpu.gpr[3] = status::Success;
   return true;
 }

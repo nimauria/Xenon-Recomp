@@ -13,7 +13,8 @@ namespace xenon::core {
 // Guest ABI: r3 = PHANDLE out, r4 = stack size (0 = default), r5 = LPDWORD
 // thread-id out (optional, nullable), r6 = XapiThreadStartup, r7 = start
 // address, r8 = start context, r9 = creation flags (bit 0 = suspended; bits
-// 24..31 = processor affinity, informational) -> r3 = NTSTATUS.
+// 24..31 = processor mask, which sets the thread's processor number in its
+// KPCR) -> r3 = NTSTATUS.
 //
 // XAPI's CreateThread passes its own startup routine (the title's statically
 // linked XapiThreadStartup) in r6. When it is set, the thread starts there
@@ -112,6 +113,13 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
   write_guest_thread_id(*memory_, tls, thread->thread_id());
   thread->set_guest_kthread_address(tls.kthread_address);
+  thread->set_guest_kpcr_address(tls.kpcr_address);
+  // The thread runs on the hardware thread its flags request, and its
+  // processor number (r13+0x10C) must say so: titles index per-processor
+  // state with it. AC6's audio threads rendezvous through a word with one
+  // byte per processor, which never completed while every thread read 0.
+  memory_->write8(tls.kpcr_address + GuestKpcrLayout::kCurrentCpuOffset,
+                  kernel::guest_processor_for_affinity(creation_flags >> 24));
   {
     logging::append_probe_log("thread_create_flags_diag.log", "ExCreateThread: thread_id=%u start_address=0x%08llX creation_flags=0x%08X create_suspended=%d\n",
                  thread->thread_id(), (unsigned long long)start_address, _diag_creation_flags,
@@ -212,6 +220,7 @@ bool XenonSession::export_xam_task_schedule(ExportCallContext& context) {
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
   write_guest_thread_id(*memory_, tls, thread->thread_id());
   thread->set_guest_kthread_address(tls.kthread_address);
+  thread->set_guest_kpcr_address(tls.kpcr_address);
 
   kernel::Handle handle{};
   const auto insert_code = kernel_process_->handle_table().insert(

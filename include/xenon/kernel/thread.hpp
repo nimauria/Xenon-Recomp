@@ -38,6 +38,21 @@ enum class ThreadState : std::uint8_t {
   Terminated,
 };
 
+// Offset of X_KPCR.current_cpu: the byte holding the hardware thread (0..5)
+// the guest thread is running on. Kernel and title code read it as
+// r13+0x10C, for example to pick their own slot in a per-processor array.
+inline constexpr std::uint32_t kGuestKpcrCurrentCpuOffset = 0x10C;
+
+// The hardware thread a guest processor-affinity mask (bit n = hardware
+// thread n, 0..5) runs a thread on: its highest requested processor, as in
+// xenia-project/xenia (GetFakeCpuNumber); titles normally give exactly one
+// bit. A mask naming no hardware thread is processor 0.
+[[nodiscard]] constexpr std::uint8_t guest_processor_for_affinity(std::uint32_t mask) noexcept {
+  for (std::uint8_t cpu = 6; cpu-- > 0;)
+    if (mask & (1u << cpu)) return cpu;
+  return 0;
+}
+
 struct ThreadCreationParams {
   std::uint32_t stack_size{0};
   std::uint32_t creation_flags{0};
@@ -202,6 +217,10 @@ class KernelThread final : public KernelObject {
   void set_guest_kthread_address(std::uint32_t address) noexcept {
     guest_kthread_address_ = address;
   }
+  // This thread's guest KPCR (each Xenon guest thread has its own), where
+  // KeSetAffinityThread records the processor it moves the thread to.
+  [[nodiscard]] std::uint32_t guest_kpcr_address() const noexcept { return guest_kpcr_address_; }
+  void set_guest_kpcr_address(std::uint32_t address) noexcept { guest_kpcr_address_ = address; }
 
  private:
   void thread_main();
@@ -213,6 +232,7 @@ class KernelThread final : public KernelObject {
   std::uint32_t creation_flags_;
   void* kernel_data_{nullptr};
   std::uint32_t guest_kthread_address_{0};
+  std::uint32_t guest_kpcr_address_{0};
 
   mutable std::mutex mutex_;
   // Guards the create_suspended entry-time park in thread_main(): resume()

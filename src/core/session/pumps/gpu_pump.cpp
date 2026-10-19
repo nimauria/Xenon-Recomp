@@ -44,6 +44,7 @@ bool XenonSession::start_gpu_pump_thread() {
   }
   write_guest_thread_id(*memory_, gpu_pump_thread_tls_, gpu_pump_thread_->thread_id());
   gpu_pump_thread_->set_guest_kthread_address(gpu_pump_thread_tls_.kthread_address);
+  gpu_pump_thread_->set_guest_kpcr_address(gpu_pump_thread_tls_.kpcr_address);
   logging::append_probe_log("thread_identity_diag.log", "gpu_pump_thread_ assigned thread_id=%u\n",
                             gpu_pump_thread_->thread_id());
   if (main_thread_) {

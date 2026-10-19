@@ -46,6 +46,7 @@ bool XenonSession::start_audio_guest_thread() {
   }
   write_guest_thread_id(*memory_, audio_thread_tls_, audio_thread_->thread_id());
   audio_thread_->set_guest_kthread_address(audio_thread_tls_.kthread_address);
+  audio_thread_->set_guest_kpcr_address(audio_thread_tls_.kpcr_address);
 
   // Mark the pump active and wire the invoker before starting the thread, so
   // there is no window where the thread is running but has nothing to do (or

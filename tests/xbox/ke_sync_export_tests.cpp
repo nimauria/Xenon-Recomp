@@ -409,6 +409,44 @@ void test_ke_resume_thread_unknown_pointer_returns_invalid_handle() {
   assert(unknown_cpu.gpr[3] == 0xC0000008u);  // STATUS_INVALID_HANDLE
 }
 
+// Regression (AC6 audio): KeSetAffinityThread moves a thread to another
+// hardware thread, so the processor number in its KPCR (r13+0x10C) must
+// change with it; titles index per-processor state with that byte.
+void test_ke_set_affinity_thread_moves_the_kpcr_processor_number() {
+  static_assert(kernel::guest_processor_for_affinity(0x01u) == 0u);
+  static_assert(kernel::guest_processor_for_affinity(0x20u) == 5u);
+  static_assert(kernel::guest_processor_for_affinity(0x0Cu) == 3u);
+  static_assert(kernel::guest_processor_for_affinity(0x0u) == 0u);
+  static_assert(kernel::guest_processor_for_affinity(0xC0u) == 0u);
+
+  Fixture f;
+  kernel::ThreadCreationParams params{};
+  auto thread = f.process->thread_manager().create_thread([] { return 0u; }, params);
+  assert(thread);
+  memory::GuestAddress kthread{}, kpcr{}, previous{};
+  assert(f.address_space->allocate(0x1000, 16, memory::kReadWrite, false, kthread));
+  assert(f.address_space->allocate(0x1000, 16, memory::kReadWrite, false, kpcr));
+  previous = f.alloc64();
+  thread->set_guest_kthread_address(kthread);
+  thread->set_guest_kpcr_address(kpcr);
+
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = kthread;
+  cpu.gpr[4] = 0x10u;  // hardware thread 4
+  cpu.gpr[5] = previous;
+  core::ExportCallContext call{cpu, *f.address_space, 0, 0};
+  assert(xbox::ke_set_affinity_thread_export(*f.process, call));
+  assert(cpu.gpr[3] == 0u);
+  assert(thread->processor_affinity() == 0x10u);
+  assert(f.address_space->read8(kpcr + kernel::kGuestKpcrCurrentCpuOffset) == 4u);
+
+  cpu.gpr[3] = kthread;
+  cpu.gpr[4] = 0x02u;
+  assert(xbox::ke_set_affinity_thread_export(*f.process, call));
+  assert(f.address_space->read8(kpcr + kernel::kGuestKpcrCurrentCpuOffset) == 1u);
+  assert(f.address_space->read32_be(previous) == 0x10u);
+}
+
 }  // namespace
 
 // ---- Guest SignalState consistency -------------------------------------
@@ -599,6 +637,7 @@ int main() {
   test_ke_wait_for_multiple_objects_any_and_all();
   test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type();
   test_unsupported_dispatcher_type_is_rejected_not_misinterpreted();
+  test_ke_set_affinity_thread_moves_the_kpcr_processor_number();
   test_ke_query_base_priority_thread_unknown_thread_is_safe();
   test_ke_resume_thread_unknown_pointer_returns_invalid_handle();
   test_event_signal_state_follows_every_change();
