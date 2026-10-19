@@ -46,6 +46,7 @@ add_library(xenon_core STATIC
   run_fingerprint.cpp
   capability_report.cpp
   import_classification.cpp
+  guest_stack_walk.cpp
   boot_checkpoints.cpp
   export_trace.cpp
   guest_memory_watch.cpp

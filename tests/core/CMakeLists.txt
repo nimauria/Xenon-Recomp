@@ -54,6 +54,12 @@ if(XENON_BUILD_TESTS)
   xenon_enable_test_asserts(xenon_import_capability_report_tests)
   add_test(NAME xenon_import_capability_report_tests COMMAND xenon_import_capability_report_tests)
 
+  # Guest back-chain walk used by fault reports (Xbox 360 MSVC frame layout).
+  add_executable(xenon_guest_stack_walk_tests guest_stack_walk_tests.cpp)
+  target_link_libraries(xenon_guest_stack_walk_tests PRIVATE xenon_core)
+  xenon_enable_test_asserts(xenon_guest_stack_walk_tests)
+  add_test(NAME xenon_guest_stack_walk_tests COMMAND xenon_guest_stack_walk_tests)
+
   # Proves the real "recompiled PPC -> import call -> CPU V2 -> external-call
   # bridge -> core::ExportRegistry -> active subsystem" path through the
   # actual production pipeline (XEX Loader V2, Recomp Driver, a compiled and
