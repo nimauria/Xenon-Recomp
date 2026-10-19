@@ -61,6 +61,26 @@ int main(int argc, char** argv) {
   try {
     StatusReporter status(options.status_file);
 
+#if defined(_WIN32)
+    // The native build nests objects up to kNativeBuildPathHeadroom
+    // characters below the cache root, and MSVC fails past MAX_PATH (C1041,
+    // C1083) only after analysis has run for minutes. Refuse up front.
+    const auto cache_root_length = std::filesystem::absolute(options.cache_root).wstring().size();
+    if (cache_root_length + xenon::recomp::kNativeBuildPathHeadroom >
+        xenon::recomp::kWindowsMaxPathLength) {
+      const auto message =
+          "the cache root is " + std::to_string(cache_root_length) +
+          " characters long; the native build needs it to be at most " +
+          std::to_string(xenon::recomp::kWindowsMaxPathLength -
+                         xenon::recomp::kNativeBuildPathHeadroom) +
+          " because the MSVC compiler cannot open paths longer than 259 characters. "
+          "Choose a shorter --cache-root.";
+      status.report(Phase::Failed, 0, "Checking the cache location", message);
+      std::cerr << "xenon-prepare: " << message << "\n";
+      return 1;
+    }
+#endif
+
     // --- Phase: Inspecting (Gen 11: discover every executable XEX module
     // the content source actually contains, not just default.xex) ---------
     status.report(Phase::Inspecting, 0, "Discovering executable modules in content source");

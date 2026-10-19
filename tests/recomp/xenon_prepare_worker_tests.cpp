@@ -237,6 +237,29 @@ int main() {
   assert(first_result == 0);
   std::cout << "  [PASS] First preparation with no cached artifact builds successfully\n";
 
+  // The Windows cache-root limit in xenon-prepare is the MAX_PATH budget
+  // minus kNativeBuildPathHeadroom; every path a real preparation creates
+  // must fit within that headroom, or the limit admits roots whose native
+  // build MSVC cannot complete.
+  {
+    std::size_t deepest = 0;
+    std::filesystem::path deepest_path;
+    for (const auto& item : std::filesystem::recursive_directory_iterator(cache_root)) {
+      const auto depth = item.path().native().size() - cache_root.native().size();
+      if (depth > deepest) {
+        deepest = depth;
+        deepest_path = item.path();
+      }
+    }
+    if (deepest > kNativeBuildPathHeadroom) {
+      std::cerr << "deepest preparation path is " << deepest << " characters below the cache root: "
+                << deepest_path.string() << "\n";
+    }
+    assert(deepest <= kNativeBuildPathHeadroom &&
+           "raise kNativeBuildPathHeadroom: the native build nests deeper than it allows");
+  }
+  std::cout << "  [PASS] Every prepared path fits within the native build path headroom\n";
+
   ArtifactCacheStore store(cache_root);
   const auto key_v1 = expected_key(source_root, identity, hints_v1);
   const auto entry_v1 = store.lookup(key_v1);
@@ -321,6 +344,29 @@ int main() {
   }
   assert(staging_entries == 0);
   std::cout << "  [PASS] A pre-signalled cancellation exits cleanly and disturbs nothing\n";
+
+#if defined(_WIN32)
+  // A cache root too long for MSVC's MAX_PATH limit is refused before any
+  // analysis, with the reason in the status file, instead of failing in the
+  // compiler minutes later.
+  {
+    auto long_cache_root = root / "long";
+    while (std::filesystem::absolute(long_cache_root).native().size() + kNativeBuildPathHeadroom <=
+           kWindowsMaxPathLength)
+      long_cache_root /= "deep-cache-directory";
+    std::ostringstream command;
+    command << quote(prepare_exe) << " --content " << quote(content_dir) << " --cache-root "
+            << quote(long_cache_root) << " --status-file " << quote(status_file) << " --recomp-root "
+            << quote(source_root);
+    assert(run_system(command.str()) == 1);
+    const auto rejected_status = read_text_file(status_file);
+    assert(rejected_status.find("\"Failed\"") != std::string::npos);
+    assert(rejected_status.find("Choose a shorter --cache-root") != std::string::npos);
+    assert(!std::filesystem::exists(long_cache_root / "workspaces") &&
+           "nothing may be prepared under a rejected cache root");
+  }
+  std::cout << "  [PASS] An over-long Windows cache root is refused before any work\n";
+#endif
 
   // ---------------------------------------------------------------------
   // Gen 11 (Autonomous Game Intake): a content directory shipping a second

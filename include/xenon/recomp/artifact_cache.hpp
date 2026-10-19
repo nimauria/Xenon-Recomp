@@ -19,6 +19,7 @@
 // (tools/xenon_prepare/) and covered directly by
 // tests/recomp/artifact_cache_tests.cpp.
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -151,6 +152,17 @@ class ArtifactStagingBuild {
   std::filesystem::path directory_;
   bool resolved_{false};  // true once commit() or discard() has run
 };
+
+// The deepest path a preparation creates below its cache root, with margin:
+// the nested native build compiles Xenon's runtime sources to objects such as
+// workspaces/<16 hex>/build/xenon-recomp/src/xbox/CMakeFiles/<target>.dir/
+// exports/<file>.cpp.obj (146 characters measured on AC6, 19 October 2026).
+// MSVC cannot open a file past MAX_PATH even in a long-path-aware process,
+// so on Windows the cache root itself may be at most
+// kWindowsMaxPathLength - kNativeBuildPathHeadroom characters.
+// xenon_prepare_worker_tests checks a real preparation against this value.
+inline constexpr std::size_t kNativeBuildPathHeadroom = 160;
+inline constexpr std::size_t kWindowsMaxPathLength = 259;
 
 class ArtifactCacheStore {
  public:
