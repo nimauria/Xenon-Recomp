@@ -191,6 +191,19 @@ void test_return_with_zero_link_register_is_clean() {
   assert(harness.run() == 0u);
 }
 
+// Regression (AC6 wrote 2.7 million "Guest dispatch returned" lines in 45 s,
+// each under the console lock, throttling its main thread while loading):
+// per-dispatch tracing is verbose-only.
+void test_dispatch_trace_is_verbose_only() {
+  SessionHarness harness(&entry_fn, &halt);
+  std::ostringstream captured;
+  auto* const previous = std::cout.rdbuf(captured.rdbuf());
+  assert(harness.run() == 0u);
+  std::cout.rdbuf(previous);
+  assert(captured.str().find("Guest dispatch returned") == std::string::npos);
+  assert(captured.str().find("Guest entry returned") == std::string::npos);
+}
+
 void test_stop_request_is_clean() {
   SessionHarness harness(&entry_fn, &halt);
   xenon::core::SessionExecutionTestAccess::request_stop(harness.session);
@@ -351,6 +364,7 @@ int main() {
   test_return_with_zero_link_register_is_clean();
   test_stop_request_is_clean();
   test_tail_branch_to_import_runs_once_and_returns_to_lr();
+  test_dispatch_trace_is_verbose_only();
   test_crash_reports_pump_state();
   test_long_running_thread_is_not_capped();
   test_stop_report_shows_spinning_callers_and_wait_objects();

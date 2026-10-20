@@ -91,11 +91,11 @@ SessionResult XenonSession::stop() {
   }
 
   set_state(SessionState::Stopping, "Stop requested...");
-  stop_requested_.store(true);
 
   if (!execution_active_.load()) {
     // The execution thread never actually got into guest code (e.g. it
     // failed immediately), so it is safe to join synchronously here.
+    stop_requested_.store(true);
     if (main_thread_) static_cast<void>(main_thread_->join());
     set_state(SessionState::Stopped, "Game stopped");
     return SessionResult::ok("Game stopped", SessionState::Stopped);
@@ -103,8 +103,12 @@ SessionResult XenonSession::stop() {
 
   // A stop that finds the guest still executing usually means it is stalled
   // (blocked in a kernel wait or spinning). Say what each thread last asked the
-  // kernel for, so the stall can be diagnosed from the log alone.
+  // kernel for, so the stall can be diagnosed from the log alone. This runs
+  // before stop_requested_ is set: the main thread's dispatch loop exits on
+  // that flag and unregisters its registers, and a stall usually involves
+  // the main thread.
   report_stop_diagnostics();
+  stop_requested_.store(true);
 
   // Ends the kernel waits and delays guest threads are blocked in, after the
   // report above has recorded them. Already-running native compiled code

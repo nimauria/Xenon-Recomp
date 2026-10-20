@@ -67,6 +67,12 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
                  tracked_thread_id, (unsigned long long)entry, (void*)entry_fn);
   }
 
+  // One console line per outer dispatch is verbose-only: a running title
+  // passes through this loop millions of times a minute (every return via a
+  // shared restore helper), and logging each one under the console lock
+  // throttled AC6's main thread while it loaded.
+  const bool trace_each_dispatch =
+      trace_dispatches && config_.enable_logging && config_.verbose_logging;
   cpu::ExecutionResult result{};
   bool crashed = false;
   std::string crash_message;
@@ -99,7 +105,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
         result = fallback.result;
       }
     }
-    if (!crashed && trace_dispatches && config_.enable_logging) {
+    if (!crashed && trace_each_dispatch) {
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest entry returned: reason="
                 << cpu::flow_reason_name(result.reason)
@@ -204,7 +210,7 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
           } else {
             result = next_fn(context);
           }
-          if (trace_dispatches && config_.enable_logging) {
+          if (trace_each_dispatch) {
             std::scoped_lock console_log_lock(console_log_mutex());
             std::cout << "[XenonSession] Guest dispatch returned: reason="
                       << cpu::flow_reason_name(result.reason)
