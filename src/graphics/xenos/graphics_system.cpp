@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <limits>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/shader_ir.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::gpu {
@@ -558,9 +560,32 @@ bool GraphicsSystem::replay_portable_capture(
 }
 
 void GraphicsSystem::execute_ir(Backend& backend) {
+  using Clock = std::chrono::steady_clock;
+  const auto begin_start = Clock::now();
   backend.begin_submission(memory_, edram_);
-  for (const auto& command : stream_.commands()) backend.consume(command);
+  const auto elapsed_ms = [](Clock::time_point since) {
+    return static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since).count());
+  };
+  if (const auto ms = elapsed_ms(begin_start); ms >= 50)
+    logging::append_probe_log("ir_timing_diag.log", "begin_submission %lld ms\n", ms);
+  // The pump thread runs this between ring drains and vsync interrupts, so a
+  // slow command delays both; name the slow ones.
+  for (const auto& command : stream_.commands()) {
+    const auto start = Clock::now();
+    backend.consume(command);
+    if (const auto ms = elapsed_ms(start); ms >= 50) {
+      std::uint32_t detail = 0;
+      if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) detail = draw->index_count;
+      if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) detail = load->physical_address;
+      logging::append_probe_log("ir_timing_diag.log", "command variant %zu took %lld ms (detail 0x%X)\n",
+                                command.index(), ms, detail);
+    }
+  }
+  const auto end_start = Clock::now();
   backend.end_submission();
+  if (const auto ms = elapsed_ms(end_start); ms >= 50)
+    logging::append_probe_log("ir_timing_diag.log", "end_submission %lld ms\n", ms);
   stream_.clear();
 }
 

@@ -61,11 +61,32 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       }
     }
     const auto state = resource_state.snapshot();
+    const auto draw_start = std::chrono::steady_clock::now();
+    const auto report_slow = [&](const char* kind) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - draw_start)
+                          .count();
+      if (ms >= 50)
+        xenon::logging::append_probe_log(
+            "ir_timing_diag.log",
+            "%s %lld ms: primitive=%d source=%d index_count=%u vs=%016llX ps=%016llX "
+            "scissor=(%d,%d)-(%d,%d) viewport scale=(%g,%g) offset=(%g,%g) pitch=%u\n",
+            kind, static_cast<long long>(ms), static_cast<int>(draw->primitive_type),
+            static_cast<int>(draw->source), draw->index_count,
+            static_cast<unsigned long long>(draw->vertex_shader.hash),
+            static_cast<unsigned long long>(draw->pixel_shader.hash), state.raster.scissor_left,
+            state.raster.scissor_top, state.raster.scissor_right, state.raster.scissor_bottom,
+            state.raster.viewport.x_scale, state.raster.viewport.y_scale,
+            state.raster.viewport.x_offset, state.raster.viewport.y_offset,
+            unsigned(state.raster.surface_pitch));
+    };
     if (state.edram_mode == EdramMode::Copy) {
       consume_resolve(state);
+      report_slow("resolve");
       return;
     }
     consume_draw(draw, state);
+    report_slow("draw");
   }
   if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
     consume_shader_load(load);

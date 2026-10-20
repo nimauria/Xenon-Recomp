@@ -1,7 +1,10 @@
 #include "xenon/gpu/d3d12/pipeline.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+
+#include "xenon/logging/probe_log.hpp"
 
 namespace xenon::gpu::d3d12 {
 namespace {
@@ -184,6 +187,19 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
                                   std::span<const BlendState> blend_states,
                                   DXGI_FORMAT depth_format,
                                   const DepthTargetDescriptor* depth_state) {
+  // Pipeline creation runs on the GPU pump thread; report slow ones.
+  struct CreationTimer {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    ~CreationTimer() {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - start)
+                          .count();
+      if (ms >= 50)
+        xenon::logging::append_probe_log("shader_compile_diag.log",
+                                         "D3D12 pipeline creation %lld ms\n",
+                                         static_cast<long long>(ms));
+    }
+  } creation_timer;
   reset();
   error_.clear();
   if (!device || !root_signature || color_formats.size() > 4 ||

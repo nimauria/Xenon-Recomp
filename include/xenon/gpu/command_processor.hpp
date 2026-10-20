@@ -72,6 +72,8 @@ class CommandProcessor {
     // Ring drains that stopped before a packet extending past the write
     // pointer, to continue once the guest submits the rest.
     std::uint64_t incomplete_ring_packets{};
+    // execute_ring() calls: how often the pump drained (or retried) the ring.
+    std::uint64_t ring_drains{};
     // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
     // fallback audit"): a guest register write whose index is outside the
     // known register file. emit_register_write() still throws for this (a

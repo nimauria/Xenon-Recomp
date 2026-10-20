@@ -243,6 +243,7 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   const std::uint32_t available = write_index >= read_index
                                       ? write_index - read_index
                                       : capacity_dwords - read_index + write_index;
+  ++stats_.ring_drains;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
 

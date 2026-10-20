@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "xenon/gpu/backend.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_ownership.hpp"
 #include "xenon/gpu/edram_surface.hpp"
@@ -211,6 +212,30 @@ class BackendCore {
   std::string error{};
   bool ready{};
 
+  // Diagnostic: time spent in each step of a whole-surface EDRAM ownership
+  // transfer (these run on the GPU pump thread), logged when slow.
+  struct TransferTiming {
+    const char* name;
+    std::array<const char*, 3> steps;
+    std::uint32_t width{}, height{}, samples{};
+    std::array<long long, 3> ms{};
+    template <typename Step>
+    bool step(std::size_t index, Step&& run) {
+      const auto start = std::chrono::steady_clock::now();
+      const bool ok = run();
+      ms[index] += std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - start)
+                       .count();
+      return ok;
+    }
+    ~TransferTiming() {
+      if (ms[0] + ms[1] + ms[2] < 20) return;
+      xenon::logging::append_probe_log(
+          "ir_timing_diag.log", "%s %ux%u x%u: %s %lld ms, %s %lld ms, %s %lld ms\n", name,
+          width, height, samples, steps[0], ms[0], steps[1], ms[1], steps[2], ms[2]);
+    }
+  };
+
   bool flush_color_owner(EdramOwnerId owner) {
     const auto found = owner_render_targets.find(owner);
     if (!edram || found == owner_render_targets.end() || !found->second) {
@@ -224,17 +249,24 @@ class BackendCore {
     std::vector<std::byte> canonical(
         std::size_t(canonical_pitch) * image->height());
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"color flush", {"readback", "convert", "store"},
+                          image->width(), image->height(), sample_count};
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
       std::vector<std::byte> pixels;
       std::uint32_t pitch{};
-      if (!image->readback_sample(queue, sample, 0, 0, image->width(),
-                                  image->height(), pixels, pitch) ||
-          !host_color_to_edram(image->guest_format(), image->width(),
-                               image->height(), pixels, pitch, canonical,
-                               canonical_pitch) ||
-          !store_edram_raw(*edram, surface, 0, 0, image->width(),
-                           image->height(), sample, canonical,
-                           canonical_pitch)) {
+      if (!timing.step(0, [&] {
+            return image->readback_sample(queue, sample, 0, 0, image->width(),
+                                          image->height(), pixels, pitch);
+          }) ||
+          !timing.step(1, [&] {
+            return host_color_to_edram(image->guest_format(), image->width(),
+                                       image->height(), pixels, pitch, canonical,
+                                       canonical_pitch);
+          }) ||
+          !timing.step(2, [&] {
+            return store_edram_raw(*edram, surface, 0, 0, image->width(),
+                                   image->height(), sample, canonical, canonical_pitch);
+          })) {
         error = image->error().empty()
                     ? named("EDRAM ownership sample readback failed")
                     : image->error();
@@ -255,14 +287,20 @@ class BackendCore {
     const auto& surface = image->surface();
     const auto canonical_pitch = image->width() * 4u;
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"depth flush", {"readback", "-", "store"},
+                          image->width(), image->height(), sample_count};
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
       std::vector<std::uint32_t> pixels;
       std::uint32_t pitch{};
-      if (!image->readback_sample(queue, sample, 0, 0, image->width(),
-                                  image->height(), pixels, pitch) ||
-          !store_edram_raw(*edram, surface, 0, 0, image->width(),
-                           image->height(), sample, std::as_bytes(std::span(pixels)),
-                           canonical_pitch)) {
+      if (!timing.step(0, [&] {
+            return image->readback_sample(queue, sample, 0, 0, image->width(),
+                                          image->height(), pixels, pitch);
+          }) ||
+          !timing.step(2, [&] {
+            return store_edram_raw(*edram, surface, 0, 0, image->width(),
+                                   image->height(), sample,
+                                   std::as_bytes(std::span(pixels)), canonical_pitch);
+          })) {
         error = image->error().empty()
                     ? named("EDRAM depth ownership sample readback failed")
                     : image->error();
@@ -340,15 +378,22 @@ class BackendCore {
     std::vector<std::byte> pixels(
         std::size_t(host_pitch) * requested.height());
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"color acquire", {"load", "convert", "upload"},
+                          requested.width(), requested.height(), sample_count};
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      if (!resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
-                             requested.height(), sample, canonical,
-                             canonical_pitch) ||
-          !edram_color_to_host(requested.guest_format(), requested.width(),
-                               requested.height(), canonical,
-                               canonical_pitch, pixels, host_pitch) ||
-          !requested.upload_sample(queue, sample, 0, 0, requested.width(),
-                                   requested.height(), pixels, host_pitch)) {
+      if (!timing.step(0, [&] {
+            return resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
+                                     requested.height(), sample, canonical, canonical_pitch);
+          }) ||
+          !timing.step(1, [&] {
+            return edram_color_to_host(requested.guest_format(), requested.width(),
+                                       requested.height(), canonical, canonical_pitch,
+                                       pixels, host_pitch);
+          }) ||
+          !timing.step(2, [&] {
+            return requested.upload_sample(queue, sample, 0, 0, requested.width(),
+                                           requested.height(), pixels, host_pitch);
+          })) {
         error = requested.error().empty()
                     ? named("canonical EDRAM sample upload failed")
                     : requested.error();
@@ -392,14 +437,19 @@ class BackendCore {
     std::vector<std::uint32_t> pixels(
         std::size_t(requested.width()) * requested.height());
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"depth acquire", {"load", "-", "upload"},
+                          requested.width(), requested.height(), sample_count};
     for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      if (!resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
-                             requested.height(), sample,
-                             std::as_writable_bytes(std::span(pixels)),
-                             canonical_pitch) ||
-          !requested.upload_sample(queue, sample, 0, 0, requested.width(),
-                                   requested.height(), pixels,
-                                   canonical_pitch)) {
+      if (!timing.step(0, [&] {
+            return resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
+                                     requested.height(), sample,
+                                     std::as_writable_bytes(std::span(pixels)),
+                                     canonical_pitch);
+          }) ||
+          !timing.step(2, [&] {
+            return requested.upload_sample(queue, sample, 0, 0, requested.width(),
+                                           requested.height(), pixels, canonical_pitch);
+          })) {
         error = requested.error().empty()
                     ? named("canonical EDRAM depth sample upload failed")
                     : requested.error();
