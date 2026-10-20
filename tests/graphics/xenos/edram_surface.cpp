@@ -16,6 +16,13 @@ int main() {
   assert(single.sample_width() == 1280 && single.sample_height() == 720);
   assert(single.pitch_tiles() == 16 && single.tile_rows() == 45);
   assert(single.tile_count() == 720);
+  // The most rows a pitch can hold before tile addresses wrap onto itself
+  // (AC6 sized a 640-pitch 4x surface 8192 rows tall: eight times EDRAM).
+  assert(single.max_resident_height_pixels() == 2048u);
+  assert((EdramSurfaceLayout{0, 640, 1, MsaaSamples::X4, false, false}
+              .max_resident_height_pixels() == 1024u));
+  assert((EdramSurfaceLayout{0, 1280, 1, MsaaSamples::X1, true, false}
+              .max_resident_height_pixels() == 1024u));
   auto shorter = single;
   shorter.height_pixels = 360;
   assert(single.identity_hash() == shorter.identity_hash());

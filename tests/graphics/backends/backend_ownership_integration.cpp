@@ -69,6 +69,9 @@ template <typename Backend>
 void set_scissor_height(Backend& backend, std::uint32_t height) {
   write_register(backend, 0x200E, 0u);
   write_register(backend, 0x200F, kSurfacePitch | (height << 16u));
+  // The window scissor (offset disabled) is the render target, as Direct3D sets it.
+  write_register(backend, 0x2081, 1u << 31u);
+  write_register(backend, 0x2082, kSurfacePitch | (height << 16u));
 }
 
 template <typename Backend>

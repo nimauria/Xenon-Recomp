@@ -563,12 +563,46 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   const auto surface = registers_[0x2000];
   result.raster.surface_pitch = static_cast<std::uint16_t>(bits(surface, 0, 14));
   result.raster.msaa_samples_log2 = static_cast<std::uint8_t>(bits(surface, 16, 2));
-  const auto scissor_tl = registers_[0x200E];
-  const auto scissor_br = registers_[0x200F];
-  result.raster.scissor_left = signed_bits(scissor_tl, 0, 15);
-  result.raster.scissor_top = signed_bits(scissor_tl, 16, 15);
-  result.raster.scissor_right = signed_bits(scissor_br, 0, 15);
-  result.raster.scissor_bottom = signed_bits(scissor_br, 16, 15);
+  // The drawable rectangle is the window scissor (PA_SC_WINDOW_SCISSOR_TL/BR,
+  // 0x2081/0x2082, which Direct3D sets to the render target), offset by
+  // PA_SC_WINDOW_OFFSET unless bit 31 of the top-left disables it, and
+  // intersected with the screen scissor (PA_SC_SCREEN_SCISSOR_TL/BR,
+  // 0x200E/0x200F, which Direct3D leaves at 0,0-8192,8192); an empty
+  // intersection collapses to a zero-sized rectangle, and the horizontal
+  // extent never exceeds the surface pitch. As in xenia's GetScissor. Using
+  // the screen scissor alone made every AC6 render target 8192 rows tall, so
+  // all of them overlapped all of EDRAM.
+  {
+    const auto window_tl = registers_[0x2081];
+    const auto window_br = registers_[0x2082];
+    std::int32_t left = static_cast<std::int32_t>(bits(window_tl, 0, 15));
+    std::int32_t top = static_cast<std::int32_t>(bits(window_tl, 16, 15));
+    std::int32_t right = static_cast<std::int32_t>(bits(window_br, 0, 15));
+    std::int32_t bottom = static_cast<std::int32_t>(bits(window_br, 16, 15));
+    if (bits(window_tl, 31, 1) == 0u) {
+      const auto offset = registers_[0x2080];
+      const auto offset_x = signed_bits(offset, 0, 15);
+      const auto offset_y = signed_bits(offset, 16, 15);
+      left += offset_x;
+      right += offset_x;
+      top += offset_y;
+      bottom += offset_y;
+    }
+    const auto screen_tl = registers_[0x200E];
+    const auto screen_br = registers_[0x200F];
+    left = std::max(left, signed_bits(screen_tl, 0, 15));
+    top = std::max(top, signed_bits(screen_tl, 16, 15));
+    right = std::min(right, signed_bits(screen_br, 0, 15));
+    bottom = std::min(bottom, signed_bits(screen_br, 16, 15));
+    if (result.raster.surface_pitch != 0u) {
+      left = std::min(left, std::int32_t{result.raster.surface_pitch});
+      right = std::min(right, std::int32_t{result.raster.surface_pitch});
+    }
+    result.raster.scissor_left = std::min(left, right);
+    result.raster.scissor_top = std::min(top, bottom);
+    result.raster.scissor_right = right;
+    result.raster.scissor_bottom = bottom;
+  }
   const auto mode = registers_[0x2205];
   result.raster.cull_front = bits(mode, 0, 2) == 1 || bits(mode, 0, 2) == 3;
   result.raster.cull_back = bits(mode, 0, 2) == 2 || bits(mode, 0, 2) == 3;
@@ -593,6 +627,30 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.raster.viewport.y_offset = std::bit_cast<float>(registers_[0x2112]);
   result.raster.viewport.z_scale = std::bit_cast<float>(registers_[0x2113]);
   result.raster.viewport.z_offset = std::bit_cast<float>(registers_[0x2114]);
+  // How far down the draw can reach (as xenia's DrawExtentEstimator::
+  // EstimateMaxY, without inspecting vertices). With clipping enabled
+  // (PA_CL_CLIP_CNTL.clip_disable, bit 16, clear) geometry ends at the
+  // viewport bottom: the window offset when PA_SU_SC_MODE_CNTL applies it to
+  // vertices, half a pixel for D3D pixel centers, then the Y offset plus the
+  // |Y scale|. Only the viewport-transformed case (PA_CL_VTE_CNTL Y scale and
+  // offset, bits 2 and 3, both enabled - what Direct3D sets) is bounded here:
+  // that is the case the host renderer also maps through the viewport, and a
+  // render target must never be smaller than what the renderer draws into.
+  {
+    std::int32_t bottom = std::max(result.raster.scissor_bottom, 0);
+    const auto vte = registers_[0x2206];
+    const auto y_scale = std::abs(result.raster.viewport.y_scale);
+    if (bits(registers_[0x2204], 16, 1) == 0u && bits(vte, 2, 1) != 0u &&
+        bits(vte, 3, 1) != 0u && y_scale > 0.0001f) {
+      float viewport_bottom = result.raster.viewport.y_offset + y_scale;
+      if (result.raster.vertex_window_offset_enabled)
+        viewport_bottom += static_cast<float>(result.raster.window_offset_y);
+      if (result.raster.d3d_pixel_center) viewport_bottom += 0.5f;
+      if (!(viewport_bottom > 0.0f)) viewport_bottom = 0.0f;  // negative or NaN
+      bottom = static_cast<std::int32_t>(std::min(static_cast<float>(bottom), viewport_bottom));
+    }
+    result.raster.drawable_bottom = bottom;
+  }
   result.raster.polygon_offset_front_scale =
       std::bit_cast<float>(registers_[0x2380]);
   result.raster.polygon_offset_front_offset =

@@ -213,6 +213,11 @@ struct RasterState {
   float polygon_offset_back_scale{};
   float polygon_offset_back_offset{};
   ViewportState viewport{};
+  // The lowest pixel row (exclusive) this draw can reach: the scissor bottom,
+  // further limited by the viewport bottom while clipping is enabled. Render
+  // targets are sized from it; the scissor alone is 8192 under Direct3D when
+  // its scissor test is off.
+  std::int32_t drawable_bottom{};
 };
 
 struct NativePipelineKey {

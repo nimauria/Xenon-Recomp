@@ -49,6 +49,9 @@ struct EdramSurfaceLayout {
   [[nodiscard]] std::uint32_t row_tiles() const noexcept;
   [[nodiscard]] std::uint32_t tile_rows() const noexcept;
   [[nodiscard]] std::uint32_t tile_count() const noexcept;
+  // The most rows this pitch and sample count can hold in EDRAM. Tile
+  // addresses wrap, so a taller surface would only alias its own rows.
+  [[nodiscard]] std::uint32_t max_resident_height_pixels() const noexcept;
   [[nodiscard]] bool valid() const noexcept;
   // Stable native-resource identity. Height is deliberately excluded because
   // it is a drawable extent (often derived from the current scissor), not a

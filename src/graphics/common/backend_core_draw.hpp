@@ -26,7 +26,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   }
   if (color_count && state.raster.surface_pitch &&
       state.raster.scissor_bottom > 0) {
-    const auto height = std::uint32_t(state.raster.scissor_bottom);
+    // Sized to the rows the draw can reach, not the (often open) scissor,
+    // and never taller than EDRAM can hold at this pitch.
+    const auto height = (std::min)(
+        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
+        EdramSurfaceLayout{0u, state.raster.surface_pitch, 1u,
+                           static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false,
+                           false}
+            .max_resident_height_pixels());
     for (std::size_t slot = 0; slot < color_count; ++slot) {
       if (!color_plan.enabled[slot]) continue;
       const auto& target = state.color_targets[slot];
@@ -34,11 +41,12 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       EdramSurfaceLayout surface{target.base_tile, state.raster.surface_pitch,
           height, static_cast<MsaaSamples>(state.raster.msaa_samples_log2),
           color_render_target_is_64bpp(format), false};
+      surface.height_pixels = (std::min)(surface.height_pixels, surface.max_resident_height_pixels());
       const auto key = surface.identity_hash() ^
                        (std::uint64_t(target.format) << 56u);
       auto existing = render_targets.find(key);
       if (existing != render_targets.end() &&
-          existing->second->height() < height) {
+          existing->second->height() < surface.height_pixels) {
         const auto owner = render_target_owners.at(key);
         if (edram_ownership.owned_tile_count(owner) &&
             !flush_color_owner(owner)) return;
@@ -75,10 +83,11 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       state.raster.surface_pitch && state.raster.scissor_bottom > 0 &&
       (state.depth_target.test_enabled || state.depth_target.write_enabled ||
        state.depth_target.stencil_enabled)) {
-    const EdramSurfaceLayout surface{
+    EdramSurfaceLayout surface{
         state.depth_target.base_tile, state.raster.surface_pitch,
-        static_cast<std::uint32_t>(state.raster.scissor_bottom),
+        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
         static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false, true};
+    surface.height_pixels = (std::min)(surface.height_pixels, surface.max_resident_height_pixels());
     const auto key = surface.identity_hash() ^
                      (std::uint64_t(state.depth_target.format) << 60u);
     if (const auto existing = depth_targets.find(key);

@@ -103,6 +103,13 @@ std::uint32_t EdramSurfaceLayout::tile_count() const noexcept {
   return pitch_tiles() * tile_rows();
 }
 
+std::uint32_t EdramSurfaceLayout::max_resident_height_pixels() const noexcept {
+  const auto tiles_per_row = pitch_tiles();
+  if (!tiles_per_row) return 0u;
+  const auto sample_rows = (Edram::kTileCount / tiles_per_row) * 16u;
+  return sample_rows >> (msaa == MsaaSamples::X1 ? 0u : 1u);
+}
+
 bool EdramSurfaceLayout::valid() const noexcept {
   return pitch_pixels && height_pixels &&
          static_cast<unsigned>(msaa) <= static_cast<unsigned>(MsaaSamples::X4) &&

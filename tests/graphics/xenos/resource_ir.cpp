@@ -18,6 +18,13 @@ void write_fetch(xenon::gpu::ResourceStateTracker& tracker, unsigned slot,
                  value});
 }
 
+// The window scissor Direct3D leaves open when only the screen scissor is
+// under test: 0,0-8192,8192 with the window offset disabled.
+void apply_unbounded_window_scissor(xenon::gpu::ResourceStateTracker& tracker) {
+  tracker.apply({0x2081, 1u << 31});
+  tracker.apply({0x2082, 8192u | (8192u << 16)});
+}
+
 
 void write_memexport_stream(xenon::gpu::ResourceStateTracker& tracker,
                             xenon::gpu::ShaderStage stage,
@@ -379,6 +386,7 @@ void test_vertex_and_render_state() {
   tracker.apply({0x2104, 0x000Fu});
   tracker.apply({0x200E, 10u | (20u << 16)});
   tracker.apply({0x200F, 1010u | (620u << 16)});
+  apply_unbounded_window_scissor(tracker);
   tracker.apply({0x2200, (1u << 1) | (1u << 2)});
   tracker.apply({0x2201, 6u | (1u << 5) | (7u << 8) |
                               (1u << 16) | (4u << 21) | (10u << 24)});
@@ -572,6 +580,7 @@ void test_copy_resolve_state() {
   tracker.apply({0x2000, 64u});
   tracker.apply({0x200E, 0u});
   tracker.apply({0x200F, 64u | (64u << 16)});
+  apply_unbounded_window_scissor(tracker);
   auto rectangle = decode_resolve_rectangle(tracker.snapshot(), memory);
   assert(rectangle.valid);
   assert(rectangle.left == 0 && rectangle.top == 0);
@@ -744,7 +753,71 @@ void test_preferred_polygon_offset() {
 
 }  // namespace
 
+// Regression (AC6 spent 3.5 s per frame moving whole EDRAM surfaces): the
+// drawable rectangle is the window scissor, offset by the window offset unless
+// disabled, intersected with the screen scissor. Using the screen scissor
+// alone (0,0-8192,8192 under Direct3D) made every render target 8192 rows
+// tall, so each one covered all of EDRAM and aliased every other.
+void test_window_scissor_bounds_the_drawable_rectangle() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  tracker.apply({0x2000, 1280u | (2u << 16)});              // pitch 1280, 4x MSAA
+  tracker.apply({0x200E, 0u});                              // screen scissor 0,0
+  tracker.apply({0x200F, 8192u | (8192u << 16)});           // ... to 8192,8192
+  tracker.apply({0x2081, 1u << 31});                        // window 0,0, offset off
+  tracker.apply({0x2082, 1280u | (720u << 16)});            // ... to 1280,720
+  auto state = tracker.snapshot();
+  assert(state.raster.scissor_left == 0 && state.raster.scissor_top == 0);
+  assert(state.raster.scissor_right == 1280 && state.raster.scissor_bottom == 720);
+
+  // The window offset moves the window scissor unless bit 31 disables it.
+  tracker.apply({0x2080, 16u | (32u << 16)});
+  tracker.apply({0x2081, 0u});
+  tracker.apply({0x2082, 100u | (200u << 16)});
+  state = tracker.snapshot();
+  assert(state.raster.scissor_left == 16 && state.raster.scissor_top == 32);
+  assert(state.raster.scissor_right == 116 && state.raster.scissor_bottom == 232);
+
+  // The screen scissor still clips, the horizontal extent stops at the
+  // surface pitch, and an empty intersection collapses instead of inverting.
+  tracker.apply({0x2081, 1u << 31});
+  tracker.apply({0x2082, 4000u | (720u << 16)});
+  tracker.apply({0x200E, 8u | (8u << 16)});
+  tracker.apply({0x200F, 8192u | (600u << 16)});
+  state = tracker.snapshot();
+  assert(state.raster.scissor_left == 8 && state.raster.scissor_top == 8);
+  assert(state.raster.scissor_right == 1280 && state.raster.scissor_bottom == 600);
+  tracker.apply({0x200E, 700u | (650u << 16)});
+  state = tracker.snapshot();
+  assert(state.raster.scissor_top == 600 && state.raster.scissor_bottom == 600);
+
+  // Direct3D with its scissor test off leaves the window scissor at 8192;
+  // with clipping enabled the viewport bounds how far down the draw reaches
+  // (AC6: viewport 1280x720 on a 640-pitch, 4x MSAA tile).
+  tracker.apply({0x200E, 0u});
+  tracker.apply({0x200F, 8192u | (8192u << 16)});
+  tracker.apply({0x2081, 1u << 31});
+  tracker.apply({0x2082, 8192u | (8192u << 16)});
+  tracker.apply({0x2000, 640u | (2u << 16)});
+  tracker.apply({0x2206, (1u << 2) | (1u << 3)});            // Y scale and offset enabled
+  tracker.apply({0x2111, std::bit_cast<std::uint32_t>(-360.0f)});
+  tracker.apply({0x2112, std::bit_cast<std::uint32_t>(360.0f)});
+  state = tracker.snapshot();
+  assert(state.raster.scissor_bottom == 8192);
+  assert(state.raster.drawable_bottom == 720 && "0.5 + 360 + |-360|, truncated");
+  // Without the Y enables the draw is bounded by the scissor alone.
+  tracker.apply({0x2206, 0u});
+  state = tracker.snapshot();
+  assert(state.raster.drawable_bottom == 8192);
+  // With clipping disabled geometry can reach anywhere the scissor allows.
+  tracker.apply({0x2206, (1u << 2) | (1u << 3)});
+  tracker.apply({0x2204, 1u << 16});
+  state = tracker.snapshot();
+  assert(state.raster.drawable_bottom == 8192);
+}
+
 int main() {
+  test_window_scissor_bounds_the_drawable_rectangle();
   test_guest_memory_coherency_ranges();
   test_memexport_stream_planning();
   test_memexport_dynamic_and_invalid_streams_stay_explicit();
