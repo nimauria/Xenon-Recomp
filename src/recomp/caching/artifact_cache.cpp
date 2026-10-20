@@ -137,10 +137,18 @@ bool validate_native_module(const std::filesystem::path& path, std::string& erro
     error = "native module file does not exist: " + path.string();
     return false;
   }
+  // A corrupt or truncated module must fail the load, not raise Windows'
+  // modal "Bad Image" dialog: that waits for a click, so a background
+  // preparation worker hung forever on it.
+  DWORD previous_error_mode = 0;
+  const bool restore_error_mode =
+      SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_error_mode) != 0;
   const HMODULE handle = LoadLibraryW(path.c_str());
+  const auto load_error = GetLastError();
+  if (restore_error_mode) SetThreadErrorMode(previous_error_mode, nullptr);
   if (handle == nullptr) {
     error = "failed to load native module (LoadLibraryW error " +
-            std::to_string(static_cast<unsigned long>(GetLastError())) + "): " + path.string();
+            std::to_string(static_cast<unsigned long>(load_error)) + "): " + path.string();
     return false;
   }
   const auto proc = GetProcAddress(handle, "Xenon_BindCompiledRegistry");
