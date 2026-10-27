@@ -117,6 +117,9 @@ struct SessionExecutionTestAccess {
   [[nodiscard]] static std::uint64_t gpu_interrupts_delivered(const XenonSession& session) noexcept {
     return session.gpu_interrupts_delivered_.load();
   }
+  [[nodiscard]] static std::string present_results(const XenonSession& session) {
+    return session.describe_present_results();
+  }
   // Replaces the backend init_gpu() chose; before create_guest_process().
   static void set_backend(XenonSession& session, std::unique_ptr<gpu::Backend> backend) {
     session.gpu_ = std::move(backend);
@@ -633,6 +636,46 @@ class BlockingDrawBackend final : public gpu::Backend {
   bool presentation_ready() const noexcept override { return false; }
 };
 
+// Presents whose scanout fails. The pump used to discard present()'s
+// status, so a window left black by failing presents was indistinguishable
+// from one showing a black frame.
+class FailingPresentBackend final : public gpu::Backend {
+ public:
+  std::atomic<int> presents{0};
+  void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
+  void consume(const gpu::ir::Command&) override {}
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
+    return ++presents % 2 ? gpu::PresentStatus::Error : gpu::PresentStatus::Success;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return true; }
+  bool presentation_ready() const noexcept override { return true; }
+};
+
+void test_present_outcomes_are_counted_by_status() {
+  GpuPumpHarness harness;
+  auto backend = std::make_unique<FailingPresentBackend>();
+  auto* failing = backend.get();
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session, std::move(backend));
+  assert(xenon::core::SessionExecutionTestAccess::present_results(harness.session).empty());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  harness.session.kernel_process()->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
+  for (int i = 0; i < 400 && failing->presents.load() < 4; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  const auto presents = failing->presents.load();
+  assert(presents >= 4);
+  const auto expected = " (" + std::to_string(presents / 2) + " ok, " +
+                        std::to_string((presents + 1) / 2) + " error)";
+  assert(xenon::core::SessionExecutionTestAccess::present_results(harness.session) == expected);
+}
+
 // Regression (Ace Combat 6): one thread drained the ring, rendered, presented
 // and delivered the vsync interrupt, so a draw that took hundreds of
 // milliseconds held back vsync, and with it the title's flip handshakes. On
@@ -724,6 +767,7 @@ int main() {
   test_vsync_callback_wakes_a_waiting_guest_thread_each_frame();
   test_vsync_keeps_arriving_while_the_gpu_worker_is_busy();
   test_published_ring_work_wakes_the_worker();
+  test_present_outcomes_are_counted_by_status();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

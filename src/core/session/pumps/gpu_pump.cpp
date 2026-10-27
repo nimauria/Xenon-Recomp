@@ -239,8 +239,11 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       frame.visible_width = front_buffer.width;
       frame.visible_height = front_buffer.height;
       const auto _present_start = Clock::now();
-      static_cast<void>(graphics_system_->present(*gpu_, frame));
+      const auto status = graphics_system_->present(*gpu_, frame);
       gpu_presents_.fetch_add(1u, std::memory_order_relaxed);
+      const auto status_index = static_cast<std::size_t>(status);
+      if (status_index < gpu_present_results_.size())
+        gpu_present_results_[status_index].fetch_add(1u, std::memory_order_relaxed);
       const auto _present_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     Clock::now() - _present_start)
                                     .count();

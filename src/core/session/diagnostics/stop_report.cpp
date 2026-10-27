@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -20,6 +21,19 @@
 
 namespace xenon::core {
 
+std::string XenonSession::describe_present_results() const {
+  static constexpr std::array<const char*, 8> kNames{
+      "ok", "suboptimal", "out of date", "surface lost", "minimized", "not configured",
+      "unsupported", "error"};
+  std::string text;
+  for (std::size_t i = 0; i < gpu_present_results_.size(); ++i) {
+    const auto count = gpu_present_results_[i].load(std::memory_order_relaxed);
+    if (!count) continue;
+    text += (text.empty() ? " (" : ", ") + std::to_string(count) + " " + kNames[i];
+  }
+  return text.empty() ? text : text + ")";
+}
+
 std::vector<std::string> XenonSession::describe_pump_state() {
   std::vector<std::string> lines;
   // A pump that stopped because a guest callback never returned.
@@ -32,7 +46,7 @@ std::vector<std::string> XenonSession::describe_pump_state() {
   lines.push_back("GPU worker wakes: ring work " + std::to_string(gpu_wake_.count(kGpuWakeRingWork)) +
                   ", present " + std::to_string(gpu_wake_.count(kGpuWakePresent)) + ", polls " +
                   std::to_string(gpu_wake_.timeouts()) + "; frames presented " +
-                  std::to_string(gpu_presents_.load()));
+                  std::to_string(gpu_presents_.load()) + describe_present_results());
   lines.push_back(CallbackWatch::describe("Audio pump", audio_callback_watch_.snapshot(), now));
   const auto interrupt = kernel_process_ ? kernel_process_->gpu_interrupt_callback()
                                          : kernel::KernelProcess::GpuInterruptCallbackState{};
@@ -265,6 +279,25 @@ void XenonSession::report_stop_diagnostics() {
                   << " cap=" << ring.capacity_dwords << ")"
                   << " front_buffer=0x" << std::hex << front.base_address << std::dec << " "
                   << front.width << "x" << front.height << std::endl;
+        // Whether the scanout source holds an image at all: a black window
+        // with an all-zero front buffer is a rendering problem, not a
+        // presentation one.
+        if (front.base_address && front.width && front.height && memory_) {
+          std::vector<std::byte> pixels(std::size_t(front.width) * front.height * 4u);
+          if (memory_->copy_physical_range(front.base_address & 0x1FFFFFFFu, pixels)) {
+            std::size_t nonzero = 0;
+            std::set<std::uint32_t> distinct;
+            for (std::size_t i = 0; i + 4u <= pixels.size(); i += 4u) {
+              std::uint32_t value{};
+              std::memcpy(&value, pixels.data() + i, 4u);
+              if (value & 0x00FFFFFFu && value & 0xFFFFFF00u) ++nonzero;
+              if (distinct.size() < 64u) distinct.insert(value);
+            }
+            std::cout << "[XenonSession] Front buffer content: " << nonzero * 100u / (pixels.size() / 4u)
+                      << "% of pixels non-black, " << distinct.size()
+                      << (distinct.size() >= 64u ? "+" : "") << " distinct values" << std::endl;
+          }
+        }
         const auto& stall = graphics_system_->command_processor().last_wait_stall();
         if (stall.valid) {
           std::cout << "[XenonSession] GPU parked on WAIT_REG_MEM: "
