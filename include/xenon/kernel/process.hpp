@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <cstdint>
@@ -173,11 +174,19 @@ class KernelProcess final : public KernelObject {
     std::uint32_t pitch{0};
     std::uint8_t format{0};
     std::uint64_t generation{0};
+    // The texture fetch constant VdSwap was given for the front buffer
+    // (pitch, tiling, endianness, format), with its base address set to the
+    // front buffer: what the GPU scans out, as PM4_XE_SWAP carries it.
+    std::array<std::uint32_t, 6> fetch_constant{};
+    bool has_fetch_constant{false};
   };
   [[nodiscard]] GpuFrontBufferState gpu_front_buffer() const noexcept;
   void set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
                             std::uint32_t height, std::uint32_t pitch,
                             std::uint8_t format) noexcept;
+  void set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
+                            std::uint32_t height, std::uint32_t pitch, std::uint8_t format,
+                            const std::array<std::uint32_t, 6>& fetch_constant) noexcept;
 
  private:
   std::uint32_t process_id_;

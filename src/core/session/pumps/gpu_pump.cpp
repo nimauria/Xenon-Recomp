@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/gpu/resource_ir.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -143,6 +144,8 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   // which raises no notification; and a bounded idle fallback.
   constexpr auto kParkedWaitPoll = std::chrono::milliseconds(1);
   constexpr auto kIdleFallback = std::chrono::milliseconds(50);
+  // The front buffer generation (VdSwap count) last presented successfully.
+  std::uint64_t last_presented_generation = 0;
 
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
     const bool parked =
@@ -227,23 +230,36 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
 
     if ((reasons & kGpuWakePresent) == 0u) continue;
     const auto front_buffer = kernel_process_->gpu_front_buffer();
-    if (front_buffer.base_address != 0) {
-      gpu::TextureDescriptor texture{};
-      texture.base_address = front_buffer.base_address;
-      texture.width = front_buffer.width;
-      texture.height = front_buffer.height;
-      texture.pitch = front_buffer.pitch;
-      texture.format = front_buffer.format;
+    // What is scanned out is the front buffer as VdSwap's texture fetch
+    // constant describes it; a front buffer published without one has no
+    // known layout and is not presented.
+    const auto texture = front_buffer.has_fetch_constant
+                             ? gpu::decode_texture_fetch_constant(front_buffer.fetch_constant)
+                             : std::nullopt;
+    // A frame is presented once, when the title swaps it in: reading back,
+    // detiling and uploading the scan-out costs tens of milliseconds, and
+    // repeating it every vsync for an unchanged frame starved ring work. A
+    // present that did not succeed is retried at the next vsync.
+    if (front_buffer.base_address != 0 && texture &&
+        front_buffer.generation != last_presented_generation) {
       gpu::PresentationFrame frame{};
-      frame.texture = texture;
-      frame.visible_width = front_buffer.width;
-      frame.visible_height = front_buffer.height;
+      frame.texture = *texture;
+      frame.visible_width = front_buffer.width ? front_buffer.width : texture->width;
+      frame.visible_height = front_buffer.height ? front_buffer.height : texture->height;
       const auto _present_start = Clock::now();
       const auto status = graphics_system_->present(*gpu_, frame);
+      if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal)
+        last_presented_generation = front_buffer.generation;
       gpu_presents_.fetch_add(1u, std::memory_order_relaxed);
       const auto status_index = static_cast<std::size_t>(status);
       if (status_index < gpu_present_results_.size())
         gpu_present_results_[status_index].fetch_add(1u, std::memory_order_relaxed);
+      if (status == gpu::PresentStatus::Error || status == gpu::PresentStatus::Unsupported ||
+          status == gpu::PresentStatus::SurfaceLost) {
+        auto message = gpu_->last_error();
+        std::scoped_lock lock(gpu_present_error_mutex_);
+        gpu_present_error_ = std::move(message);
+      }
       const auto _present_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     Clock::now() - _present_start)
                                     .count();

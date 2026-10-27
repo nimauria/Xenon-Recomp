@@ -4,6 +4,7 @@
 // kernel::KernelProcess + memory::AddressSpace, exactly as a guest thunk
 // would - mirrors tls_export_tests.cpp's fixture pattern.
 
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -294,6 +295,53 @@ void test_swap_populates_front_buffer() {
   assert(front_buffer.pitch == kWidth * 4u);
   assert(front_buffer.format == kFormat);
   assert(front_buffer.generation >= 1u);
+  assert(!front_buffer.has_fetch_constant);
+}
+
+// Regression (Ace Combat 6): VdSwap's second argument is the front buffer's
+// texture fetch constant, which says how scan-out reads it (tiled, endian
+// swap, pitch, format). It was ignored, the presented texture was described
+// from width/height alone and never valid, and every present failed with
+// "invalid Xenos texture descriptor" - a black window. VdSwap now keeps the
+// fetch constant with its base address set to the front buffer, as xenia's
+// VdSwap does.
+void test_swap_keeps_the_front_buffer_fetch_constant() {
+  Fixture fixture;
+  const auto front_buffer_va = fixture.alloc(0x4000u, 0x1000u);
+  const auto physical = fixture.address_space->get_physical_address(front_buffer_va);
+  assert(physical != 0xFFFFFFFFu && (physical & 0xFFFu) == 0u);
+  const auto frontbuffer_cell = fixture.alloc(4u);
+  const auto format_cell = fixture.alloc(4u);
+  const auto width_cell = fixture.alloc(4u);
+  const auto height_cell = fixture.alloc(4u);
+  fixture.address_space->write32_be(frontbuffer_cell, front_buffer_va);
+  fixture.address_space->write32_be(format_cell, 6u);
+  fixture.address_space->write32_be(width_cell, 1280u);
+  fixture.address_space->write32_be(height_cell, 720u);
+  // A tiled 1280x720 k_8_8_8_8 texture, 8in32 endian, whose header holds a
+  // stale base address (0x12345000).
+  const std::array<std::uint32_t, 6> header{
+      0x80000002u | (1280u / 32u) << 22, 0x12345000u | 2u << 6 | 6u,
+      (1279u) | (719u << 13), 0x00000000u, 0x00000000u, 0x00000200u};
+  const auto fetch = fixture.alloc(24u, 16u);
+  for (std::uint32_t i = 0; i < 6u; ++i) fixture.address_space->write32_be(fetch + i * 4u, header[i]);
+  const auto stack = fixture.alloc(0x80u, 16u);
+  fixture.address_space->write32_be(stack + 0x54u, width_cell);
+  fixture.address_space->write32_be(stack + 0x5Cu, height_cell);
+
+  cpu::CpuState cpu{};
+  cpu.gpr[1] = stack;
+  cpu.gpr[3] = 0u;
+  cpu.gpr[4] = fetch;
+  cpu.gpr[8] = frontbuffer_cell;
+  cpu.gpr[9] = format_cell;
+  assert(fixture.invoke(kOrdSwap, cpu).success);
+
+  const auto front_buffer = fixture.process->gpu_front_buffer();
+  assert(front_buffer.has_fetch_constant);
+  auto expected = header;
+  expected[1] = (header[1] & 0xFFFu) | physical;
+  assert(front_buffer.fetch_constant == expected);
 }
 
 // VdSwap must also advance the ring buffer's write cursor by a real amount
@@ -349,6 +397,7 @@ int main() {
   test_get_current_display_information_populates_struct();
   test_simple_return_value_exports();
   test_swap_populates_front_buffer();
+  test_swap_keeps_the_front_buffer_fetch_constant();
   test_swap_advances_ring_write_index();
 
   std::cout << "All xboxkrnl Vd* GPU control-plane export tests passed!\n";

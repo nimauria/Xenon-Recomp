@@ -604,7 +604,7 @@ class XenonSession final : public cpu::RuntimeServices {
   // that ends in a fault still shows whether the pumps were still running.
   [[nodiscard]] std::vector<std::string> describe_pump_state();
   // " (N ok, M error, ...)" for the presents so far; empty before any.
-  [[nodiscard]] std::string describe_present_results() const;
+  [[nodiscard]] std::string describe_present_results();
   void report_pump_state(std::string_view reason);
 
   SessionConfig config_{};
@@ -787,6 +787,8 @@ class XenonSession final : public cpu::RuntimeServices {
   // Presents by gpu::PresentStatus: a window that stays black because
   // every present fails looks the same as one showing a black frame.
   std::array<std::atomic<std::uint64_t>, 8> gpu_present_results_{};
+  std::mutex gpu_present_error_mutex_{};
+  std::string gpu_present_error_{};  // the backend's error at the latest failed present
   // The vsync thread: its own KernelThread, KPCR/static TLS and callback
   // stack, so the title's vsync handler runs on its own guest context.
   memory::GuestAddress gpu_vsync_callback_stack_base_{};

@@ -378,6 +378,12 @@ struct ColorTargetPlan {
     std::span<const std::byte> physical_memory,
     std::uint32_t physical_base = 0u);
 
+// Decodes a texture fetch constant (six dwords, as in the fetch-constant
+// registers or a Direct3D texture header in memory). Nullopt when the
+// constant is not a texture fetch.
+[[nodiscard]] std::optional<TextureDescriptor> decode_texture_fetch_constant(
+    const std::array<std::uint32_t, 6>& words) noexcept;
+
 class ResourceStateTracker {
  public:
   static constexpr std::uint32_t kFetchConstantBase = 0x4800;

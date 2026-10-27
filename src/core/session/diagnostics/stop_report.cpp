@@ -21,7 +21,7 @@
 
 namespace xenon::core {
 
-std::string XenonSession::describe_present_results() const {
+std::string XenonSession::describe_present_results() {
   static constexpr std::array<const char*, 8> kNames{
       "ok", "suboptimal", "out of date", "surface lost", "minimized", "not configured",
       "unsupported", "error"};
@@ -31,7 +31,9 @@ std::string XenonSession::describe_present_results() const {
     if (!count) continue;
     text += (text.empty() ? " (" : ", ") + std::to_string(count) + " " + kNames[i];
   }
-  return text.empty() ? text : text + ")";
+  if (text.empty()) return text;
+  std::scoped_lock lock(gpu_present_error_mutex_);
+  return text + (gpu_present_error_.empty() ? ")" : "; last failure: " + gpu_present_error_ + ")");
 }
 
 std::vector<std::string> XenonSession::describe_pump_state() {

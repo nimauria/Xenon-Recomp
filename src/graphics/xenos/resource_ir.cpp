@@ -500,12 +500,14 @@ std::optional<TextureDescriptor> ResourceStateTracker::texture(
     std::uint32_t fetch_constant) const noexcept {
   if (fetch_constant >= 32) return std::nullopt;
   const auto offset = kFetchConstantBase + fetch_constant * 6u;
-  const auto w0 = registers_[offset + 0u];
-  const auto w1 = registers_[offset + 1u];
-  const auto w2 = registers_[offset + 2u];
-  const auto w3 = registers_[offset + 3u];
-  const auto w4 = registers_[offset + 4u];
-  const auto w5 = registers_[offset + 5u];
+  return decode_texture_fetch_constant(
+      {registers_[offset + 0u], registers_[offset + 1u], registers_[offset + 2u],
+       registers_[offset + 3u], registers_[offset + 4u], registers_[offset + 5u]});
+}
+
+std::optional<TextureDescriptor> decode_texture_fetch_constant(
+    const std::array<std::uint32_t, 6>& words) noexcept {
+  const auto [w0, w1, w2, w3, w4, w5] = words;
   if ((w0 & 3u) != 2u) return std::nullopt;
 
   TextureDescriptor result{};

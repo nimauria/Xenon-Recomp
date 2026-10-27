@@ -44,6 +44,7 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] std::size_t realized_render_target_count() const noexcept;
   [[nodiscard]] const DeviceProperties& device_properties() const noexcept;
   [[nodiscard]] const std::string& error() const noexcept;
+  [[nodiscard]] std::string last_error() const override { return error(); }
 
  private:
   class Impl;

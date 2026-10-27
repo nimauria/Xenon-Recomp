@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <variant>
 
 #include "xenon/gpu/edram.hpp"
@@ -111,6 +112,9 @@ class Backend {
   [[nodiscard]] virtual bool resize_presentation(std::uint32_t width,
                                                  std::uint32_t height) = 0;
   [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;
+  // What the most recent failure was (a present that returned Error, a
+  // draw that could not be recorded), for diagnostics; empty if none.
+  [[nodiscard]] virtual std::string last_error() const { return {}; }
   [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
     return {};
   }

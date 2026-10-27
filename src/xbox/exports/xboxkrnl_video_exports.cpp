@@ -401,6 +401,8 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     }
   }
   const auto buffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  // The front buffer's Direct3D texture header: a texture fetch constant.
+  const auto fetch_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto frontbuffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
   const auto texture_format_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
   // color_space_ptr (r10) is read for completeness/documentation parity with
@@ -425,8 +427,21 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     const auto front_buffer_physical = address_space->get_physical_address(front_buffer_virtual);
     if (front_buffer_physical != 0xFFFFFFFFu) {
       const auto pitch = width * kFrontBufferBytesPerPixel;
-      process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
-                                   static_cast<std::uint8_t>(format));
+      if (fetch_ptr != 0u) {
+        // Scan-out reads the front buffer as this fetch constant describes
+        // it (tiled, endian-swapped, its own pitch). As xenia does, the base
+        // address is the front buffer the title passed, which the header
+        // need not carry yet.
+        std::array<std::uint32_t, 6> fetch{};
+        for (std::uint32_t i = 0; i < fetch.size(); ++i)
+          fetch[i] = context.memory.read32_be(fetch_ptr + i * 4u);
+        fetch[1] = (fetch[1] & 0xFFFu) | (front_buffer_physical & ~0xFFFu);
+        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
+                                     static_cast<std::uint8_t>(format), fetch);
+      } else {
+        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
+                                     static_cast<std::uint8_t>(format));
+      }
     }
   }
 

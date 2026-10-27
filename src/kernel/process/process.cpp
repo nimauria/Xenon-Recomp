@@ -172,6 +172,22 @@ void KernelProcess::set_gpu_front_buffer(std::uint32_t base_address, std::uint32
   gpu_front_buffer_.height = height;
   gpu_front_buffer_.pitch = pitch;
   gpu_front_buffer_.format = format;
+  gpu_front_buffer_.has_fetch_constant = false;
+  ++gpu_front_buffer_.generation;
+}
+
+void KernelProcess::set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
+                                         std::uint32_t height, std::uint32_t pitch,
+                                         std::uint8_t format,
+                                         const std::array<std::uint32_t, 6>& fetch_constant) noexcept {
+  std::scoped_lock lock(gpu_mutex_);
+  gpu_front_buffer_.base_address = base_address;
+  gpu_front_buffer_.width = width;
+  gpu_front_buffer_.height = height;
+  gpu_front_buffer_.pitch = pitch;
+  gpu_front_buffer_.format = format;
+  gpu_front_buffer_.fetch_constant = fetch_constant;
+  gpu_front_buffer_.has_fetch_constant = true;
   ++gpu_front_buffer_.generation;
 }
 

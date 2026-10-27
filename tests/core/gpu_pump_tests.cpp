@@ -43,6 +43,7 @@
 #include "xenon/logging/diagnostic_events.hpp"
 
 #include <array>
+#include <mutex>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -117,7 +118,7 @@ struct SessionExecutionTestAccess {
   [[nodiscard]] static std::uint64_t gpu_interrupts_delivered(const XenonSession& session) noexcept {
     return session.gpu_interrupts_delivered_.load();
   }
-  [[nodiscard]] static std::string present_results(const XenonSession& session) {
+  [[nodiscard]] static std::string present_results(XenonSession& session) {
     return session.describe_present_results();
   }
   // Replaces the backend init_gpu() chose; before create_guest_process().
@@ -639,41 +640,86 @@ class BlockingDrawBackend final : public gpu::Backend {
 // Presents whose scanout fails. The pump used to discard present()'s
 // status, so a window left black by failing presents was indistinguishable
 // from one showing a black frame.
+// What the backend saw, kept beyond shutdown(), which destroys the backend.
+struct PresentLog {
+  std::atomic<int> presents{0};
+  std::mutex frame_mutex;
+  gpu::PresentationFrame last_frame{};
+};
+
 class FailingPresentBackend final : public gpu::Backend {
  public:
-  std::atomic<int> presents{0};
+  explicit FailingPresentBackend(std::shared_ptr<PresentLog> log) : log_(std::move(log)) {}
   void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
   void consume(const gpu::ir::Command&) override {}
   void end_submission() override {}
   bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
   bool make_edram_canonical() override { return true; }
   bool invalidate_edram_native_state() override { return true; }
-  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
-    return ++presents % 2 ? gpu::PresentStatus::Error : gpu::PresentStatus::Success;
+  gpu::PresentStatus present(const gpu::PresentationFrame& frame) override {
+    {
+      std::scoped_lock lock(log_->frame_mutex);
+      log_->last_frame = frame;
+    }
+    return ++log_->presents % 2 ? gpu::PresentStatus::Error : gpu::PresentStatus::Success;
   }
+  std::string last_error() const override { return "swap chain is gone"; }
   bool resize_presentation(std::uint32_t, std::uint32_t) override { return true; }
   bool presentation_ready() const noexcept override { return true; }
+
+ private:
+  std::shared_ptr<PresentLog> log_;
 };
 
 void test_present_outcomes_are_counted_by_status() {
   GpuPumpHarness harness;
-  auto backend = std::make_unique<FailingPresentBackend>();
-  auto* failing = backend.get();
-  xenon::core::SessionExecutionTestAccess::set_backend(harness.session, std::move(backend));
+  auto failing = std::make_shared<PresentLog>();
+  xenon::core::SessionExecutionTestAccess::set_backend(
+      harness.session, std::make_unique<FailingPresentBackend>(failing));
   assert(xenon::core::SessionExecutionTestAccess::present_results(harness.session).empty());
   assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
-  harness.session.kernel_process()->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 0u);
-  for (int i = 0; i < 400 && failing->presents.load() < 4; ++i) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  // A tiled 64x64 k_8_8_8_8 front buffer at 0x3000, as VdSwap publishes it.
+  const std::array<std::uint32_t, 6> fetch{0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u,
+                                           63u | 63u << 13, 0u, 0u, 0x200u};
+  // Each swap is presented; a failed present is retried at the next vsync,
+  // so every swap ends in one success: errors and successes alternate.
+  for (int swap = 0; swap < 2; ++swap) {
+    harness.session.kernel_process()->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u, fetch);
+    const int target = 2 * (swap + 1);
+    for (int i = 0; i < 400 && failing->presents.load() < target; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
   }
+  // An unchanged front buffer is not presented again.
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
   const bool shutdown_completed = run_with_timeout(
       [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
   assert(shutdown_completed);
-  const auto presents = failing->presents.load();
-  assert(presents >= 4);
-  const auto expected = " (" + std::to_string(presents / 2) + " ok, " +
-                        std::to_string((presents + 1) / 2) + " error)";
+  assert(failing->presents.load() == 4);
+  const std::string expected = " (2 ok, 2 error; last failure: swap chain is gone)";
   assert(xenon::core::SessionExecutionTestAccess::present_results(harness.session) == expected);
+  // What was presented is the texture the fetch constant describes.
+  std::scoped_lock lock(failing->frame_mutex);
+  const auto& texture = failing->last_frame.texture;
+  assert(texture.valid && texture.tiled && texture.base_address == 0x3000u);
+  assert(texture.width == 64u && texture.height == 64u && texture.pitch == 64u);
+  assert(texture.format == 6u && texture.endian == gpu::Endian::Swap8In32);
+}
+
+// A front buffer published without a fetch constant has no known layout and
+// is not presented (the old path presented a texture that was never valid).
+void test_a_front_buffer_without_a_fetch_constant_is_not_presented() {
+  GpuPumpHarness harness;
+  auto failing = std::make_shared<PresentLog>();
+  xenon::core::SessionExecutionTestAccess::set_backend(
+      harness.session, std::make_unique<FailingPresentBackend>(failing));
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  harness.session.kernel_process()->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  assert(failing->presents.load() == 0);
 }
 
 // Regression (Ace Combat 6): one thread drained the ring, rendered, presented
@@ -768,6 +814,7 @@ int main() {
   test_vsync_keeps_arriving_while_the_gpu_worker_is_busy();
   test_published_ring_work_wakes_the_worker();
   test_present_outcomes_are_counted_by_status();
+  test_a_front_buffer_without_a_fetch_constant_is_not_presented();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;
