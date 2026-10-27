@@ -281,6 +281,14 @@ void XenonSession::report_stop_diagnostics() {
                   << " cap=" << ring.capacity_dwords << ")"
                   << " front_buffer=0x" << std::hex << front.base_address << std::dec << " "
                   << front.width << "x" << front.height << std::endl;
+        if (gpu_) {
+          const auto performance = gpu_->performance_counters();
+          std::cout << "[XenonSession] GPU backend: draws " << performance.draws << " ("
+                    << performance.failed_draws << " failed), resolves "
+                    << performance.resolve_operations << " (" << performance.failed_resolves
+                    << " failed); last error: "
+                    << (gpu_->last_error().empty() ? "none" : gpu_->last_error()) << std::endl;
+        }
         // Whether the scanout source holds an image at all: a black window
         // with an all-zero front buffer is a rendering problem, not a
         // presentation one.

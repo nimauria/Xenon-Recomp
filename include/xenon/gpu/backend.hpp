@@ -31,6 +31,11 @@ struct GpuPerformanceCounters {
   // path, not a first-time texture creation (which is not a re-validation
   // and is not counted here).
   std::uint64_t texture_cache_invalidations{};
+  // Draws and resolves the backend could not carry out (each sets the
+  // backend's last_error()); a resolve that fails leaves its destination,
+  // possibly the front buffer, unwritten.
+  std::uint64_t failed_draws{};
+  std::uint64_t failed_resolves{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent

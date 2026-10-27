@@ -86,13 +86,25 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             int(state.depth_target.write_enabled), state.raster.window_offset_x,
             state.raster.window_offset_y, state.raster.drawable_bottom);
     };
-    if (state.edram_mode == EdramMode::Copy) {
+    // A failure sets `error`; count it, and keep an earlier error when
+    // this command succeeded.
+    auto previous_error = std::move(error);
+    error.clear();
+    const bool resolve = state.edram_mode == EdramMode::Copy;
+    if (resolve) {
       consume_resolve(state);
       report_slow("resolve");
-      return;
+    } else {
+      consume_draw(draw, state);
+      report_slow("draw");
     }
-    consume_draw(draw, state);
-    report_slow("draw");
+    if (error.empty()) {
+      if (resolve) ++performance.resolve_operations;
+      error = std::move(previous_error);
+    } else {
+      ++(resolve ? performance.failed_resolves : performance.failed_draws);
+    }
+    if (resolve) return;
   }
   if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
     consume_shader_load(load);
