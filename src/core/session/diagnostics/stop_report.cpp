@@ -52,6 +52,12 @@ std::vector<std::string> XenonSession::describe_pump_state() {
                     "; submissions to unregistered handles: " +
                     std::to_string(audio_->rejected_unregistered_submissions()));
     for (const auto& client : clients) lines.push_back("  " + audio::AudioSystem::describe(client));
+    // Whether anything audible reached the device, and the recording, if one.
+    lines.push_back(audio::OutputMeter::describe(audio_->output_levels(), audio::kXboxSampleRate) +
+                    "; underruns " + std::to_string(audio_->underrun_count()));
+    if (const auto& recorder = audio_->output_recorder(); recorder.recording())
+      lines.push_back("Audio capture: " + std::to_string(recorder.frames_written()) +
+                      " frames written, " + std::to_string(recorder.frames_dropped()) + " dropped");
   }
 #endif
   return lines;

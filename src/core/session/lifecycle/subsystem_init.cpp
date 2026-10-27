@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 
@@ -110,6 +111,13 @@ bool XenonSession::init_audio() {
     return false;
   }
   audio_->set_master_volume(config_.audio_master_volume);
+  // Development: record what the runtime sends to the audio device.
+  if (const char* capture = std::getenv("XENON_AUDIO_CAPTURE"); capture && *capture) {
+    std::string capture_error;
+    if (!audio_->start_output_recording(capture, &capture_error) && config_.enable_logging) {
+      std::cout << "[XenonSession] XENON_AUDIO_CAPTURE: " << capture_error << std::endl;
+    }
+  }
 
   // Render-driver callbacks execute guest code on the audio callback's own
   // KernelThread (see start_audio_guest_thread()). Give it a dedicated PPC

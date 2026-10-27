@@ -16,6 +16,7 @@
 
 #include "xenon/audio/backend.hpp"
 #include "xenon/audio/mixer.hpp"
+#include "xenon/audio/output_monitor.hpp"
 #include "xenon/audio/xma.hpp"
 #include "xenon/cpu/types.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -111,6 +112,16 @@ class AudioSystem final {
   [[nodiscard]] std::uint32_t underrun_count() const noexcept {
     return underrun_count_.load();
   }
+  // What reached the host device so far (levels, audible time).
+  [[nodiscard]] OutputMeter::Snapshot output_levels() const noexcept { return meter_.snapshot(); }
+  // Records the device output to a WAV file from now until shutdown (or
+  // stop_output_recording()): the runtime's own output, for development.
+  [[nodiscard]] bool start_output_recording(const std::filesystem::path& path,
+                                            std::string* error = nullptr) {
+    return recorder_.start(path, kXboxSampleRate, 4, error);
+  }
+  void stop_output_recording() { recorder_.stop(); }
+  [[nodiscard]] const OutputRecorder& output_recorder() const noexcept { return recorder_; }
 
   [[nodiscard]] std::uint32_t speaker_config() const noexcept {
     return speaker_config_.load();
@@ -216,6 +227,8 @@ class AudioSystem final {
   std::atomic<float> ducker_hold_{0.05f};
   float ducker_gain_{1.0f};
   std::uint32_t ducker_hold_frames_{};
+  OutputMeter meter_{};
+  OutputRecorder recorder_{};
 };
 
 }  // namespace xenon::audio

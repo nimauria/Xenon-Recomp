@@ -60,6 +60,7 @@ if(XENON_ENABLE_AUDIO)
     backend_sdl.cpp
     mixer.cpp
     system.cpp
+    output_monitor.cpp
     xma/decoder.cpp
     xma/decode.cpp
     xma/mmio.cpp

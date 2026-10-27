@@ -84,6 +84,7 @@ void AudioSystem::shutdown() noexcept {
   stop_guest_callback_pump();
 
   if (backend_) backend_->close();
+  recorder_.stop();
 
   {
     std::lock_guard lock(clients_mutex_);
@@ -372,6 +373,9 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
   for (float& sample : interleaved_stereo) {
     sample = std::clamp(sample * host_gain, -1.0f, 1.0f);
   }
+
+  meter_.observe(interleaved_stereo);
+  recorder_.push(interleaved_stereo);
 
   // XAudioGetRenderDriverTic is a consumed-sample clock, not a count of
   // successfully submitted buffers. Advance even when we produced silence.
