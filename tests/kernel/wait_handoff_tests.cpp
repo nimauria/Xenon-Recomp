@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -80,6 +81,37 @@ void test_semaphore_release_goes_to_registered_waiters_first() {
   assert(wait_one(semaphore, 0ms) == WaitResult::Timeout);
   for (auto& thread : waiters) thread.join();
   assert(released == 2);
+}
+
+// Waits are satisfied oldest first: with three registered waiters, each
+// single release goes to the one that has waited longest.
+void test_releases_go_to_waiters_in_arrival_order() {
+  auto semaphore = std::make_shared<KernelSemaphore>(0, 10);
+  std::vector<int> order;
+  std::mutex order_mutex;
+  std::vector<std::thread> waiters;
+  for (int i = 0; i < 3; ++i) {
+    waiters.emplace_back([&, i] {
+      assert(wait_one(semaphore, 10000ms) == WaitResult::Success);
+      std::scoped_lock lock(order_mutex);
+      order.push_back(i);
+    });
+    await_waiters(*semaphore, std::size_t(i) + 1u);
+  }
+  for (int released = 1; released <= 3; ++released) {
+    assert(semaphore->release(1));
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (true) {
+      {
+        std::scoped_lock lock(order_mutex);
+        if (order.size() == std::size_t(released)) break;
+      }
+      assert(std::chrono::steady_clock::now() < deadline);
+      std::this_thread::yield();
+    }
+  }
+  for (auto& thread : waiters) thread.join();
+  assert((order == std::vector<int>{0, 1, 2}));
 }
 
 // A released mutant is owned by the oldest waiter before release() returns;
@@ -220,6 +252,7 @@ void test_a_grant_racing_a_timeout_is_never_lost() {
 int main() {
   test_auto_reset_event_goes_to_the_registered_waiter();
   test_semaphore_release_goes_to_registered_waiters_first();
+  test_releases_go_to_waiters_in_arrival_order();
   test_mutant_release_passes_ownership_to_the_waiter();
   test_pulse_releases_the_registered_waiter_only();
   test_unsatisfiable_wait_all_does_not_block_a_later_wait_any();
