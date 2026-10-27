@@ -84,12 +84,19 @@ void XenonSession::shutdown() {
   stop_gpu_pump_thread();
   if (memory_) {
     release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    release_guest_thread_tls_context(*memory_, gpu_vsync_thread_tls_);
   }
   gpu_pump_thread_tls_ = {};
+  gpu_vsync_thread_tls_ = {};
   if (memory_ && gpu_pump_callback_stack_base_) {
     (void)memory_->release(gpu_pump_callback_stack_base_);
     gpu_pump_callback_stack_base_ = 0;
     gpu_pump_callback_stack_size_ = 0;
+  }
+  if (memory_ && gpu_vsync_callback_stack_base_) {
+    (void)memory_->release(gpu_vsync_callback_stack_base_);
+    gpu_vsync_callback_stack_base_ = 0;
+    gpu_vsync_callback_stack_size_ = 0;
   }
 
   // Every guest thread must be gone before the code it runs is unloaded.

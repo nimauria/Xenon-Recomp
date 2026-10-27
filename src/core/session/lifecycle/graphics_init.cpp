@@ -81,6 +81,13 @@ bool XenonSession::init_gpu() {
     return false;
   }
   gpu_pump_callback_stack_size_ = kGpuPumpCallbackStackSize;
+  // The vsync thread's interrupt callbacks run on a stack of their own.
+  if (!memory_->allocate(kGpuPumpCallbackStackSize, 16, memory::kReadWrite,
+                         /*top_down=*/true, gpu_vsync_callback_stack_base_)) {
+    set_error("Failed to allocate guest GPU vsync callback stack");
+    return false;
+  }
+  gpu_vsync_callback_stack_size_ = kGpuPumpCallbackStackSize;
 
   if (requested == "null" || requested == "none") {
     gpu_ = std::make_unique<gpu::NullBackend>();

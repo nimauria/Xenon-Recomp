@@ -42,6 +42,7 @@
 #include "xenon/kernel/wait.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -53,6 +54,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 using xenon::cpu::CompiledLookupKind;
@@ -107,6 +109,17 @@ struct SessionExecutionTestAccess {
   }
   [[nodiscard]] static CallbackWatch::Snapshot gpu_callback(const XenonSession& session) noexcept {
     return session.gpu_callback_watch_.snapshot();
+  }
+  [[nodiscard]] static CallbackWatch::Snapshot gpu_vsync_callback(
+      const XenonSession& session) noexcept {
+    return session.gpu_vsync_callback_watch_.snapshot();
+  }
+  [[nodiscard]] static std::uint64_t gpu_interrupts_delivered(const XenonSession& session) noexcept {
+    return session.gpu_interrupts_delivered_.load();
+  }
+  // Replaces the backend init_gpu() chose; before create_guest_process().
+  static void set_backend(XenonSession& session, std::unique_ptr<gpu::Backend> backend) {
+    session.gpu_ = std::move(backend);
   }
 };
 
@@ -451,7 +464,7 @@ void test_a_blocked_callback_is_reported_while_it_blocks() {
   std::this_thread::sleep_for(std::chrono::milliseconds(60));
 
   using xenon::core::CallbackWatch;
-  const auto stuck = xenon::core::SessionExecutionTestAccess::gpu_callback(harness.session);
+  const auto stuck = xenon::core::SessionExecutionTestAccess::gpu_vsync_callback(harness.session);
   const auto now = CallbackWatch::now_ns();
   assert(stuck.in_callback && stuck.entry == kCallbackAddr);
   assert(std::string(stuck.kind) == "vsync interrupt");
@@ -471,7 +484,7 @@ void test_a_blocked_callback_is_reported_while_it_blocks() {
   assert(shutdown_completed);
   events::set_enabled(false);
 
-  const auto after = xenon::core::SessionExecutionTestAccess::gpu_callback(harness.session);
+  const auto after = xenon::core::SessionExecutionTestAccess::gpu_vsync_callback(harness.session);
   assert(!after.in_callback && after.calls >= 2);
   assert(after.slow_calls >= 1 && after.longest_ns >= 50'000'000 &&
          after.longest_entry == kCallbackAddr);
@@ -597,6 +610,105 @@ void test_vsync_callback_wakes_a_waiting_guest_thread_each_frame() {
   g_frame_event.reset();
 }
 
+// A backend whose draws block until released, as a slow native draw or EDRAM
+// transfer blocks the GPU worker.
+class BlockingDrawBackend final : public gpu::Backend {
+ public:
+  std::atomic<bool> release{false};
+  std::atomic<int> draws_entered{0};
+  void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
+  void consume(const gpu::ir::Command& command) override {
+    if (!std::holds_alternative<gpu::ir::DrawPacket>(command)) return;
+    draws_entered.fetch_add(1);
+    while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
+    return gpu::PresentStatus::NotConfigured;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+  bool presentation_ready() const noexcept override { return false; }
+};
+
+// Regression (Ace Combat 6): one thread drained the ring, rendered, presented
+// and delivered the vsync interrupt, so a draw that took hundreds of
+// milliseconds held back vsync, and with it the title's flip handshakes. On
+// hardware vertical blank does not wait for the GPU: vsync interrupts keep
+// arriving while the GPU worker is stuck in a draw.
+void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
+  g_gpu_interrupt_ran.store(false);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &gpu_interrupt_probe_entry);
+  auto backend = std::make_unique<BlockingDrawBackend>();
+  auto* blocking = backend.get();
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session, std::move(backend));
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+
+  // DRAW_INDX_2, auto-index, 3 vertices: big-endian ring words.
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  const std::uint32_t words[] = {0xC0003600u, 0x00030084u};
+  for (std::uint32_t i = 0; i < 2; ++i) {
+    const std::array<std::byte, 4> bytes{
+        static_cast<std::byte>(words[i] >> 24), static_cast<std::byte>(words[i] >> 16),
+        static_cast<std::byte>(words[i] >> 8), static_cast<std::byte>(words[i])};
+    assert(memory->write_physical(kRingBase + i * 4u, bytes));
+  }
+  kernel_process->configure_gpu_ring_buffer(kRingBase, 16u);
+  kernel_process->set_gpu_ring_buffer_write_index(2u);
+
+  for (int i = 0; i < 400 && blocking->draws_entered.load() == 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(blocking->draws_entered.load() == 1 && "the worker reached the draw");
+  const auto before = xenon::core::SessionExecutionTestAccess::gpu_interrupts_delivered(harness.session);
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  const auto during = xenon::core::SessionExecutionTestAccess::gpu_interrupts_delivered(harness.session);
+  // About 15 at 60 Hz; the old single thread delivered none.
+  assert(during - before >= 5 && "vsync interrupts continue while a draw blocks the worker");
+  assert(kernel_process->gpu_ring_buffer().read_index == 0u &&
+         "the read pointer does not move past a draw still executing");
+
+  blocking->release.store(true);
+  for (int i = 0; i < 400 && kernel_process->gpu_ring_buffer().read_index != 2u; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(kernel_process->gpu_ring_buffer().read_index == 2u);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
+// The worker drains ring work when it is published, not on a polling tick:
+// with no vsync callback and nothing else to do, a write-pointer move is
+// drained promptly and counted as a ring-work wake.
+void test_published_ring_work_wakes_the_worker() {
+  GpuPumpHarness harness;
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  assert(memory->fill_physical(kRingBase, 64u * 4u, std::byte{0}));
+  kernel_process->configure_gpu_ring_buffer(kRingBase, 64u);
+  for (std::uint32_t write = 4u; write <= 32u; write += 4u) {
+    kernel_process->set_gpu_ring_buffer_write_index(write);
+    bool drained = false;
+    for (int i = 0; i < 2000 && !drained; ++i) {
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      drained = kernel_process->gpu_ring_buffer().read_index == write;
+    }
+    assert(drained && "published ring work is drained within 200 ms");
+  }
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
 }  // namespace
 
 int main() {
@@ -610,6 +722,8 @@ int main() {
   test_a_blocked_callback_is_reported_while_it_blocks();
   test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads();
   test_vsync_callback_wakes_a_waiting_guest_thread_each_frame();
+  test_vsync_keeps_arriving_while_the_gpu_worker_is_busy();
+  test_published_ring_work_wakes_the_worker();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

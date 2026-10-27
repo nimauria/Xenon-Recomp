@@ -125,7 +125,9 @@ SessionResult XenonSession::stop() {
 void XenonSession::terminate_guest_threads(bool include_pumps) noexcept {
   if (!kernel_process_) return;
   for (const auto& thread : kernel_process_->thread_manager().enumerate_threads()) {
-    if (!include_pumps && (thread == gpu_pump_thread_ || thread == audio_thread_)) continue;
+    if (!include_pumps && (thread == gpu_pump_thread_ || thread == gpu_vsync_thread_ ||
+                           thread == audio_thread_))
+      continue;
     static_cast<void>(thread->terminate(0));
   }
 }

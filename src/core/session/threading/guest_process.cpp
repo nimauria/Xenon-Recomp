@@ -181,8 +181,10 @@ void XenonSession::release_partial_guest_process() noexcept {
   stop_gpu_pump_thread();
   if (memory_) {
     release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    release_guest_thread_tls_context(*memory_, gpu_vsync_thread_tls_);
   }
   gpu_pump_thread_tls_ = {};
+  gpu_vsync_thread_tls_ = {};
 }
 
 }  // namespace xenon::core

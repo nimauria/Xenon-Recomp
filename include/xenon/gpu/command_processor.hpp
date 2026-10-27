@@ -136,6 +136,10 @@ class CommandProcessor {
     std::uint32_t last_value{};
   };
   [[nodiscard]] const WaitStallInfo& last_wait_stall() const noexcept { return last_wait_stall_; }
+  // A ring drain is suspended at an unsatisfied wait and resumes there at
+  // the next drain. What it waits for may be a guest CPU store, which raises
+  // no notification, so the drainer polls while this holds.
+  [[nodiscard]] bool parked_on_wait() const noexcept { return resume_pending_; }
 
   [[nodiscard]] const Statistics& statistics() const noexcept { return stats_; }
   [[nodiscard]] std::uint32_t max_indirect_depth() const noexcept {

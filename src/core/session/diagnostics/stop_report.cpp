@@ -25,6 +25,14 @@ std::vector<std::string> XenonSession::describe_pump_state() {
   // A pump that stopped because a guest callback never returned.
   const auto now = CallbackWatch::now_ns();
   lines.push_back(CallbackWatch::describe("GPU pump", gpu_callback_watch_.snapshot(), now));
+  lines.push_back(
+      CallbackWatch::describe("GPU vsync", gpu_vsync_callback_watch_.snapshot(), now));
+  // Why the GPU worker woke: published ring work, a vsync's present request,
+  // or a timed poll (parked on WAIT_REG_MEM, or the idle fallback).
+  lines.push_back("GPU worker wakes: ring work " + std::to_string(gpu_wake_.count(kGpuWakeRingWork)) +
+                  ", present " + std::to_string(gpu_wake_.count(kGpuWakePresent)) + ", polls " +
+                  std::to_string(gpu_wake_.timeouts()) + "; frames presented " +
+                  std::to_string(gpu_presents_.load()));
   lines.push_back(CallbackWatch::describe("Audio pump", audio_callback_watch_.snapshot(), now));
   const auto interrupt = kernel_process_ ? kernel_process_->gpu_interrupt_callback()
                                          : kernel::KernelProcess::GpuInterruptCallbackState{};

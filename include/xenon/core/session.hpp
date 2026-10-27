@@ -24,6 +24,7 @@
 #include "xenon/core/export_trace.hpp"
 #include "xenon/core/guest_memory_watch.hpp"
 #include "xenon/core/guest_thread_context.hpp"
+#include "xenon/core/wake_signal.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
 #include "xenon/cpu/executable_code_cache.hpp"
 #include "xenon/cpu/external_calls.hpp"
@@ -566,8 +567,13 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] bool start_gpu_pump_thread();
   // Entry point (kernel::ThreadEntry) for gpu_pump_thread_: registers itself
   // as the current KernelThread, then runs run_gpu_pump_thread()'s loop body
-  // until stop_gpu_pump_thread() clears gpu_pump_running_.
+  // until stop_gpu_pump_thread() clears gpu_pump_running_. The GPU worker:
+  // drains the ring, renders and presents, woken by gpu_wake_.
   [[nodiscard]] std::uint32_t run_gpu_pump_thread();
+  // Entry point for gpu_vsync_thread_: at 60 Hz, asks the worker to present
+  // and delivers the vsync interrupt, whatever the worker is doing - as on
+  // hardware, vertical blank does not wait for the GPU.
+  [[nodiscard]] std::uint32_t run_gpu_vsync_thread();
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
@@ -770,6 +776,24 @@ class XenonSession final : public cpu::RuntimeServices {
   std::shared_ptr<kernel::KernelThread> gpu_pump_thread_{};
   GuestThreadTlsContext gpu_pump_thread_tls_{};
   std::atomic<bool> gpu_pump_running_{false};
+  // Why the GPU worker woke; WakeSignal counts each reason for the report.
+  static constexpr std::uint32_t kGpuWakeRingWork = 1u << 0u;  // write pointer moved
+  static constexpr std::uint32_t kGpuWakePresent = 1u << 1u;   // vsync: present a frame
+  static constexpr std::uint32_t kGpuWakeStop = 1u << 2u;
+  WakeSignal gpu_wake_{};
+  std::atomic<std::uint64_t> gpu_presents_{0};
+  // The vsync thread: its own KernelThread, KPCR/static TLS and callback
+  // stack, so the title's vsync handler runs on its own guest context.
+  memory::GuestAddress gpu_vsync_callback_stack_base_{};
+  std::uint32_t gpu_vsync_callback_stack_size_{};
+  std::shared_ptr<kernel::KernelThread> gpu_vsync_thread_{};
+  GuestThreadTlsContext gpu_vsync_thread_tls_{};
+  CallbackWatch gpu_vsync_callback_watch_{};
+  // The title's graphics interrupt callback runs once at a time, whether a
+  // PM4_INTERRUPT (GPU worker) or vsync (vsync thread) raised it: on
+  // hardware both are the one GPU interrupt, taken on one processor, and
+  // xenia's ExecuteInterrupt serialises them the same way.
+  std::mutex gpu_interrupt_mutex_{};
   // Vsync interrupt deliveries into the title's registered callback (diagnostics).
   std::atomic<std::uint64_t> gpu_interrupts_delivered_{0};
   std::atomic<std::uint64_t> gpu_interrupts_failed_{0};

@@ -95,9 +95,23 @@ void KernelProcess::configure_gpu_ring_buffer(std::uint32_t base_address,
   gpu_ring_buffer_.read_index = 0;
 }
 
-void KernelProcess::set_gpu_ring_buffer_write_index(std::uint32_t write_index) noexcept {
+void KernelProcess::set_gpu_work_notifier(std::function<void()> notifier) {
   std::scoped_lock lock(gpu_mutex_);
+  gpu_work_notifier_ = std::move(notifier);
+}
+
+void KernelProcess::notify_gpu_work() {
+  std::function<void()> notifier;
   {
+    std::scoped_lock lock(gpu_mutex_);
+    notifier = gpu_work_notifier_;
+  }
+  if (notifier) notifier();
+}
+
+void KernelProcess::set_gpu_ring_buffer_write_index(std::uint32_t write_index) noexcept {
+  {
+    std::scoped_lock lock(gpu_mutex_);
     static std::atomic<int> _wptr_diag_count{0};
     const int _n = _wptr_diag_count.fetch_add(1) + 1;
     if (_n <= 80) {
@@ -106,8 +120,10 @@ void KernelProcess::set_gpu_ring_buffer_write_index(std::uint32_t write_index) n
                                        write_index, gpu_ring_buffer_.write_index,
                                        gpu_ring_buffer_.read_index);
     }
+    gpu_ring_buffer_.write_index = write_index;
   }
-  gpu_ring_buffer_.write_index = write_index;
+  // Outside the ring lock: the notifier wakes the GPU pump, which reads it.
+  notify_gpu_work();
 }
 
 void KernelProcess::set_gpu_ring_buffer_read_index(std::uint32_t read_index) noexcept {
