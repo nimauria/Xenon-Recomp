@@ -113,6 +113,16 @@ class CommandProcessor {
       std::function<void(std::uint32_t cpu_index)> callback) {
     interrupt_callback_ = std::move(callback);
   }
+  // Called before every effect of the command stream a guest can observe:
+  // a write to guest memory (fences, MEM_WRITE, REG_TO_MEM, scratch
+  // write-back, EVENT_WRITE_EXT, IM_STORE), an interrupt, and the evaluation
+  // of a wait on memory or a register. On hardware those happen after the
+  // commands before them have executed, so a renderer that executes graphics
+  // IR after decoding installs a barrier that executes what is pending
+  // (GraphicsSystem::submit_ring(Backend&, ...)). Empty: decode only.
+  void set_guest_visible_barrier(std::function<void()> barrier) {
+    guest_visible_barrier_ = std::move(barrier);
+  }
 
   // The WAIT_REG_MEM the most recent stalled drain is parked on (diagnostics: a
   // title stuck at this point is waiting on state nothing in the host model sets).
@@ -224,6 +234,10 @@ class CommandProcessor {
   std::uint64_t viz_query_draws_{};
   std::uint32_t swap_counter_{};
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
+  std::function<void()> guest_visible_barrier_{};
+  void before_guest_visible_effect() {
+    if (guest_visible_barrier_) guest_visible_barrier_();
+  }
   std::uint64_t submission_dwords_{};
   std::uint32_t max_indirect_depth_{};
   // True while execute_ring() runs: an unsatisfied wait then suspends the drain

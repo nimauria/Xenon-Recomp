@@ -454,6 +454,25 @@ std::uint32_t GraphicsSystem::submit_ring(std::uint32_t physical_address,
                                          read_index, write_index);
 }
 
+std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physical_address,
+                                          std::uint32_t capacity_dwords,
+                                          std::uint32_t read_index,
+                                          std::uint32_t write_index) {
+  // Only a decoded draw (a resolve is one) can change what the guest
+  // observes; register writes alone wait for the next draw or the end.
+  command_processor_.set_guest_visible_barrier([this, &backend] {
+    if (command_processor_.statistics().draws != draws_at_last_execute_) execute_ir(backend);
+  });
+  struct ClearBarrier {
+    CommandProcessor& processor;
+    ~ClearBarrier() { processor.set_guest_visible_barrier({}); }
+  } clear{command_processor_};
+  const auto next_read_index =
+      command_processor_.execute_ring(physical_address, capacity_dwords, read_index, write_index);
+  execute_ir(backend);
+  return next_read_index;
+}
+
 FrontendSubmissionCapture GraphicsSystem::capture_buffer(
     std::uint32_t physical_address, std::uint32_t dword_count) {
   auto capture = std::make_unique<FrontendSubmissionCapture>();
@@ -560,6 +579,7 @@ bool GraphicsSystem::replay_portable_capture(
 }
 
 void GraphicsSystem::execute_ir(Backend& backend) {
+  draws_at_last_execute_ = command_processor_.statistics().draws;
   using Clock = std::chrono::steady_clock;
   const auto begin_start = Clock::now();
   backend.begin_submission(memory_, edram_);

@@ -401,6 +401,7 @@ void CommandProcessor::emit_register_write(std::uint32_t index,
       const std::array<std::byte, 4> bytes{
           static_cast<std::byte>(value >> 24), static_cast<std::byte>(value >> 16),
           static_cast<std::byte>(value >> 8), static_cast<std::byte>(value)};
+      before_guest_visible_effect();
       if (!memory_.write_physical(destination, bytes)) {
         throw std::runtime_error("Xenos scratch register write-back has no backing");
       }
@@ -426,6 +427,7 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   // The Xenos memory path is little-endian before the packet-selected endian
   // transformation; CPU-visible big-endian access is supplied by MemoryPort.
   const auto bytes = encode_le32(stored);
+  before_guest_visible_effect();
   if (!memory_.write_physical(address, bytes)) {
     throw std::runtime_error("Xenos physical write has no backing");
   }
@@ -621,6 +623,9 @@ void CommandProcessor::execute_wait_reg_mem(
   }
 
   ++stats_.wait_reg_mem_packets;
+  // What the wait polls may be written by the work before it (a resolve, a
+  // memory export).
+  before_guest_visible_effect();
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
@@ -696,6 +701,7 @@ void CommandProcessor::execute_wait_register(
         "PM4_WAIT_REG_EQ/GTE requires exactly 4 dwords");
   }
   const std::uint32_t register_index = payload[0];
+  before_guest_visible_effect();
   if (!registers_.valid(register_index)) {
     throw std::out_of_range("PM4 compact wait register outside register file");
   }
@@ -782,6 +788,7 @@ bool CommandProcessor::execute_im_store(
     throw std::out_of_range("PM4_IM_STORE destination outside physical RAM");
   }
 
+  before_guest_visible_effect();
   if (byte_count64) {
     auto write = memory_.physical_write_span(
         destination, static_cast<std::uint32_t>(byte_count64));
@@ -898,6 +905,7 @@ void CommandProcessor::execute_event_write_extent(
     encoded[i * 2u] = value[0];
     encoded[i * 2u + 1u] = value[1];
   }
+  before_guest_visible_effect();
   if (!memory_.write_physical(address, encoded)) {
     throw std::runtime_error("PM4_EVENT_WRITE_EXT write failed");
   }
@@ -947,6 +955,7 @@ void CommandProcessor::execute_interrupt(
   }
   ++stats_.interrupt_packets;
   if (!interrupt_callback_) return;
+  before_guest_visible_effect();
   for (std::uint32_t cpu = 0; cpu < 6u; ++cpu) {
     if ((payload[0] & (UINT32_C(1) << cpu)) == 0u) continue;
     interrupt_callback_(cpu);
@@ -969,6 +978,7 @@ void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload)
     throw std::out_of_range("Xenos physical write outside RAM");
   }
 
+  before_guest_visible_effect();
   auto write = memory_.physical_write_span(
       physical_base, static_cast<std::uint32_t>(byte_count64));
   if (!write) throw std::runtime_error("Xenos physical write has no backing");

@@ -567,6 +567,81 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// Executes graphics IR and records, for each draw, the guest-visible state at
+// the moment the draw executes.
+class OrderRecordingBackend final : public xenon::gpu::Backend {
+ public:
+  OrderRecordingBackend(AddressSpace& memory, std::uint32_t fence) : memory_(memory), fence_(fence) {}
+  void begin_submission(AddressSpace&, xenon::gpu::Edram&) override {}
+  void consume(const xenon::gpu::ir::Command& command) override {
+    if (!std::holds_alternative<xenon::gpu::ir::DrawPacket>(command)) return;
+    ++draws_executed;
+    fence_when_drawn.push_back(load_physical_be32(memory_, fence_));
+  }
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+    return xenon::gpu::PresentStatus::NotConfigured;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+  bool presentation_ready() const noexcept override { return false; }
+
+  int draws_executed = 0;
+  std::vector<std::uint32_t> fence_when_drawn;
+
+ private:
+  AddressSpace& memory_;
+  std::uint32_t fence_;
+};
+
+// Regression: the command processor wrote fences and dispatched interrupts as
+// it decoded the ring, and the draws before them executed only afterwards, so
+// a guest could see a fence pass (and reuse what the draw read, or read a
+// resolve's destination) before the draw had run. With a backend bound, the
+// work before each guest-visible effect executes first.
+void test_ring_effects_follow_the_work_before_them() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x01009000;
+  constexpr std::uint32_t fence = 0x01219000;
+  constexpr std::uint32_t mem_write_target = 0x01219010;
+  store_be32(memory, fence, 0u);
+  store_be32(memory, mem_write_target, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  std::vector<int> draws_at_interrupt;
+  graphics.set_interrupt_callback([&](std::uint32_t) {
+    draws_at_interrupt.push_back(backend.draws_executed);
+  });
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
+  write_words(memory, ring,
+              {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+               make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x00000006u, fence | swap,
+               1u,
+               make_packet_type3(Type3Opcode::Interrupt, 1), 1u << 2u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+               make_packet_type3(Type3Opcode::MemWrite, 2), mem_write_target | swap, 0x77u,
+               make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x00000006u, fence | swap,
+               2u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  constexpr std::uint32_t words = 2 + 4 + 2 + 2 + 3 + 4 + 2;
+  const auto next = graphics.submit_ring(backend, ring, 64, 0, words);
+  assert(next == words);
+  // Each draw ran before the fence that follows it was written.
+  assert(backend.draws_executed == 3);
+  assert((backend.fence_when_drawn == std::vector<std::uint32_t>{0u, 1u, 2u}));
+  // The interrupt after the first fence saw the first draw executed.
+  assert((draws_at_interrupt == std::vector<int>{1}));
+  assert(load_physical_be32(memory, fence) == 2u);
+  assert(load_physical_be32(memory, mem_write_target) == 0x77u);
+  // Nothing is left pending: the read index returned is safe to write back.
+  assert(graphics.stream().commands().empty());
+}
+
 // Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
 // drain at startup): the write pointer can sit inside a packet the guest is
 // still writing. The drain must stop before that packet, with everything
@@ -1421,6 +1496,7 @@ int main() {
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_ring_effects_follow_the_work_before_them();
   test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);

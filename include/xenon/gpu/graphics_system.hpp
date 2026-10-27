@@ -25,6 +25,17 @@ class GraphicsSystem {
                                           std::uint32_t capacity_dwords,
                                           std::uint32_t read_index,
                                           std::uint32_t write_index);
+  // As submit_ring(), executing the work on `backend` in command order: the
+  // graphics IR decoded so far is executed before each effect the guest can
+  // observe (a fence or other memory write, an interrupt, a wait - see
+  // CommandProcessor::set_guest_visible_barrier()), and the rest before this
+  // returns. So when the guest sees a fence pass, or the returned read index
+  // written back, the draws and resolves before it have executed and the
+  // ring and guest memory they used may be reused.
+  [[nodiscard]] std::uint32_t submit_ring(Backend& backend, std::uint32_t physical_address,
+                                          std::uint32_t capacity_dwords,
+                                          std::uint32_t read_index,
+                                          std::uint32_t write_index);
   [[nodiscard]] FrontendSubmissionCapture capture_buffer(
       std::uint32_t physical_address, std::uint32_t dword_count);
   [[nodiscard]] FrontendSubmissionCapture capture_ring(
@@ -82,6 +93,9 @@ class GraphicsSystem {
   ir::Stream stream_{};
   Edram edram_{};
   CommandProcessor command_processor_;
+  // CommandProcessor::Statistics::draws when execute_ir() last ran: a draw
+  // (or resolve) has been decoded and not executed while they differ.
+  std::uint64_t draws_at_last_execute_{};
 };
 
 }  // namespace xenon::gpu
