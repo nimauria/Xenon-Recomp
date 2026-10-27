@@ -5,7 +5,32 @@
 
 using namespace xenon::gpu;
 
+namespace {
+
+// A partial flush returns only the given tiles, and only where the named
+// owner holds them; the owner keeps every other tile.
+void test_release_tiles_is_partial() {
+  EdramOwnershipTracker ownership;
+  const EdramSurfaceLayout surface{0, 1280, 64, MsaaSamples::X1, false, false};
+  const auto plan = ownership.plan(0x7, surface);
+  assert(ownership.commit(plan));
+  const auto held = ownership.owned_tile_count(0x7);
+  assert(held == plan.covered_tiles.size() && held > 4u);
+  const std::uint16_t returned[] = {plan.covered_tiles[0], plan.covered_tiles[1], 2047u};
+  ownership.release_tiles(0x7, returned);
+  assert(ownership.owner(plan.covered_tiles[0]) == kCanonicalEdramOwner);
+  assert(ownership.owner(plan.covered_tiles[1]) == kCanonicalEdramOwner);
+  assert(ownership.owner(plan.covered_tiles[2]) == 0x7);
+  assert(ownership.owned_tile_count(0x7) == held - 2u);
+  // Another owner releasing tiles it does not hold changes nothing.
+  ownership.release_tiles(0x9, plan.covered_tiles);
+  assert(ownership.owned_tile_count(0x7) == held - 2u);
+}
+
+}  // namespace
+
 int main() {
+  test_release_tiles_is_partial();
   EdramOwnershipTracker ownership;
   const EdramSurfaceLayout wrapped{2040, 1280, 32, MsaaSamples::X1,
                                     false, false};

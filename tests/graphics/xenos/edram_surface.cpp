@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -11,7 +12,110 @@
 
 using namespace xenon::gpu;
 
+namespace {
+
+// Every tile a sample of the region touches, by walking each sample: the
+// definition covered_edram_tiles() must match.
+std::vector<std::uint16_t> tiles_by_sample(const EdramSurfaceLayout& layout,
+                                           EdramSurfaceRegion region) {
+  std::set<std::uint16_t> tiles;
+  const auto samples = 1u << static_cast<unsigned>(layout.msaa);
+  for (auto y = std::max(region.top, 0); y < std::min(region.bottom, int(layout.height_pixels)); ++y)
+    for (auto x = std::max(region.left, 0); x < std::min(region.right, int(layout.pitch_pixels)); ++x)
+      for (std::uint32_t s = 0; s < samples; ++s) {
+        const auto address = edram_sample_address(layout, std::uint32_t(x), std::uint32_t(y), s);
+        assert(address);
+        tiles.insert(static_cast<std::uint16_t>(address->low / Edram::kTileBytes));
+        if (address->has_high)
+          tiles.insert(static_cast<std::uint16_t>(address->high / Edram::kTileBytes));
+      }
+  return {tiles.begin(), tiles.end()};
+}
+
+// Regression (AC6 spent hundreds of ms per draw planning EDRAM ownership):
+// the tile set is computed from tile rows and columns, and must equal the
+// per-sample definition for every sample count, format width, depth swizzle,
+// partial region and EDRAM wrap-around.
+void test_covered_tiles_match_the_per_sample_definition() {
+  const EdramSurfaceRegion regions[] = {
+      {0, 0, 1280, 720}, {0, 0, 1, 1}, {39, 7, 41, 9}, {79, 15, 81, 17}, {100, 3, 333, 77}};
+  for (const auto msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+    for (const bool wide : {false, true})
+      for (const bool depth : {false, true})
+        for (const std::uint32_t base : {0u, 5u, 2040u})
+          for (const std::uint32_t pitch : {1280u, 640u, 200u}) {
+            EdramSurfaceLayout layout{base, pitch, 1u, msaa, wide, depth};
+            layout.height_pixels = std::min(720u, layout.max_resident_height_pixels());
+            for (const auto& region : regions)
+              assert(covered_edram_tiles(layout, region) == tiles_by_sample(layout, region));
+          }
+}
+
+// An ownership change moves only the tiles changing hands: the rectangles
+// for a tile set cover exactly that set, and sets that do not map to whole
+// pixels are refused.
+void test_tile_regions_cover_exactly_the_tiles() {
+  for (const auto msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+    for (const bool wide : {false, true})
+      for (const std::uint32_t base : {0u, 1500u}) {
+        EdramSurfaceLayout layout{base, 640u, 1u, msaa, wide, false};
+        layout.height_pixels = std::min(720u, layout.max_resident_height_pixels());
+        const auto all = covered_edram_tiles(
+            layout, {0, 0, int(layout.pitch_pixels), int(layout.height_pixels)});
+        // The whole surface, a band of rows, and a scattered pattern that keeps
+        // 64bpp column pairs together.
+        std::vector<std::vector<std::uint16_t>> sets{all, {}, {}};
+        for (std::size_t i = 0; i < all.size(); ++i) {
+          const auto relative = (all[i] + Edram::kTileCount - base) % Edram::kTileCount;
+          const auto row = relative / layout.pitch_tiles();
+          const auto column = (relative % layout.pitch_tiles()) / (wide ? 2u : 1u);
+          if (row >= 3 && row < 9) sets[1].push_back(all[i]);
+          if ((row + column) % 3 == 0) sets[2].push_back(all[i]);
+        }
+        for (const auto& set : sets) {
+          std::vector<EdramSurfaceRegion> regions;
+          assert(edram_tile_regions(layout, set, regions));
+          std::set<std::uint16_t> covered;
+          for (const auto& region : regions)
+            for (const auto tile : covered_edram_tiles(layout, region)) covered.insert(tile);
+          assert(covered == std::set<std::uint16_t>(set.begin(), set.end()));
+        }
+        if (wide) {
+          // One half of a 64bpp column is not a whole pixel.
+          std::vector<EdramSurfaceRegion> regions;
+          const std::uint16_t half[] = {all.front()};
+          assert(!edram_tile_regions(layout, half, regions));
+        }
+      }
+  // The whole of a 1280x720 surface is one rectangle.
+  EdramSurfaceLayout frame{0u, 1280u, 720u, MsaaSamples::X1, false, false};
+  std::vector<EdramSurfaceRegion> regions;
+  assert(edram_tile_regions(frame, covered_edram_tiles(frame, {0, 0, 1280, 720}), regions));
+  assert(regions.size() == 1u && regions[0].right == 1280 && regions[0].bottom == 720);
+}
+
+// Regression (AC6's color and depth targets of one draw each covered all of
+// EDRAM, so acquiring one evicted the other within the same draw): a bound
+// surface ends where the next bound surface begins, cyclically.
+void test_bound_surfaces_do_not_overlap() {
+  const EdramSurfaceLayout color{0u, 640u, 1u, MsaaSamples::X4, false, false};
+  const EdramSurfaceLayout depth{720u, 640u, 1u, MsaaSamples::X4, false, true};
+  const std::uint32_t bases[] = {0u, 720u};
+  assert(rows_before_next_surface(color, bases) == 360u);  // 720 tiles / 16 per band * 8 rows
+  assert(rows_before_next_surface(depth, bases) == 664u);  // wraps round to tile 0
+  assert(rows_before_next_surface(color, std::span<const std::uint32_t>{}) ==
+         color.max_resident_height_pixels());
+  // A base inside the first tile row is not a bound.
+  const std::uint32_t adjacent[] = {0u, 3u};
+  assert(rows_before_next_surface(color, adjacent) == color.max_resident_height_pixels());
+}
+
+}  // namespace
+
 int main() {
+  test_bound_surfaces_do_not_overlap();
+  test_covered_tiles_match_the_per_sample_definition();
+  test_tile_regions_cover_exactly_the_tiles();
   EdramSurfaceLayout single{2040, 1280, 720, MsaaSamples::X1, false, false};
   assert(single.sample_width() == 1280 && single.sample_height() == 720);
   assert(single.pitch_tiles() == 16 && single.tile_rows() == 45);

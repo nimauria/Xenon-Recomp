@@ -236,6 +236,147 @@ class BackendCore {
     }
   };
 
+  // Moving EDRAM contents between a native image and canonical storage, one
+  // rectangle at a time. A whole-surface move passes one rectangle; an
+  // ownership change passes only the tiles that change hands (see
+  // edram_tile_regions()), which is what keeps aliasing render targets from
+  // copying entire surfaces through the CPU on every switch.
+  bool color_to_canonical(RenderTargetImage& image,
+                          std::span<const EdramSurfaceRegion> regions) {
+    const auto& surface = image.surface();
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"color flush", {"readback", "convert", "store"},
+                          image.width(), image.height(), sample_count};
+    for (const auto& region : regions) {
+      const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
+      const auto width = std::uint32_t(region.right - region.left);
+      const auto height = std::uint32_t(region.bottom - region.top);
+      const auto canonical_pitch = width * (surface.is_64bpp ? 8u : 4u);
+      std::vector<std::byte> canonical(std::size_t(canonical_pitch) * height);
+      for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+        std::vector<std::byte> pixels;
+        std::uint32_t pitch{};
+        if (!timing.step(0, [&] {
+              return image.readback_sample(queue, sample, left, top, left + width, top + height,
+                                           pixels, pitch);
+            }) ||
+            !timing.step(1, [&] {
+              return host_color_to_edram(image.guest_format(), width, height, pixels, pitch,
+                                         canonical, canonical_pitch);
+            }) ||
+            !timing.step(2, [&] {
+              return store_edram_raw(*edram, surface, left, top, width, height, sample, canonical,
+                                     canonical_pitch);
+            })) {
+          error = image.error().empty() ? named("EDRAM ownership sample readback failed")
+                                        : image.error();
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool depth_to_canonical(DepthTargetImage& image,
+                          std::span<const EdramSurfaceRegion> regions) {
+    const auto& surface = image.surface();
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"depth flush", {"readback", "-", "store"},
+                          image.width(), image.height(), sample_count};
+    for (const auto& region : regions) {
+      const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
+      const auto width = std::uint32_t(region.right - region.left);
+      const auto height = std::uint32_t(region.bottom - region.top);
+      for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+        std::vector<std::uint32_t> pixels;
+        std::uint32_t pitch{};
+        if (!timing.step(0, [&] {
+              return image.readback_sample(queue, sample, left, top, left + width, top + height,
+                                           pixels, pitch);
+            }) ||
+            !timing.step(2, [&] {
+              return store_edram_raw(*edram, surface, left, top, width, height, sample,
+                                     std::as_bytes(std::span(pixels)), width * 4u);
+            })) {
+          error = image.error().empty() ? named("EDRAM depth ownership sample readback failed")
+                                        : image.error();
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool canonical_to_color(RenderTargetImage& image,
+                          std::span<const EdramSurfaceRegion> regions) {
+    const auto& surface = image.surface();
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"color acquire", {"load", "convert", "upload"},
+                          image.width(), image.height(), sample_count};
+    for (const auto& region : regions) {
+      const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
+      const auto width = std::uint32_t(region.right - region.left);
+      const auto height = std::uint32_t(region.bottom - region.top);
+      const auto canonical_pitch = width * (surface.is_64bpp ? 8u : 4u);
+      const auto host_pitch = width * color_host_bytes_per_pixel(image.guest_format());
+      std::vector<std::byte> canonical(std::size_t(canonical_pitch) * height);
+      std::vector<std::byte> pixels(std::size_t(host_pitch) * height);
+      for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+        if (!timing.step(0, [&] {
+              return resolve_edram_raw(*edram, surface, left, top, width, height, sample,
+                                       canonical, canonical_pitch);
+            }) ||
+            !timing.step(1, [&] {
+              return edram_color_to_host(image.guest_format(), width, height, canonical,
+                                         canonical_pitch, pixels, host_pitch);
+            }) ||
+            !timing.step(2, [&] {
+              return image.upload_sample(queue, sample, left, top, left + width, top + height,
+                                         pixels, host_pitch);
+            })) {
+          error = image.error().empty() ? named("canonical EDRAM sample upload failed")
+                                        : image.error();
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool canonical_to_depth(DepthTargetImage& image,
+                          std::span<const EdramSurfaceRegion> regions) {
+    const auto& surface = image.surface();
+    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
+    TransferTiming timing{"depth acquire", {"load", "-", "upload"},
+                          image.width(), image.height(), sample_count};
+    for (const auto& region : regions) {
+      const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
+      const auto width = std::uint32_t(region.right - region.left);
+      const auto height = std::uint32_t(region.bottom - region.top);
+      std::vector<std::uint32_t> pixels(std::size_t(width) * height);
+      for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
+        if (!timing.step(0, [&] {
+              return resolve_edram_raw(*edram, surface, left, top, width, height, sample,
+                                       std::as_writable_bytes(std::span(pixels)), width * 4u);
+            }) ||
+            !timing.step(2, [&] {
+              return image.upload_sample(queue, sample, left, top, left + width, top + height,
+                                         pixels, width * 4u);
+            })) {
+          error = image.error().empty() ? named("canonical EDRAM depth sample upload failed")
+                                        : image.error();
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  static std::array<EdramSurfaceRegion, 1> whole_image(std::uint32_t width,
+                                                       std::uint32_t height) {
+    return {EdramSurfaceRegion{0, 0, std::int32_t(width), std::int32_t(height)}};
+  }
+
   bool flush_color_owner(EdramOwnerId owner) {
     const auto found = owner_render_targets.find(owner);
     if (!edram || found == owner_render_targets.end() || !found->second) {
@@ -243,36 +384,7 @@ class BackendCore {
       return false;
     }
     auto* image = found->second;
-    const auto& surface = image->surface();
-    const auto canonical_pitch = image->width() *
-        (surface.is_64bpp ? 8u : 4u);
-    std::vector<std::byte> canonical(
-        std::size_t(canonical_pitch) * image->height());
-    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
-    TransferTiming timing{"color flush", {"readback", "convert", "store"},
-                          image->width(), image->height(), sample_count};
-    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      std::vector<std::byte> pixels;
-      std::uint32_t pitch{};
-      if (!timing.step(0, [&] {
-            return image->readback_sample(queue, sample, 0, 0, image->width(),
-                                          image->height(), pixels, pitch);
-          }) ||
-          !timing.step(1, [&] {
-            return host_color_to_edram(image->guest_format(), image->width(),
-                                       image->height(), pixels, pitch, canonical,
-                                       canonical_pitch);
-          }) ||
-          !timing.step(2, [&] {
-            return store_edram_raw(*edram, surface, 0, 0, image->width(),
-                                   image->height(), sample, canonical, canonical_pitch);
-          })) {
-        error = image->error().empty()
-                    ? named("EDRAM ownership sample readback failed")
-                    : image->error();
-        return false;
-      }
-    }
+    if (!color_to_canonical(*image, whole_image(image->width(), image->height()))) return false;
     edram_ownership.release(owner);
     return true;
   }
@@ -284,29 +396,7 @@ class BackendCore {
       return false;
     }
     auto* image = found->second;
-    const auto& surface = image->surface();
-    const auto canonical_pitch = image->width() * 4u;
-    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
-    TransferTiming timing{"depth flush", {"readback", "-", "store"},
-                          image->width(), image->height(), sample_count};
-    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      std::vector<std::uint32_t> pixels;
-      std::uint32_t pitch{};
-      if (!timing.step(0, [&] {
-            return image->readback_sample(queue, sample, 0, 0, image->width(),
-                                          image->height(), pixels, pitch);
-          }) ||
-          !timing.step(2, [&] {
-            return store_edram_raw(*edram, surface, 0, 0, image->width(),
-                                   image->height(), sample,
-                                   std::as_bytes(std::span(pixels)), canonical_pitch);
-          })) {
-        error = image->error().empty()
-                    ? named("EDRAM depth ownership sample readback failed")
-                    : image->error();
-        return false;
-      }
-    }
+    if (!depth_to_canonical(*image, whole_image(image->width(), image->height()))) return false;
     edram_ownership.release(owner);
     return true;
   }
@@ -316,6 +406,29 @@ class BackendCore {
     if (owner_depth_targets.contains(owner)) return flush_depth_owner(owner);
     error = named("EDRAM alias transfer has no native owner");
     return false;
+  }
+
+  // Returns only `tiles` from `owner`'s image to canonical storage; the owner
+  // keeps the rest. A set that does not map to whole pixels flushes the owner
+  // entirely instead.
+  bool flush_owner_tiles(EdramOwnerId owner, std::span<const std::uint16_t> tiles) {
+    std::vector<EdramSurfaceRegion> regions;
+    if (const auto color = owner_render_targets.find(owner);
+        color != owner_render_targets.end() && color->second) {
+      if (!edram || !edram_tile_regions(color->second->surface(), tiles, regions))
+        return flush_color_owner(owner);
+      if (!color_to_canonical(*color->second, regions)) return false;
+    } else if (const auto depth = owner_depth_targets.find(owner);
+               depth != owner_depth_targets.end() && depth->second) {
+      if (!edram || !edram_tile_regions(depth->second->surface(), tiles, regions))
+        return flush_depth_owner(owner);
+      if (!depth_to_canonical(*depth->second, regions)) return false;
+    } else {
+      error = named("EDRAM alias transfer has no native owner");
+      return false;
+    }
+    edram_ownership.release_tiles(owner, tiles);
+    return true;
   }
 
   bool make_edram_canonical() {
@@ -343,6 +456,48 @@ class BackendCore {
     return true;
   }
 
+  // Gives `requested_owner` the tiles of `ownership_surface`. Only tiles held
+  // elsewhere move: other native owners return exactly the overlapping tiles
+  // to canonical storage, and just those tiles are uploaded into the
+  // requested image. Tiles it already owns stay in place.
+  template <typename Image, typename ToNative>
+  bool acquire_ownership(EdramOwnerId requested_owner, Image& requested,
+                         const EdramSurfaceLayout& ownership_surface, ToNative to_native,
+                         bool (BackendCore::*flush_self)(EdramOwnerId), const char* stale) {
+    auto plan = edram_ownership.plan(requested_owner, ownership_surface);
+    if (!plan.valid || plan.changes.empty()) return plan.valid;
+    std::vector<std::uint16_t> incoming;
+    for (const auto& change : plan.changes) {
+      if (change.previous_owner != kCanonicalEdramOwner &&
+          !flush_owner_tiles(change.previous_owner, change.tiles)) return false;
+      incoming.insert(incoming.end(), change.tiles.begin(), change.tiles.end());
+    }
+    plan = edram_ownership.plan(requested_owner, ownership_surface);
+    if (plan.requires_preservation()) {
+      error = named("EDRAM ownership transfer did not reach canonical storage");
+      return false;
+    }
+    std::sort(incoming.begin(), incoming.end());
+    std::vector<EdramSurfaceRegion> regions;
+    if (edram_tile_regions(requested.surface(), incoming, regions)) {
+      if (!(this->*to_native)(requested, regions)) return false;
+    } else {
+      // Not whole pixels: make everything this image holds canonical, then
+      // upload the whole image.
+      if (edram_ownership.owned_tile_count(requested_owner) &&
+          !(this->*flush_self)(requested_owner)) return false;
+      plan = edram_ownership.plan(requested_owner, ownership_surface);
+      if (!(this->*to_native)(requested, whole_image(requested.width(), requested.height())))
+        return false;
+    }
+    if (!edram_ownership.commit(plan)) {
+      error = named(stale);
+      ++unsupported.unexpected_ownership_transitions;
+      return false;
+    }
+    return true;
+  }
+
   bool acquire_color_ownership(std::uint64_t key,
                                RenderTargetImage& requested,
                                const EdramSurfaceLayout& ownership_surface) {
@@ -351,61 +506,9 @@ class BackendCore {
       error = named("EDRAM color surface has no ownership identity");
       return false;
     }
-    const auto requested_owner = owner_it->second;
-    auto plan = edram_ownership.plan(requested_owner, ownership_surface);
-    if (!plan.valid || plan.changes.empty()) return plan.valid;
-
-    if (edram_ownership.owned_tile_count(requested_owner) &&
-        !flush_color_owner(requested_owner)) return false;
-    plan = edram_ownership.plan(requested_owner, ownership_surface);
-    for (const auto& change : plan.changes) {
-      if (change.previous_owner != kCanonicalEdramOwner &&
-           !flush_owner(change.previous_owner)) return false;
-    }
-    plan = edram_ownership.plan(requested_owner, ownership_surface);
-    if (plan.requires_preservation()) {
-      error = named("EDRAM ownership transfer did not reach canonical storage");
-      return false;
-    }
-
-    const auto& surface = requested.surface();
-    const auto canonical_pitch = requested.width() *
-        (surface.is_64bpp ? 8u : 4u);
-    const auto host_pitch = requested.width() *
-        color_host_bytes_per_pixel(requested.guest_format());
-    std::vector<std::byte> canonical(
-        std::size_t(canonical_pitch) * requested.height());
-    std::vector<std::byte> pixels(
-        std::size_t(host_pitch) * requested.height());
-    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
-    TransferTiming timing{"color acquire", {"load", "convert", "upload"},
-                          requested.width(), requested.height(), sample_count};
-    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      if (!timing.step(0, [&] {
-            return resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
-                                     requested.height(), sample, canonical, canonical_pitch);
-          }) ||
-          !timing.step(1, [&] {
-            return edram_color_to_host(requested.guest_format(), requested.width(),
-                                       requested.height(), canonical, canonical_pitch,
-                                       pixels, host_pitch);
-          }) ||
-          !timing.step(2, [&] {
-            return requested.upload_sample(queue, sample, 0, 0, requested.width(),
-                                           requested.height(), pixels, host_pitch);
-          })) {
-        error = requested.error().empty()
-                    ? named("canonical EDRAM sample upload failed")
-                    : requested.error();
-        return false;
-      }
-    }
-    if (!edram_ownership.commit(plan)) {
-      error = named("EDRAM ownership plan became stale");
-      ++unsupported.unexpected_ownership_transitions;
-      return false;
-    }
-    return true;
+    return acquire_ownership(owner_it->second, requested, ownership_surface,
+                             &BackendCore::canonical_to_color, &BackendCore::flush_color_owner,
+                             "EDRAM ownership plan became stale");
   }
 
   bool acquire_depth_ownership(std::uint64_t key,
@@ -416,52 +519,9 @@ class BackendCore {
       error = named("EDRAM depth surface has no ownership identity");
       return false;
     }
-    const auto owner = owner_it->second;
-    auto plan = edram_ownership.plan(owner, ownership_surface);
-    if (!plan.valid || plan.changes.empty()) return plan.valid;
-    if (edram_ownership.owned_tile_count(owner) && !flush_depth_owner(owner)) {
-      return false;
-    }
-    plan = edram_ownership.plan(owner, ownership_surface);
-    for (const auto& change : plan.changes) {
-      if (change.previous_owner != kCanonicalEdramOwner &&
-          !flush_owner(change.previous_owner)) return false;
-    }
-    plan = edram_ownership.plan(owner, ownership_surface);
-    if (plan.requires_preservation()) {
-      error = named("depth EDRAM ownership transfer did not reach canonical storage");
-      return false;
-    }
-    const auto& surface = requested.surface();
-    const auto canonical_pitch = requested.width() * 4u;
-    std::vector<std::uint32_t> pixels(
-        std::size_t(requested.width()) * requested.height());
-    const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
-    TransferTiming timing{"depth acquire", {"load", "-", "upload"},
-                          requested.width(), requested.height(), sample_count};
-    for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-      if (!timing.step(0, [&] {
-            return resolve_edram_raw(*edram, surface, 0, 0, requested.width(),
-                                     requested.height(), sample,
-                                     std::as_writable_bytes(std::span(pixels)),
-                                     canonical_pitch);
-          }) ||
-          !timing.step(2, [&] {
-            return requested.upload_sample(queue, sample, 0, 0, requested.width(),
-                                           requested.height(), pixels, canonical_pitch);
-          })) {
-        error = requested.error().empty()
-                    ? named("canonical EDRAM depth sample upload failed")
-                    : requested.error();
-        return false;
-      }
-    }
-    if (!edram_ownership.commit(plan)) {
-      error = named("depth EDRAM ownership plan became stale");
-      ++unsupported.unexpected_ownership_transitions;
-      return false;
-    }
-    return true;
+    return acquire_ownership(owner_it->second, requested, ownership_surface,
+                             &BackendCore::canonical_to_depth, &BackendCore::flush_depth_owner,
+                             "depth EDRAM ownership plan became stale");
   }
 
   bool make_region_canonical(const EdramSurfaceLayout& surface,

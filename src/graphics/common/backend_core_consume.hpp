@@ -70,7 +70,9 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
         xenon::logging::append_probe_log(
             "ir_timing_diag.log",
             "%s %lld ms: primitive=%d source=%d index_count=%u vs=%016llX ps=%016llX "
-            "scissor=(%d,%d)-(%d,%d) viewport scale=(%g,%g) offset=(%g,%g) pitch=%u\n",
+            "scissor=(%d,%d)-(%d,%d) viewport scale=(%g,%g) offset=(%g,%g) pitch=%u "
+            "msaa=%u color0 base=%u (enabled %d) depth base=%u (test %d write %d) "
+            "window offset=(%d,%d) drawable_bottom=%d\n",
             kind, static_cast<long long>(ms), static_cast<int>(draw->primitive_type),
             static_cast<int>(draw->source), draw->index_count,
             static_cast<unsigned long long>(draw->vertex_shader.hash),
@@ -78,7 +80,11 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             state.raster.scissor_top, state.raster.scissor_right, state.raster.scissor_bottom,
             state.raster.viewport.x_scale, state.raster.viewport.y_scale,
             state.raster.viewport.x_offset, state.raster.viewport.y_offset,
-            unsigned(state.raster.surface_pitch));
+            unsigned(state.raster.surface_pitch), unsigned(state.raster.msaa_samples_log2),
+            unsigned(state.color_targets[0].base_tile), int(state.color_targets[0].enabled),
+            unsigned(state.depth_target.base_tile), int(state.depth_target.test_enabled),
+            int(state.depth_target.write_enabled), state.raster.window_offset_x,
+            state.raster.window_offset_y, state.raster.drawable_bottom);
     };
     if (state.edram_mode == EdramMode::Copy) {
       consume_resolve(state);
@@ -332,8 +338,17 @@ void BackendCore<Derived, Api>::consume_resolve(
   }
   if (state.copy.color_clear_enabled) {
     const auto owner = render_target_owners.find(source_key);
+    // Only the source's tiles under the cleared rectangle go back to
+    // canonical storage to be cleared; the source keeps the rest.
+    std::vector<std::uint16_t> cleared_tiles;
+    if (owner != render_target_owners.end()) {
+      for (const auto tile : covered_edram_tiles(
+               source->surface(),
+               {rectangle.left, rectangle.top, rectangle.right, rectangle.bottom}))
+        if (edram_ownership.owner(tile) == owner->second) cleared_tiles.push_back(tile);
+    }
     if (owner == render_target_owners.end() ||
-        !flush_color_owner(owner->second) ||
+        !flush_owner_tiles(owner->second, cleared_tiles) ||
         !clear_edram_surface_region(
             *edram, source->surface(), rectangle.left,
             rectangle.top, rectangle.right, rectangle.bottom,

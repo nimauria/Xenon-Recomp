@@ -591,22 +591,27 @@ std::vector<std::uint16_t> covered_edram_tiles(
   region.right = std::clamp(region.right, 0, int(layout.pitch_pixels));
   region.bottom = std::clamp(region.bottom, 0, int(layout.height_pixels));
   if (region.left >= region.right || region.top >= region.bottom) return result;
+  // The samples of a pixel rectangle span whole tile columns and rows (see
+  // edram_sample_address()), so the tiles follow from the first and last
+  // sample coordinates; walking every sample made each ownership plan of a
+  // large surface cost millions of address computations.
+  const bool x2_wide = layout.msaa == MsaaSamples::X4;
+  const bool x2_tall = layout.msaa != MsaaSamples::X1;
+  const auto first_sample_x = std::uint32_t(region.left) << (x2_wide ? 1u : 0u);
+  const auto last_sample_x = (std::uint32_t(region.right) << (x2_wide ? 1u : 0u)) - 1u;
+  const auto first_sample_y = std::uint32_t(region.top) << (x2_tall ? 1u : 0u);
+  const auto last_sample_y = (std::uint32_t(region.bottom) << (x2_tall ? 1u : 0u)) - 1u;
+  const auto tile_stride = layout.is_64bpp ? 2u : 1u;
   std::array<bool, Edram::kTileCount> seen{};
-  const auto sample_count = 1u << static_cast<unsigned>(layout.msaa);
-  for (auto y = region.top; y < region.bottom; ++y) {
-    for (auto x = region.left; x < region.right; ++x) {
-      for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
-        const auto address = edram_sample_address(
-            layout, std::uint32_t(x), std::uint32_t(y), sample);
-        if (!address) continue;
-        const auto add = [&](std::uint32_t byte_address) {
-          const auto tile = static_cast<std::uint16_t>(
-              byte_address / Edram::kTileBytes);
-          if (!seen[tile]) { seen[tile] = true; result.push_back(tile); }
-        };
-        add(address->low);
-        if (address->has_high) add(address->high);
-      }
+  const auto add = [&](std::uint32_t tile) {
+    tile %= Edram::kTileCount;
+    if (!seen[tile]) { seen[tile] = true; result.push_back(static_cast<std::uint16_t>(tile)); }
+  };
+  for (auto tile_y = first_sample_y / 16u; tile_y <= last_sample_y / 16u; ++tile_y) {
+    for (auto tile_x = first_sample_x / 80u; tile_x <= last_sample_x / 80u; ++tile_x) {
+      const auto tile = layout.base_tile + tile_y * layout.pitch_tiles() + tile_x * tile_stride;
+      add(tile);
+      if (layout.is_64bpp) add(tile + 1u);
     }
   }
   std::sort(result.begin(), result.end());
@@ -652,6 +657,85 @@ bool clear_edram_surface_region(Edram& edram,
                                 std::uint32_t(y), value, sample)) return false;
       }
     }
+  }
+  return true;
+}
+
+std::uint32_t rows_before_next_surface(const EdramSurfaceLayout& layout,
+                                       std::span<const std::uint32_t> bound_bases) {
+  auto rows = layout.max_resident_height_pixels();
+  const auto pitch_tiles = layout.pitch_tiles();
+  if (!pitch_tiles) return rows;
+  const auto base = layout.base_tile % Edram::kTileCount;
+  for (const auto other : bound_bases) {
+    const auto distance = (other % Edram::kTileCount + Edram::kTileCount - base) % Edram::kTileCount;
+    if (distance == 0u) continue;
+    const auto sample_rows = (distance / pitch_tiles) * 16u;
+    // A surface spans at least one tile row; a base closer than that is not
+    // a bound on this one.
+    if (sample_rows == 0u) continue;
+    rows = (std::min)(rows, sample_rows >> (layout.msaa == MsaaSamples::X1 ? 0u : 1u));
+  }
+  return rows;
+}
+
+bool edram_tile_regions(const EdramSurfaceLayout& layout,
+                        std::span<const std::uint16_t> tiles,
+                        std::vector<EdramSurfaceRegion>& regions) {
+  regions.clear();
+  if (!layout.valid()) return false;
+  const auto tile_stride = layout.is_64bpp ? 2u : 1u;
+  const auto pitch_tiles = layout.pitch_tiles();
+  const auto columns = pitch_tiles / tile_stride;
+  const auto rows = layout.tile_rows();
+  // Halves present per tile cell (1 for 32bpp, both bits for 64bpp).
+  std::vector<std::uint8_t> cells(std::size_t(columns) * rows, 0u);
+  for (const auto tile : tiles) {
+    const auto relative =
+        (std::uint32_t(tile) + Edram::kTileCount - layout.base_tile % Edram::kTileCount) %
+        Edram::kTileCount;
+    const auto row = relative / pitch_tiles;
+    const auto within = relative % pitch_tiles;
+    if (row >= rows) return false;
+    cells[std::size_t(row) * columns + within / tile_stride] |=
+        static_cast<std::uint8_t>(1u << (within % tile_stride));
+  }
+  const std::uint8_t whole = layout.is_64bpp ? 3u : 1u;
+  for (const auto cell : cells)
+    if (cell != 0u && cell != whole) return false;
+
+  const auto x_shift = layout.msaa == MsaaSamples::X4 ? 1u : 0u;
+  const auto y_shift = layout.msaa == MsaaSamples::X1 ? 0u : 1u;
+  struct Open { std::uint32_t first, last, top; };
+  std::vector<Open> open;
+  const auto close = [&](const Open& run, std::uint32_t bottom_row) {
+    EdramSurfaceRegion region{};
+    region.left = std::int32_t((run.first * 80u) >> x_shift);
+    region.right = std::int32_t((std::min)(((run.last + 1u) * 80u) >> x_shift, layout.pitch_pixels));
+    region.top = std::int32_t((run.top * 16u) >> y_shift);
+    region.bottom = std::int32_t((std::min)((bottom_row * 16u) >> y_shift, layout.height_pixels));
+    if (region.left < region.right && region.top < region.bottom) regions.push_back(region);
+  };
+  for (std::uint32_t row = 0; row <= rows; ++row) {
+    std::vector<Open> next;
+    std::uint32_t column = 0;
+    while (row < rows && column < columns) {
+      if (!cells[std::size_t(row) * columns + column]) { ++column; continue; }
+      const auto first = column;
+      while (column < columns && cells[std::size_t(row) * columns + column]) ++column;
+      const auto last = column - 1u;
+      const auto continued = std::find_if(open.begin(), open.end(), [&](const Open& run) {
+        return run.first == first && run.last == last;
+      });
+      if (continued != open.end()) {
+        next.push_back(*continued);
+        open.erase(continued);
+      } else {
+        next.push_back({first, last, row});
+      }
+    }
+    for (const auto& run : open) close(run, row);
+    open = std::move(next);
   }
   return true;
 }

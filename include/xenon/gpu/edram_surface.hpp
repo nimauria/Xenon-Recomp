@@ -175,6 +175,23 @@ enum class ColorHostStorage : std::uint8_t {
 // Copies one selected sample per pixel into a tightly packed host buffer.
 // This raw path is the lossless basis for format conversion and guest-memory
 // resolves; 64bpp samples contain two consecutive little-endian dwords.
+// The pixel rectangles of `layout` holding exactly `tiles` (each tile is an
+// 80x16-sample block): runs of tiles in a tile row merged, and identical runs
+// in consecutive rows joined. Lets an ownership change move only the tiles
+// that change hands. False when a tile lies outside the surface or a 64bpp
+// pixel column arrives with only one of its two tiles - such a set does not
+// map to whole pixels, and the caller must move the full surface.
+// The most rows `layout` can have without running into another surface bound
+// to the same draw. Surfaces of one draw never share EDRAM, so each ends where
+// the next bound base tile begins, counting cyclically through EDRAM. Bases
+// equal to layout's own are ignored; with none, this is the resident limit.
+[[nodiscard]] std::uint32_t rows_before_next_surface(const EdramSurfaceLayout& layout,
+                                                     std::span<const std::uint32_t> bound_bases);
+
+[[nodiscard]] bool edram_tile_regions(const EdramSurfaceLayout& layout,
+                                      std::span<const std::uint16_t> tiles,
+                                      std::vector<EdramSurfaceRegion>& regions);
+
 [[nodiscard]] bool resolve_edram_raw(
     const Edram& edram, const EdramSurfaceLayout& layout,
     std::uint32_t left, std::uint32_t top, std::uint32_t width,
