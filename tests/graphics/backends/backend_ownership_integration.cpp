@@ -308,6 +308,67 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
             << " Backend::consume ownership/alias/resolve integration: ok\n";
 }
 
+// Regression (Ace Combat 6): a resolve whose surface no native render target
+// matches - nothing drew through that exact view, or only a depth view of the
+// same tiles did - was abandoned ("resolve source EDRAM surface is
+// unavailable"), so AC6's front buffer was never written. On Xenos a resolve
+// reads EDRAM itself: the result is whatever the tiles hold.
+template <typename Backend>
+void run_resolve_without_a_matching_render_target(Backend& backend,
+                                                  std::string_view name) {
+  constexpr std::uint32_t kCanonicalDestination = 0x80000;
+  constexpr std::uint32_t kDepthOwnedDestination = 0xA0000;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  const std::array<float, 6> resolve_vertices{
+      -0.5f, -0.5f, 15.5f, -0.5f, -0.5f, 15.5f};
+  write_guest_bytes(memory, kResolveVertices, resolve_vertices.data(),
+                    sizeof(resolve_vertices));
+  Edram edram;
+  edram.reset();
+  const EdramSurfaceLayout color_surface{
+      kSurfaceBaseTile, kSurfacePitch, kGrownHeight, MsaaSamples::X1, false, false};
+  for (std::uint32_t y = 0; y < kGrownHeight; ++y) {
+    for (std::uint32_t x = 0; x < kSurfacePitch; ++x) {
+      assert(write_edram_sample(edram, color_surface, x, y,
+                                {0x5A000000u | (y << 8u) | x, 0u}));
+    }
+  }
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+
+  // No draw has bound this color surface: the resolve reads canonical EDRAM,
+  // and its post-copy clear lands there.
+  write_register(backend, 0x2001,
+                 kSurfaceBaseTile |
+                     (static_cast<std::uint32_t>(ColorRenderTargetFormat::R8G8B8A8) << 16u));
+  issue_color_resolve(backend, kCanonicalDestination, true);
+  assert_backend_ok(backend, "resolve with no native color target");
+  assert(backend.realized_render_target_count() == 0);
+  assert(resolved_word_at(memory, kCanonicalDestination, 0, 0) == 0x5A000000u);
+  assert(resolved_word_at(memory, kCanonicalDestination, 15, 15) == 0x5A000F0Fu);
+  assert(read_edram_sample(edram, color_surface, 15, 15)[0] == kColorClear);
+  assert(read_edram_sample(edram, color_surface, 16, 0)[0] == 0x5A000010u);
+
+  // A depth image owns the tiles; a color resolve of them (no color target)
+  // takes them back from it. Depth X=0 aliases color X=40, and the round
+  // trip through the depth image keeps the bits.
+  set_depth_draw_state(backend, kGrownHeight);
+  issue_dummy_draw(backend);
+  assert_backend_ok(backend, "depth ownership");
+  const std::array<float, 6> alias_vertices{
+      39.5f, -0.5f, 55.5f, -0.5f, 39.5f, 15.5f};
+  write_guest_bytes(memory, kResolveVertices, alias_vertices.data(), sizeof(alias_vertices));
+  write_register(backend, 0x2001,
+                 kSurfaceBaseTile |
+                     (static_cast<std::uint32_t>(ColorRenderTargetFormat::R8G8B8A8) << 16u));
+  issue_color_resolve(backend, kDepthOwnedDestination, false);
+  assert_backend_ok(backend, "color resolve of depth-owned tiles");
+  assert(resolved_word_at(memory, kDepthOwnedDestination, 40, 0) == 0x5A000028u);
+  backend.end_submission();
+  std::cout << name << " resolve without a matching render target: ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -324,6 +385,9 @@ int main() {
       assert(false);
     }
     run_backend_ownership_alias_resolve_clear(backend, "Vulkan");
+    xenon::gpu::vulkan::Backend fresh;
+    assert(fresh.initialize({.enable_validation = false}));
+    run_resolve_without_a_matching_render_target(fresh, "Vulkan");
     ran_backend = true;
   }
 #endif
@@ -341,6 +405,9 @@ int main() {
       assert(false);
     }
     run_backend_ownership_alias_resolve_clear(backend, "D3D12");
+    xenon::gpu::d3d12::Backend fresh;
+    assert(fresh.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+    run_resolve_without_a_matching_render_target(fresh, "D3D12");
     ran_backend = true;
   }
 #endif

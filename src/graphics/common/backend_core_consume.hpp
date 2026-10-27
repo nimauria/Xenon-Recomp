@@ -165,13 +165,17 @@ void BackendCore<Derived, Api>::consume_resolve(
         source_key = key;
       }
     }
-    if (!source) {
-      error =
-          named("Xenos depth resolve source EDRAM surface is unavailable");
+    // As for color: with no native image of this surface, the resolve
+    // reads canonical EDRAM once the owners of its tiles have returned them.
+    const EdramSurfaceLayout canonical_surface{
+        state.depth_target.base_tile, state.raster.surface_pitch,
+        static_cast<std::uint32_t>(rectangle.bottom), samples, false, true};
+    if (source) {
+      if (!acquire_depth_ownership(source_key, *source, source->surface())) return;
+    } else if (!make_region_canonical(canonical_surface, {rectangle.left, rectangle.top,
+                                                          rectangle.right, rectangle.bottom})) {
       return;
     }
-    if (!acquire_depth_ownership(source_key, *source,
-                                 source->surface())) return;
     if (resolve_plan.selected_sample_count != 1) {
       error = named("Xenos depth resolve selected multiple samples");
       return;
@@ -187,11 +191,26 @@ void BackendCore<Derived, Api>::consume_resolve(
     }
     std::vector<std::uint32_t> readback;
     std::uint32_t row_pitch{};
-    if (!source->readback_sample(
-            queue, guest_sample, rectangle.left, rectangle.top,
-            rectangle.right, rectangle.bottom, readback, row_pitch)) {
-      error = source->error();
-      return;
+    if (source) {
+      if (!source->readback_sample(
+              queue, guest_sample, rectangle.left, rectangle.top,
+              rectangle.right, rectangle.bottom, readback, row_pitch)) {
+        error = source->error();
+        return;
+      }
+    } else {
+      const auto region_width = static_cast<std::uint32_t>(rectangle.right - rectangle.left);
+      const auto region_height = static_cast<std::uint32_t>(rectangle.bottom - rectangle.top);
+      readback.assign(std::size_t(region_width) * region_height, 0u);
+      row_pitch = region_width * 4u;
+      if (!resolve_edram_raw(*edram, canonical_surface,
+                             static_cast<std::uint32_t>(rectangle.left),
+                             static_cast<std::uint32_t>(rectangle.top), region_width,
+                             region_height, guest_sample,
+                             std::as_writable_bytes(std::span(readback)), row_pitch)) {
+        error = named("Xenos depth resolve could not read canonical EDRAM");
+        return;
+      }
     }
     const auto written = write_depth_resolve(
         resolve_plan.copy, format, rectangle, readback, row_pitch,
@@ -231,15 +250,57 @@ void BackendCore<Derived, Api>::consume_resolve(
       source_key = key;
     }
   }
-  if (!source) {
-    error = named("Xenos resolve source EDRAM surface is unavailable");
+  // On Xenos a resolve reads EDRAM itself, whatever last wrote it: a draw
+  // through another view of the same tiles, a clear, or nothing at all.
+  // With no native image of this exact surface, whichever images own the
+  // rectangle's tiles return them to canonical EDRAM and the resolve reads
+  // them there. Failing the resolve instead left AC6's front buffer
+  // unwritten, and the screen black.
+  const EdramSurfaceLayout canonical_surface{
+      target.base_tile, state.raster.surface_pitch,
+      static_cast<std::uint32_t>(rectangle.bottom), samples,
+      color_render_target_is_64bpp(format), false};
+  const EdramSurfaceRegion resolve_region{rectangle.left, rectangle.top,
+                                          rectangle.right, rectangle.bottom};
+  if (source) {
+    if (!acquire_color_ownership(source_key, *source, source->surface())) return;
+  } else if (!make_region_canonical(canonical_surface, resolve_region)) {
     return;
   }
-  if (!acquire_color_ownership(source_key, *source,
-                               source->surface())) return;
+  // One guest sample of the rectangle, in the native host color layout a
+  // render target readback has.
+  const auto read_sample = [&](std::uint32_t sample, std::vector<std::byte>& pixels,
+                               std::uint32_t& pitch) {
+    if (source) {
+      if (source->readback_sample(queue, sample, rectangle.left, rectangle.top,
+                                  rectangle.right, rectangle.bottom, pixels, pitch))
+        return true;
+      error = source->error();
+      return false;
+    }
+    const auto region_width = static_cast<std::uint32_t>(rectangle.right - rectangle.left);
+    const auto region_height = static_cast<std::uint32_t>(rectangle.bottom - rectangle.top);
+    const auto canonical_pitch = region_width * (canonical_surface.is_64bpp ? 8u : 4u);
+    std::vector<std::byte> canonical(std::size_t(canonical_pitch) * region_height);
+    pitch = region_width * color_host_bytes_per_pixel(format);
+    pixels.assign(std::size_t(pitch) * region_height, std::byte{});
+    if (resolve_edram_raw(*edram, canonical_surface, static_cast<std::uint32_t>(rectangle.left),
+                          static_cast<std::uint32_t>(rectangle.top), region_width,
+                          region_height, sample, canonical, canonical_pitch) &&
+        edram_color_to_host(format, region_width, region_height, canonical, canonical_pitch,
+                            pixels, pitch))
+      return true;
+    error = named("Xenos resolve could not read canonical EDRAM");
+    return false;
+  };
+  // A native average needs a native image; from canonical EDRAM every
+  // sample is read and averaged explicitly.
+  auto guest_sample_mask = resolve_plan.guest_sample_mask;
+  if (resolve_plan.native_color_average && !source)
+    guest_sample_mask = (1u << (1u << static_cast<unsigned>(samples))) - 1u;
   std::vector<std::byte> readback;
   std::uint32_t row_pitch{};
-  if (resolve_plan.native_color_average) {
+  if (resolve_plan.native_color_average && source) {
     if (!source->readback(queue, rectangle.left, rectangle.top,
                           rectangle.right, rectangle.bottom, readback,
                           row_pitch)) {
@@ -250,35 +311,20 @@ void BackendCore<Derived, Api>::consume_resolve(
     std::array<std::uint32_t, 4> selected_samples{};
     std::uint32_t selected_count{};
     for (std::uint32_t guest_sample = 0; guest_sample < 4; ++guest_sample) {
-      if (resolve_plan.guest_sample_mask & (1u << guest_sample)) {
+      if (guest_sample_mask & (1u << guest_sample)) {
         selected_samples[selected_count] = guest_sample;
         ++selected_count;
       }
     }
     if (selected_count == 1) {
-      if (!source->readback_sample(
-              queue, selected_samples[0], rectangle.left,
-              rectangle.top, rectangle.right, rectangle.bottom, readback,
-              row_pitch)) {
-        error = source->error();
-        return;
-      }
+      if (!read_sample(selected_samples[0], readback, row_pitch)) return;
     } else if (selected_count == 2 || selected_count == 4) {
       std::vector<std::byte> first;
       std::vector<std::byte> second;
       std::uint32_t first_pitch{};
       std::uint32_t second_pitch{};
-      if (!source->readback_sample(
-              queue, selected_samples[0], rectangle.left,
-              rectangle.top, rectangle.right, rectangle.bottom, first,
-              first_pitch) ||
-          !source->readback_sample(
-              queue, selected_samples[1], rectangle.left,
-              rectangle.top, rectangle.right, rectangle.bottom, second,
-              second_pitch)) {
-        error = source->error();
-        return;
-      }
+      if (!read_sample(selected_samples[0], first, first_pitch) ||
+          !read_sample(selected_samples[1], second, second_pitch)) return;
       const auto width = static_cast<std::uint32_t>(rectangle.right -
                                                     rectangle.left);
       const auto height = static_cast<std::uint32_t>(rectangle.bottom -
@@ -298,14 +344,8 @@ void BackendCore<Derived, Api>::consume_resolve(
         std::uint32_t fourth_pitch{};
         std::uint32_t second_average_pitch{};
         std::uint32_t all_average_pitch{};
-        if (!source->readback_sample(
-                queue, selected_samples[2], rectangle.left,
-                rectangle.top, rectangle.right, rectangle.bottom, third,
-                third_pitch) ||
-            !source->readback_sample(
-                queue, selected_samples[3], rectangle.left,
-                rectangle.top, rectangle.right, rectangle.bottom, fourth,
-                fourth_pitch) ||
+        if (!read_sample(selected_samples[2], third, third_pitch) ||
+            !read_sample(selected_samples[3], fourth, fourth_pitch) ||
             !average_host_color_samples(
                 format, width, height, third, third_pitch, fourth,
                 fourth_pitch, second_average, second_average_pitch) ||
@@ -336,7 +376,16 @@ void BackendCore<Derived, Api>::consume_resolve(
     error = written.error;
     return;
   }
-  if (state.copy.color_clear_enabled) {
+  if (state.copy.color_clear_enabled && !source) {
+    // The rectangle is already canonical: clear it there.
+    if (!clear_edram_surface_region(*edram, canonical_surface, rectangle.left, rectangle.top,
+                                    rectangle.right, rectangle.bottom,
+                                    state.copy.color_clear)) {
+      error = named("regional color resolve clear failed");
+      return;
+    }
+    edram_ownership.make_canonical_region(canonical_surface, resolve_region);
+  } else if (state.copy.color_clear_enabled) {
     const auto owner = render_target_owners.find(source_key);
     // Only the source's tiles under the cleared rectangle go back to
     // canonical storage to be cleared; the source keeps the rest.
