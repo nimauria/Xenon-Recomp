@@ -11,6 +11,8 @@
 
 #include "xenon/core/guest_stack_walk.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/kernel/handle_table.hpp"
+#include "xenon/kernel/object_description.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #if defined(XENON_HAS_AUDIO)
 #include "xenon/audio/system.hpp"
@@ -141,6 +143,47 @@ void XenonSession::report_stop_diagnostics() {
             }
           }
           std::cout << std::dec << std::endl;
+        }
+        // An Nt wait names handles; resolve each to its object's state and
+        // the guest signal last noted on it, so the report says who should
+        // have released the waiter and when it last did.
+        if (call.descriptor && kernel_process_ &&
+            (call.descriptor->name == "NtWaitForSingleObjectEx" ||
+             call.descriptor->name == "NtSignalAndWaitForSingleObjectEx" ||
+             call.descriptor->name == "NtWaitForMultipleObjectsEx")) {
+          const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+          const auto describe = [&](const char* role, std::uint32_t handle) {
+            kernel::HandleView view{};
+            std::cout << "[XenonSession]     " << role << " handle 0x" << std::hex << handle
+                      << std::dec << ": ";
+            if (kernel_process_->handle_table().lookup(handle, view) !=
+                    kernel::KernelIoCode::Success ||
+                !view.object) {
+              std::cout << "<not a live handle>" << std::endl;
+              return;
+            }
+            std::cout << kernel::describe_object_state(*view.object, now_ns) << std::endl;
+          };
+          if (call.descriptor->name == "NtWaitForMultipleObjectsEx") {
+            // r3 = count, r4 = handle array.
+            const auto count = std::min<std::uint64_t>(call.arguments[0], 16u);
+            for (std::uint64_t i = 0; memory_ && i < count; ++i) {
+              try {
+                describe("wait", memory_->read32_be(
+                                     static_cast<cpu::GuestAddress>(call.arguments[1] + i * 4u)));
+              } catch (const memory::MemoryFault&) {
+                std::cout << "[XenonSession]     wait handle array unreadable" << std::endl;
+                break;
+              }
+            }
+          } else if (call.descriptor->name == "NtSignalAndWaitForSingleObjectEx") {
+            describe("signalled", static_cast<std::uint32_t>(call.arguments[0]));
+            describe("wait", static_cast<std::uint32_t>(call.arguments[1]));
+          } else {
+            describe("wait", static_cast<std::uint32_t>(call.arguments[0]));
+          }
         }
         // A critical section names its owner: X_RTL_CRITICAL_SECTION has
         // LockCount at +0x10, RecursionCount at +0x14 and the owning

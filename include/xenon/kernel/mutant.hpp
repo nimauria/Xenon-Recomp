@@ -30,6 +30,9 @@ class KernelMutant final : public KernelObject {
   [[nodiscard]] bool acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout,
                              bool* abandoned = nullptr);
   [[nodiscard]] bool release(std::uint32_t owner_thread_id);
+  // As above, for a caller already holding the dispatcher lock
+  // (detail::dispatcher_mutex()), such as signal_and_wait_for_object().
+  [[nodiscard]] bool release_locked(std::uint32_t owner_thread_id);
   [[nodiscard]] bool is_owned() const;
   [[nodiscard]] std::uint32_t owner_thread_id() const;
   [[nodiscard]] std::int32_t recursion_count() const;
@@ -49,23 +52,23 @@ class KernelMutant final : public KernelObject {
     return recursion_count_ == 0 || owner_thread_id_ == thread_id;
   }
   // Returns whether this took over an abandoned mutant. Ownership is also
-  // recorded against the calling host thread, which is the guest thread's
-  // own: every guest thread runs on its own host thread, and a thread's exit
-  // abandons what that host thread still owns.
-  bool satisfy_locked(std::uint32_t thread_id) noexcept {
+  // recorded against the waiting thread's host thread, which is the guest
+  // thread's own: every guest thread runs on its own host thread, and a
+  // thread's exit abandons what that host thread still owns. A signaller
+  // satisfying the wait for a waiter passes the waiter's host thread.
+  bool satisfy_locked(std::uint32_t thread_id, std::thread::id host_thread) noexcept {
     if (recursion_count_ > 0) {
       ++recursion_count_;
       return false;
     }
     owner_thread_id_ = thread_id;
-    owner_host_thread_ = std::this_thread::get_id();
+    owner_host_thread_ = host_thread;
     recursion_count_ = 1;
     return std::exchange(abandoned_, false);
   }
   void abandon_locked() noexcept;
 
-  mutable std::mutex mutex_;
-  std::condition_variable condition_;
+  std::mutex& mutex_ = detail::dispatcher_mutex();
   std::uint32_t owner_thread_id_{0};
   std::thread::id owner_host_thread_{};
   std::int32_t recursion_count_{0};

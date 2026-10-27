@@ -21,20 +21,17 @@ namespace xenon::kernel {
 
 namespace detail {
 
-// Reaches each waitable object's own mutex and its can-satisfy/satisfy rules.
-// A thread has no mutex here: termination is final and read through
-// is_terminated(), and waiting on a thread consumes nothing.
-struct WaitAccess {
-  static std::mutex* mutex(KernelObject& object) {
-    switch (object.type()) {
-      case ObjectType::Event: return &static_cast<KernelEvent&>(object).mutex_;
-      case ObjectType::Semaphore: return &static_cast<KernelSemaphore&>(object).mutex_;
-      case ObjectType::Mutant: return &static_cast<KernelMutant&>(object).mutex_;
-      case ObjectType::Timer: return &static_cast<KernelTimer&>(object).mutex_;
-      default: return nullptr;
-    }
-  }
+std::mutex& dispatcher_mutex() noexcept {
+  // Never destroyed: guest threads may still signal during process teardown.
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
 
+// Reaches each waitable object's can-satisfy/satisfy rules. Every call is
+// made with the dispatcher lock held. A thread has no state under that lock:
+// termination is final and read through is_terminated(), and waiting on a
+// thread consumes nothing.
+struct WaitAccess {
   static bool can_satisfy(KernelObject& object, std::uint32_t thread_id) {
     switch (object.type()) {
       case ObjectType::Event: return static_cast<KernelEvent&>(object).can_satisfy_locked();
@@ -58,12 +55,13 @@ struct WaitAccess {
   }
 
   // Returns whether the wait took over an abandoned mutant.
-  static bool satisfy(KernelObject& object, std::uint32_t thread_id) {
+  static bool satisfy(KernelObject& object, std::uint32_t thread_id,
+                      std::thread::id host_thread) {
     switch (object.type()) {
       case ObjectType::Event: static_cast<KernelEvent&>(object).satisfy_locked(); break;
       case ObjectType::Semaphore: static_cast<KernelSemaphore&>(object).satisfy_locked(); break;
       case ObjectType::Mutant:
-        return static_cast<KernelMutant&>(object).satisfy_locked(thread_id);
+        return static_cast<KernelMutant&>(object).satisfy_locked(thread_id, host_thread);
       case ObjectType::Timer: static_cast<KernelTimer&>(object).satisfy_locked(); break;
       default: break;
     }
@@ -71,30 +69,87 @@ struct WaitAccess {
   }
 };
 
-}  // namespace detail
-
 namespace {
 
-constexpr std::size_t kMaxWaitObjects = 64;
+// Caller holds the dispatcher lock. Tests the wait and, when it can be
+// satisfied, consumes what it takes: WaitAll takes all of its objects or
+// none of them, and WaitAny takes exactly one, the lowest-indexed
+// satisfiable object. Taking over an abandoned mutant sets `abandoned`. As in
+// the NT wait code the Xbox kernel derives from, a WaitAny reports the
+// satisfying index and a WaitAll reports index 0 (STATUS_ABANDONED)
+// whichever mutant was abandoned. A WaitAll naming the same object twice
+// needs it satisfiable once and consumes it once; what the Xbox kernel does
+// with duplicates has not been verified.
+bool try_satisfy_wait(std::span<KernelObject* const> objects,
+                      std::span<KernelObject* const> distinct, bool wait_all,
+                      std::uint32_t thread_id, std::thread::id host_thread, std::uint32_t& index,
+                      bool& abandoned) {
+  abandoned = false;
+  if (wait_all) {
+    for (auto* object : distinct) {
+      if (!WaitAccess::can_satisfy(*object, thread_id)) return false;
+    }
+    for (auto* object : distinct) {
+      if (WaitAccess::satisfy(*object, thread_id, host_thread)) abandoned = true;
+    }
+    index = 0;
+    return true;
+  }
+  for (std::size_t i = 0; i < objects.size(); ++i) {
+    if (WaitAccess::can_satisfy(*objects[i], thread_id)) {
+      abandoned = WaitAccess::satisfy(*objects[i], thread_id, host_thread);
+      index = static_cast<std::uint32_t>(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Caller holds the dispatcher lock: records that `block`'s wait was
+// satisfied, so no signaller satisfies it again, and wakes its waiter.
+void grant(MultiWaitBlock& block, std::uint32_t index, bool abandoned) {
+  {
+    std::scoped_lock lock(block.mutex);
+    block.granted = true;
+    block.index = index;
+    block.abandoned = abandoned;
+    ++block.wakeups;
+  }
+  block.condition.notify_one();
+}
 
 }  // namespace
 
-void detail::MultiWaitList::add(MultiWaitBlock* block) {
+void MultiWaitList::add(MultiWaitBlock* block) {
   std::scoped_lock lock(mutex_);
   blocks_.push_back(block);
-  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_seq_cst);
+  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_relaxed);
 }
 
-void detail::MultiWaitList::remove(MultiWaitBlock* block) noexcept {
+void MultiWaitList::remove(MultiWaitBlock* block) noexcept {
   std::scoped_lock lock(mutex_);
   if (const auto found = std::find(blocks_.begin(), blocks_.end(), block); found != blocks_.end()) {
-    *found = blocks_.back();
-    blocks_.pop_back();
+    blocks_.erase(found);
   }
-  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_seq_cst);
+  size_.store(static_cast<std::uint32_t>(blocks_.size()), std::memory_order_relaxed);
 }
 
-void detail::MultiWaitList::notify_always() noexcept {
+void MultiWaitList::satisfy_waiters_locked() noexcept {
+  // Object lists are only changed with the dispatcher lock held, as here.
+  if (size_.load(std::memory_order_relaxed) == 0) return;
+  std::scoped_lock lock(mutex_);
+  for (auto* block : blocks_) {
+    if (block->granted || block->objects.empty()) continue;
+    std::uint32_t index = 0;
+    bool abandoned = false;
+    if (try_satisfy_wait(block->objects, block->distinct, block->wait_all, block->thread_id,
+                         block->host_thread, index, abandoned)) {
+      grant(*block, index, abandoned);
+    }
+  }
+}
+
+void MultiWaitList::notify_always() noexcept {
   std::scoped_lock lock(mutex_);
   for (auto* block : blocks_) {
     {
@@ -104,6 +159,22 @@ void detail::MultiWaitList::notify_always() noexcept {
     block->condition.notify_one();
   }
 }
+
+}  // namespace detail
+
+namespace {
+
+constexpr std::size_t kMaxWaitObjects = 64;
+
+// The wait under every wait. `signal`, when given, runs first, in the same
+// dispatcher critical section that checks and registers the wait.
+WaitResult wait_for_objects_after(const std::function<bool()>* signal,
+                                  std::span<KernelObject* const> objects, bool wait_all,
+                                  std::chrono::milliseconds timeout,
+                                  std::uint32_t* signaled_index,
+                                  std::uint32_t waiting_thread_id, bool alertable);
+
+}  // namespace
 
 bool is_waitable_object(ObjectType type) {
   switch (type) {
@@ -116,6 +187,11 @@ bool is_waitable_object(ObjectType type) {
     default:
       return false;
   }
+}
+
+std::size_t waiter_count(KernelObject& object) {
+  if (!is_waitable_object(object.type())) return 0;
+  return detail::WaitAccess::wait_list(object).size();
 }
 
 bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout,
@@ -132,7 +208,7 @@ bool wait_on_object(KernelObject& object, std::chrono::milliseconds timeout,
     case ObjectType::Thread: {
       // Waiting on a thread means waiting for it to terminate
       auto& thread = static_cast<KernelThread&>(object);
-      return thread.state() == ThreadState::Terminated || 
+      return thread.state() == ThreadState::Terminated ||
              thread.join(static_cast<std::uint32_t>(timeout.count()));
     }
     default:
@@ -149,29 +225,17 @@ WaitResult wait_for_single_object(
     return WaitResult::Failed;
   }
 
-  // A KernelThread's wait must end when the thread is terminated, which only
-  // the multi-object path (registered on the waiter's own thread) provides.
-  // Waiting for another thread to finish still goes through join(), which
-  // terminate() cannot interrupt.
-  if (KernelThread::current() && object->type() != ObjectType::Thread) {
-    std::uint32_t index = 0;
-    return wait_for_multiple_objects(std::span(&object, 1), false, timeout, &index,
-                                     waiting_thread_id, alertable);
+  // Waiting for another thread to finish goes through join(), which
+  // terminate() cannot interrupt; every other wait is a registered wait,
+  // which ends when the waiting KernelThread is terminated.
+  if (object->type() == ObjectType::Thread) {
+    return wait_on_object(*object, timeout, waiting_thread_id) ? WaitResult::Success
+                                                               : WaitResult::Timeout;
   }
-
-  if (object->type() == ObjectType::Mutant) {
-    bool abandoned = false;
-    if (!static_cast<KernelMutant&>(*object).acquire(waiting_thread_id, timeout, &abandoned)) {
-      return WaitResult::Timeout;
-    }
-    return abandoned ? WaitResult::Abandoned : WaitResult::Success;
-  }
-
-  if (wait_on_object(*object, timeout, waiting_thread_id)) {
-    return WaitResult::Success;
-  }
-
-  return WaitResult::Timeout;
+  KernelObject* const raw = object.get();
+  std::uint32_t index = 0;
+  return wait_for_objects(std::span(&raw, 1), false, timeout, &index, waiting_thread_id,
+                          alertable);
 }
 
 WaitResult wait_for_multiple_objects(
@@ -181,64 +245,62 @@ WaitResult wait_for_multiple_objects(
     std::uint32_t* signaled_index,
     std::uint32_t waiting_thread_id,
     bool alertable) {
-
   if (objects.empty() || objects.size() > kMaxWaitObjects) {
     return WaitResult::Failed;
   }
+  std::array<KernelObject*, kMaxWaitObjects> raw{};
+  for (std::size_t i = 0; i < objects.size(); ++i) raw[i] = objects[i].get();
+  return wait_for_objects(std::span(raw.data(), objects.size()), wait_all, timeout,
+                          signaled_index, waiting_thread_id, alertable);
+}
 
-  // Verify all objects are waitable
-  for (const auto& obj : objects) {
-    if (!obj || !is_waitable_object(obj->type())) {
+WaitResult wait_for_objects(std::span<KernelObject* const> objects, bool wait_all,
+                            std::chrono::milliseconds timeout, std::uint32_t* signaled_index,
+                            std::uint32_t waiting_thread_id, bool alertable) {
+  return wait_for_objects_after(nullptr, objects, wait_all, timeout, signaled_index,
+                                waiting_thread_id, alertable);
+}
+
+WaitResult signal_and_wait_for_object(const std::function<bool()>& signal,
+                                      const std::shared_ptr<KernelObject>& object,
+                                      std::chrono::milliseconds timeout,
+                                      std::uint32_t waiting_thread_id, bool alertable) {
+  if (!object) return WaitResult::Failed;
+  KernelObject* const raw = object.get();
+  return wait_for_objects_after(&signal, std::span(&raw, 1), false, timeout, nullptr,
+                                waiting_thread_id, alertable);
+}
+
+namespace {
+
+WaitResult wait_for_objects_after(const std::function<bool()>* signal,
+                                  std::span<KernelObject* const> objects, bool wait_all,
+                                  std::chrono::milliseconds timeout,
+                                  std::uint32_t* signaled_index,
+                                  std::uint32_t waiting_thread_id, bool alertable) {
+  if (objects.empty() || objects.size() > kMaxWaitObjects) {
+    return WaitResult::Failed;
+  }
+  for (auto* object : objects) {
+    if (!object || !is_waitable_object(object->type())) {
       return WaitResult::Failed;
     }
   }
 
-  // Each distinct object is locked once, in address order, so two waits over
-  // overlapping sets cannot deadlock. A WaitAll naming the same object twice
-  // needs it satisfiable once and consumes it once; what the Xbox kernel does
-  // with duplicates has not been verified.
-  std::array<KernelObject*, kMaxWaitObjects> lock_order{};
-  for (std::size_t i = 0; i < objects.size(); ++i) lock_order[i] = objects[i].get();
-  const auto lock_end = lock_order.begin() + static_cast<std::ptrdiff_t>(objects.size());
-  std::sort(lock_order.begin(), lock_end, std::less<KernelObject*>{});
+  // Each distinct object once, so a WaitAll consumes a duplicate once and a
+  // wait registers once per object.
+  std::array<KernelObject*, kMaxWaitObjects> unique_objects{};
+  std::copy(objects.begin(), objects.end(), unique_objects.begin());
+  const auto unique_end = unique_objects.begin() + static_cast<std::ptrdiff_t>(objects.size());
+  std::sort(unique_objects.begin(), unique_end, std::less<KernelObject*>{});
   const std::span<KernelObject* const> distinct(
-      lock_order.begin(), std::unique(lock_order.begin(), lock_end));
+      unique_objects.begin(), std::unique(unique_objects.begin(), unique_end));
 
-  // Checks and consumes with every object's mutex held, so WaitAll takes all
-  // of its objects or none of them, and WaitAny takes exactly one: the
-  // lowest-indexed satisfiable object. Taking over an abandoned mutant makes
-  // the result Abandoned. As in the NT wait code the Xbox kernel derives
-  // from, a WaitAny reports the satisfying index with it and a WaitAll
-  // reports index 0 (STATUS_ABANDONED) whichever mutant was abandoned.
-  bool abandoned = false;
-  const auto try_satisfy = [&]() -> bool {
-    std::array<std::unique_lock<std::mutex>, kMaxWaitObjects> locks;
-    std::size_t locked = 0;
-    for (auto* object : distinct) {
-      if (auto* mutex = detail::WaitAccess::mutex(*object)) {
-        locks[locked++] = std::unique_lock(*mutex);
-      }
-    }
-    if (wait_all) {
-      for (auto* object : distinct) {
-        if (!detail::WaitAccess::can_satisfy(*object, waiting_thread_id)) return false;
-      }
-      for (auto* object : distinct) {
-        if (detail::WaitAccess::satisfy(*object, waiting_thread_id)) abandoned = true;
-      }
-      if (abandoned && signaled_index) *signaled_index = 0;
-      return true;
-    }
-    for (std::size_t i = 0; i < objects.size(); ++i) {
-      if (detail::WaitAccess::can_satisfy(*objects[i], waiting_thread_id)) {
-        abandoned = detail::WaitAccess::satisfy(*objects[i], waiting_thread_id);
-        if (signaled_index) *signaled_index = static_cast<std::uint32_t>(i);
-        return true;
-      }
-    }
-    return false;
+  const auto host_thread = std::this_thread::get_id();
+  const auto succeeded = [&](std::uint32_t index, bool abandoned) {
+    if (signaled_index && (!wait_all || abandoned)) *signaled_index = index;
+    return abandoned ? WaitResult::Abandoned : WaitResult::Success;
   };
-  const auto satisfied = [&] { return abandoned ? WaitResult::Abandoned : WaitResult::Success; };
 
   const bool infinite = timeout.count() < 0 || timeout.count() >= 0xFFFFFFFFll;
   const auto deadline =
@@ -259,42 +321,72 @@ WaitResult wait_for_multiple_objects(
   };
   if (terminating()) return WaitResult::Terminating;
 
-  // A wait that is satisfied at once, or has a zero timeout, never registers.
-  if (try_satisfy()) return satisfied();
-  if (const auto ended = alert_or_apc()) return *ended;
-  if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
-
-  // Registered on every object before the next check, so any change after
-  // that check wakes this block (see multi_wait_list.hpp). A KernelThread
-  // also registers on its own thread, so terminate(), a queued user APC and
-  // an alert wake it.
+  // One dispatcher critical section: the optional signal, the immediate
+  // check, and registration. A wait that is satisfied at once, ends for an
+  // alert or APC, or has a zero timeout, never registers. A satisfiable
+  // object has no waiter it could satisfy (a signal satisfies registered
+  // waits first), so taking it here takes nobody's signal. Once registered,
+  // the signal that makes the wait satisfiable satisfies it
+  // (detail::MultiWaitList::satisfy_waiters_locked()). A KernelThread also
+  // registers on its own thread, so terminate(), a queued user APC and an
+  // alert wake it.
   detail::MultiWaitBlock block;
-  for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
+  block.objects = objects;
+  block.distinct = distinct;
+  block.wait_all = wait_all;
+  block.thread_id = waiting_thread_id;
+  block.host_thread = host_thread;
   KernelObject* own_thread = nullptr;
-  if (self && std::find(distinct.begin(), distinct.end(), self) == distinct.end()) {
-    own_thread = self;
-    detail::WaitAccess::wait_list(*own_thread).add(&block);
-  }
-  struct Unregister {
-    std::span<KernelObject* const> objects;
-    KernelObject* own_thread;
-    detail::MultiWaitBlock* block;
-    ~Unregister() {
-      for (auto* object : objects) detail::WaitAccess::wait_list(*object).remove(block);
-      if (own_thread) detail::WaitAccess::wait_list(*own_thread).remove(block);
+  {
+    std::scoped_lock dispatch(detail::dispatcher_mutex());
+    if (signal && !(*signal)()) return WaitResult::Failed;
+    std::uint32_t index = 0;
+    bool abandoned = false;
+    if (detail::try_satisfy_wait(objects, distinct, wait_all, waiting_thread_id, host_thread,
+                                 index, abandoned)) {
+      return succeeded(index, abandoned);
     }
-  } unregister{distinct, own_thread, &block};
+    if (const auto ended = alert_or_apc()) return *ended;
+    if (!infinite && timeout.count() == 0) return WaitResult::Timeout;
+    for (auto* object : distinct) detail::WaitAccess::wait_list(*object).add(&block);
+    if (self && std::find(distinct.begin(), distinct.end(), self) == distinct.end()) {
+      own_thread = self;
+      detail::WaitAccess::wait_list(*own_thread).add(&block);
+    }
+  }
 
+  std::optional<WaitResult> outcome;
   while (true) {
     std::uint64_t observed = 0;
     {
       std::scoped_lock lock(block.mutex);
+      if (block.granted) break;
       observed = block.wakeups;
     }
-    if (terminating()) return WaitResult::Terminating;
-    if (try_satisfy()) return satisfied();
-    if (const auto ended = alert_or_apc()) return *ended;
-    if (!infinite && std::chrono::steady_clock::now() >= deadline) return WaitResult::Timeout;
+    if (terminating()) {
+      outcome = WaitResult::Terminating;
+      break;
+    }
+    {
+      // A thread object's termination is read, not signalled; take it here.
+      std::scoped_lock dispatch(detail::dispatcher_mutex());
+      std::uint32_t index = 0;
+      bool abandoned = false;
+      if (!block.granted &&
+          detail::try_satisfy_wait(objects, distinct, wait_all, waiting_thread_id, host_thread,
+                                   index, abandoned)) {
+        detail::grant(block, index, abandoned);
+        break;
+      }
+    }
+    if (const auto ended = alert_or_apc()) {
+      outcome = *ended;
+      break;
+    }
+    if (!infinite && std::chrono::steady_clock::now() >= deadline) {
+      outcome = WaitResult::Timeout;
+      break;
+    }
 
     std::unique_lock lock(block.mutex);
     const auto woken = [&] { return block.wakeups != observed; };
@@ -305,7 +397,18 @@ WaitResult wait_for_multiple_objects(
       (void)block.condition.wait_until(lock, deadline, woken);
     }
   }
+
+  // Unregistered under the dispatcher lock: a signal that satisfied this wait
+  // before then consumed its object for this waiter, so the wait reports it
+  // even if it was ending for another reason.
+  std::scoped_lock dispatch(detail::dispatcher_mutex());
+  for (auto* object : distinct) detail::WaitAccess::wait_list(*object).remove(&block);
+  if (own_thread) detail::WaitAccess::wait_list(*own_thread).remove(&block);
+  if (block.granted) return succeeded(block.index, block.abandoned);
+  return *outcome;
 }
+
+}  // namespace
 
 WaitResult delay_current_thread(std::chrono::milliseconds delay, bool alertable) {
   auto* self = KernelThread::current();

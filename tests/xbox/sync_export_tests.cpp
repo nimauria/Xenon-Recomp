@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "xenon/core/export_registry.hpp"
@@ -19,6 +20,7 @@
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/mutant.hpp"
+#include "xenon/kernel/object_description.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/kernel/semaphore.hpp"
@@ -558,6 +560,56 @@ void test_nt_signal_and_wait_signals_then_waits() {
   assert(bad_result.success && bad_cpu.gpr[3] != 0u);
 }
 
+// A stalled wait's report must name the object's last signaller however long
+// ago that was, so every guest signal is noted on the object itself, even
+// with diagnostic event recording off (AC6's main thread waited 42 s on a
+// handle whose last signal had long left the bounded event ring).
+void test_signals_are_noted_on_the_object_without_event_recording() {
+  namespace events = xenon::logging::events;
+  const bool was_enabled = events::enabled();
+  events::set_enabled(false);
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1u;  // SynchronizationEvent (auto-reset)
+  assert(f.invoke(0x0D1u, cpu).success && cpu.gpr[3] == 0u);
+  const auto handle = f.address_space->read32_be(handle_out);
+  kernel::HandleView view{};
+  assert(f.process->handle_table().lookup(handle, view) == kernel::KernelIoCode::Success);
+  const auto now = [] {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  assert(view.object->last_signal().count == 0u);
+  assert(kernel::describe_object_state(*view.object, now()) ==
+         "event (auto-reset) not signalled; never signalled through a recorded export");
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.lr = 0x821F4144u;
+  assert(f.invoke(0x0F6u, cpu, 7u).success && cpu.gpr[3] == 0u);  // NtSetEvent
+  auto note = view.object->last_signal();
+  assert(note.count == 1u && note.guest_thread_id == 7u && note.guest_caller == 0x821F4144u);
+  assert(std::string(note.source) == "NtSetEvent");
+  const auto text = kernel::describe_object_state(*view.object, now());
+  assert(text.rfind("event (auto-reset) signalled; last signalled by t7 (NtSetEvent from 0x821F4144)",
+                    0) == 0);
+  assert(text.find(", 1 signals") != std::string::npos);
+
+  // The signal half of NtSignalAndWaitForSingleObjectEx is noted too.
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.gpr[4] = handle;
+  cpu.lr = 0x821F58ACu;
+  assert(f.invoke(0x0FBu, cpu, 9u).success && cpu.gpr[3] == 0u);
+  note = view.object->last_signal();
+  assert(note.count == 2u && note.guest_thread_id == 9u &&
+         std::string(note.source) == "NtSignalAndWaitForSingleObjectEx");
+  events::set_enabled(was_enabled);
+}
+
 // I/O completion ports: packets come out in order with their key, APC
 // context, status and byte count; an empty port times out; a remove blocked
 // with no timeout ends when its thread is terminated.
@@ -660,6 +712,7 @@ int main() {
   test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();
+  test_signals_are_noted_on_the_object_without_event_recording();
   test_io_completion_ports();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";

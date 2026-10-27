@@ -1,6 +1,6 @@
 #include "xenon/kernel/timer.hpp"
 
-#include "xenon/kernel/wait_util.hpp"
+#include "xenon/kernel/wait.hpp"
 
 namespace xenon::kernel {
 
@@ -10,52 +10,49 @@ KernelTimer::KernelTimer(TimerType type)
 bool KernelTimer::set(std::chrono::milliseconds due_time,
                      std::optional<std::chrono::milliseconds> period,
                      TimerCallback callback) {
-  std::scoped_lock lock(mutex_);
-  
-  due_time_ = std::chrono::steady_clock::now() + due_time;
-  period_ = period;
-  callback_ = std::move(callback);
-  active_ = true;
-  signaled_ = false;
+  TimerCallback fired_callback;
+  {
+    std::scoped_lock lock(mutex_);
 
-  // due_time == 0 fires immediately and synchronously here. A nonzero
-  // due_time only arms due_time_/period_ above - the caller (the
-  // NtSetTimerEx export handler) is responsible for registering this timer
-  // with a kernel::TimerManager (see next_due_time()/fire()) so it actually
-  // fires later; KernelTimer itself owns no timer thread.
-  if (due_time.count() == 0) {
-    signaled_ = true;
-    condition_.notify_all();
-    multi_waiters_.notify();
-    if (callback_) {
-      callback_();
+    due_time_ = std::chrono::steady_clock::now() + due_time;
+    period_ = period;
+    callback_ = std::move(callback);
+    active_ = true;
+    signaled_ = false;
+
+    // due_time == 0 fires immediately and synchronously here. A nonzero
+    // due_time only arms due_time_/period_ above - the caller (the
+    // NtSetTimerEx export handler) is responsible for registering this timer
+    // with a kernel::TimerManager (see next_due_time()/fire()) so it actually
+    // fires later; KernelTimer itself owns no timer thread.
+    if (due_time.count() == 0) {
+      signaled_ = true;
+      multi_waiters_.satisfy_waiters_locked();
+      fired_callback = callback_;
     }
   }
-
+  // Outside the dispatcher lock, which the callback may need.
+  if (fired_callback) {
+    fired_callback();
+  }
   return true;
 }
 
 bool KernelTimer::cancel() {
   std::scoped_lock lock(mutex_);
-  
+
   if (!active_) {
     return false;
   }
 
   active_ = false;
   signaled_ = false;
-  condition_.notify_all();
   return true;
 }
 
 bool KernelTimer::wait_for(std::chrono::milliseconds timeout) {
-  std::unique_lock lock(mutex_);
-  
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return can_satisfy_locked(); })) {
-    return false;
-  }
-  satisfy_locked();
-  return true;
+  KernelObject* const self = this;
+  return wait_for_objects(std::span(&self, 1), false, timeout) == WaitResult::Success;
 }
 
 bool KernelTimer::is_signaled() const {
@@ -81,8 +78,7 @@ bool KernelTimer::fire() {
     }
 
     signaled_ = true;
-    condition_.notify_all();
-    multi_waiters_.notify();
+    multi_waiters_.satisfy_waiters_locked();
     callback_copy = callback_;
 
     if (period_) {
@@ -93,8 +89,8 @@ bool KernelTimer::fire() {
     }
   }
 
-  // Invoked outside the lock: a callback that touches this same KernelTimer
-  // (e.g. re-arming it) must not deadlock against mutex_.
+  // Invoked outside the dispatcher lock: a callback that touches a kernel
+  // object (e.g. re-arming this timer) must not deadlock against it.
   if (callback_copy) {
     callback_copy();
   }

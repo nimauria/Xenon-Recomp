@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -53,12 +54,39 @@ enum class WaitResult : std::uint32_t {
     std::uint32_t waiting_thread_id = 0,
     bool alertable = false);
 
+// The wait every other wait is built on, over raw objects in index order
+// (each must be waitable). Satisfied at once when it can be; otherwise the
+// wait registers on every object and is satisfied by the signal that makes
+// it satisfiable, ahead of any wait registered after it (see
+// multi_wait_list.hpp).
+[[nodiscard]] WaitResult wait_for_objects(std::span<KernelObject* const> objects, bool wait_all,
+                                          std::chrono::milliseconds timeout,
+                                          std::uint32_t* signaled_index = nullptr,
+                                          std::uint32_t waiting_thread_id = 0,
+                                          bool alertable = false);
+
+// NtSignalAndWaitForSingleObjectEx. `signal` runs with the dispatcher lock
+// held (use the objects' *_locked operations) and the caller's wait on
+// `object` is checked and registered in the same critical section, so no
+// thread can act on the signal - take a mutant it released, then set the
+// event this thread waits on - before this thread is waiting. Returns Failed
+// without waiting when `signal` returns false.
+[[nodiscard]] WaitResult signal_and_wait_for_object(const std::function<bool()>& signal,
+                                                    const std::shared_ptr<KernelObject>& object,
+                                                    std::chrono::milliseconds timeout,
+                                                    std::uint32_t waiting_thread_id = 0,
+                                                    bool alertable = false);
+
 // Sleeps the calling thread for `delay` (KeDelayExecutionThread). On a
 // KernelThread the sleep ends early, returning Terminating, if the thread is
 // terminated, or UserApc, if `alertable` and a user APC is queued for it;
 // otherwise it returns Success.
 [[nodiscard]] WaitResult delay_current_thread(std::chrono::milliseconds delay,
                                               bool alertable = false);
+
+// The waits currently registered on a waitable object (0 for any other):
+// for diagnostics and tests.
+[[nodiscard]] std::size_t waiter_count(KernelObject& object);
 
 // Helper to check if an object is waitable
 [[nodiscard]] bool is_waitable_object(ObjectType type);

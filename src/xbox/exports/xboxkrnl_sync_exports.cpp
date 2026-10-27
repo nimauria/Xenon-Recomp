@@ -407,13 +407,9 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
 // then immediately resets it (verified against the xenia-project/xenia
 // reference: XEvent::Pulse()).
 //
-// Real hardware's PulseEvent is documented by Microsoft as inherently
-// unreliable: a thread that has not yet reached the wait when the pulse
-// happens will never observe it, and this implementation's plain set()-
-// then-reset() has the same property for a thread that is mid-wakeup but
-// has not yet reacquired KernelEvent's internal lock to recheck its
-// predicate - that is real, spec-documented behavior to preserve, not a
-// race to engineer away with a generation counter no guest code relies on.
+// A thread that has not yet reached the wait when the pulse happens never
+// observes it; every wait already registered that the pulse can satisfy is
+// satisfied (KernelEvent::pulse()), as KePulseEvent does on NT.
 bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto previous_state_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
@@ -431,8 +427,7 @@ bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& co
 
   auto& event = static_cast<kernel::KernelEvent&>(*view.object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
-  event.set();
-  event.reset();
+  event.pulse();
   sync_events::record(EventKind::Signal, context, view.object.get(), handle, previous,
                       "NtPulseEvent");
   if (previous_state_ptr != 0u) {
@@ -742,11 +737,14 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
 // STATUS_USER_APC), r6 = unused by that same reference
 // implementation, r7 = PLARGE_INTEGER timeout (nullable) -> r3 = NTSTATUS.
 // Signals signal_handle (Event -> Set, Semaphore -> Release(1), Mutant ->
-// Release) then waits on wait_handle, exactly as the two-step
-// NtSetEvent/NtReleaseSemaphore/NtReleaseMutant + NtWaitForSingleObjectEx
-// sequence above would, but atomically from the guest's perspective (no
-// other thread can observe the signal without also being subject to this
-// thread's wait starting immediately after).
+// Release) then waits on wait_handle. As on NT, the signal and the start of
+// the wait are one dispatcher operation (kernel::signal_and_wait_for_object):
+// a thread woken by the signal, or one that takes a mutant it releases,
+// cannot signal the wait object before this thread is waiting on it. Titles
+// build condition variables from exactly this (AC6: release the lock mutant,
+// wait on an auto-reset event); done as two steps, the other thread's
+// SetEvent could land before this wait and be consumed by its own next wait.
+// Both handles are resolved before anything is signalled.
 bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& process,
                                                      ExportCallContext& context) {
   const auto signal_handle = static_cast<Handle>(context.cpu.gpr[3]);
@@ -760,34 +758,12 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
     context.cpu.gpr[3] = to_status(signal_lookup);
     return true;
   }
-
-  switch (signal_view.object->type()) {
-    case ObjectType::Event: {
-      static_cast<kernel::KernelEvent&>(*signal_view.object).set();
-      break;
-    }
-    case ObjectType::Semaphore: {
-      std::int32_t previous = 0;
-      if (!static_cast<kernel::KernelSemaphore&>(*signal_view.object).release(1, &previous)) {
-        context.cpu.gpr[3] = kStatusSemaphoreLimitExceeded;
-        return true;
-      }
-      break;
-    }
-    case ObjectType::Mutant: {
-      if (!static_cast<kernel::KernelMutant&>(*signal_view.object).release(context.thread_id)) {
-        context.cpu.gpr[3] = kStatusMutantNotOwned;
-        return true;
-      }
-      break;
-    }
-    default:
-      context.cpu.gpr[3] = status::ObjectTypeMismatch;
-      return true;
+  const auto signal_type = signal_view.object->type();
+  if (signal_type != ObjectType::Event && signal_type != ObjectType::Semaphore &&
+      signal_type != ObjectType::Mutant) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
   }
-  sync_events::record(EventKind::Signal, context, signal_view.object.get(), signal_handle, 0u,
-                      "NtSignalAndWaitForSingleObjectEx");
-
   HandleView wait_view{};
   const auto wait_lookup = process.handle_table().lookup(wait_handle, wait_view);
   if (wait_lookup != KernelIoCode::Success) {
@@ -800,10 +776,33 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
-  sync_events::record(EventKind::WaitBegin, context, wait_view.object.get(), wait_handle,
-                      sync_events::timeout_value(timeout), "NtSignalAndWaitForSingleObjectEx");
-  const auto result =
-      kernel::wait_for_single_object(wait_view.object, timeout, context.thread_id, alertable);
+  std::uint32_t signal_failure = 0;
+  // Runs with the dispatcher lock held.
+  const auto signal = [&]() -> bool {
+    auto& object = *signal_view.object;
+    if (signal_type == ObjectType::Event) {
+      static_cast<kernel::KernelEvent&>(object).set_locked();
+    } else if (signal_type == ObjectType::Semaphore) {
+      if (!static_cast<kernel::KernelSemaphore&>(object).release_locked(1)) {
+        signal_failure = kStatusSemaphoreLimitExceeded;
+        return false;
+      }
+    } else if (!static_cast<kernel::KernelMutant&>(object).release_locked(context.thread_id)) {
+      signal_failure = kStatusMutantNotOwned;
+      return false;
+    }
+    sync_events::record(EventKind::Signal, context, &object, signal_handle, 0u,
+                        "NtSignalAndWaitForSingleObjectEx");
+    sync_events::record(EventKind::WaitBegin, context, wait_view.object.get(), wait_handle,
+                        sync_events::timeout_value(timeout), "NtSignalAndWaitForSingleObjectEx");
+    return true;
+  };
+  const auto result = kernel::signal_and_wait_for_object(signal, wait_view.object, timeout,
+                                                         context.thread_id, alertable);
+  if (signal_failure != 0u) {
+    context.cpu.gpr[3] = signal_failure;
+    return true;
+  }
   if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
   sync_events::record(EventKind::WaitEnd, context, wait_view.object.get(), wait_handle,

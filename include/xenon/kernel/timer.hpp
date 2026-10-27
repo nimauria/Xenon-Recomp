@@ -62,8 +62,7 @@ class KernelTimer final : public KernelObject {
   }
 
   TimerType type_;
-  mutable std::mutex mutex_;
-  std::condition_variable condition_;
+  std::mutex& mutex_ = detail::dispatcher_mutex();
   bool signaled_{false};
   bool active_{false};
   std::chrono::steady_clock::time_point due_time_;

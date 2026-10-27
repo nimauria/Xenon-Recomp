@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "xenon/kernel/wait_util.hpp"
+#include "xenon/kernel/wait.hpp"
 
 namespace xenon::kernel {
 namespace {
@@ -45,22 +45,21 @@ KernelMutant::~KernelMutant() {
 
 bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout,
                            bool* abandoned) {
-  std::unique_lock lock(mutex_);
-
   // Already owned by this thread: satisfied at once, deepening the recursion.
   // Otherwise wait for the mutant to become available.
-  if (!wait_until_signaled(condition_, lock, timeout,
-                           [&] { return can_satisfy_locked(owner_thread_id); })) {
-    return false;
-  }
-  const bool took_abandoned = satisfy_locked(owner_thread_id);
-  if (abandoned) *abandoned = took_abandoned;
-  return true;
+  KernelObject* const self = this;
+  const auto result =
+      wait_for_objects(std::span(&self, 1), false, timeout, nullptr, owner_thread_id);
+  if (abandoned) *abandoned = result == WaitResult::Abandoned;
+  return result == WaitResult::Success || result == WaitResult::Abandoned;
 }
 
 bool KernelMutant::release(std::uint32_t owner_thread_id) {
   std::scoped_lock lock(mutex_);
+  return release_locked(owner_thread_id);
+}
 
+bool KernelMutant::release_locked(std::uint32_t owner_thread_id) {
   if (owner_thread_id_ != owner_thread_id || recursion_count_ == 0) {
     return false;  // Not owned by this thread
   }
@@ -69,8 +68,8 @@ bool KernelMutant::release(std::uint32_t owner_thread_id) {
   if (recursion_count_ == 0) {
     owner_thread_id_ = 0;
     owner_host_thread_ = {};
-    condition_.notify_one();
-    multi_waiters_.notify();
+    // Ownership passes straight to the oldest waiter.
+    multi_waiters_.satisfy_waiters_locked();
   }
 
   return true;
@@ -101,8 +100,7 @@ void KernelMutant::abandon_locked() noexcept {
   owner_thread_id_ = 0;
   owner_host_thread_ = {};
   recursion_count_ = 0;
-  condition_.notify_all();
-  multi_waiters_.notify();
+  multi_waiters_.satisfy_waiters_locked();
 }
 
 void abandon_mutants_owned_by_this_thread() noexcept {

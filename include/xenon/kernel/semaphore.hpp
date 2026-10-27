@@ -17,6 +17,10 @@ class KernelSemaphore final : public KernelObject {
   explicit KernelSemaphore(std::int32_t initial_count, std::int32_t maximum_count);
 
   [[nodiscard]] bool release(std::int32_t release_count, std::int32_t* previous_count = nullptr);
+  // As above, for a caller already holding the dispatcher lock
+  // (detail::dispatcher_mutex()), such as signal_and_wait_for_object().
+  [[nodiscard]] bool release_locked(std::int32_t release_count,
+                                    std::int32_t* previous_count = nullptr);
   [[nodiscard]] bool wait_for(std::chrono::milliseconds timeout);
   [[nodiscard]] std::int32_t count() const;
   [[nodiscard]] std::int32_t maximum_count() const noexcept { return maximum_count_; }
@@ -38,8 +42,7 @@ class KernelSemaphore final : public KernelObject {
     if (mirror_) mirror_->store(count_);
   }
 
-  mutable std::mutex mutex_;
-  std::condition_variable condition_;
+  std::mutex& mutex_ = detail::dispatcher_mutex();
   std::int32_t count_;
   std::int32_t maximum_count_;
   std::unique_ptr<SignalStateMirror> mirror_;

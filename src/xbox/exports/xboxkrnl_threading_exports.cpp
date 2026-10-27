@@ -419,9 +419,10 @@ bool ke_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& co
   }
   auto& event = static_cast<kernel::KernelEvent&>(*object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
-  // Release the current waiters, then reset - PulseEvent's documented semantics.
-  event.set();
-  event.reset();
+  // Releases the waits registered now, then leaves the event reset.
+  event.pulse();
+  sync_events::record(logging::events::EventKind::Signal, context, object.get(), header, previous,
+                      "KePulseEvent");
   context.cpu.gpr[3] = previous;
   return true;
 }

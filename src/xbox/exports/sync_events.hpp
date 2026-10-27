@@ -22,6 +22,10 @@ namespace xenon::xbox::sync_events {
 inline void record(logging::events::EventKind kind, const core::ExportCallContext& context,
                    const kernel::KernelObject* object, std::uint32_t guest_address,
                    std::uint32_t value, const char* source) {
+  // Kept on the object whether or not events are recorded: the stop report
+  // names an open wait's last signaller from it.
+  if (kind == logging::events::EventKind::Signal && object)
+    object->note_signal(context.thread_id, static_cast<std::uint32_t>(context.cpu.lr), source);
   if (!logging::events::enabled()) return;
   logging::events::Event event{};
   event.kind = kind;

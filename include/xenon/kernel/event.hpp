@@ -16,7 +16,14 @@ class KernelEvent final : public KernelObject {
   explicit KernelEvent(bool manual_reset = false, bool initial_state = false);
 
   void set();
+  // As above, for a caller already holding the dispatcher lock
+  // (detail::dispatcher_mutex()), such as signal_and_wait_for_object().
+  void set_locked();
   void reset();
+  // Releases the waits it can satisfy now (every one for a manual-reset
+  // event, the oldest for an auto-reset one) and leaves the event
+  // unsignalled (NtPulseEvent/KePulseEvent).
+  void pulse();
   [[nodiscard]] bool signaled() const;
   // True for a notification (manual-reset) event, false for a synchronization
   // (auto-reset) event - EVENT_BASIC_INFORMATION's EventType is the inverse.
@@ -32,7 +39,8 @@ class KernelEvent final : public KernelObject {
 
  private:
   friend struct detail::WaitAccess;
-  // Caller holds mutex_. A satisfied wait consumes an auto-reset event.
+  // Caller holds the dispatcher lock (mutex_). A satisfied wait consumes an
+  // auto-reset event.
   [[nodiscard]] bool can_satisfy_locked() const noexcept { return signaled_; }
   void satisfy_locked() noexcept {
     if (manual_reset_) return;
@@ -44,8 +52,7 @@ class KernelEvent final : public KernelObject {
   }
 
   bool manual_reset_{};
-  mutable std::mutex mutex_{};
-  std::condition_variable condition_{};
+  std::mutex& mutex_ = detail::dispatcher_mutex();
   bool signaled_{};
   std::unique_ptr<SignalStateMirror> mirror_;
   detail::MultiWaitList multi_waiters_;

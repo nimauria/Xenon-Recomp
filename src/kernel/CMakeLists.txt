@@ -3,6 +3,7 @@
 if(XENON_ENABLE_KERNEL)
   add_library(xenon_kernel STATIC
     handles/object.cpp
+    handles/object_description.cpp
     handles/handle_table.cpp
     handles/io_request.cpp
     handles/file_object.cpp
