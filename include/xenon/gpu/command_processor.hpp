@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -47,6 +48,11 @@ class CommandProcessor {
     // Ring-level waits that could not be satisfied yet and were suspended (the ring
     // read index stays at the wait packet and execution resumes there later).
     std::uint64_t wait_stalls{};
+    // How long parked waits lasted, from the drain that parked to the one
+    // that found the condition true (host steady-clock nanoseconds).
+    std::uint64_t parks_resumed{};
+    std::uint64_t parked_ns{};
+    std::uint64_t longest_park_ns{};
     // COHER_STATUS_HOST requests completed by a WAIT_REG_MEM poll.
     std::uint64_t coherency_syncs{};
     // SCRATCH_REGn writes mirrored to memory at SCRATCH_ADDR + n*4.
@@ -251,6 +257,7 @@ class CommandProcessor {
   WaitStallInfo last_wait_stall_{};
   // A GpuWaitParked event was recorded for last_wait_stall_ and no resume yet.
   bool wait_park_recorded_{false};
+  std::chrono::steady_clock::time_point park_started_{};
 
   // Where a suspended wait sits inside nested indirect buffers, so the next drain
   // resumes AT the wait rather than replaying the buffer from its start.

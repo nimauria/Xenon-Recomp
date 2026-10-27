@@ -257,6 +257,10 @@ void XenonSession::report_stop_diagnostics() {
                   << " unexecuted=" << gpu_stats.unexecuted_packets
                   << " drains=" << gpu_stats.ring_drains
                   << " incomplete=" << gpu_stats.incomplete_ring_packets
+                  << " parks=" << gpu_stats.parks_resumed << " parked_ms="
+                  << gpu_stats.parked_ns / 1'000'000 << " longest_park_ms="
+                  << gpu_stats.longest_park_ns / 1'000'000
+                  << " guest_swaps=" << kernel_process_->gpu_front_buffer().generation
                   << " ring(read=" << ring.read_index << " write=" << ring.write_index
                   << " cap=" << ring.capacity_dwords << ")"
                   << " front_buffer=0x" << std::hex << front.base_address << std::dec << " "

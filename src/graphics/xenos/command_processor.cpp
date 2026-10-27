@@ -651,6 +651,13 @@ void CommandProcessor::execute_wait_reg_mem(
           last_wait_stall_.address == payload[1]) {
         record_gpu_wait_event(logging::events::EventKind::GpuWaitResumed, payload[1], value);
         wait_park_recorded_ = false;
+        const auto parked = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - park_started_)
+                .count());
+        ++stats_.parks_resumed;
+        stats_.parked_ns += parked;
+        stats_.longest_park_ns = (std::max)(stats_.longest_park_ns, parked);
       }
       return;
     }
@@ -674,6 +681,7 @@ void CommandProcessor::execute_wait_reg_mem(
       record_gpu_wait_event(logging::events::EventKind::GpuWaitParked, stall.address,
                             stall.reference);
       wait_park_recorded_ = true;
+      park_started_ = std::chrono::steady_clock::now();
     }
     last_wait_stall_ = stall;
     throw WaitStalled{};
