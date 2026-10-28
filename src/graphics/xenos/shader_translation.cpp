@@ -1216,14 +1216,19 @@ void main(triangle XenonVertex input[3],
   if (d01 >= d12 && d01 >= d20) { a=input[0]; b=input[1]; c=input[2]; }
   else if (d12 >= d20) { a=input[1]; b=input[2]; c=input[0]; }
   else { a=input[2]; b=input[0]; c=input[1]; }
-  stream.Append(a);
+  // A four-vertex strip rasterizes (v0,v1,v2) and (v1,v2,v3): the shared
+  // v1-v2 edge must be the A-B diagonal or one corner of the rectangle is
+  // never covered. C,A,B is a cyclic rotation of the input order in every
+  // case above, so the title's winding (and therefore culling) is kept.
+  XenonVertex d = xenon_rectangle_corner(a,b,c);
   stream.Append(c);
+  stream.Append(a);
   stream.Append(b);
-  stream.Append(xenon_rectangle_corner(a,b,c));
+  stream.Append(d);
   stream.RestartStrip();
 }
 )hlsl";
-  result.source_hash = hash_text("xenon.rectangle-list.geometry.v1");
+  result.source_hash = hash_text("xenon.rectangle-list.geometry.v2");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
   return result;

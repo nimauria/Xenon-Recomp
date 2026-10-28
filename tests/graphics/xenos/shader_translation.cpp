@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 #include "xenon/gpu/dxc_shader_compiler.hpp"
 #include "xenon/gpu/shader_translation.hpp"
@@ -362,6 +365,70 @@ void test_vertex_shader_texture_fetch_uses_explicit_lod() {
   assert(compiler.compile(lowered, spirv).succeeded);
 }
 
+struct Point2 {
+  double x, y;
+};
+
+double signed_area(Point2 p, Point2 q, Point2 r) {
+  return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+}
+
+bool strictly_inside(Point2 p, Point2 a, Point2 b, Point2 c) {
+  const double s0 = signed_area(a, b, p), s1 = signed_area(b, c, p),
+               s2 = signed_area(c, a, p);
+  return (s0 > 0 && s1 > 0 && s2 > 0) || (s0 < 0 && s1 < 0 && s2 < 0);
+}
+
+// Regression (AC6 logo fade): the geometry shader emitted the strip A,C,B,D,
+// whose shared v1-v2 edge C-B is a side, not the diagonal, so a corner wedge of
+// every rectangle stayed undrawn. Model the emitted strip on the CPU: every
+// interior point must be covered exactly once, with the input's winding.
+bool rectangle_strip_covers(const std::vector<char>& order,
+                            const std::array<Point2, 3>& input) {
+  // The shader's own vertex classification: A-B is the longest edge.
+  const auto d2 = [](Point2 p, Point2 q) {
+    return (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y);
+  };
+  const double d01 = d2(input[0], input[1]), d12 = d2(input[1], input[2]),
+               d20 = d2(input[2], input[0]);
+  Point2 a, b, c;
+  if (d01 >= d12 && d01 >= d20) { a = input[0]; b = input[1]; c = input[2]; }
+  else if (d12 >= d20) { a = input[1]; b = input[2]; c = input[0]; }
+  else { a = input[2]; b = input[0]; c = input[1]; }
+  const Point2 d{a.x + b.x - c.x, a.y + b.y - c.y};
+  std::array<Point2, 4> strip{};
+  if (order.size() != 4u) return false;
+  for (std::size_t i = 0; i < 4; ++i) {
+    switch (order[i]) {
+      case 'a': strip[i] = a; break;
+      case 'b': strip[i] = b; break;
+      case 'c': strip[i] = c; break;
+      case 'd': strip[i] = d; break;
+      default: return false;
+    }
+  }
+  // D3D/Vulkan strips: (v0,v1,v2), then (v2,v1,v3) for the odd triangle.
+  const double input_winding = signed_area(input[0], input[1], input[2]);
+  if (signed_area(strip[0], strip[1], strip[2]) * input_winding <= 0) return false;
+  if (signed_area(strip[2], strip[1], strip[3]) * input_winding <= 0) return false;
+
+  double min_x = a.x, max_x = a.x, min_y = a.y, max_y = a.y;
+  for (const auto& p : {b, c, d}) {
+    min_x = std::min(min_x, p.x); max_x = std::max(max_x, p.x);
+    min_y = std::min(min_y, p.y); max_y = std::max(max_y, p.y);
+  }
+  for (int iy = 1; iy < 64; ++iy) {
+    for (int ix = 1; ix < 64; ++ix) {
+      const Point2 p{min_x + (max_x - min_x) * (ix + 0.37) / 64.0,
+                     min_y + (max_y - min_y) * (iy + 0.21) / 64.0};
+      const int covered = int(strictly_inside(p, strip[0], strip[1], strip[2])) +
+                          int(strictly_inside(p, strip[1], strip[2], strip[3]));
+      if (covered != 1) return false;
+    }
+  }
+  return true;
+}
+
 void test_rectangle_list_geometry_shader() {
   using namespace xenon::gpu;
   const auto lowered = make_rectangle_list_geometry_shader();
@@ -369,6 +436,22 @@ void test_rectangle_list_geometry_shader() {
   assert(lowered.profile == "gs_6_0");
   assert(lowered.hlsl.find("d01 >= d12") != std::string::npos);
   assert(lowered.hlsl.find("maxvertexcount(4)") != std::string::npos);
+  // The emitted strip, as the shader appends it.
+  std::vector<char> order;
+  for (std::size_t at = lowered.hlsl.find("stream.Append("); at != std::string::npos;
+       at = lowered.hlsl.find("stream.Append(", at + 1)) {
+    order.push_back(lowered.hlsl[at + std::strlen("stream.Append(")]);
+    assert(lowered.hlsl[at + std::strlen("stream.Append(") + 1] == ')');
+  }
+  // Full-screen rectangle in each vertex rotation (the longest edge lands on
+  // every classification branch), plus a non-square, off-center one.
+  const std::array<Point2, 3> tl_tr_bl{{{-1, 1}, {1, 1}, {-1, -1}}};
+  assert(rectangle_strip_covers(order, tl_tr_bl));
+  assert(rectangle_strip_covers(order, {tl_tr_bl[1], tl_tr_bl[2], tl_tr_bl[0]}));
+  assert(rectangle_strip_covers(order, {tl_tr_bl[2], tl_tr_bl[0], tl_tr_bl[1]}));
+  assert(rectangle_strip_covers(order, {{{0.25, -0.5}, {0.25, 0.75}, {-0.6, -0.5}}}));
+  // The previous A,C,B,D strip shares side C-B and leaves a corner wedge.
+  assert(!rectangle_strip_covers({'a', 'c', 'b', 'd'}, tl_tr_bl));
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
   ShaderCompileOptions spirv{};
