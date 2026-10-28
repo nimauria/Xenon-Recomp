@@ -468,6 +468,31 @@ int main() {
     assert(sum == vec_a[i] + vec_b[i]);
   }
 
+  // Regression: vmsum3fp128 must dot vA with vB, as generated code does. The
+  // interpreter passed (vA, vB, none) to a semantic that dots its second and
+  // third operands, so every interpreted dot product came out zero.
+  constexpr GuestAddress kVecDot = kDataPage + 0x230u;
+  write_instruction(memory, kCode + 0x900u, 0x7C2018CEu);  // lvx v1, 0, r3  (r3 = kVecA)
+  write_instruction(memory, kCode + 0x904u, 0x7C4020CEu);  // lvx v2, 0, r4  (r4 = kVecB)
+  write_instruction(memory, kCode + 0x908u, 0x14611190u);  // vmsum3fp128 v3, v1, v2
+  write_instruction(memory, kCode + 0x90Cu, 0x7C6029CEu);  // stvx v3, 0, r5 (r5 = kVecDot)
+  write_instruction(memory, kCode + 0x910u, 0x4E800020u);  // blr
+  DynamicFallbackExecutor dot_fallback;
+  ExecutionContext dot_context(state, memory, runtime);
+  dot_fallback.bind(dot_context);
+  state = {};
+  state.gpr[3] = kVecA;
+  state.gpr[4] = kVecB;
+  state.gpr[5] = kVecDot;
+  state.lr = kReturn;
+  const auto dot_result = dot_context.try_dynamic_fallback(kCode + 0x900u, CompiledLookupKind::Call);
+  assert(dot_result.handled);
+  assert(dot_result.result.reason == FlowReason::Return);
+  for (unsigned i = 0; i < 4; ++i) {
+    // 1*5 + 2*6 + 3*7, splatted to every lane.
+    assert(std::bit_cast<float>(memory.read32_be(kVecDot + i * 4u)) == 38.0f);
+  }
+
   std::cout << "dynamic fallback tests passed\n";
   return 0;
 }

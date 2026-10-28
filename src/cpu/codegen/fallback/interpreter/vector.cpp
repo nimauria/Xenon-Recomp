@@ -142,6 +142,20 @@ namespace xenon::cpu::fallback {
     return true;
   }
 
+  // vmsum3fp128/vmsum4fp128 take (old vD, vA, vB) and dot vA with vB, as
+  // lifter/vector.cpp wires them for generated code. Routing them through the
+  // generic (vA, vB, none) set below dotted vB with an empty vector, so every
+  // interpreted dot product was zero.
+  if (m.starts_with("vmsum3fp") || m.starts_with("vmsum4fp")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, state.vr[reg],
+                                        state.vr[vector_va(i)], state.vr[vector_vb(i)],
+                                        Vector128{});
+    return true;
+  }
+
   if (m.starts_with("vsum") || m.starts_with("vmsum")) {
     const auto semantic = vector_semantic_for(m);
     if (!semantic) return false;
