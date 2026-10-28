@@ -254,7 +254,9 @@ void GuestMemoryMirror::prepare_shader_access(VkCommandBuffer command,
   barrier.srcAccessMask =
       (shader_read_state_ ? VK_ACCESS_2_MEMORY_READ_BIT : 0) |
       (shader_write_state_ ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0);
-  barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+  // GPU resolves write the mirror from compute.
+  barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                         VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
   barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT |
                           (writable ? VK_ACCESS_2_SHADER_WRITE_BIT : 0);

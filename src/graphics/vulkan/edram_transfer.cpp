@@ -32,7 +32,7 @@ bool EdramColorTransfer::create_layouts(VkDevice device) {
   if (pipeline_layout_) return true;
   device_ = device;
   const VkDescriptorSetLayoutBinding binding{16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
-                                             VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                                             RenderTargetImage::kSampledSourceStages, nullptr};
   VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   set_info.bindingCount = 1;
   set_info.pBindings = &binding;

@@ -55,6 +55,7 @@
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/logging/logger.hpp"
@@ -96,6 +97,8 @@ class BackendCore {
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
   //   bool record_draw(const DrawRecording&, bool& record_failed);
+  //   bool gpu_color_resolve(RenderTargetImage&, const GpuResolveConstants&);
+  //   bool gpu_color_clear(RenderTargetImage&, const GpuClearConstants&);
   //   bool presentation_srgb_target() const;
   //   PresentStatus present_scanout(const ScanoutConstants&);
   //   bool capture_scanout_image(const ScanoutConstants&, PreparedPresentationFrame&);
@@ -575,6 +578,24 @@ class BackendCore {
     const auto& source = *found->second;
     return &source != &requested && source.guest_format() == requested.guest_format() &&
            edram_direct_transfer_supported(source.surface(), requested.surface(), tiles);
+  }
+
+  // The native color image owning every EDRAM tile `region` of `surface`
+  // covers, when one image owns them all and holds them whole; null when
+  // any is canonical or the tiles are split between owners.
+  RenderTargetImage* single_color_owner(const EdramSurfaceLayout& surface,
+                                        const EdramSurfaceRegion& region) const {
+    const auto tiles = covered_edram_tiles(surface, region);
+    if (tiles.empty()) return nullptr;
+    const auto owner = edram_ownership.owner(tiles.front());
+    if (owner == kCanonicalEdramOwner) return nullptr;
+    for (const auto tile : tiles)
+      if (edram_ownership.owner(tile) != owner) return nullptr;
+    const auto found = owner_render_targets.find(owner);
+    if (found == owner_render_targets.end() || !found->second) return nullptr;
+    if (!edram_direct_transfer_supported(found->second->surface(), surface, tiles))
+      return nullptr;
+    return found->second;
   }
 
   bool direct_color_transfer(EdramOwnerId previous, RenderTargetImage& requested,

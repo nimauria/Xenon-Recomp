@@ -238,12 +238,16 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
   assert(backend.realized_render_target_count() == 1);
 
   // Resolve the real color target and request the Xenos post-copy color clear.
-  // This forces the native color owner back through canonical EDRAM, then
-  // modifies only the resolve region and leaves that region canonical.
+  // The native owner holds every tile, so both run on the GPU in that image:
+  // the resolved words reach guest memory, and the clear reaches EDRAM once
+  // the owner hands its tiles back. Only the resolve region is cleared.
+  const auto gpu_resolves = backend.performance_counters().gpu_resolves;
   issue_color_resolve(backend, kColorResolveDestination, true);
   assert_backend_ok(backend, "color resolve and clear");
+  assert(backend.performance_counters().gpu_resolves == gpu_resolves + 1u);
   assert(resolved_word_at(memory, kColorResolveDestination, 0, 0) ==
          0xA5000000u);
+  assert(backend.make_edram_canonical());
   assert(read_edram_sample(edram, color_surface, 0, 0)[0] == kColorClear);
   assert(read_edram_sample(edram, color_surface, 15, 15)[0] == kColorClear);
   assert(read_edram_sample(edram, color_surface, 16, 0)[0] == 0xA5000010u);
@@ -369,6 +373,103 @@ void run_resolve_without_a_matching_render_target(Backend& backend,
   std::cout << name << " resolve without a matching render target: ok\n";
 }
 
+// AC6's frame: a scene drawn at 640x360 with 4x MSAA is resolved as a
+// 1280x720 single-sample surface over the same EDRAM, converted, byte
+// swapped and cleared. The resolve runs on the GPU straight out of the MSAA
+// image: canonical EDRAM is not touched until the owner hands its tiles back,
+// guest memory gets the converted words, and the clear lands in the image.
+template <typename Backend>
+void run_gpu_resolve_of_msaa_alias(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kMsaaPitch = 80;   // pixels, 4x MSAA
+  constexpr std::uint32_t kMsaaHeight = 16;
+  constexpr std::uint32_t kViewPitch = 160;  // the same samples as 1x pixels
+  constexpr std::uint32_t kViewHeight = 32;
+  constexpr std::uint32_t kResolveRight = 96;
+  constexpr std::uint32_t kDestination = 0x00300000u;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  const std::array<float, 6> rectangle{-0.5f, -0.5f, float(kResolveRight) - 0.5f,
+                                       -0.5f, -0.5f, float(kViewHeight) - 0.5f};
+  write_guest_bytes(memory, kResolveVertices, rectangle.data(), sizeof(rectangle));
+  Edram edram;
+  edram.reset();
+  const EdramSurfaceLayout view{kSurfaceBaseTile, kViewPitch, kViewHeight,
+                                MsaaSamples::X1, false, false};
+  const auto seeded = [](std::uint32_t x, std::uint32_t y) {
+    return 0xC3000000u | (y << 8u) | x;  // R = x, G = y, B = 0, A = 0xC3
+  };
+  for (std::uint32_t y = 0; y < kViewHeight; ++y)
+    for (std::uint32_t x = 0; x < kViewPitch; ++x)
+      assert(write_edram_sample(edram, view, x, y, {seeded(x, y), 0u}));
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+
+  const auto set_surface = [&](std::uint32_t pitch, std::uint32_t height, std::uint32_t msaa) {
+    write_register(backend, 0x2000, pitch | (msaa << 16u));
+    write_register(backend, 0x200E, 0u);
+    write_register(backend, 0x200F, pitch | (height << 16u));
+    write_register(backend, 0x2081, 1u << 31u);
+    write_register(backend, 0x2082, pitch | (height << 16u));
+    write_register(backend, 0x2001,
+                   kSurfaceBaseTile |
+                       (static_cast<std::uint32_t>(ColorRenderTargetFormat::R8G8B8A8) << 16u));
+  };
+  // The 4x MSAA scene takes the tiles.
+  set_surface(kMsaaPitch, kMsaaHeight, 2u);
+  write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::ColorDepth));
+  write_register(backend, 0x2104, 0xFu);
+  write_register(backend, 0x2200, 0u);
+  issue_dummy_draw(backend);
+  assert_backend_ok(backend, "4x MSAA owner");
+
+  // Resolve it as the 1x surface: Convert to k_8_8_8_8 with red/blue swapped,
+  // 8-in-32 endian, then clear.
+  const auto before = backend.performance_counters().gpu_resolves;
+  set_surface(kViewPitch, kViewHeight, 0u);
+  set_resolve_fetch(backend);
+  write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::Copy));
+  write_register(backend, 0x2318,
+                 (1u << 8u) | (static_cast<std::uint32_t>(CopyCommand::Convert) << 20u));
+  write_register(backend, 0x2319, kDestination);
+  write_register(backend, 0x231A, kViewPitch | (kViewHeight << 16u));
+  write_register(backend, 0x231B,
+                 static_cast<std::uint32_t>(Endian128::Swap8In32) | (6u << 7u) | (1u << 24u));
+  write_register(backend, 0x231E, kColorClear);
+  write_register(backend, 0x231F, 0u);
+  issue_dummy_draw(backend);
+  assert_backend_ok(backend, "GPU resolve");
+  if (backend.performance_counters().gpu_resolves != before + 1u) {
+    std::cerr << name << ": the resolve went through canonical EDRAM, not the GPU\n";
+    assert(false);
+  }
+  // No flush happened: canonical EDRAM still has what was seeded.
+  assert(read_edram_sample(edram, view, 0, 0)[0] == seeded(0, 0));
+
+  for (std::uint32_t y = 0; y < kViewHeight; ++y) {
+    for (std::uint32_t x = 0; x < kResolveRight; ++x) {
+      const auto swapped = (seeded(x, y) & 0xFF00FF00u) | (x << 16u);  // B = x, R = 0
+      const auto expected = ((swapped & 0xFFu) << 24u) | ((swapped & 0xFF00u) << 8u) |
+                            ((swapped >> 8u) & 0xFF00u) | (swapped >> 24u);
+      const auto word = read_guest_word(
+          memory, kDestination + static_cast<std::uint32_t>(tiled_offset_2d(x, y, kViewPitch, 4)));
+      if (word != expected) {
+        std::cerr << name << " GPU resolve wrote 0x" << std::hex << word << " at (" << std::dec
+                  << x << ',' << y << "), expected 0x" << std::hex << expected << std::dec << '\n';
+        assert(false);
+      }
+    }
+  }
+
+  // The clear covers the rectangle's samples only; the rest keep the scene.
+  assert(backend.make_edram_canonical());
+  for (const auto [x, y] : {std::pair{0u, 0u}, std::pair{95u, 31u}, std::pair{40u, 17u}})
+    assert(read_edram_sample(edram, view, x, y)[0] == kColorClear);
+  for (const auto [x, y] : {std::pair{96u, 0u}, std::pair{159u, 31u}})
+    assert(read_edram_sample(edram, view, x, y)[0] == seeded(x, y));
+  backend.end_submission();
+  std::cout << name << " GPU resolve of a 4x MSAA alias: ok\n";
+}
+
 // Two native color images of one format over the same EDRAM tile: the second
 // takes the tile from the first on the GPU (EdramColorTransfer) rather than
 // through canonical EDRAM, and resolving it yields exactly the EDRAM words the
@@ -464,6 +565,9 @@ int main() {
     xenon::gpu::vulkan::Backend transfer;
     assert(transfer.initialize({.enable_validation = false}));
     run_direct_color_transfer(transfer, "Vulkan");
+    xenon::gpu::vulkan::Backend alias;
+    assert(alias.initialize({.enable_validation = false}));
+    run_gpu_resolve_of_msaa_alias(alias, "Vulkan");
     ran_backend = true;
   }
 #endif
@@ -487,6 +591,9 @@ int main() {
     xenon::gpu::d3d12::Backend transfer;
     assert(transfer.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
     run_direct_color_transfer(transfer, "D3D12");
+    xenon::gpu::d3d12::Backend alias;
+    assert(alias.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+    run_gpu_resolve_of_msaa_alias(alias, "D3D12");
     ran_backend = true;
   }
 #endif

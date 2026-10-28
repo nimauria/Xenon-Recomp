@@ -16,6 +16,7 @@
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/depth_target.hpp"
 #include "xenon/gpu/d3d12/edram_transfer.hpp"
+#include "xenon/gpu/d3d12/gpu_resolve.hpp"
 #include "xenon/gpu/d3d12/guest_memory_mirror.hpp"
 #include "xenon/gpu/d3d12/pipeline.hpp"
 #include "xenon/gpu/d3d12/presentation.hpp"
@@ -79,6 +80,18 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   std::unordered_map<std::uint64_t, std::unique_ptr<RenderTargetImage>> dummy_render_targets{};
   EdramColorTransfer edram_color_transfer{};
+  GpuResolver gpu_resolver{};
+
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
+    if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
   ScanoutRenderer scanout{};
 
   bool presentation_srgb_target() const { return false; }

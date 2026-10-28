@@ -69,9 +69,12 @@ class RenderTargetImage {
     return surface_;
   }
   void transition_to_color_attachment(VkCommandBuffer command) noexcept;
-  // A descriptor set of `set_layout` (one sampled image at binding 16) holding
-  // this image in SHADER_READ_ONLY_OPTIMAL, created on first use; GPU-side
-  // EDRAM transfers read the image through it. `set_layout` must stay the same.
+  // A descriptor set of `set_layout` (one sampled image at binding 16, with
+  // kSampledSourceStages) holding this image in SHADER_READ_ONLY_OPTIMAL,
+  // created on first use; EDRAM transfers and GPU resolves read the image
+  // through it, so every caller's layout must be defined exactly that way.
+  static constexpr VkShaderStageFlags kSampledSourceStages =
+      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
   [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 

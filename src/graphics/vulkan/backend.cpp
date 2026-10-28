@@ -16,6 +16,7 @@
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/depth_target.hpp"
 #include "xenon/gpu/vulkan/edram_transfer.hpp"
+#include "xenon/gpu/vulkan/gpu_resolve.hpp"
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
 #include "xenon/gpu/vulkan/pipeline.hpp"
 #include "xenon/gpu/vulkan/presentation.hpp"
@@ -77,6 +78,18 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     (void)queue.wait_idle();
   }
   EdramColorTransfer edram_color_transfer{};
+  GpuResolver gpu_resolver{};
+
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
+    if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
   ScanoutRenderer scanout{};
 
   bool presentation_srgb_target() const { return presentation.srgb(); }

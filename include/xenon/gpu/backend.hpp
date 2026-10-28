@@ -39,6 +39,9 @@ struct GpuPerformanceCounters {
   // Tile sets handed from one native image to another on the GPU, without
   // a round trip through canonical EDRAM.
   std::uint64_t direct_edram_transfers{};
+  // Color resolves done on the GPU out of the image owning their tiles,
+  // without flushing it to canonical EDRAM.
+  std::uint64_t gpu_resolves{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent

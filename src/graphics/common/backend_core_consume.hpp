@@ -269,21 +269,51 @@ void BackendCore<Derived, Api>::consume_resolve(
   }
   // On Xenos a resolve reads EDRAM itself, whatever last wrote it: a draw
   // through another view of the same tiles, a clear, or nothing at all.
-  // With no native image of this exact surface, whichever images own the
-  // rectangle's tiles return them to canonical EDRAM and the resolve reads
-  // them there. Failing the resolve instead left AC6's front buffer
-  // unwritten, and the screen black.
   const EdramSurfaceLayout canonical_surface{
       target.base_tile, state.raster.surface_pitch,
       static_cast<std::uint32_t>(rectangle.bottom), samples,
       color_render_target_is_64bpp(format), false};
   const EdramSurfaceRegion resolve_region{rectangle.left, rectangle.top,
                                           rectangle.right, rectangle.bottom};
-  if (source) {
-    if (!acquire_color_ownership(source_key, *source, source->surface())) return;
-  } else if (!make_region_canonical(canonical_surface, resolve_region)) {
-    return;
+  if (source && !acquire_color_ownership(source_key, *source, source->surface())) return;
+  // When one native image owns every tile, the resolve runs on the GPU out of
+  // that image, through the EDRAM mapping when it is another view of the
+  // tiles (AC6 resolves its 640x360 4x MSAA scene as a 1280x720 surface).
+  // Nothing is flushed to canonical EDRAM or read back to convert.
+  if (auto* owner = source ? source : single_color_owner(canonical_surface, resolve_region)) {
+    const auto gpu = plan_gpu_color_resolve(resolve_plan, format, canonical_surface,
+                                            owner->surface(), owner->host_msaa(),
+                                            owner->guest_format());
+    GpuClearConstants clear{};
+    if (gpu.valid && (!state.copy.color_clear_enabled ||
+                      plan_gpu_color_clear(resolve_plan, format, canonical_surface,
+                                           owner->surface(), owner->host_msaa(), clear))) {
+      // Bytes of the touched pages outside the rectangle keep their CPU
+      // values; the pass writes the rectangle's pixels over them.
+      if (!mirror.synchronize_range(gpu.range_address, gpu.range_size,
+                                    memory::GpuRangeUsage::RenderReadback)) {
+        error = mirror.error();
+        return;
+      }
+      if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
+      mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+      if (state.copy.color_clear_enabled && !self().gpu_color_clear(*owner, clear)) return;
+      // Guest code may read what it resolved, and it reads CPU memory.
+      if (!mirror.make_cpu_visible(gpu.range_address, gpu.range_size,
+                                   memory::GpuRangeUsage::RenderReadback)) {
+        error = mirror.error();
+        return;
+      }
+      ++performance.gpu_resolves;
+      // A depth clear sets its error itself; the color resolve is done.
+      (void)clear_depth_resolve_region(state, rectangle, samples);
+      return;
+    }
   }
+  // Otherwise whichever images own the rectangle's tiles return them to
+  // canonical EDRAM and the resolve reads them there. Failing the resolve
+  // instead left AC6's front buffer unwritten, and the screen black.
+  if (!source && !make_region_canonical(canonical_surface, resolve_region)) return;
   // One guest sample of the rectangle, in the native host color layout a
   // render target readback has.
   const auto read_sample = [&](std::uint32_t sample, std::vector<std::byte>& pixels,
