@@ -120,9 +120,10 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
   if (instruction.kind == ShaderInstructionKind::VertexFetch) {
     const auto& fetch = instruction.vertex_fetch;
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          uint source_index = asuint(r[(" << unsigned(fetch.source_register);
+        << "          uint source_index = (uint)floor(r[(" << unsigned(fetch.source_register);
     if (fetch.source_relative) out << " + ar";
-    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "]);\n"
+    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "] + "
+        << (fetch.index_rounded ? "0.5" : "0.0") << ");\n"
         << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
         << ", " << unsigned(fetch.fetch_constant_select) << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
         << fetch.offset_dwords << ", " << unsigned(fetch.data_format) << ", "

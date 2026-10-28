@@ -233,6 +233,10 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
     for (const auto& diagnostic : lowered.diagnostics) std::cerr << diagnostic << '\n';
   }
   assert(lowered.complete);
+  assert(lowered.hlsl.find(
+             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.0);") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("source_index = asuint") == std::string::npos);
   assert(lowered.hlsl.find("xenon_vertex_fetch(5, 2, source_index") != std::string::npos);
   assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
          std::string::npos);
@@ -247,6 +251,12 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
 
   shader.instructions[0].vertex_fetch.data_format = 17;  // 11_11_10
   assert(HlslShaderLowerer::lower(shader).complete);
+  shader.instructions[0].vertex_fetch.index_rounded = true;
+  const auto rounded = HlslShaderLowerer::lower(shader);
+  assert(rounded.complete);
+  assert(rounded.hlsl.find(
+             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.5);") !=
+         std::string::npos);
   shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
   assert(!HlslShaderLowerer::lower(shader).complete);
 }
