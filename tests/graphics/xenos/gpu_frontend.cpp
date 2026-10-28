@@ -1333,7 +1333,8 @@ void test_portable_capture_round_trip(AddressSpace& memory) {
 
   const auto path = std::filesystem::temp_directory_path() /
                     "xenon_gpu_portable_capture_test.xgcap";
-  std::filesystem::remove(path);
+  std::error_code cleanup_error;  // a scanner may briefly hold the file
+  std::filesystem::remove(path, cleanup_error);
   assert(xenon::gpu::save_portable_capture(capture, path, &error));
   assert(error.empty());
   const auto loaded = xenon::gpu::load_portable_capture(path, &error);
@@ -1354,7 +1355,7 @@ void test_portable_capture_round_trip(AddressSpace& memory) {
   assert(graphics.edram().read8(0x1234u) == 0x5Au);
   assert(replay_backend.command_count() ==
          RegisterFile::kRegisterCount + loaded->frontend.commands.size() + 1u);
-  std::filesystem::remove(path);
+  std::filesystem::remove(path, cleanup_error);
 }
 
 void test_frontend_ring_capture(AddressSpace& memory) {
