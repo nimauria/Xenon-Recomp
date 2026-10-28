@@ -13,6 +13,37 @@
 #include <vector>
 
 namespace xenon::audio {
+namespace {
+
+// The APU register file is a little-endian device: byte k of a register sits
+// at register address + k, and titles use lwbrx/stwbrx to see true values.
+// Memory V2 hands MMIO handlers the big-endian assembly of the accessed
+// bytes, so the lanes are mapped here. Treating the registers as big-endian
+// gave AC6 a byte-swapped context-array address; it then derived context
+// indices near 62000 and kicked registers far past the kick group, so no XMA
+// voice ever decoded.
+[[nodiscard]] std::uint64_t read_register_lanes(std::uint32_t reg, std::uint32_t byte_in_reg,
+                                                std::uint32_t width) noexcept {
+  if (byte_in_reg + width > 4u) return 0;
+  std::uint64_t value = 0;
+  for (std::uint32_t i = 0; i < width; ++i) {
+    value = (value << 8u) | ((reg >> ((byte_in_reg + i) * 8u)) & 0xFFu);
+  }
+  return value;
+}
+
+[[nodiscard]] std::uint32_t write_register_lanes(std::uint32_t reg, std::uint32_t byte_in_reg,
+                                                 std::uint32_t width,
+                                                 std::uint64_t value) noexcept {
+  for (std::uint32_t i = 0; i < width; ++i) {
+    const auto lane = (byte_in_reg + i) * 8u;
+    const auto byte = static_cast<std::uint32_t>(value >> ((width - 1u - i) * 8u)) & 0xFFu;
+    reg = (reg & ~(0xFFu << lane)) | (byte << lane);
+  }
+  return reg;
+}
+
+}  // namespace
 
 std::uint64_t XmaDecoder::mmio_read(cpu::GuestAddress address,
                                     std::uint32_t width) {
@@ -39,17 +70,7 @@ std::uint64_t XmaDecoder::mmio_read(cpu::GuestAddress address,
     }
   }
 
-  const auto byte_in_reg = offset & 3u;
-  if (width == 4u && byte_in_reg == 0) return value;
-  if (width == 2u && byte_in_reg <= 2u) {
-    const auto shift = (2u - byte_in_reg) * 8u;
-    return (value >> shift) & 0xFFFFu;
-  }
-  if (width == 1u) {
-    const auto shift = (3u - byte_in_reg) * 8u;
-    return (value >> shift) & 0xFFu;
-  }
-  return 0;
+  return read_register_lanes(value, offset & 3u, width);
 }
 
 void XmaDecoder::mmio_write(cpu::GuestAddress address, std::uint32_t width,
@@ -61,26 +82,15 @@ void XmaDecoder::mmio_write(cpu::GuestAddress address, std::uint32_t width,
   const auto offset = static_cast<std::uint32_t>(address - kXmaMmioBase);
   const auto reg_offset = offset & ~3u;
   const auto byte_in_reg = offset & 3u;
-  std::uint32_t value = static_cast<std::uint32_t>(raw_value);
+  if (byte_in_reg + width > 4u) return;
 
-  // Support narrow accesses through the same canonical big-endian register
-  // value. Commands are dispatched from the resulting dword.
-  if (width != 4u || byte_in_reg != 0) {
+  // Narrow writes merge into the register's little-endian byte lanes;
+  // commands are dispatched from the resulting dword.
+  std::uint32_t value{};
+  {
     std::lock_guard lock(mmio_mutex_);
-    auto merged = mmio_registers_[reg_offset / 4u];
-    if (width == 1u) {
-      const auto shift = (3u - byte_in_reg) * 8u;
-      merged = (merged & ~(0xFFu << shift)) | ((value & 0xFFu) << shift);
-    } else if (width == 2u && byte_in_reg <= 2u) {
-      const auto shift = (2u - byte_in_reg) * 8u;
-      merged = (merged & ~(0xFFFFu << shift)) | ((value & 0xFFFFu) << shift);
-    } else {
-      return;
-    }
-    value = merged;
-    mmio_registers_[reg_offset / 4u] = merged;
-  } else {
-    std::lock_guard lock(mmio_mutex_);
+    value = write_register_lanes(mmio_registers_[reg_offset / 4u], byte_in_reg, width,
+                                 raw_value);
     // Xenon owns the physical context array. Preserve its address even if a
     // guest probes the hardware register with a write.
     if (reg_offset != kRegContextArrayAddress) {
