@@ -70,8 +70,8 @@ struct LaunchConfig {
   // Host window client size, from "displayResolution" ("WIDTHxHEIGHT"). This
   // is host output only: the guest still sees its own video mode, and the
   // presenter scales the front buffer to this size.
-  std::uint32_t display_width{1920};
-  std::uint32_t display_height{1080};
+  std::uint32_t display_width{1280};
+  std::uint32_t display_height{720};
 
   std::string input_backend;
   std::string input_preferred_device{"Automatic"};

@@ -326,7 +326,8 @@ int main() {
   }
   std::cout << "  [PASS] Explicit headlessMode=true round-trips\n";
 
-  // displayResolution sizes the host window; it defaults to 1920x1080 and a
+  // displayResolution sizes the host window; it defaults to 1280x720, the
+  // Xbox 360's native HD output, and a
   // malformed or out-of-range value is a launch error, not a silent default.
   {
     TempFile file("display_default.json");
@@ -334,7 +335,7 @@ int main() {
     LaunchConfig config{};
     std::string error;
     assert(LaunchConfig::load_from_file(file.string(), config, error));
-    assert(config.display_width == 1920u && config.display_height == 1080u);
+    assert(config.display_width == 1280u && config.display_height == 720u);
   }
   {
     TempFile file("display_1440p.json");
@@ -356,7 +357,7 @@ int main() {
     assert(!LaunchConfig::load_from_file(file.string(), config, error));
     assert(error.find("displayResolution") != std::string::npos);
   }
-  std::cout << "  [PASS] displayResolution defaults to 1920x1080 and rejects bad values\n";
+  std::cout << "  [PASS] displayResolution defaults to 1280x720 and rejects bad values\n";
 
   // Test 13: memoryWatch accepts hex strings, decimal strings and numbers, and
   // defaults to disabled.

@@ -83,7 +83,7 @@ Written once by the launcher before starting the process, passed as
   "renderer": "Automatic",
   "shaderCache": true,
   "shaderCacheMode": "Persistent",
-  "displayResolution": "1920x1080",
+  "displayResolution": "1280x720",
   "inputBackend": "Automatic",
   "inputPreferredDevice": "Automatic",
   "inputDeadzone": 0.10,
@@ -412,7 +412,7 @@ install. See `launcher/tests/runtime/runtime_bridge_tests.cpp` and
   `SessionConfig::verbose_logging` diagnostics.
 - **Display resolution is part of the schema; fullscreen/vsync are not yet.**
   `displayResolution` ("WIDTHxHEIGHT", set in launch.json; no launcher UI
-  yet, default 1920x1080) sizes the window client
+  yet, default 1280x720, the Xbox 360 HD output) sizes the window client
   area in physical pixels (per-monitor DPI aware); a size larger than the
   desktop starts maximized. It is host output only: the guest keeps its own
   video mode and the presenter scales the front buffer to the window.
