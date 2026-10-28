@@ -445,6 +445,38 @@ void test_memexport_translation_targets() {
 
 }  // namespace
 
+// Scalar operations read source 3, mulsc/addsc/subsc add a temporary operand,
+// and exports can write constant components: all of it must compile for both
+// DXIL and SPIR-V.
+void test_scalar_source_and_export_constants_compile() {
+  using namespace xenon::gpu;
+  for (const auto stage : {ShaderStage::Vertex, ShaderStage::Pixel}) {
+    auto shader = make_shader(stage);
+    auto& alu = shader.instructions[0].alu;
+    alu.scalar_opcode = 45;  // addsc
+    alu.sources[2].temporary = false;
+    alu.sources[2].index = 3;
+    alu.sources[2].relative = true;
+    alu.constant_address_register_relative = true;
+    alu.scalar_constant_temporary = 0;
+    alu.vector_write_mask = 0x3;
+    alu.scalar_write_mask = 0x6;
+    alu.scalar_destination_relative = true;
+    const auto lowered = HlslShaderLowerer::lower(shader);
+    assert(lowered.complete);
+    assert(lowered.hlsl.find("xenon_scalar_op(45, s2, s3t, ps") != std::string::npos);
+    DxcShaderCompiler compiler;
+    const auto dxil = compiler.compile(lowered, {});
+    if (!dxil.succeeded) {
+      for (const auto& diagnostic : dxil.diagnostics) std::cerr << diagnostic << '\n';
+    }
+    assert(dxil.succeeded);
+    ShaderCompileOptions spirv{};
+    spirv.format = ShaderBinaryFormat::Spirv;
+    assert(compiler.compile(lowered, spirv).succeeded);
+  }
+}
+
 int main() {
   test_lowering_is_deterministic();
   test_dxc_dual_target_and_cache();
@@ -457,5 +489,6 @@ int main() {
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
   test_memexport_translation_targets();
+  test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

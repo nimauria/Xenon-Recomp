@@ -111,17 +111,44 @@ AluInstruction decode_alu(const ShaderInstruction96& raw, std::uint32_t address,
   out.predicate = decode_predicate(bits(w1, 28, 1), bits(w1, 27, 1));
   out.constant_address_register_relative = bits(w1, 29, 1);
   out.vector_opcode = static_cast<std::uint8_t>(bits(w2, 24, 5));
+  // mulsc/addsc/subsc always read a constant in source 3; its select bit and
+  // the middle swizzle bits name the temporary instead.
+  const bool scalar_constant_operation =
+      out.scalar_opcode >= 42u && out.scalar_opcode <= 47u;
+  if (scalar_constant_operation) {
+    out.scalar_constant_temporary = static_cast<std::uint8_t>(
+        (out.scalar_opcode & 1u) | (bits(w2, 29, 1) << 1) | (bits(w1, 0, 8) & 0x3Cu));
+    reflection.temporary_register_count = std::max(
+        reflection.temporary_register_count, out.scalar_constant_temporary + 1u);
+  }
+  const bool constant_1_relative = bits(w1, 30, 1) != 0;
+  const bool constant_0_relative = bits(w1, 31, 1) != 0;
   for (unsigned i = 0; i < 3; ++i) {
     const unsigned reverse = 2u - i;
     auto& source = out.sources[i];
     source.index = bits(w2, reverse * 8, 8);
-    source.swizzle = static_cast<std::uint8_t>(bits(w1, reverse * 8, 8));
+    // Microcode swizzles are component-relative: component c selects
+    // (field_c + c) & 3, so a zero field is .xyzw.
+    const auto relative_swizzle = bits(w1, reverse * 8, 8);
+    source.swizzle = 0;
+    for (unsigned c = 0; c < 4; ++c) {
+      source.swizzle = static_cast<std::uint8_t>(
+          source.swizzle | ((((relative_swizzle >> (2u * c)) + c) & 3u) << (2u * c)));
+    }
     source.negate = bits(w1, 24 + reverse, 1);
-    source.temporary = bits(w2, 29 + reverse, 1);
-    source.relative = source.temporary ? (source.index & 0x40u) != 0
-                                       : (i == 0 ? bits(w1, 31, 1)
-                                                 : bits(w1, 30, 1));
-    source.absolute_value = source.temporary && (source.index & 0x80u);
+    source.temporary = bits(w2, 29 + reverse, 1) &&
+                       !(i == 2 && scalar_constant_operation);
+    if (source.temporary) {
+      source.relative = (source.index & 0x40u) != 0;
+      source.absolute_value = (source.index & 0x80u) != 0;
+    } else {
+      // A constant's relative-addressing flag is const_0_rel_abs for the
+      // first constant operand and const_1_rel_abs for any later one.
+      const bool earlier_constant =
+          (i >= 1 && !out.sources[0].temporary) || (i == 2 && !out.sources[1].temporary);
+      source.relative = earlier_constant ? constant_1_relative : constant_0_relative;
+      source.absolute_value = out.absolute_constants;
+    }
     if (source.temporary) {
       source.index &= 0x3Fu;
       reflection.temporary_register_count =

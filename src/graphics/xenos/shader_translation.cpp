@@ -25,17 +25,20 @@ std::string swizzle(std::uint8_t value) {
   return result;
 }
 
-std::string source(const AluSource& value, ShaderStage stage) {
+// Relative temporaries add the loop index aL. Relative constants add a0 when
+// the instruction's const_address_register_relative bit is set, otherwise aL.
+std::string source(const AluSource& value, ShaderStage stage,
+                   bool constant_address_register_relative) {
   std::ostringstream out;
   if (value.negate) out << "-";
   if (value.absolute_value) out << "abs(";
   if (value.temporary) {
     out << "r[(" << value.index;
-    if (value.relative) out << " + ar";
+    if (value.relative) out << " + aL";
     out << ") & 63]";
   } else {
     out << "XenonFloatConstants[((" << value.index;
-    if (value.relative) out << " + ar";
+    if (value.relative) out << (constant_address_register_relative ? " + a0" : " + aL");
     out << ") & 255)";
     if (stage == ShaderStage::Pixel) out << " + 256";
     out << "]";
@@ -77,7 +80,7 @@ std::string destination(const AluInstruction& alu, bool scalar) {
     out << "e[" << unsigned(index) << "]";
   } else {
     out << "r[(" << unsigned(index);
-    if (relative) out << " + ar";
+    if (relative) out << " + aL";
     out << ") & 63]";
   }
   return out.str();
@@ -85,15 +88,27 @@ std::string destination(const AluInstruction& alu, bool scalar) {
 
 void emit_alu(std::ostringstream& out, const AluInstruction& alu,
               ShaderStage stage, bool memexport_enabled) {
+  const bool a0_constants = alu.constant_address_register_relative;
   out << "        if (" << predicate(alu.predicate) << ") {\n"
-      << "          float4 s0 = " << source(alu.sources[0], stage) << ";\n"
-      << "          float4 s1 = " << source(alu.sources[1], stage) << ";\n"
-      << "          float4 s2 = " << source(alu.sources[2], stage) << ";\n"
-      << "          bool killed = false;\n"
+      << "          float4 s0 = " << source(alu.sources[0], stage, a0_constants) << ";\n"
+      << "          float4 s1 = " << source(alu.sources[1], stage, a0_constants) << ";\n"
+      << "          float4 s2 = " << source(alu.sources[2], stage, a0_constants) << ";\n";
+  // The scalar unit reads source 3. mulsc/addsc/subsc pair its constant with
+  // a temporary, which takes source 3's negation and the constant abs flag.
+  std::string scalar_b = "s2";
+  if (alu.scalar_opcode >= 42u && alu.scalar_opcode <= 47u) {
+    AluSource temporary = alu.sources[2];
+    temporary.index = alu.scalar_constant_temporary;
+    temporary.temporary = true;
+    temporary.relative = false;
+    out << "          float4 s3t = " << source(temporary, stage, a0_constants) << ";\n";
+    scalar_b = "s3t";
+  }
+  out << "          bool killed = false;\n"
       << "          float4 pv = xenon_vector_op(" << unsigned(alu.vector_opcode)
       << ", s0, s1, s2, p0, a0, killed);\n"
       << "          float4 ps_new = xenon_scalar_op(" << unsigned(alu.scalar_opcode)
-      << ", s0, s1, ps, p0, a0, killed);\n";
+      << ", s2, " << scalar_b << ", ps, p0, a0, killed);\n";
   if (alu.vector_clamp) out << "          pv = saturate(pv);\n";
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
   write_masked(out, destination(alu, false), "pv", alu.vector_write_mask, 10);
@@ -121,7 +136,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
     const auto& fetch = instruction.vertex_fetch;
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
         << "          uint source_index = (uint)floor(r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + ar";
+    if (fetch.source_relative) out << " + aL";
     out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "] + "
         << (fetch.index_rounded ? "0.5" : "0.0") << ");\n"
         << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
@@ -130,7 +145,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
         << (fetch.signed_data ? "true" : "false") << ", "
         << (fetch.normalized ? "true" : "false") << ");\n"
         << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + ar";
+    if (fetch.destination_relative) out << " + aL";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
         << "        }\n";
   } else {
@@ -144,7 +159,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
     };
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
         << "          float4 coord = r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + ar";
+    if (fetch.source_relative) out << " + aL";
     out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n";
     // Xenos setTextureLod / setTextureGradientsHorz / setTextureGradientsVert
     // write per-shader-invocation state that later tfetches read when their
@@ -190,7 +205,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
           << offsets() << ");\n";
     }
     out << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + ar";
+    if (fetch.destination_relative) out << " + aL";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
         << "        }\n";
   }
@@ -958,8 +973,6 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
         condition = cf.predicate.condition ? "p0" : "!p0";
       }
       out << "        bool execute = " << condition << ";\n"
-          << "        int ar = "
-          << (cf.addressing == AddressingMode::Absolute ? "a0" : "aL") << ";\n"
           << "        if (execute) {\n";
       for (std::uint32_t address = cf.target; address < cf.target + cf.count; ++address) {
         auto found = instructions.find(address);
