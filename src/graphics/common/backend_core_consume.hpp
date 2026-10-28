@@ -71,7 +71,8 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             "ir_timing_diag.log",
             "%s %lld ms: primitive=%d source=%d index_count=%u vs=%016llX ps=%016llX "
             "scissor=(%d,%d)-(%d,%d) viewport scale=(%g,%g) offset=(%g,%g) pitch=%u "
-            "msaa=%u color0 base=%u (enabled %d) depth base=%u (test %d write %d) "
+            "msaa=%u color0 base=%u (enabled %d mask=0x%X blend=%d) "
+            "depth base=%u (test %d write %d) cull=(%d,%d) alpha=(%d,%d) "
             "window offset=(%d,%d) drawable_bottom=%d\n",
             kind, static_cast<long long>(ms), static_cast<int>(draw->primitive_type),
             static_cast<int>(draw->source), draw->index_count,
@@ -82,8 +83,11 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             state.raster.viewport.x_offset, state.raster.viewport.y_offset,
             unsigned(state.raster.surface_pitch), unsigned(state.raster.msaa_samples_log2),
             unsigned(state.color_targets[0].base_tile), int(state.color_targets[0].enabled),
+            unsigned(state.color_targets[0].write_mask), int(state.color_targets[0].blend.enabled),
             unsigned(state.depth_target.base_tile), int(state.depth_target.test_enabled),
-            int(state.depth_target.write_enabled), state.raster.window_offset_x,
+            int(state.depth_target.write_enabled), int(state.raster.cull_front),
+            int(state.raster.cull_back), int(state.pixel_control.alpha_test_enabled),
+            int(state.pixel_control.alpha_to_mask_enabled), state.raster.window_offset_x,
             state.raster.window_offset_y, state.raster.drawable_bottom);
     };
     // A failure sets `error`; count it, and keep an earlier error when
@@ -387,6 +391,43 @@ void BackendCore<Derived, Api>::consume_resolve(
   if (!written.valid) {
     error = written.error;
     return;
+  }
+  // Keep resolve correctness failures separate from presentation failures.
+  // When probe logging is explicitly enabled, sample the first few resolves
+  // on both sides of the native-readback -> guest-memory boundary. This is
+  // intentionally bounded: AC6 resolves every frame, and an unbounded byte
+  // audit would distort the performance issue it is meant to diagnose.
+  static std::atomic_uint32_t resolve_content_probe_count{};
+  const auto resolve_content_probe =
+      resolve_content_probe_count.fetch_add(1u, std::memory_order_relaxed);
+  if (resolve_content_probe < 64u) {
+    std::size_t source_nonzero{};
+    for (const auto byte : readback) {
+      if (byte != std::byte{}) ++source_nonzero;
+    }
+    std::vector<std::byte> destination_snapshot(written.modified_size);
+    const auto destination_read =
+        written.modified_size == 0u ||
+        memory->copy_physical_range(written.modified_address,
+                                    destination_snapshot);
+    std::size_t destination_nonzero{};
+    if (destination_read) {
+      for (const auto byte : destination_snapshot) {
+        if (byte != std::byte{}) ++destination_nonzero;
+      }
+    }
+    xenon::logging::append_probe_log(
+        "resolve_content_diag.log",
+        "resolve #%u source_nonzero=%zu/%zu destination=0x%08X+0x%X "
+        "destination_read=%u destination_nonzero=%zu/%zu format=%u "
+        "copy_command=%u samples=%u rectangle=(%d,%d)-(%d,%d)\n",
+        resolve_content_probe + 1u, source_nonzero, readback.size(),
+        written.modified_address, written.modified_size,
+        destination_read ? 1u : 0u, destination_nonzero,
+        destination_snapshot.size(), static_cast<unsigned>(format),
+        static_cast<unsigned>(state.copy.command),
+        static_cast<unsigned>(samples), rectangle.left, rectangle.top,
+        rectangle.right, rectangle.bottom);
   }
   if (state.copy.color_clear_enabled && !source) {
     // The rectangle is already canonical: clear it there.
