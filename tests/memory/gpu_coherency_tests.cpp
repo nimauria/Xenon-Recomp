@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
@@ -5,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 #include "xenon/memory/address_space.hpp"
 #include "xenon/memory/gpu_coherency.hpp"
@@ -86,6 +88,127 @@ int main() {
     assert(mixed_plan.source_domain ==
            xenon::cpu::MemoryOrderingDomain::CacheInhibited);
     assert(mixed.cpu_dirty_ranges().size() == 1u);
+  }
+
+  // The one-domain batch path must leave every set exactly as applying the
+  // writes one at a time does, over sets already fragmented by uploads and
+  // by GPU writes of different generations. A single write of another
+  // domain forces the per-write path for the reference.
+  {
+    const auto prepare = [](GuestMemoryGpuCoherency& tracker,
+                            GuestMemoryCoherency& stores) {
+      tracker.reset(0x40000u, false);
+      for (std::uint32_t i = 0; i < 64u; ++i) {
+        const auto address = 0x1000u + i * 0x700u;
+        stores.mark_write(address, 0x80u + (i % 5u) * 0x40u);
+        (void)tracker.plan_upload(stores, address, 0x300u, 0u, GpuRangeUsage::VertexBuffer);
+        tracker.commit_cpu_upload(address, 0x300u);
+        if (i % 3u == 0u) tracker.mark_gpu_write(address + 0x100u, 0x180u);
+      }
+    };
+    GuestMemoryCoherency batch_stores;
+    GuestMemoryCoherency reference_stores;
+    GuestMemoryGpuCoherency batched;
+    GuestMemoryGpuCoherency reference;
+    prepare(batched, batch_stores);
+    prepare(reference, reference_stores);
+    std::uint32_t state = 12345u;
+    for (std::uint32_t i = 0; i < 3000u; ++i) {
+      state = state * 1103515245u + 12345u;
+      const auto address = 0x800u + (state >> 8) % 0x30000u;
+      const auto size = 1u + (state >> 4) % 0x90u;
+      batch_stores.mark_write(address, size);
+      reference_stores.mark_write(address, size);
+    }
+    reference_stores.mark_write(0x3F000u, 4u,
+                                xenon::cpu::MemoryOrderingDomain::CacheInhibited);
+    (void)batched.plan_upload(batch_stores, 0x800u, 4u, 0u, GpuRangeUsage::VertexBuffer);
+    (void)reference.plan_upload(reference_stores, 0x800u, 4u, 0u,
+                                GpuRangeUsage::VertexBuffer);
+    const auto below = [](std::vector<GpuCoherencyRange> ranges) {
+      std::erase_if(ranges, [](const auto& range) { return range.address >= 0x3F000u; });
+      return ranges;
+    };
+    const auto same = [](const std::vector<GpuCoherencyRange>& a,
+                         const std::vector<GpuCoherencyRange>& b) {
+      return a.size() == b.size() &&
+             std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+               return x.address == y.address && x.size == y.size;
+             });
+    };
+    assert(same(below(batched.cpu_dirty_ranges()), below(reference.cpu_dirty_ranges())));
+    assert(same(below(batched.gpu_dirty_ranges()), below(reference.gpu_dirty_ranges())));
+    for (std::uint32_t address = 0x800u; address < 0x3F000u; address += 0x10u)
+      assert(batched.device_range_valid(address, 0x10u) ==
+             reference.device_range_valid(address, 0x10u));
+  }
+
+  // Mixed ordering domains (AC6 interleaves write-combined vertex stores with
+  // cached ones) are batched too. Every set and every byte's visibility
+  // domain must match applying the same stores one at a time in publication
+  // order, where a later store decides the domain of the bytes it covers.
+  {
+    using xenon::cpu::MemoryOrderingDomain;
+    GuestMemoryCoherency batch_stores;
+    GuestMemoryCoherency reference_stores;
+    GuestMemoryGpuCoherency batched;
+    GuestMemoryGpuCoherency reference;
+    for (auto* tracker : {&batched, &reference}) {
+      tracker->reset(0x20000u, false);
+      for (std::uint32_t i = 0; i < 32u; ++i) {
+        tracker->mark_gpu_write(0x400u + i * 0x900u, 0x200u);
+      }
+    }
+    std::uint32_t state = 777u;
+    for (std::uint32_t i = 0; i < 4000u; ++i) {
+      state = state * 1103515245u + 12345u;
+      const auto address = 0x100u + (state >> 8) % 0x1F000u;
+      const auto size = 1u + (state >> 3) % 0x60u;
+      const auto domain = static_cast<MemoryOrderingDomain>((state >> 20) % 4u);
+      batch_stores.mark_write(address, size, domain);
+      reference.mark_cpu_write(address, size, domain);
+    }
+    (void)batched.plan_upload(batch_stores, 0x100u, 4u, 0u, GpuRangeUsage::VertexBuffer);
+    (void)reference.plan_upload(reference_stores, 0x100u, 4u, 0u, GpuRangeUsage::VertexBuffer);
+    const auto same = [](const std::vector<GpuCoherencyRange>& a,
+                         const std::vector<GpuCoherencyRange>& b) {
+      return a.size() == b.size() &&
+             std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+               return x.address == y.address && x.size == y.size;
+             });
+    };
+    assert(same(batched.cpu_dirty_ranges(), reference.cpu_dirty_ranges()));
+    assert(same(batched.gpu_dirty_ranges(), reference.gpu_dirty_ranges()));
+    for (std::uint32_t address = 0x100u; address < 0x20000u; address += 4u) {
+      assert(batched.device_range_valid(address, 4u) ==
+             reference.device_range_valid(address, 4u));
+      const auto batch_plan =
+          batched.plan_upload(batch_stores, address, 4u, 0u, GpuRangeUsage::VertexBuffer);
+      const auto reference_plan =
+          reference.plan_upload(reference_stores, address, 4u, 0u, GpuRangeUsage::VertexBuffer);
+      assert(batch_plan.source_domain == reference_plan.source_domain);
+    }
+  }
+
+  // More stores than the journal holds fall back to dirty pages, applied in
+  // one pass: every page written becomes CPU-dirty, nothing else does.
+  {
+    GuestMemoryCoherency stores;
+    GuestMemoryGpuCoherency overflowed;
+    overflowed.reset(0x200000u, false);
+    (void)overflowed.plan_upload(stores, 0u, 0x200000u, 0u, GpuRangeUsage::Generic);
+    overflowed.commit_cpu_upload(0u, 0x200000u);
+    for (std::uint32_t i = 0; i < GuestMemoryCoherency::kWriteJournalCapacity + 4096u; ++i)
+      stores.mark_write(0x10000u + (i % 64u) * 2u * kBasePageSize + (i % 997u), 4u);
+    (void)overflowed.plan_upload(stores, 0u, 4u, 0u, GpuRangeUsage::Generic);
+    const auto dirty = overflowed.cpu_dirty_ranges();
+    assert(dirty.size() == 64u);
+    for (std::uint32_t page = 0; page < 64u; ++page) {
+      assert(dirty[page].address == 0x10000u + page * 2u * kBasePageSize);
+      assert(dirty[page].size == kBasePageSize);
+      assert(!overflowed.device_range_valid(dirty[page].address, 4u));
+      assert(overflowed.device_range_valid(dirty[page].address + kBasePageSize, 4u));
+    }
   }
 
   // Adjacent dirty physical pages are also coalesced by the canonical memory
