@@ -720,6 +720,31 @@ void test_host_polygon_mode() {
   assert(host_polygon_mode(raster) == HostPolygonMode::Fill);
 }
 
+// Z_WRITE_ENABLE without Z_ENABLE writes nothing, and a Z test that always
+// passes without writing does nothing: neither may bind EDRAM depth. AC6's
+// boot logo quad sets Z_WRITE_ENABLE alone; binding depth for it bounced the
+// depth tiles between two surfaces through the CPU on every frame.
+void test_depth_control_without_effect_is_disabled() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  const auto depth = [&](std::uint32_t control) {
+    tracker.apply({0x2200, control});
+    return tracker.snapshot().depth_target;
+  };
+  constexpr std::uint32_t z_enable = 1u << 1, z_write = 1u << 2;
+  constexpr std::uint32_t always = 7u << 4, less_equal = 3u << 4;
+  auto state = depth(z_write | less_equal);
+  assert(!state.test_enabled && !state.write_enabled && !state.stencil_enabled);
+  state = depth(z_enable | always);
+  assert(!state.test_enabled && !state.write_enabled);
+  state = depth(z_enable | z_write | always);
+  assert(state.test_enabled && state.write_enabled);
+  state = depth(z_enable | less_equal);
+  assert(state.test_enabled && !state.write_enabled);
+  state = depth(z_write | 1u);  // stencil only
+  assert(!state.test_enabled && !state.write_enabled && state.stencil_enabled);
+}
+
 void test_preferred_polygon_offset() {
   using namespace xenon::gpu;
   RasterState raster{};
@@ -828,5 +853,6 @@ int main() {
   test_color_target_plan();
   test_host_polygon_mode();
   test_preferred_polygon_offset();
+  test_depth_control_without_effect_is_disabled();
   std::cout << "xenon_resource_ir_tests: ok\n";
 }

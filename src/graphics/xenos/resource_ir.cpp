@@ -739,10 +739,17 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.depth_target.base_tile =
       static_cast<std::uint16_t>(bits(depth_info, 0, 12) & 0x7FFu);
   result.depth_target.format = static_cast<std::uint8_t>(bits(depth_info, 16, 1));
-  result.depth_target.test_enabled = bits(depth_control, 1, 1) != 0;
-  result.depth_target.write_enabled = bits(depth_control, 2, 1) != 0;
-  result.depth_target.stencil_enabled = bits(depth_control, 0, 1) != 0;
+  // Z_WRITE_ENABLE takes effect only with Z_ENABLE, and a test that always
+  // passes without writing does nothing, so neither binds EDRAM depth (as in
+  // xenia's GetNormalizedDepthControl). Draws like AC6's logo quad set
+  // Z_WRITE_ENABLE alone.
   result.depth_target.function = static_cast<CompareFunction>(bits(depth_control, 4, 3));
+  const bool z_enable = bits(depth_control, 1, 1) != 0;
+  result.depth_target.write_enabled = z_enable && bits(depth_control, 2, 1) != 0;
+  result.depth_target.test_enabled =
+      z_enable && (result.depth_target.write_enabled ||
+                   result.depth_target.function != CompareFunction::Always);
+  result.depth_target.stencil_enabled = bits(depth_control, 0, 1) != 0;
   result.depth_target.backface_stencil_enabled = bits(depth_control, 7, 1) != 0;
   result.depth_target.stencil_front.function =
       static_cast<CompareFunction>(bits(depth_control, 8, 3));
