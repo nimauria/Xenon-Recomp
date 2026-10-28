@@ -81,8 +81,17 @@ ScanoutPlan plan_scanout(const PresentationFrame& frame, std::uint32_t target_wi
     plan.error = "presentation source format has no RGBA8 scanout conversion";
     return plan;
   }
-  if (base.guest_size_bytes > UINT32_MAX ||
-      std::uint64_t{base.guest_address} + base.guest_size_bytes > 0x100000000ull) {
+  // One 2D slice. guest_size_bytes is a layer's stride, which pads to four
+  // slices for 3D textures, four times the front buffer. Tiled addressing
+  // spreads a slice over whole 4 KiB blocks (a 32x32 16-bit slice puts rows
+  // 16-31 in its second 2 KiB), so the slice is rounded up to one.
+  const std::uint64_t slice_bytes = (std::uint64_t(base.storage_pitch_blocks) *
+                                         layout.format.bytes_per_block() *
+                                         base.storage_height_blocks +
+                                     4095u) &
+                                    ~std::uint64_t{4095u};
+  if (!slice_bytes || slice_bytes > base.guest_size_bytes ||
+      std::uint64_t{base.guest_address} + slice_bytes > 0x100000000ull) {
     plan.error = "scanout source range is invalid";
     return plan;
   }
@@ -118,7 +127,7 @@ ScanoutPlan plan_scanout(const PresentationFrame& frame, std::uint32_t target_wi
   c.target_width = target_width;
   c.target_height = target_height;
   plan.guest_address = base.guest_address;
-  plan.guest_size = static_cast<std::uint32_t>(base.guest_size_bytes);
+  plan.guest_size = static_cast<std::uint32_t>(slice_bytes);
   plan.valid = true;
   return plan;
 }

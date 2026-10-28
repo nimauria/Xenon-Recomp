@@ -160,6 +160,27 @@ void test_catmull_rom_scanout() {
     for (const auto weight : taps.weights) sum += weight;
     assert(sum > 0.9999f && sum < 1.0001f);
   }
+  // Scan-out keeps exactly the front buffer's slice current on the GPU, not
+  // the four-slice stride a texture layer is padded to.
+  {
+    PresentationFrame front{};
+    front.texture = rgba8_descriptor(0x1ABC0000u, 1280, 720, true);
+    const auto plan = plan_scanout(front, 1280, 720, true);
+    assert(plan.valid && plan.guest_address == 0x1ABC0000u);
+    assert(plan.guest_size == 1280u * 4u * 736u);
+    // A tiled slice occupies whole 4 KiB blocks: a 32x32 5_6_5 slice is 2 KiB
+    // of texels, but its rows 16-31 are addressed in the second 2 KiB.
+    PresentationFrame small{};
+    small.texture = rgba8_descriptor(0x400000u, 32, 32, true);
+    small.texture.format = 4;  // 5_6_5
+    const auto small_plan = plan_scanout(small, 32, 32, true);
+    assert(small_plan.valid && small_plan.guest_size == 4096u);
+    std::uint64_t highest = 0;
+    for (std::uint32_t y = 0; y < 32u; ++y)
+      for (std::uint32_t x = 0; x < 32u; ++x)
+        highest = (std::max)(highest, tiled_offset_2d(x, y, 32u, 2u));
+    assert(highest >= 2048u && highest + 2u <= small_plan.guest_size);
+  }
   const auto identity = scanout_taps(7, 0, 32, 32);
   assert(identity.first == 6 && identity.weights[0] == 0.0f && identity.weights[1] == 1.0f &&
          identity.weights[2] == 0.0f && identity.weights[3] == 0.0f);
