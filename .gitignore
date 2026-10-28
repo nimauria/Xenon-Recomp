@@ -182,3 +182,6 @@ CLAUDE.md
 !/docs/xam/XAM_V1.md
 !/docs/xbox/IMPORT_DISPATCH.md
 !/docs/xbox/XEX_LOADER_V2.md
+
+# Retired Qt launcher is kept locally, outside version control.
+/launcher/
