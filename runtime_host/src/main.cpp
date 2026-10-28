@@ -256,7 +256,8 @@ int main(int argc, char** argv) {
   bool presentation_active = false;
   if (session.gpu() != nullptr) {
     std::string presentation_error;
-    presentation_active = presentation.create(1280, 720, launch.title.empty() ? "Xenon" : launch.title,
+    presentation_active = presentation.create(launch.display_width, launch.display_height,
+                                              launch.title.empty() ? "Xenon" : launch.title,
                                               *session.gpu(), &presentation_error);
     if (!presentation_active) {
       if (!launch.headless_mode) {
@@ -269,7 +270,8 @@ int main(int argc, char** argv) {
                    "continuing without it): "
                 << presentation_error << std::endl;
     } else {
-      std::cout << "[runtime_host] Presentation window created (1280x720)" << std::endl;
+      std::cout << "[runtime_host] Presentation window created (" << launch.display_width << "x"
+                << launch.display_height << ")" << std::endl;
     }
   }
 #endif

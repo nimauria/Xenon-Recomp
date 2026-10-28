@@ -83,6 +83,7 @@ Written once by the launcher before starting the process, passed as
   "renderer": "Automatic",
   "shaderCache": true,
   "shaderCacheMode": "Persistent",
+  "displayResolution": "1920x1080",
   "inputBackend": "Automatic",
   "inputPreferredDevice": "Automatic",
   "inputDeadzone": 0.10,
@@ -409,10 +410,13 @@ install. See `launcher/tests/runtime/runtime_bridge_tests.cpp` and
   `developer/verboseLogging` preference is copied into `LaunchConfiguration`,
   serialized by `RuntimeBridge`, parsed by the host, and drives
   `SessionConfig::verbose_logging` diagnostics.
-- **Display/window settings are not part of the schema yet.** The runtime now
-  owns a real presentation window/surface, but resolution/fullscreen/vsync are
-  not exposed as launch-contract controls and therefore still use the host's
-  current defaults.
+- **Display resolution is part of the schema; fullscreen/vsync are not yet.**
+  `displayResolution` ("WIDTHxHEIGHT", set in launch.json; no launcher UI
+  yet, default 1920x1080) sizes the window client
+  area in physical pixels (per-monitor DPI aware); a size larger than the
+  desktop starts maximized. It is host output only: the guest keeps its own
+  video mode and the presenter scales the front buffer to the window.
+  Fullscreen and vsync are not launch-contract controls yet.
 - **Input launch settings are real; XAM/xboxkrnl-file-I/O export
   reachability is real.** `XenonSession::init_input()` selects real SDL/
   XInput drivers via `input_backend` (or fails outright if none can be
