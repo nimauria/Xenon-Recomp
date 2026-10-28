@@ -4,9 +4,21 @@ namespace xenon::memory {
 
 std::uint32_t AddressSpace::allocate_physical_page(bool top_down) {
   reclaim_retired_physical_pages();
+  // A virtual commit is mapped through the page table, so any physical page
+  // backs it. Physical RAM above the 4 KiB view's window can only serve
+  // virtual commits and 64 KiB/16 MiB allocations; use it first so the pages
+  // a 4 KiB MmAllocatePhysicalMemoryEx can address stay available. A title
+  // that sizes its heap from MmQueryStatistics otherwise sees 4 KiB requests
+  // fail while free pages remain.
+  constexpr std::uint32_t kFirstPageOutside4KView =
+      (kPhysical4KAddressableEndInclusive + 1u) / kBasePageSize;
+  constexpr std::uint32_t kAllocatableEndPage =
+      kPhysicalAllocatableEndExclusive / kBasePageSize;
+  const auto readers = active_fast_readers_.load(std::memory_order_acquire);
   std::uint32_t page = kInvalidPhysicalPage;
-  if (!physical_allocator_->allocate(1u, 1u, top_down, page,
-                                     active_fast_readers_.load(std::memory_order_acquire))) {
+  if (!physical_allocator_->allocate_quietly(1u, 1u, top_down, kFirstPageOutside4KView,
+                                             kAllocatableEndPage, page) &&
+      !physical_allocator_->allocate(1u, 1u, top_down, page, readers)) {
     return kInvalidPhysicalPage;
   }
   physical_page_used_[page] = kPhysicalAnonymous;

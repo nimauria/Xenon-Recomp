@@ -29,6 +29,21 @@ class AddressSpace::PhysicalRangeAllocator {
                               std::uint32_t maximum_page_exclusive,
                               std::uint32_t& out_first_page,
                               std::uint32_t readers_snapshot = 0u) {
+    if (allocate_quietly(page_count, alignment_pages, top_down, minimum_page,
+                         maximum_page_exclusive, out_first_page)) {
+      return true;
+    }
+    diag_log_exhaustion(page_count, readers_snapshot);
+    return false;
+  }
+
+  // Same placement as allocate(), without the exhaustion probe: for callers
+  // that try a preferred range before falling back to the whole space.
+  [[nodiscard]] bool allocate_quietly(std::uint32_t page_count,
+                                      std::uint32_t alignment_pages, bool top_down,
+                                      std::uint32_t minimum_page,
+                                      std::uint32_t maximum_page_exclusive,
+                                      std::uint32_t& out_first_page) {
     if (!page_count || !alignment_pages ||
         !std::has_single_bit(alignment_pages) ||
         minimum_page >= maximum_page_exclusive ||
@@ -49,7 +64,6 @@ class AddressSpace::PhysicalRangeAllocator {
         out_first_page = candidate;
         return true;
       }
-      diag_log_exhaustion(page_count, readers_snapshot);
       return false;
     }
 
@@ -69,7 +83,6 @@ class AddressSpace::PhysicalRangeAllocator {
       out_first_page = candidate;
       return true;
     }
-    diag_log_exhaustion(page_count, readers_snapshot);
     return false;
   }
 

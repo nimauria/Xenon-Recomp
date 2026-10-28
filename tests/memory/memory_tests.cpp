@@ -760,18 +760,17 @@ int main() {
     assert(ownership_mem.release(owner_va));
     assert(ownership_mem.read32_be(alias_va) == 0x44556677u);
 
-    std::uint32_t while_aliased{};
-    assert(ownership_mem.allocate_physical(kBasePageSize, kBasePageSize,
-                                           false, while_aliased));
-    assert(while_aliased != owner_phys);
+    // Anonymous commits take the lowest free page of the same placement
+    // class, so a fresh commit reveals whether the aliased page was recycled.
+    constexpr GuestAddress probe_va = 0x00300000u;
+    assert(ownership_mem.commit_fixed(probe_va, kBasePageSize, kReadWrite));
+    assert(ownership_mem.get_physical_address(probe_va) != owner_phys);
+    assert(ownership_mem.release(probe_va));
     assert(ownership_mem.release(alias_va));
-    assert(ownership_mem.free_physical(while_aliased, kBasePageSize));
 
-    std::uint32_t after_alias_release{};
-    assert(ownership_mem.allocate_physical(kBasePageSize, kBasePageSize,
-                                           false, after_alias_release));
-    assert(after_alias_release == owner_phys);
-    assert(ownership_mem.free_physical(after_alias_release, kBasePageSize));
+    assert(ownership_mem.commit_fixed(probe_va, kBasePageSize, kReadWrite));
+    assert(ownership_mem.get_physical_address(probe_va) == owner_phys);
+    assert(ownership_mem.release(probe_va));
   }
 
   // Memory V2 reverse mappings: overlapping virtual views keep physical
@@ -834,11 +833,12 @@ int main() {
     assert(anonymous_physical != 0xFFFFFFFFu);
     assert(decommit_mem.release(va));
     assert(decommit_mem.validate_invariants());
-    std::uint32_t reusable{};
-    assert(decommit_mem.allocate_physical(kBasePageSize, kBasePageSize, false,
-                                          reusable));
-    assert(reusable == anonymous_physical);
-    assert(decommit_mem.free_physical(reusable, kBasePageSize));
+    // The released anonymous page must return to the allocator: the next
+    // anonymous commit (same placement class) receives it again.
+    assert(decommit_mem.commit_fixed(va, kBasePageSize, kReadWrite));
+    assert(decommit_mem.get_physical_address(va) == anonymous_physical);
+    assert(decommit_mem.release(va));
+    assert(decommit_mem.validate_invariants());
   }
 
   // Randomized alias model: repeatedly map and unmap a fixed physical pool
@@ -930,18 +930,18 @@ int main() {
       assert(old_context.read32_be(old_va) == 0xCAFEBABEu);
       assert(quiescence_mem.release(old_va));
 
-      std::uint32_t while_reader_alive{};
-      assert(quiescence_mem.allocate_physical(
-          kBasePageSize, kBasePageSize, false, while_reader_alive));
-      assert(while_reader_alive != retired_phys);
-      assert(quiescence_mem.free_physical(while_reader_alive, kBasePageSize));
+      // A fresh anonymous commit (same placement class as old_va) would take
+      // the lowest free page, i.e. the retired one, if it were recycled.
+      constexpr GuestAddress probe_va = 0x00200000u;
+      assert(quiescence_mem.commit_fixed(probe_va, kBasePageSize, kReadWrite));
+      assert(quiescence_mem.get_physical_address(probe_va) != retired_phys);
+      assert(quiescence_mem.release(probe_va));
     }
 
-    std::uint32_t after_quiescence{};
-    assert(quiescence_mem.allocate_physical(
-        kBasePageSize, kBasePageSize, false, after_quiescence));
-    assert(after_quiescence == retired_phys);
-    assert(quiescence_mem.free_physical(after_quiescence, kBasePageSize));
+    constexpr GuestAddress after_va = 0x00300000u;
+    assert(quiescence_mem.commit_fixed(after_va, kBasePageSize, kReadWrite));
+    assert(quiescence_mem.get_physical_address(after_va) == retired_phys);
+    assert(quiescence_mem.release(after_va));
   }
 
   // Memory V2 physical range allocator: bottom-up and top-down allocation
@@ -1225,17 +1225,76 @@ int main() {
     assert(physical_policy_mem.validate_invariants());
   }
 
+  // Regression (AC6): a title sizes its main 64 KiB-page heap from
+  // MmQueryStatistics and keeps a few MiB of headroom for 4 KiB physical
+  // allocations and thread stacks. Physical RAM above the 4 KiB view's window
+  // can back virtual commits but no 4 KiB physical allocation, so virtual
+  // commits must use it before consuming the headroom inside the window.
+  // Before the fix, stacks took the window pages first and the title's next
+  // 4 KiB MmAllocatePhysicalMemoryEx failed with pages still free.
+  {
+    AddressSpace headroom_mem;
+    assert(headroom_mem.initialize());
+    constexpr std::uint32_t kFirstOutsidePage =
+        (kPhysical4KAddressableEndInclusive + 1u) / kBasePageSize;
+
+    // A small 64 KiB-page block at the very top and a 4 KiB block at the top
+    // of the window fragment physical memory the way AC6's early boot does.
+    PhysicalAllocationOptions top_options{};
+    top_options.page_class = PhysicalPageClass::Page64K;
+    top_options.top_down = true;
+    std::uint32_t top_block{};
+    assert(headroom_mem.allocate_physical(kLargePageSize, top_options, top_block));
+    PhysicalAllocationOptions window_options{};
+    window_options.page_class = PhysicalPageClass::Page4K;
+    window_options.top_down = true;
+    std::uint32_t window_top{};
+    assert(headroom_mem.allocate_physical(kBasePageSize, window_options, window_top));
+    assert(window_top / kBasePageSize == kFirstOutsidePage - 1u);
+
+    // The heap grab: everything left inside the window except the headroom.
+    constexpr std::uint32_t kFirstTitlePage = kPhysicalSystemReserveSize / kBasePageSize;
+    const auto window_free_pages = window_top / kBasePageSize - kFirstTitlePage;
+    const auto heap_pages = ((window_free_pages - 32u) / 16u) * 16u;
+    const auto headroom_pages = window_free_pages - heap_pages;
+    PhysicalAllocationOptions heap_options{};
+    heap_options.page_class = PhysicalPageClass::Page64K;
+    heap_options.top_down = false;
+    heap_options.zero_initialize = false;
+    std::uint32_t heap{};
+    assert(headroom_mem.allocate_physical(heap_pages * kBasePageSize, heap_options, heap));
+    assert(heap == kPhysicalSystemReserveSize);
+
+    // Thread stacks: commit every page the window cannot address.
+    const auto outside_pages = top_block / kBasePageSize - kFirstOutsidePage;
+    GuestAddress stacks{};
+    assert(headroom_mem.allocate(outside_pages * kBasePageSize, kBasePageSize,
+                                 kReadWrite, true, stacks));
+    for (std::uint32_t page = 0; page < outside_pages; ++page) {
+      const auto physical = headroom_mem.get_physical_address(stacks + page * kBasePageSize);
+      assert(physical / kBasePageSize >= kFirstOutsidePage);
+    }
+
+    // The headroom inside the window is intact for 4 KiB physical requests.
+    PhysicalAllocationOptions late_options{};
+    late_options.page_class = PhysicalPageClass::Page4K;
+    std::uint32_t late{};
+    assert(headroom_mem.allocate_physical(headroom_pages * kBasePageSize, late_options, late));
+    assert(headroom_mem.validate_invariants());
+  }
+
   // MEM_NOZERO-style policy is expressible without a parallel memory system.
   // A no-zero commit may reuse the previous physical contents; ordinary
-  // commits still guarantee zero initialization.
+  // commits still guarantee zero initialization. The stale page is seeded by
+  // an anonymous commit so the next anonymous commit reuses that frame.
   {
     AddressSpace nozero_mem;
     assert(nozero_mem.initialize());
-    std::uint32_t stale_physical{};
-    assert(nozero_mem.allocate_physical(kBasePageSize, kBasePageSize, false,
-                                        stale_physical));
-    nozero_mem.write32_be(kPhysical64KBase + stale_physical, 0xA1B2C3D4u);
-    assert(nozero_mem.free_physical(stale_physical, kBasePageSize));
+    GuestAddress stale_va{};
+    assert(nozero_mem.allocate(kBasePageSize, kBasePageSize, kReadWrite, false, stale_va));
+    const auto stale_physical = nozero_mem.get_physical_address(stale_va);
+    nozero_mem.write32_be(stale_va, 0xA1B2C3D4u);
+    assert(nozero_mem.release(stale_va));
 
     GuestAddress nozero_va{};
     VirtualAllocationOptions nozero{};
@@ -1244,17 +1303,13 @@ int main() {
                                false, nozero_va, std::nullopt, nozero));
     assert(nozero_mem.get_physical_address(nozero_va) == stale_physical);
     assert(nozero_mem.read32_be(nozero_va) == 0xA1B2C3D4u);
+    nozero_mem.write32_be(nozero_va, 0x11223344u);
     assert(nozero_mem.release(nozero_va));
 
-    std::uint32_t stale_again{};
-    assert(nozero_mem.allocate_physical(kBasePageSize, kBasePageSize, false,
-                                        stale_again));
-    nozero_mem.write32_be(kPhysical64KBase + stale_again, 0x11223344u);
-    assert(nozero_mem.free_physical(stale_again, kBasePageSize));
     GuestAddress zeroed_va{};
     assert(nozero_mem.allocate(kBasePageSize, kBasePageSize, kReadWrite,
                                false, zeroed_va));
-    assert(nozero_mem.get_physical_address(zeroed_va) == stale_again);
+    assert(nozero_mem.get_physical_address(zeroed_va) == stale_physical);
     assert(nozero_mem.read32_be(zeroed_va) == 0u);
     assert(nozero_mem.release(zeroed_va));
   }
