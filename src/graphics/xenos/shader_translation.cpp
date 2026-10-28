@@ -104,28 +104,42 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
     out << "          float4 s3t = " << source(temporary, stage, a0_constants) << ";\n";
     scalar_b = "s3t";
   }
-  out << "          bool killed = false;\n"
+  out << "          bool vector_killed = false, scalar_killed = false;\n"
       << "          float4 pv = xenon_vector_op(" << unsigned(alu.vector_opcode)
-      << ", s0, s1, s2, p0, a0, killed);\n"
+      << ", s0, s1, s2, p0, a0, vector_killed);\n"
       << "          float4 ps_new = xenon_scalar_op(" << unsigned(alu.scalar_opcode)
-      << ", s2, " << scalar_b << ", ps, p0, a0, killed);\n";
+      << ", s2, " << scalar_b << ", ps, p0, a0, scalar_killed);\n";
   if (alu.vector_clamp) out << "          pv = saturate(pv);\n";
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
-  write_masked(out, destination(alu, false), "pv", alu.vector_write_mask, 10);
-  write_masked(out, destination(alu, true), "ps_new", alu.scalar_write_mask, 10);
+  // Both results of an export go to vector_dest. A component selected by both
+  // write masks receives 1.0; with scalar_dest_rel set, one selected by
+  // neither receives 0.0.
+  std::uint8_t vector_mask = alu.vector_write_mask;
+  std::uint8_t scalar_mask = alu.scalar_write_mask;
+  std::uint8_t one_mask = 0, zero_mask = 0;
+  if (alu.export_data) {
+    one_mask = vector_mask & scalar_mask;
+    if (alu.scalar_destination_relative) zero_mask = 0xFu & ~(vector_mask | scalar_mask);
+    vector_mask &= static_cast<std::uint8_t>(~one_mask);
+    scalar_mask &= static_cast<std::uint8_t>(~one_mask);
+  }
+  write_masked(out, destination(alu, false), "pv", vector_mask, 10);
+  write_masked(out, destination(alu, true), "ps_new", scalar_mask, 10);
+  write_masked(out, destination(alu, false), "(1.0).xxxx", one_mask, 10);
+  write_masked(out, destination(alu, false), "(0.0).xxxx", zero_mask, 10);
   if (memexport_enabled && alu.export_data && alu.vector_destination >= 33u &&
       alu.vector_destination <= 37u &&
-      (alu.vector_write_mask || alu.scalar_write_mask)) {
+      (vector_mask | scalar_mask | one_mask | zero_mask) != 0) {
     out << "          memexport_written_mask |= "
         << (1u << (alu.vector_destination - 33u)) << "u;\n";
   }
   out << "          ps = ps_new;\n";
   if (stage == ShaderStage::Pixel) {
     if (memexport_enabled) {
-      out << "          if (killed) { xenon_memexport_flush(e[32], e[33], e[34], "
-             "e[35], e[36], e[37], memexport_written_mask); discard; }\n";
+      out << "          if (vector_killed || scalar_killed) { xenon_memexport_flush(e[32], "
+             "e[33], e[34], e[35], e[36], e[37], memexport_written_mask); discard; }\n";
     } else {
-      out << "          if (killed) discard;\n";
+      out << "          if (vector_killed || scalar_killed) discard;\n";
     }
   }
   out << "        }\n";

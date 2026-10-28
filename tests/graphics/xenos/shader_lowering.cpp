@@ -237,6 +237,48 @@ void test_decoded_scalar_operations_read_source_three() {
   assert(hlsl.find("xenon_scalar_op(48, s0") == std::string::npos);
 }
 
+// Export write masks: both bits give 1.0, neither bit with scalar_dest_rel
+// gives 0.0, otherwise each unit writes its own components.
+void test_export_constant_components() {
+  using namespace xenon::gpu;
+  auto alu = make_alu(0);
+  alu.alu.export_data = true;
+  alu.alu.vector_destination = 62;
+  alu.alu.vector_write_mask = 0x3;
+  alu.alu.scalar_write_mask = 0x6;
+  alu.alu.scalar_destination_relative = true;
+  const auto lowered =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Vertex, {alu}));
+  assert(lowered.complete);
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("e[62].x = pv.x;") != std::string::npos);
+  assert(hlsl.find("e[62].y = (1.0).xxxx.y;") != std::string::npos);
+  assert(hlsl.find("e[62].y = pv.y;") == std::string::npos);
+  assert(hlsl.find("e[62].y = ps_new.y;") == std::string::npos);
+  assert(hlsl.find("e[62].z = ps_new.z;") != std::string::npos);
+  assert(hlsl.find("e[62].w = (0.0).xxxx.w;") != std::string::npos);
+
+  alu.alu.scalar_destination_relative = false;
+  const auto unchanged =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Vertex, {alu}));
+  assert(unchanged.hlsl.find("e[62].w =") == std::string::npos);
+}
+
+// A vector kill must discard even though the co-issued scalar operation runs
+// after it.
+void test_vector_kill_is_not_cleared_by_scalar_operation() {
+  using namespace xenon::gpu;
+  auto alu = make_alu(0);
+  alu.alu.vector_opcode = 24;  // kill_eq
+  const auto lowered =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Pixel, {alu}));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("p0, a0, vector_killed);") != std::string::npos);
+  assert(lowered.hlsl.find("p0, a0, scalar_killed);") != std::string::npos);
+  assert(lowered.hlsl.find("if (vector_killed || scalar_killed) discard;") !=
+         std::string::npos);
+}
+
 // Relative temporaries add aL. Relative constants add a0 only when the ALU
 // instruction's const_address_register_relative bit is set.
 void test_relative_addressing_registers() {
@@ -284,6 +326,8 @@ int main() {
   test_non_memexport_guest_memory_stays_read_only();
   test_forced_writable_guest_memory_variant();
   test_decoded_scalar_operations_read_source_three();
+  test_export_constant_components();
+  test_vector_kill_is_not_cleared_by_scalar_operation();
   test_relative_addressing_registers();
   std::cout << "xenon_shader_lowering_tests: ok\n";
 }
