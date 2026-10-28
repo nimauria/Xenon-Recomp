@@ -392,8 +392,21 @@ bool XenonSession::invoke_gpu_interrupt_callback(cpu::GuestAddress callback,
     return false;
   }
 
-  return run_guest_callback(state, callback, thread, watch,
-                            source == 0u ? "vsync interrupt" : "graphics interrupt");
+  // TEMPORARY frame-pacing timeline (see runtime_services.cpp).
+  const auto timeline_start = std::chrono::steady_clock::now();
+  const bool ok = run_guest_callback(state, callback, thread, watch,
+                                     source == 0u ? "vsync interrupt" : "graphics interrupt");
+  {
+    const auto at = std::chrono::duration_cast<std::chrono::microseconds>(
+                        timeline_start.time_since_epoch()).count();
+    const auto took = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - timeline_start).count();
+    static const auto window = at + 80'000'000;
+    if (at >= window && at < window + 2'000'000)
+      logging::append_probe_log("timeline_diag.log", "%10lld us +%7lld %s interrupt\n", (long long)at,
+                                (long long)took, source == 0u ? "VSYNC" : "GPU");
+  }
+  return ok;
 }
 
 }  // namespace xenon::core

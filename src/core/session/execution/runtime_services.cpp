@@ -246,7 +246,21 @@ bool XenonSession::external_call(std::string_view module,
     return observer;
   };
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::BeforeKernelCall));
+  // TEMPORARY frame-pacing timeline: every kernel call that blocks for 1 ms
+  // or more, and every VdSwap, during a two-second window.
+  const auto timeline_start = std::chrono::steady_clock::now();
   auto result = export_registry_.invoke(module, ordinal, context);
+  {
+    const auto end = std::chrono::steady_clock::now();
+    const auto at = std::chrono::duration_cast<std::chrono::microseconds>(timeline_start.time_since_epoch()).count();
+    static const auto window = at + 80'000'000;
+    const auto took = std::chrono::duration_cast<std::chrono::microseconds>(end - timeline_start).count();
+    const std::string_view name = descriptor ? std::string_view(descriptor->name) : std::string_view{};
+    if (at >= window && at < window + 2'000'000 && (took >= 1000 || name == "VdSwap"))
+      logging::append_probe_log("timeline_diag.log", "%10lld us +%7lld t%u %.*s r3=0x%08llX lr=0x%08X\n",
+                                (long long)at, (long long)took, calling_thread_id, int(name.size()), name.data(),
+                                (unsigned long long)arguments[0], static_cast<unsigned>(call_lr));
+  }
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::AfterKernelCall));
   if (track_in_flight) {
     std::scoped_lock lock(in_flight_exports_mutex_);
