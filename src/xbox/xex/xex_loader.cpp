@@ -23,6 +23,14 @@ XexFormat detect_xex_format(std::span<const std::byte> bytes) noexcept {
   return XexFormat::Unknown;
 }
 
+std::uint32_t default_thread_stack_size(const XexImage& image) noexcept {
+  if (image.default_stack_size == 0u ||
+      image.default_stack_size > 0xFFFFFFFFu - (memory::kBasePageSize - 1u)) {
+    return kFallbackThreadStackSize;
+  }
+  return (image.default_stack_size + memory::kBasePageSize - 1u) & ~(memory::kBasePageSize - 1u);
+}
+
 bool parse_xex_image(std::span<const std::byte> bytes, XexImage& out_image, std::string* error,
                     std::span<const std::byte> reference_image) {
   out_image = {};
@@ -69,6 +77,10 @@ bool parse_xex_image(std::span<const std::byte> bytes, XexImage& out_image, std:
   parse_execution_info(bytes, header_size, entries, out_image);
   parse_original_pe_name(bytes, header_size, entries, out_image.original_pe_name);
   parse_native_tls(bytes, header_size, entries, out_image.tls);
+  if (const auto* entry = find_opt_header(entries, kHeaderDefaultStackSize);
+      entry && opt_header_is_inline(entry->key)) {
+    out_image.default_stack_size = entry->raw;
+  }
   parse_delta_patch_descriptor(bytes, header_size, entries, out_image.delta_patch);
 
   FileFormatInfo format_info{};

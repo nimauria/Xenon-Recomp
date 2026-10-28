@@ -280,6 +280,10 @@ struct XexImage {
   std::vector<XexRelocation> relocations;
   std::vector<XexFunctionMetadata> function_metadata;
   std::optional<XexTls> tls;
+  // XEX_HEADER_DEFAULT_STACK_SIZE: the stack the kernel gives the title's main
+  // thread and any ExCreateThread call that passes a zero stack size. Zero
+  // when the image does not declare one.
+  std::uint32_t default_stack_size{};
   std::string original_pe_name;
   // The exact on-disk header bytes ([0, header_size) of the bytes passed to
   // parse_xex_image()) this image was parsed from. Retained so
@@ -318,6 +322,12 @@ struct LoadedXex {
                                   XexImage& out_image,
                                   std::string* error = nullptr,
                                   std::span<const std::byte> reference_image = {});
+
+// Stack the kernel gives the main thread and any thread created with a zero
+// stack size: the image's XEX_HEADER_DEFAULT_STACK_SIZE rounded up to a 4 KiB
+// page, or kFallbackThreadStackSize when the image declares none.
+inline constexpr std::uint32_t kFallbackThreadStackSize = 1u * 1024u * 1024u;
+[[nodiscard]] std::uint32_t default_thread_stack_size(const XexImage& image) noexcept;
 
 // Maps an already-parsed `image` (from parse_xex_image() or
 // apply_title_update()) into Memory V2 with real per-page-descriptor R/W/X

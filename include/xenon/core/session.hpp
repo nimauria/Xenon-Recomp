@@ -405,6 +405,8 @@ class XenonSession final : public cpu::RuntimeServices {
   bool resolve_xex_imports();
   bool bind_compiled_code();
   bool create_guest_process();
+  // Stack size for the main thread and for thread creation that passes zero.
+  [[nodiscard]] std::uint32_t default_guest_stack_size() const noexcept;
   // Releases whatever create_guest_process() had already allocated when a
   // later step in that same call fails (guest stack, kernel_process_ and the
   // kernel_memory_/module registration it owns). Without this, a failure

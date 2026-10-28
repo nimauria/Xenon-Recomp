@@ -47,10 +47,9 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
     return true;
   }
 
-  // 0 means "inherit the default stack size" on real Xbox 360, matching the
-  // same default create_guest_process() uses for the main thread.
-  constexpr std::uint32_t kDefaultStackSize = 1u * 1024u * 1024u;
-  if (stack_size == 0u) stack_size = kDefaultStackSize;
+  // 0 means "inherit the default stack size": the image's
+  // XEX_HEADER_DEFAULT_STACK_SIZE, the same size the main thread received.
+  if (stack_size == 0u) stack_size = default_guest_stack_size();
   constexpr std::uint32_t kMinimumStackSize = 4096u;
   if (stack_size < kMinimumStackSize) stack_size = kMinimumStackSize;
 
