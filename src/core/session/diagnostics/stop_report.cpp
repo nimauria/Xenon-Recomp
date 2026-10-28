@@ -15,6 +15,7 @@
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/object_description.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/memory/address_space.hpp"
 #if defined(XENON_HAS_AUDIO)
 #include "xenon/audio/system.hpp"
 #endif
@@ -58,6 +59,23 @@ std::vector<std::string> XenonSession::describe_pump_state() {
         << " delivered=" << gpu_interrupts_delivered_.load()
         << " failed=" << gpu_interrupts_failed_.load();
   lines.push_back(vsync.str());
+  if (memory_) {
+    // Who owns the 512 MiB: a title that exhausts physical memory sees
+    // MmAllocatePhysicalMemoryEx/NtAllocateVirtualMemory fail and usually
+    // dereferences the null result shortly after.
+    const auto stats = memory_->memory_statistics();
+    const auto mib = [](std::uint32_t pages) {
+      return std::to_string(pages * (memory::kBasePageSize / 1024u) / 1024u) + " MiB";
+    };
+    lines.push_back("Guest physical memory: " + mib(stats.available_physical_pages) +
+                    " available of " + mib(stats.total_physical_pages) + "; system " +
+                    mib(stats.system_physical_pages) + ", virtual commits " +
+                    mib(stats.anonymous_physical_pages) + ", physical allocations " +
+                    mib(stats.explicit_physical_pages) + ", retired " +
+                    mib(stats.retired_physical_pages) + "; image " + mib(stats.image_pages) +
+                    ", virtual reserved " + mib(stats.reserved_virtual_pages) + " committed " +
+                    mib(stats.committed_virtual_pages));
+  }
 #if defined(XENON_HAS_AUDIO)
   if (audio_) {
     // Why each render client's callbacks stopped, if they did: a callback
@@ -70,7 +88,9 @@ std::vector<std::string> XenonSession::describe_pump_state() {
     for (const auto& client : clients) lines.push_back("  " + audio::AudioSystem::describe(client));
     // Whether anything audible reached the device, and the recording, if one.
     lines.push_back(audio::OutputMeter::describe(audio_->output_levels(), audio::kXboxSampleRate) +
-                    "; underruns " + std::to_string(audio_->underrun_count()));
+                    "; underruns " + std::to_string(audio_->underrun_count()) +
+                    "; loudest submitted sample " + std::to_string(audio_->submitted_peak()));
+    lines.push_back(audio::XmaDecoder::describe(audio_->xma().stats()));
     if (const auto& recorder = audio_->output_recorder(); recorder.recording())
       lines.push_back("Audio capture: " + std::to_string(recorder.frames_written()) +
                       " frames written, " + std::to_string(recorder.frames_dropped()) + " dropped");

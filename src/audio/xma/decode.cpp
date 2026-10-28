@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -186,9 +187,11 @@ bool XmaDecoder::decode_one(std::size_t index) {
     return false;
   }
   const XmaContextData initial = data;
+  decode_passes_.fetch_add(1, std::memory_order_relaxed);
 
   if (!data.output_buffer_valid || !data.output_buffer_ptr ||
       !data.output_buffer_block_count) {
+    idle_passes_[kIdleNoOutputBuffer].fetch_add(1, std::memory_order_relaxed);
     finish();
     return false;
   }
@@ -216,6 +219,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
                               ? static_cast<std::size_t>(data.output_buffer_padding)
                               : 0u;
     if (!blocks_to_write || writable_blocks < blocks_to_write + headroom) {
+      idle_passes_[kIdleOutputFull].fetch_add(1, std::memory_order_relaxed);
       finish();
       return false;
     }
@@ -267,11 +271,13 @@ bool XmaDecoder::decode_one(std::size_t index) {
   // Hardware does not advance compressed input unless enough output-ring
   // space exists for the requested block quantum plus its reserved padding.
   if (writable_blocks < decode_blocks + data.output_buffer_padding) {
+    idle_passes_[kIdleOutputFull].fetch_add(1, std::memory_order_relaxed);
     finish();
     return false;
   }
 
   if (!data.input_buffer_0_valid && !data.input_buffer_1_valid) {
+    idle_passes_[kIdleNoInput].fetch_add(1, std::memory_order_relaxed);
     data.output_buffer_valid = false;
     const bool published = merge_hardware_progress(context, initial, data);
     finish(false, published, data.interrupt_when_done);
@@ -468,14 +474,22 @@ bool XmaDecoder::decode_one(std::size_t index) {
                            channels * sizeof(std::int16_t);
   std::array<std::byte, Runtime::kMaxFrameBytes> decoded_pcm{};
   std::size_t decoded_offset = 0;
+  float frame_peak = 0.0f;
   for (std::uint32_t sample = 0; sample < kXmaSamplesPerFrame; ++sample) {
     for (int ch = 0; ch < channels; ++ch) {
       const auto* plane =
           reinterpret_cast<const float*>(runtime.frame->extended_data[ch]);
+      frame_peak = std::max(frame_peak, std::abs(plane[sample]));
       const auto value = static_cast<std::uint16_t>(float_to_s16(plane[sample]));
       decoded_pcm[decoded_offset++] = std::byte((value >> 8u) & 0xFFu);
       decoded_pcm[decoded_offset++] = std::byte(value & 0xFFu);
     }
+  }
+  frames_decoded_.fetch_add(1, std::memory_order_relaxed);
+  for (auto bits = peak_bits_.load(std::memory_order_relaxed);
+       std::bit_cast<float>(bits) < frame_peak &&
+       !peak_bits_.compare_exchange_weak(bits, std::bit_cast<std::uint32_t>(frame_peak),
+                                         std::memory_order_relaxed);) {
   }
 
   const auto lead_bytes = Runtime::kDecoderStartPaddingSamples *

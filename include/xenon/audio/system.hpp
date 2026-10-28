@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -112,6 +113,11 @@ class AudioSystem final {
   [[nodiscard]] std::uint32_t underrun_count() const noexcept {
     return underrun_count_.load();
   }
+  // Loudest sample in any frame the title submitted, before downmix: tells a
+  // silent title mix apart from a loss in Xenon's output path.
+  [[nodiscard]] float submitted_peak() const noexcept {
+    return std::bit_cast<float>(submitted_peak_bits_.load(std::memory_order_relaxed));
+  }
   // What reached the host device so far (levels, audible time).
   [[nodiscard]] OutputMeter::Snapshot output_levels() const noexcept { return meter_.snapshot(); }
   // Records the device output to a WAV file from now until shutdown (or
@@ -207,6 +213,7 @@ class AudioSystem final {
   GuestCallbackInvoker guest_callback_invoker_{};
   std::atomic<std::uint32_t> underrun_count_{0};
   std::atomic<std::uint64_t> rejected_unregistered_{0};
+  std::atomic<std::uint32_t> submitted_peak_bits_{0};
   // Xbox render-driver clock, in 48 kHz samples consumed by the host. This
   // advances through underrun silence as well as submitted audio so guest AV
   // synchronization follows real playback time rather than queue occupancy.

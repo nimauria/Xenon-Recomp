@@ -142,6 +142,26 @@ class XmaDecoder final {
   [[nodiscard]] std::uint64_t decoded_samples(cpu::GuestAddress context) const;
   void set_completion_sink(CompletionSink sink);
 
+  // Engine-wide totals for diagnostics: whether contexts decode, what they
+  // fail with (XMA error_status/parser_error_status), and how loud the
+  // decoded PCM is.
+  struct Stats {
+    std::uint32_t contexts_allocated{};
+    std::uint64_t kicks{};
+    std::uint64_t decode_passes{};
+    // Passes that produced nothing: no valid output buffer, output ring
+    // without room, no valid input buffer.
+    std::uint64_t idle_no_output_buffer{};
+    std::uint64_t idle_output_full{};
+    std::uint64_t idle_no_input{};
+    std::uint64_t frames_decoded{};
+    std::uint64_t parser_errors{};
+    std::array<std::uint64_t, 16> decode_errors{};
+    float peak{};
+  };
+  [[nodiscard]] Stats stats() const noexcept;
+  [[nodiscard]] static std::string describe(const Stats& stats);
+
  private:
   struct Runtime;
   [[nodiscard]] std::optional<std::size_t> index_of(
@@ -184,6 +204,15 @@ class XmaDecoder final {
 
   mutable std::mutex completion_mutex_{};
   CompletionSink completion_sink_{};
+
+  enum IdleReason : std::size_t { kIdleNoOutputBuffer, kIdleOutputFull, kIdleNoInput, kIdleReasons };
+  std::atomic<std::uint64_t> kicks_{0};
+  std::atomic<std::uint64_t> decode_passes_{0};
+  std::array<std::atomic<std::uint64_t>, kIdleReasons> idle_passes_{};
+  std::atomic<std::uint64_t> frames_decoded_{0};
+  std::atomic<std::uint64_t> parser_errors_{0};
+  std::array<std::atomic<std::uint64_t>, 16> decode_errors_{};
+  std::atomic<std::uint32_t> peak_bits_{0};
 };
 
 }  // namespace xenon::audio

@@ -179,6 +179,17 @@ bool AudioSystem::translate_render_frame(cpu::GuestAddress samples,
   std::array<std::byte, kInputFloats * sizeof(float)> bytes{};
   memory_.read_bytes(samples, bytes);
 
+  float peak = 0.0f;
+  for (std::size_t i = 0; i < kInputFloats; ++i) {
+    const float value = std::abs(load_be_float(bytes.data() + i * sizeof(float)));
+    if (value > peak && std::isfinite(value)) peak = value;
+  }
+  for (auto bits = submitted_peak_bits_.load(std::memory_order_relaxed);
+       std::bit_cast<float>(bits) < peak &&
+       !submitted_peak_bits_.compare_exchange_weak(bits, std::bit_cast<std::uint32_t>(peak),
+                                                   std::memory_order_relaxed);) {
+  }
+
   for (std::size_t sample = 0; sample < kRenderFrameSamples; ++sample) {
     const auto read_channel = [&](std::size_t channel) {
       const auto offset =
