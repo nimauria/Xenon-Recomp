@@ -304,6 +304,21 @@ void test_relative_addressing_registers() {
   assert(hlsl.find("+ ar") == std::string::npos);
 }
 
+// The scalar helper follows the Xenos result values: setp_* write 0.0 when the
+// predicate becomes true, and maxas loads a0 from `a`, not the maximum.
+void test_scalar_helper_semantics() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_pixel_shader(false));
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("v=p0 ? 0.0 : 1.0;") != std::string::npos);
+  assert(hlsl.find("a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);") !=
+         std::string::npos);
+  assert(hlsl.find("rsqrt(abs(") == std::string::npos);
+  assert(hlsl.find("sqrt(abs(") == std::string::npos);
+  assert(hlsl.find("p0=!p0") == std::string::npos);
+  assert(hlsl.find("float x = a.z, y = a.w, z = a.x;") != std::string::npos);
+}
+
 void test_forced_writable_guest_memory_variant() {
   using namespace xenon::gpu;
   ShaderLoweringOptions options{};
@@ -329,5 +344,6 @@ int main() {
   test_export_constant_components();
   test_vector_kill_is_not_cleared_by_scalar_operation();
   test_relative_addressing_registers();
+  test_scalar_helper_semantics();
   std::cout << "xenon_shader_lowering_tests: ok\n";
 }

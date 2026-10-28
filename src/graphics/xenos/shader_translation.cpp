@@ -357,8 +357,15 @@ float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
   if (op == 16) return dot(a.xyz, b.xyz).xxxx;
   if (op == 17) return (dot(a.xy, b.xy) + c.x).xxxx;
   if (op == 18) {
-    float3 q = abs(a.xyz); float m = max(q.x, max(q.y, q.z));
-    return float4(m, 1.0, 1.0, 1.0);
+    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
+    // and the D3DCUBEMAP_FACES face.
+    float x = a.z, y = a.w, z = a.x;
+    float3 q = abs(float3(x, y, z));
+    if (q.z >= q.x && q.z >= q.y)
+      return float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);
+    if (q.y >= q.x)
+      return float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);
+    return float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0);
   }
   if (op == 19) return max(max(a.x, a.y), max(a.z, a.w)).xxxx;
   if (op >= 20 && op <= 23) {
@@ -374,27 +381,64 @@ float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
     return (killed ? 1.0 : 0.0).xxxx;
   }
   if (op == 28) return float4(1.0, a.y * b.y, a.z, b.w);
-  if (op == 29) { a0 = (int)floor(a.w + 0.5); return max(a, b); }
+  if (op == 29) {
+    a0 = (int)clamp(floor(a.w + 0.5), -256.0, 255.0);
+    return max(a, b);
+  }
   return 0.0.xxxx;
 }
 
+)hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
+R"hlsl(static const float XENON_FLT_MAX = 3.402823466e+38;
+// Infinite results of the clamping reciprocal forms: _CLAMP saturates to
+// +-FLT_MAX, _FF flushes to signed zero.
+float xenon_clamp_infinity(float value, bool to_zero) {
+  if (!isinf(value)) return value;
+  if (to_zero) return value < 0.0 ? -0.0 : 0.0;
+  return value < 0.0 ? -XENON_FLT_MAX : XENON_FLT_MAX;
+}
+
+// `a` is the scalar operand (source 3) and `b` the mulsc/addsc/subsc
+// temporary. Operand `a` is a.w, operand `b` is a.x (or b.x for the constant
+// forms).
 float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
                        inout bool p0, inout int a0, out bool killed) {
-  killed = false; float x = a.w; float y = a.x; float v = 0.0;
-  if (op == 0) v=x+y; else if (op == 1) v=x+previous.x;
-  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3 || op==4) v=xenon_legacy_mul(x,previous.x);
-  else if (op==5) v=max(x,y); else if (op==6) v=min(x,y);
+  killed = false; float x = a.w; float y = a.x; float ps = previous.x; float v = 0.0;
+  if (op == 0) v=x+y; else if (op == 1) v=x+ps;
+  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3) v=xenon_legacy_mul(x,ps);
+  else if (op==4) v=(ps==-XENON_FLT_MAX || !isfinite(ps) || !isfinite(y) || y<=0.0)
+                    ? -XENON_FLT_MAX : xenon_legacy_mul(x,ps);
+  else if (op==5) v=x>=y?x:y; else if (op==6) v=x<y?x:y;
   else if (op==7) v=x==0.0; else if (op==8) v=x>0.0; else if (op==9) v=x>=0.0; else if (op==10) v=x!=0.0;
-  else if (op==11) v=frac(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
-  else if (op==14) v=exp2(x); else if (op==15 || op==16) v=log2(x);
-  else if (op>=17 && op<=19) v=rcp(x); else if (op>=20 && op<=22) v=rsqrt(abs(x));
-  else if (op==23 || op==24) { v=max(x,y); a0=(int)floor(v + (op==24 ? 0.0 : 0.5)); }
-  else if (op==25) v=x-y; else if (op==26) v=x-previous.x;
-  else if (op>=27 && op<=30) { p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0; v=p0; }
-  else if (op==31) { p0=!p0; v=p0; } else if (op==32) { p0=false; v=0.0; }
-  else if (op==33) { p0=false; v=0.0; } else if (op==34) v=p0;
+  else if (op==11) v=x-floor(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
+  else if (op==14) v=exp2(x);
+  else if (op==15 || op==16) {
+    v=x==1.0 ? 0.0 : log2(x);
+    if (op==15 && isinf(v) && v<0.0) v=-XENON_FLT_MAX;
+  }
+  else if (op>=17 && op<=19) {
+    v=x==1.0 ? 1.0 : 1.0/x;
+    if (op!=19) v=xenon_clamp_infinity(v, op==18);
+  }
+  else if (op>=20 && op<=22) {
+    v=x==1.0 ? 1.0 : 1.0/sqrt(x);
+    if (op!=22) v=xenon_clamp_infinity(v, op==21);
+  }
+  else if (op==23 || op==24) {
+    a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);
+    v=x>=y?x:y;
+  }
+  else if (op==25) v=x-y; else if (op==26) v=x-ps;
+  else if (op>=27 && op<=30) {
+    p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0;
+    v=p0 ? 0.0 : 1.0;
+  }
+  else if (op==31) { p0=x==1.0; v=p0 ? 0.0 : (x==0.0 ? 1.0 : x); }
+  else if (op==32) { p0=x-1.0<=0.0; v=p0 ? 0.0 : x-1.0; }
+  else if (op==33) { p0=false; v=XENON_FLT_MAX; }
+  else if (op==34) { p0=x==0.0; v=p0 ? 0.0 : x; }
   else if (op>=35 && op<=39) { killed=op==35?x==0.0:op==36?x>0.0:op==37?x>=0.0:op==38?x!=0.0:x==1.0; v=killed; }
-  else if (op==40) v=sqrt(abs(x)); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
+  else if (op==40) v=sqrt(x); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
   else if (op==44 || op==45) v=x+b.x; else if (op==46 || op==47) v=x-b.x;
   else if (op==48) v=sin(x); else if (op==49) v=cos(x); else if (op==50) return previous;
   return v.xxxx;
