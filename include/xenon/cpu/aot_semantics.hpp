@@ -10,6 +10,10 @@
 #include <string_view>
 #include <type_traits>
 
+#if defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#endif
+
 #include "xenon/cpu/runtime.hpp"
 #include "xenon/cpu/vector_semantic.hpp"
 
@@ -343,9 +347,47 @@ inline int host_rounding(FpRoundingMode m) noexcept;
 inline thread_local int last_fp_exceptions = 0;
 inline thread_local std::uint32_t last_fp_invalid_detail = 0;
 inline thread_local bool last_fp_result_incremented = false;
+
+// Each guest FP operation runs with the guest's rounding mode and clear
+// exception flags, then hands the host its own state back. On x64 all scalar
+// double/float arithmetic is SSE, so that state is exactly MXCSR: reading and
+// writing it directly costs a few cycles, where fegetenv/fesetenv also save
+// and reload the x87 environment and made FP-heavy guest code (AC6's audio
+// mixer) spend half its time in the CRT.
+#if defined(_M_X64) || defined(__x86_64__)
+inline thread_local unsigned saved_host_mxcsr = 0;
+
+[[nodiscard]] inline unsigned mxcsr_rounding(FpRoundingMode m) noexcept {
+  switch (m) {
+    case FpRoundingMode::Nearest: return 0x0000u;
+    case FpRoundingMode::TowardNegative: return 0x2000u;
+    case FpRoundingMode::TowardPositive: return 0x4000u;
+    case FpRoundingMode::TowardZero: return 0x6000u;
+  }
+  return 0x0000u;
+}
+
+inline void begin_fp_operation(CpuState& state) noexcept {
+  last_fp_exceptions = 0;
+  last_fp_invalid_detail = 0;
+  last_fp_result_incremented = false;
+  saved_host_mxcsr = _mm_getcsr();
+  // Clear the six exception flags and replace the rounding control; the
+  // host's masks, flush-to-zero and denormals-are-zero settings are kept.
+  _mm_setcsr((saved_host_mxcsr & ~(0x003Fu | 0x6000u)) |
+             mxcsr_rounding(state.fp_rounding_mode()));
+}
+
+inline void finish_fp_operation() noexcept {
+  const unsigned flags = _mm_getcsr();
+  _mm_setcsr(saved_host_mxcsr);
+  last_fp_exceptions = ((flags & 0x01u) ? FE_INVALID : 0) | ((flags & 0x04u) ? FE_DIVBYZERO : 0) |
+                       ((flags & 0x08u) ? FE_OVERFLOW : 0) | ((flags & 0x10u) ? FE_UNDERFLOW : 0) |
+                       ((flags & 0x20u) ? FE_INEXACT : 0);
+}
+#else
 inline thread_local fenv_t saved_host_fp_environment{};
 inline thread_local bool saved_host_fp_environment_valid = false;
-inline thread_local FpRoundingMode cached_rounding_mode = FpRoundingMode::Nearest;
 
 inline void begin_fp_operation(CpuState& state) noexcept {
   last_fp_exceptions = 0;
@@ -353,11 +395,8 @@ inline void begin_fp_operation(CpuState& state) noexcept {
   last_fp_result_incremented = false;
   saved_host_fp_environment_valid = std::fegetenv(&saved_host_fp_environment) == 0;
   std::feclearexcept(FE_ALL_EXCEPT);
-  const auto mode = state.fp_rounding_mode();
-  if (cached_rounding_mode != mode) {
-    std::fesetround(host_rounding(mode));
-    cached_rounding_mode = mode;
-  }
+  // Set every time: finish_fp_operation() restores the host's rounding.
+  std::fesetround(host_rounding(state.fp_rounding_mode()));
 }
 
 inline void finish_fp_operation() noexcept {
@@ -367,6 +406,7 @@ inline void finish_fp_operation() noexcept {
     saved_host_fp_environment_valid = false;
   }
 }
+#endif
 
 [[nodiscard]] inline double fp_add(CpuState& state, double a, double b) noexcept {
   begin_fp_operation(state);

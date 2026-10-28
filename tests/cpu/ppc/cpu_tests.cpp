@@ -220,6 +220,28 @@ int main() {
     assert(std::fegetround() == FE_DOWNWARD);
     std::fesetround(host_round);
 
+    // Every operation applies the guest's rounding mode, not only the first
+    // after a mode change: restoring the host environment after one add used
+    // to leave the next add rounding to nearest under a cached guest mode.
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardPositive);
+    for (int i = 0; i < 3; ++i) {
+      assert(aot::fp_add(fp, 1.0, 0x1p-60) == std::nextafter(1.0, 2.0));
+      assert(aot::fp_mul(fp, 1.0 + 0x1p-52, 1.0 + 0x1p-52) > 1.0 + 0x1p-51);
+    }
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardZero);
+    for (int i = 0; i < 3; ++i) assert(aot::fp_add(fp, 1.0, 0x1p-60) == 1.0);
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardNegative);
+    for (int i = 0; i < 3; ++i)
+      assert(aot::fp_sub(fp, 1.0, 0x1p-60) == std::nextafter(1.0, 0.0));
+    // An inexact result is reported on every operation, not just the first.
+    fp.fpscr = 0;
+    for (int i = 0; i < 3; ++i) {
+      (void)aot::fp_add(fp, 1.0, 0x1p-60);
+      assert((aot::last_fp_exceptions & FE_INEXACT) != 0);
+      (void)aot::fp_add(fp, 1.0, 1.0);
+      assert(aot::last_fp_exceptions == 0);
+    }
+
     // Divide by zero and negative square root produce architected sticky state.
     fp.fpscr = 0;
     const double dz = aot::fp_div(fp, 1.0, 0.0);
