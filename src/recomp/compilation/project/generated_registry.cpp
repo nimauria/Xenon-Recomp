@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "recomp/compilation/project_generation_internal.hpp"
 #include "recomp/driver/driver_support.hpp"
@@ -152,28 +154,27 @@ bool write_registry_source(const std::filesystem::path& generation_stage, const 
     if (function.compiled && !function.native_replacement)
       registry_text << "  {0x" << hex_string(function.guest_start) << ", &" << function.name << "},\n";
   registry_text << "};\nconst std::size_t kCompiledFunctionCount = " << legacy_compiled_count << ";\n}\n";
-  registry_text << "namespace xenon::recomp {\n"
-                   "CompiledFunctionV2 lookup_compiled(void*, xenon::cpu::ExecutionContext&, xenon::cpu::GuestAddress target, xenon::cpu::CompiledLookupKind) {\n"
-                   "  switch (target) {\n";
+  // lookup_compiled() resolves every indirect call (vtables, function
+  // pointers) and every call into a native replacement. As a switch over
+  // AC6's ~14,700 entries it was a branch tree that took 70% of the main
+  // thread; it is now one bounds check and one load from a table indexed by
+  // guest word, built once when the module loads.
+  std::vector<std::pair<GuestAddress, std::string>> lookup_cases;
   if (report.hint_set_v2) {
     for (const auto& helper :
-         analysis::expand_runtime_helpers(report.hint_set_v2->runtime_helpers)) {
-      registry_text << "    case 0x" << hex_string(helper.address)
-                    << ": return &xenon::recomp::runtime_helpers::"
-                    << runtime_helper_native_symbol(helper) << ";\n";
-    }
+         analysis::expand_runtime_helpers(report.hint_set_v2->runtime_helpers))
+      lookup_cases.emplace_back(helper.address, "&xenon::recomp::runtime_helpers::" +
+                                                    runtime_helper_native_symbol(helper));
   }
   for (const auto& function : report.functions) {
     if (function.native_replacement) {
       const auto* native_name = native_replacement_function_name(*function.native_replacement);
-      if (native_name != nullptr) {
-        registry_text << "    case 0x" << hex_string(function.guest_start)
-                      << ": return &xenon::recomp::native_replacements::" << native_name << ";\n";
-      }
+      if (native_name != nullptr)
+        lookup_cases.emplace_back(function.guest_start,
+                                  std::string("&xenon::recomp::native_replacements::") + native_name);
       continue;
     }
-    if (function.compiled)
-      registry_text << "    case 0x" << hex_string(function.guest_start) << ": return &" << function.name << "_v2;\n";
+    if (function.compiled) lookup_cases.emplace_back(function.guest_start, "&" + function.name + "_v2");
   }
   for (const auto& entry : report.entries) {
     if (entry.kind != GuestEntryKind::AlternateBlock) continue;
@@ -182,10 +183,49 @@ bool write_registry_source(const std::filesystem::path& generation_stage, const 
              !function.native_replacement;
     });
     if (owner == report.functions.end()) continue;
-    registry_text << "    case 0x" << hex_string(entry.address) << ": return &"
-                  << cpu::backend::alternate_entry_symbol(owner->name, entry.address) << ";\n";
+    lookup_cases.emplace_back(entry.address,
+                              "&" + cpu::backend::alternate_entry_symbol(owner->name, entry.address));
   }
-  registry_text << "    default: return nullptr;\n  }\n}\n"
+  std::sort(lookup_cases.begin(), lookup_cases.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (std::size_t i = 1; i < lookup_cases.size(); ++i) {
+    if (lookup_cases[i].first == lookup_cases[i - 1].first) {
+      // Two entries for one address: the switch this replaced failed to compile.
+      return false;
+    }
+  }
+  for (const auto& [address, symbol] : lookup_cases) {
+    if ((address & 3u) != 0u) {
+      // Guest code is word aligned; a slot index would alias its neighbour.
+      return false;
+    }
+  }
+  const GuestAddress lookup_base = lookup_cases.empty() ? 0u : lookup_cases.front().first;
+  const std::uint64_t lookup_slots =
+      lookup_cases.empty() ? 0u : ((std::uint64_t{lookup_cases.back().first} - lookup_base) >> 2u) + 1u;
+  registry_text << "namespace xenon::recomp {\nnamespace {\n"
+                   "struct LookupCase { std::uint32_t address; CompiledFunctionV2 entry; };\n"
+                   "const LookupCase kLookupCases[] = {\n";
+  for (const auto& [address, symbol] : lookup_cases)
+    registry_text << "  {0x" << hex_string(address) << ", " << symbol << "},\n";
+  if (lookup_cases.empty()) registry_text << "  {0u, nullptr},\n";
+  registry_text << "};\n"
+                   "constexpr std::uint32_t kLookupBase = 0x" << hex_string(lookup_base) << "u;\n"
+                   "constexpr std::uint32_t kLookupSlots = " << lookup_slots << "u;\n"
+                   "// One slot per guest word from the lowest entry to the highest.\n"
+                   "CompiledFunctionV2* build_lookup_table() {\n"
+                   "  auto* table = new CompiledFunctionV2[kLookupSlots ? kLookupSlots : 1u]();\n"
+                   "  for (const auto& entry : kLookupCases)\n"
+                   "    if (entry.entry) table[(entry.address - kLookupBase) >> 2u] = entry.entry;\n"
+                   "  return table;\n"
+                   "}\n"
+                   "CompiledFunctionV2* const kLookupTable = build_lookup_table();\n"
+                   "}  // namespace\n"
+                   "CompiledFunctionV2 lookup_compiled(void*, xenon::cpu::ExecutionContext&, xenon::cpu::GuestAddress target, xenon::cpu::CompiledLookupKind) {\n"
+                   "  const std::uint32_t offset = target - kLookupBase;\n"
+                   "  if ((offset & 3u) != 0u || (offset >> 2u) >= kLookupSlots) return nullptr;\n"
+                   "  return kLookupTable[offset >> 2u];\n"
+                   "}\n"
                    "void bind_compiled_registry(xenon::cpu::ExecutionContext& context) noexcept {\n"
                    "  context.compiled_registry = nullptr;\n"
                    "  context.compiled_lookup = &lookup_compiled;\n"

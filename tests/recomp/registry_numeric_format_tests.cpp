@@ -376,6 +376,36 @@ int main() {
   std::cout << "  [PASS] Hexadecimal guest addresses immediately before the count remain hexadecimal, "
                "and do not affect the following decimal count\n";
 
+  // Test 4b: lookup_compiled() is a table indexed by guest word, not a
+  // switch. As a switch over AC6's ~14,700 entries it was a branch tree that
+  // took 70% of the game's main thread. Every compiled function has a slot,
+  // and the table spans exactly the lowest to the highest entry.
+  {
+    auto project = build_project_with_compiled_count("lookup_table", 300);
+    const auto& text = project.registry_text;
+    assert(text.find("switch (target)") == std::string::npos &&
+           "lookup_compiled() must not be a switch over every compiled entry");
+    std::uint32_t low = 0xFFFFFFFFu, high = 0u;
+    for (const auto& function : project.report.functions) {
+      if (!function.compiled || function.native_replacement) continue;
+      low = std::min(low, function.guest_start);
+      high = std::max(high, function.guest_start);
+      std::ostringstream entry;
+      entry << "  {0x" << std::hex << function.guest_start << ", &" << function.name << "_v2},";
+      assert(text.find(entry.str()) != std::string::npos &&
+             "every compiled function must have a lookup slot");
+    }
+    std::ostringstream base;
+    base << "constexpr std::uint32_t kLookupBase = 0x" << std::hex << low << "u;";
+    assert(text.find(base.str()) != std::string::npos);
+    const auto slots = "constexpr std::uint32_t kLookupSlots = " +
+                       std::to_string((high - low) / 4u + 1u) + "u;";
+    assert(text.find(slots) != std::string::npos);
+    assert(text.find("return kLookupTable[offset >> 2u];") != std::string::npos);
+    std::filesystem::remove_all(project.fixture.root);
+  }
+  std::cout << "  [PASS] lookup_compiled() indexes a table spanning every compiled entry\n";
+
   // Test 5: the small (count=15) fixture is compiled for real via a nested
   // CMake configure+build against xenon_game, the way
   // tests/recomp/recomp_driver_tests.cpp already proves a generated project
