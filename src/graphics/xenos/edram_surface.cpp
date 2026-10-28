@@ -740,6 +740,101 @@ bool edram_tile_regions(const EdramSurfaceLayout& layout,
   return true;
 }
 
+namespace {
+
+std::uint32_t host_sample_mode(const EdramSurfaceLayout& layout,
+                               MsaaSamples host_samples) noexcept {
+  if (layout.msaa != MsaaSamples::X2) return 0u;
+  return host_samples == MsaaSamples::X2 ? 1u : 2u;
+}
+
+}  // namespace
+
+EdramTransferConstants make_edram_transfer_constants(
+    const EdramSurfaceLayout& source, MsaaSamples source_host_samples,
+    const EdramSurfaceLayout& destination,
+    MsaaSamples destination_host_samples) noexcept {
+  EdramTransferConstants constants{};
+  constants.destination = {destination.base_tile % Edram::kTileCount, destination.pitch_tiles(),
+                           static_cast<std::uint32_t>(destination.msaa),
+                           host_sample_mode(destination, destination_host_samples)};
+  constants.source = {source.base_tile % Edram::kTileCount, source.pitch_tiles(),
+                      static_cast<std::uint32_t>(source.msaa),
+                      host_sample_mode(source, source_host_samples)};
+  constants.extent = {source.is_64bpp ? 2u : 1u,
+                      (destination.depth ? 1u : 0u) | (source.depth ? 2u : 0u),
+                      source.pitch_pixels, source.height_pixels};
+  return constants;
+}
+
+bool edram_direct_transfer_supported(const EdramSurfaceLayout& source,
+                                     const EdramSurfaceLayout& destination,
+                                     std::span<const std::uint16_t> tiles) noexcept {
+  if (!source.valid() || !destination.valid() || source.is_64bpp != destination.is_64bpp)
+    return false;
+  const auto stride = source.is_64bpp ? 2u : 1u;
+  const auto pitch_tiles = source.pitch_tiles();
+  for (const auto tile : tiles) {
+    const auto relative = (std::uint32_t(tile) + Edram::kTileCount -
+                           source.base_tile % Edram::kTileCount) % Edram::kTileCount;
+    const auto row = relative / pitch_tiles;
+    const auto column = (relative % pitch_tiles) / stride;
+    if ((row + 1u) * 16u > source.sample_height() || (column + 1u) * 80u > source.sample_width())
+      return false;
+  }
+  // A 64bpp pixel keeps its low and high words in a tile pair; the pairs of
+  // both surfaces must start on the same parity for low tiles to correspond.
+  if (source.is_64bpp && (destination.base_tile + Edram::kTileCount -
+                          source.base_tile % Edram::kTileCount) % 2u)
+    return false;
+  return true;
+}
+
+std::optional<EdramTransferSample> edram_transfer_source(
+    const EdramTransferConstants& constants, std::uint32_t x, std::uint32_t y,
+    std::uint32_t destination_host_sample) noexcept {
+  const auto [dst_base, dst_pitch, dst_msaa, dst_mode] = constants.destination;
+  const auto [src_base, src_pitch, src_msaa, src_mode] = constants.source;
+  const auto [stride, depth_flags, src_width, src_height] = constants.extent;
+  if (!dst_pitch || !src_pitch || !stride) return std::nullopt;
+  // The destination host sample's guest sample.
+  std::uint32_t guest = destination_host_sample;
+  if (dst_mode == 1u) {
+    guest = destination_host_sample ? 0u : 1u;
+  } else if (dst_mode == 2u) {
+    if (destination_host_sample == 0u) guest = 0u;
+    else if (destination_host_sample == 3u) guest = 1u;
+    else return std::nullopt;
+  }
+  // Its EDRAM word, as edram_sample_address() computes it.
+  const auto sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
+  const auto sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
+                        (dst_msaa == 0u ? 0u : dst_msaa == 1u ? guest : guest >> 1u);
+  auto in_tile_x = sample_x % 80u;
+  if (depth_flags & 1u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const auto row_in_tile = sample_y % 16u;
+  const auto tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) %
+                    Edram::kTileCount;
+  // The source sample holding that word.
+  const auto relative = (tile + Edram::kTileCount - src_base) % Edram::kTileCount;
+  const auto source_x_tile = (relative % src_pitch) / stride;
+  const auto source_y_tile = relative / src_pitch;
+  if (depth_flags & 2u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const auto source_sample_x = source_x_tile * 80u + in_tile_x;
+  const auto source_sample_y = source_y_tile * 16u + row_in_tile;
+  EdramTransferSample result{};
+  result.x = source_sample_x >> (src_msaa == 2u ? 1u : 0u);
+  result.y = source_sample_y >> (src_msaa == 0u ? 0u : 1u);
+  std::uint32_t source_guest = 0u;
+  if (src_msaa == 2u) source_guest = (source_sample_y & 1u) * 2u + (source_sample_x & 1u);
+  else if (src_msaa == 1u) source_guest = source_sample_y & 1u;
+  if (result.x >= src_width || result.y >= src_height) return std::nullopt;
+  result.host_sample = src_mode == 1u   ? (source_guest ? 0u : 1u)
+                       : src_mode == 2u ? (source_guest ? 3u : 0u)
+                                        : source_guest;
+  return result;
+}
+
 bool resolve_edram_raw(const Edram& edram, const EdramSurfaceLayout& layout,
                        std::uint32_t left, std::uint32_t top,
                        std::uint32_t width, std::uint32_t height,

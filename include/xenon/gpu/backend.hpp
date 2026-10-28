@@ -36,6 +36,9 @@ struct GpuPerformanceCounters {
   // possibly the front buffer, unwritten.
   std::uint64_t failed_draws{};
   std::uint64_t failed_resolves{};
+  // Tile sets handed from one native image to another on the GPU, without
+  // a round trip through canonical EDRAM.
+  std::uint64_t direct_edram_transfers{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent

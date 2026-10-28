@@ -15,6 +15,7 @@
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/depth_target.hpp"
+#include "xenon/gpu/d3d12/edram_transfer.hpp"
 #include "xenon/gpu/d3d12/guest_memory_mirror.hpp"
 #include "xenon/gpu/d3d12/pipeline.hpp"
 #include "xenon/gpu/d3d12/presentation.hpp"
@@ -59,6 +60,7 @@ struct BackendApi {
   }
   // D3D12 has no FRONT_AND_BACK cull mode.
   static constexpr bool kEmulatesFrontAndBackCull = true;
+  static constexpr bool kSupportsDirectColorTransfer = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Dxil;
@@ -75,6 +77,17 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     (void)queue.wait_idle();
   }
   std::unordered_map<std::uint64_t, std::unique_ptr<RenderTargetImage>> dummy_render_targets{};
+  EdramColorTransfer edram_color_transfer{};
+
+  bool transfer_color_tiles(RenderTargetImage& source, RenderTargetImage& destination,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (edram_color_transfer.transfer(context.device(), queue, source, destination, constants,
+                                      regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
 
   bool create_render_target(RenderTargetImage& image,
                             const EdramSurfaceLayout& surface,

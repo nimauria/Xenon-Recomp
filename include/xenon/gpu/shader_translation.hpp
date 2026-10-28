@@ -72,6 +72,12 @@ class HlslShaderLowerer {
 [[nodiscard]] LoweredShader make_depth_sample_write_shader();
 [[nodiscard]] LoweredShader make_depth_only_sample_write_shader();
 [[nodiscard]] LoweredShader make_stencil_mask_write_shader();
+// Direct EDRAM tile transfer between two native color images of the same
+// format: drawn into the destination at sample frequency, each sample loads
+// the source sample holding the same EDRAM word (EdramTransferConstants; the
+// CPU reference is edram_transfer_source()). The constants are D3D12 root
+// constants at b0 or Vulkan push constants.
+[[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples);
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};

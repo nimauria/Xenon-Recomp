@@ -110,9 +110,91 @@ void test_bound_surfaces_do_not_overlap() {
   assert(rows_before_next_surface(color, adjacent) == color.max_resident_height_pixels());
 }
 
+// The direct GPU transfer between native images (AC6 renders 640x360 4x and
+// resolves the same tiles as 1280x720 1x every frame): every destination host
+// sample takes the source sample holding the same EDRAM word, for every
+// sample count pair, host 2x layout, format width, depth swizzle and base.
+void test_direct_transfer_reads_the_sample_holding_the_same_word() {
+  struct Case {
+    EdramSurfaceLayout source, destination;
+    MsaaSamples source_host, destination_host;
+  };
+  std::vector<Case> cases;
+  for (const auto source_msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+    for (const auto destination_msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+      for (const bool wide : {false, true})
+        for (const bool source_depth : {false, true})
+          for (const bool destination_depth : {false, true})
+            for (const bool emulated_2x : {false, true}) {
+              // Both span the same 4 tile rows of an 80-sample-wide strip,
+              // whatever their sample counts.
+              const auto pitch = [](MsaaSamples m) { return m == MsaaSamples::X4 ? 80u : 160u; };
+              const auto height = [](MsaaSamples m) { return m == MsaaSamples::X1 ? 64u : 32u; };
+              const auto host = [&](MsaaSamples m) {
+                return m == MsaaSamples::X2 && emulated_2x ? MsaaSamples::X4 : m;
+              };
+              cases.push_back({{2046u, pitch(source_msaa), height(source_msaa), source_msaa, wide,
+                                source_depth},
+                               {2046u, pitch(destination_msaa), height(destination_msaa),
+                                destination_msaa, wide, destination_depth},
+                               host(source_msaa), host(destination_msaa)});
+            }
+  for (const auto& c : cases) {
+    const auto tiles = covered_edram_tiles(
+        c.destination,
+        {0, 0, int(c.destination.pitch_pixels), int(c.destination.height_pixels)});
+    assert(edram_direct_transfer_supported(c.source, c.destination, tiles));
+    const auto constants =
+        make_edram_transfer_constants(c.source, c.source_host, c.destination, c.destination_host);
+    const auto host_samples = 1u << static_cast<unsigned>(c.destination_host);
+    for (std::uint32_t y = 0; y < c.destination.height_pixels; ++y)
+      for (std::uint32_t x = 0; x < c.destination.pitch_pixels; ++x)
+        for (std::uint32_t host_sample = 0; host_sample < host_samples; ++host_sample) {
+          const auto source = edram_transfer_source(constants, x, y, host_sample);
+          // Host samples of 2x held in 4x that carry no guest sample.
+          const bool unused = c.destination.msaa == MsaaSamples::X2 &&
+                              c.destination_host == MsaaSamples::X4 && host_sample != 0u &&
+                              host_sample != 3u;
+          if (unused) {
+            assert(!source);
+            continue;
+          }
+          assert(source);
+          // Which guest sample each host sample is, by the forward mapping.
+          const auto guest_of = [](MsaaSamples guest, MsaaSamples host_msaa,
+                                   std::uint32_t host_index) {
+            const auto count = 1u << static_cast<unsigned>(guest);
+            for (std::uint32_t g = 0; g < count; ++g)
+              if (map_guest_sample_to_host(guest, g, host_msaa == MsaaSamples::X2)->sample ==
+                  host_index)
+                return g;
+            assert(false);
+            return 0u;
+          };
+          const auto destination_guest = guest_of(c.destination.msaa, c.destination_host, host_sample);
+          const auto source_guest = guest_of(c.source.msaa, c.source_host, source->host_sample);
+          const auto expected = edram_sample_address(c.destination, x, y, destination_guest);
+          const auto actual = edram_sample_address(c.source, source->x, source->y, source_guest);
+          assert(expected && actual && expected->low == actual->low);
+        }
+  }
+  // Refused: a source that does not hold the whole tile, and 64bpp tile
+  // pairs that start on different parities.
+  const EdramSurfaceLayout short_source{0u, 80u, 8u, MsaaSamples::X1, false, false};
+  const EdramSurfaceLayout full{0u, 80u, 16u, MsaaSamples::X1, false, false};
+  const std::uint16_t first_tile[] = {0u};
+  assert(!edram_direct_transfer_supported(short_source, full, first_tile));
+  const EdramSurfaceLayout wide_even{0u, 80u, 16u, MsaaSamples::X1, true, false};
+  const EdramSurfaceLayout wide_odd{1u, 80u, 16u, MsaaSamples::X1, true, false};
+  const std::uint16_t pair[] = {1u, 2u};
+  assert(!edram_direct_transfer_supported(wide_even, wide_odd, pair));
+  assert(!edram_direct_transfer_supported(full, wide_even, first_tile));
+}
+
 }  // namespace
 
 int main() {
+  test_direct_transfer_reads_the_sample_holding_the_same_word();
   test_bound_surfaces_do_not_overlap();
   test_covered_tiles_match_the_per_sample_definition();
   test_tile_regions_cover_exactly_the_tiles();

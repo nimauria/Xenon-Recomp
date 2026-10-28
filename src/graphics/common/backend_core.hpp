@@ -16,6 +16,7 @@
 //     static Format color_format(const RenderTargetImage* target);
 //     static Format native_color_format(ColorRenderTargetFormat format);
 //     static constexpr bool kEmulatesFrontAndBackCull = ...;
+//     static constexpr bool kSupportsDirectColorTransfer = ...;
 //     // With XENON_HAS_DXC:
 //     static constexpr ShaderBinaryFormat kShaderBinaryFormat = ...;
 //     static constexpr std::string_view kShaderBinaryName = "SPIR-V";
@@ -457,29 +458,59 @@ class BackendCore {
   }
 
   // Gives `requested_owner` the tiles of `ownership_surface`. Only tiles held
-  // elsewhere move: other native owners return exactly the overlapping tiles
+  // elsewhere move. A native owner the requested image can copy from directly
+  // (`direct_supported`) hands its tiles over on the GPU (`direct`, which
+  // releases them); other native owners return exactly the overlapping tiles
   // to canonical storage, and just those tiles are uploaded into the
   // requested image. Tiles it already owns stay in place.
-  template <typename Image, typename ToNative>
+  template <typename Image, typename ToNative, typename DirectSupported, typename Direct>
   bool acquire_ownership(EdramOwnerId requested_owner, Image& requested,
                          const EdramSurfaceLayout& ownership_surface, ToNative to_native,
-                         bool (BackendCore::*flush_self)(EdramOwnerId), const char* stale) {
+                         bool (BackendCore::*flush_self)(EdramOwnerId), const char* stale,
+                         DirectSupported direct_supported, Direct direct) {
     auto plan = edram_ownership.plan(requested_owner, ownership_surface);
     if (!plan.valid || plan.changes.empty()) return plan.valid;
+    // Which changes go directly. The rest arrive through canonical storage and
+    // must still map to whole pixels of the requested image: otherwise that
+    // image is reloaded whole below, over anything copied in directly, so
+    // then nothing is.
+    std::vector<bool> direct_change(plan.changes.size(), false);
     std::vector<std::uint16_t> incoming;
-    for (const auto& change : plan.changes) {
-      if (change.previous_owner != kCanonicalEdramOwner &&
-          !flush_owner_tiles(change.previous_owner, change.tiles)) return false;
-      incoming.insert(incoming.end(), change.tiles.begin(), change.tiles.end());
+    for (std::size_t i = 0; i < plan.changes.size(); ++i) {
+      const auto& change = plan.changes[i];
+      direct_change[i] = change.previous_owner != kCanonicalEdramOwner &&
+                         direct_supported(change.previous_owner, change.tiles);
+      if (!direct_change[i])
+        incoming.insert(incoming.end(), change.tiles.begin(), change.tiles.end());
+    }
+    std::sort(incoming.begin(), incoming.end());
+    std::vector<EdramSurfaceRegion> regions;
+    const bool incoming_whole = incoming.empty() ||
+                                edram_tile_regions(requested.surface(), incoming, regions);
+    if (!incoming_whole) {
+      std::fill(direct_change.begin(), direct_change.end(), false);
+      incoming.clear();
+      for (const auto& change : plan.changes)
+        incoming.insert(incoming.end(), change.tiles.begin(), change.tiles.end());
+      std::sort(incoming.begin(), incoming.end());
+    }
+    for (std::size_t i = 0; i < plan.changes.size(); ++i) {
+      const auto& change = plan.changes[i];
+      if (direct_change[i]) {
+        if (!direct(change.previous_owner, change.tiles)) return false;
+      } else if (change.previous_owner != kCanonicalEdramOwner &&
+                 !flush_owner_tiles(change.previous_owner, change.tiles)) {
+        return false;
+      }
     }
     plan = edram_ownership.plan(requested_owner, ownership_surface);
     if (plan.requires_preservation()) {
       error = named("EDRAM ownership transfer did not reach canonical storage");
       return false;
     }
-    std::sort(incoming.begin(), incoming.end());
-    std::vector<EdramSurfaceRegion> regions;
-    if (edram_tile_regions(requested.surface(), incoming, regions)) {
+    if (incoming.empty()) {
+      // Everything arrived directly.
+    } else if (edram_tile_regions(requested.surface(), incoming, regions)) {
       if (!(this->*to_native)(requested, regions)) return false;
     } else {
       // Not whole pixels: make everything this image holds canonical, then
@@ -506,9 +537,49 @@ class BackendCore {
       error = named("EDRAM color surface has no ownership identity");
       return false;
     }
-    return acquire_ownership(owner_it->second, requested, ownership_surface,
-                             &BackendCore::canonical_to_color, &BackendCore::flush_color_owner,
-                             "EDRAM ownership plan became stale");
+    return acquire_ownership(
+        owner_it->second, requested, ownership_surface, &BackendCore::canonical_to_color,
+        &BackendCore::flush_color_owner, "EDRAM ownership plan became stale",
+        [&](EdramOwnerId previous, std::span<const std::uint16_t> tiles) {
+          return direct_color_transfer_supported(previous, requested, tiles);
+        },
+        [&](EdramOwnerId previous, std::span<const std::uint16_t> tiles) {
+          return direct_color_transfer(previous, requested, tiles);
+        });
+  }
+
+  // A color image of the same format holding the tiles whole hands them over
+  // on the GPU, sample by sample through the EDRAM address mapping, instead
+  // of a readback, conversion and upload through canonical storage.
+  bool direct_color_transfer_supported(EdramOwnerId previous, const RenderTargetImage& requested,
+                                       std::span<const std::uint16_t> tiles) const {
+    if constexpr (!Api::kSupportsDirectColorTransfer) return false;
+    const auto found = owner_render_targets.find(previous);
+    if (found == owner_render_targets.end() || !found->second) return false;
+    const auto& source = *found->second;
+    return &source != &requested && source.guest_format() == requested.guest_format() &&
+           edram_direct_transfer_supported(source.surface(), requested.surface(), tiles);
+  }
+
+  bool direct_color_transfer(EdramOwnerId previous, RenderTargetImage& requested,
+                             std::span<const std::uint16_t> tiles) {
+    if constexpr (!Api::kSupportsDirectColorTransfer) {
+      error = named("direct EDRAM color transfer is unavailable on this backend");
+      return false;
+    } else {
+      auto& source = *owner_render_targets.at(previous);
+      std::vector<EdramSurfaceRegion> regions;
+      if (!edram_tile_regions(requested.surface(), tiles, regions)) {
+        error = named("direct EDRAM transfer tiles are not whole pixels");
+        return false;
+      }
+      const auto constants = make_edram_transfer_constants(
+          source.surface(), source.host_msaa(), requested.surface(), requested.host_msaa());
+      if (!self().transfer_color_tiles(source, requested, constants, regions)) return false;
+      edram_ownership.release_tiles(previous, tiles);
+      ++performance.direct_edram_transfers;
+      return true;
+    }
   }
 
   bool acquire_depth_ownership(std::uint64_t key,
@@ -519,9 +590,12 @@ class BackendCore {
       error = named("EDRAM depth surface has no ownership identity");
       return false;
     }
-    return acquire_ownership(owner_it->second, requested, ownership_surface,
-                             &BackendCore::canonical_to_depth, &BackendCore::flush_depth_owner,
-                             "depth EDRAM ownership plan became stale");
+    // Depth moves through canonical storage until it has a direct transfer.
+    return acquire_ownership(
+        owner_it->second, requested, ownership_surface, &BackendCore::canonical_to_depth,
+        &BackendCore::flush_depth_owner, "depth EDRAM ownership plan became stale",
+        [](EdramOwnerId, std::span<const std::uint16_t>) { return false; },
+        [](EdramOwnerId, std::span<const std::uint16_t>) { return false; });
   }
 
   bool make_region_canonical(const EdramSurfaceLayout& surface,

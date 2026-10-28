@@ -1360,6 +1360,76 @@ float main(float4 position : SV_Position,
   return result;
 }
 
+LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << R"hlsl(struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };
+#ifdef __spirv__
+[[vk::push_constant]] TransferConstants transfer;
+#else
+ConstantBuffer<TransferConstants> transfer : register(b0);
+#endif
+)hlsl";
+  if (count == 1)
+    out << "Texture2D<float4> Source : register(t0);\n";
+  else
+    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
+  out << R"hlsl(float4 main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) : SV_Target0 {
+  const uint x = uint(position.x);
+  const uint y = uint(position.y);
+  const uint dst_base = transfer.destination.x, dst_pitch = transfer.destination.y;
+  const uint dst_msaa = transfer.destination.z, dst_mode = transfer.destination.w;
+  const uint src_base = transfer.source.x, src_pitch = transfer.source.y;
+  const uint src_msaa = transfer.source.z, src_mode = transfer.source.w;
+  const uint stride = transfer.extent.x, depth_flags = transfer.extent.y;
+  // The destination host sample's guest sample.
+  uint guest = host_sample;
+  if (dst_mode == 1u) {
+    guest = host_sample != 0u ? 0u : 1u;
+  } else if (dst_mode == 2u) {
+    if (host_sample == 0u) guest = 0u;
+    else if (host_sample == 3u) guest = 1u;
+    else discard;
+  }
+  // Its EDRAM word.
+  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
+  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
+                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
+  uint in_tile_x = sample_x % 80u;
+  if ((depth_flags & 1u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const uint row_in_tile = sample_y % 16u;
+  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
+  // The source sample holding that word.
+  const uint relative = (tile + 2048u - src_base) % 2048u;
+  if ((depth_flags & 2u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
+  const uint source_sample_y = (relative / src_pitch) * 16u + row_in_tile;
+  const uint source_x = source_sample_x >> (src_msaa == 2u ? 1u : 0u);
+  const uint source_y = source_sample_y >> (src_msaa == 0u ? 0u : 1u);
+  if (source_x >= transfer.extent.z || source_y >= transfer.extent.w) discard;
+  uint source_guest = 0u;
+  if (src_msaa == 2u) source_guest = (source_sample_y & 1u) * 2u + (source_sample_x & 1u);
+  else if (src_msaa == 1u) source_guest = source_sample_y & 1u;
+  const uint source_host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
+                         : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
+)hlsl";
+  if (count == 1)
+    out << "  return Source.Load(int3(int2(source_x, source_y), 0));\n}\n";
+  else
+    out << "  return Source.Load(int2(source_x, source_y), source_host);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.color.v1") ^ count;
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
+  return result;
+}
+
 LoweredShader make_stencil_mask_write_shader() {
   LoweredShader result{};
   result.stage = ShaderStage::Pixel;

@@ -102,6 +102,7 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/resource_layout.cpp
       d3d12/pipeline.cpp
       d3d12/render_target.cpp
+      d3d12/edram_transfer.cpp
       d3d12/depth_target.cpp
       d3d12/texture.cpp
       d3d12/presentation.cpp

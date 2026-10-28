@@ -58,6 +58,9 @@ struct BackendApi {
   }
   // VK_CULL_MODE_FRONT_AND_BACK is native.
   static constexpr bool kEmulatesFrontAndBackCull = false;
+  // Vulkan continues through canonical EDRAM until its native image-to-image
+  // transfer owns all required descriptor and image-layout state.
+  static constexpr bool kSupportsDirectColorTransfer = false;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;

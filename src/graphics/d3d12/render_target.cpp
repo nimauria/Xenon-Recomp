@@ -32,6 +32,27 @@ std::uint32_t color_bytes_per_pixel(ColorRenderTargetFormat format) noexcept {
   return color_host_bytes_per_pixel(format);
 }
 
+bool create_shader_visible_srv_heap(
+    ID3D12Device* device, ID3D12Resource* resource, DXGI_FORMAT format,
+    bool multisampled,
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>& heap) {
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  heap_desc.NumDescriptors = 1;
+  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (FAILED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap))))
+    return false;
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+  srv.Format = format;
+  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  srv.ViewDimension = multisampled ? D3D12_SRV_DIMENSION_TEXTURE2DMS
+                                    : D3D12_SRV_DIMENSION_TEXTURE2D;
+  if (!multisampled) srv.Texture2D.MipLevels = 1;
+  device->CreateShaderResourceView(resource, &srv,
+                                   heap->GetCPUDescriptorHandleForHeapStart());
+  return true;
+}
+
 #ifdef XENON_HAS_DXC
 bool create_sample_transfer_pipeline(
     ID3D12Device* device, DXGI_FORMAT format, MsaaSamples source_samples,
@@ -104,27 +125,6 @@ bool create_sample_transfer_pipeline(
     error = "D3D12 sample transfer pipeline creation failed";
     return false;
   }
-  return true;
-}
-
-bool create_shader_visible_srv_heap(
-    ID3D12Device* device, ID3D12Resource* resource, DXGI_FORMAT format,
-    bool multisampled,
-    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>& heap) {
-  D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
-  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-  heap_desc.NumDescriptors = 1;
-  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-  if (FAILED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap))))
-    return false;
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-  srv.Format = format;
-  srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  srv.ViewDimension = multisampled ? D3D12_SRV_DIMENSION_TEXTURE2DMS
-                                    : D3D12_SRV_DIMENSION_TEXTURE2D;
-  if (!multisampled) srv.Texture2D.MipLevels = 1;
-  device->CreateShaderResourceView(resource, &srv,
-                                   heap->GetCPUDescriptorHandleForHeapStart());
   return true;
 }
 #endif
@@ -674,7 +674,21 @@ bool RenderTargetImage::upload_sample(
 #endif
 }
 
+ID3D12DescriptorHeap* RenderTargetImage::shader_resource_heap() {
+  if (srv_heap_) return srv_heap_.Get();
+  Microsoft::WRL::ComPtr<ID3D12Device> device;
+  if (!resource_ || FAILED(resource_->GetDevice(IID_PPV_ARGS(&device))) ||
+      !create_shader_visible_srv_heap(device.Get(), resource_.Get(), format_,
+                                      host_msaa_ != MsaaSamples::X1, srv_heap_)) {
+    error_ = "D3D12 color-target SRV creation failed";
+    srv_heap_.Reset();
+    return nullptr;
+  }
+  return srv_heap_.Get();
+}
+
 void RenderTargetImage::reset() noexcept {
+  srv_heap_.Reset();
   resource_.Reset();
   rtv_heap_.Reset();
   rtv_ = {};
