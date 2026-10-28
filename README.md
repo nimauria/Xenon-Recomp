@@ -22,7 +22,7 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 >
 > Xenon is under active development. Much of the core infrastructure is implemented and covered by automated tests, but running commercial games is still experimental. **No commercial Xbox 360 game is currently confirmed playable**, and there is no public release or release date. You cannot yet download Xenon and play your Xbox 360 library with it.
 >
-> The current work is getting the first title, Ace Combat 6, past an early runtime stall. See [Current milestone](#current-milestone-project-gracemeria).
+> The first title, Ace Combat 6, now renders its boot logo, but slowly; current work is rendering speed and correctness. See [Current milestone](#current-milestone-project-gracemeria).
 
 > [!NOTE]
 > Xenon does not distribute Xbox 360 games, executables, firmware, title updates, DLC, encryption keys or any other proprietary content. You must supply content from lawful sources.
@@ -53,12 +53,12 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 
 Where it stands on the `development-restructure` branch:
 
-- The game is prepared, and its recompiled guest code runs on the shared runtime without crashing immediately. Guest threads, the GPU command pump and audio callbacks all start.
-- **GPU and audio processing then stall.** They complete an initial pass, or a small number of passes, and then stop making useful progress.
-- **No graphical output, no audio playback and no gameplay have been demonstrated.** The title has not been shown to reach a menu.
-- **The cause is not yet established.** The investigation note lists structural candidates in the guest-callback, event-signalling and GPU/CPU handshake paths. Each one is still a hypothesis to test, not a confirmed root cause.
+- The game is prepared, and its recompiled guest code runs on the shared runtime. Guest threads, the GPU command pump and audio callbacks keep running.
+- **First graphical output: the Namco Bandai boot logo is drawn and presented** through the Direct3D 12 backend (28 October 2026). Getting there took generic fixes, not AC6 special cases. Shader ALU operands are now decoded as Xenos encodes them (component-relative swizzles, scalar operations reading source 3), vertex fetch indices are converted numerically, and scan-out applies the front buffer's swizzle.
+- **Rendering is still slow.** Reaching the logo takes minutes and frames take hundreds of milliseconds. Resolves, and some EDRAM ownership changes, still go through CPU readback and conversion. GPU-resident EDRAM and GPU-side resolves are the next step.
+- **No audio playback and no gameplay have been demonstrated.** The title has not been shown to reach a menu.
 
-The current priority is to resolve the runtime synchronisation and callback progression that the stall exposes. Any fix belongs in generic runtime code with its own tests, not in an Ace Combat 6 special case. Details, probes and the suggested debugging order are in [`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`](docs/runtime/AC6_RUNTIME_INVESTIGATION.md).
+Any fix belongs in generic runtime code with its own tests, not in an Ace Combat 6 special case. The earlier runtime investigation is in [`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`](docs/runtime/AC6_RUNTIME_INVESTIGATION.md).
 
 *Gears of War 2* is planned as a later target, chosen because it never received an official PC port. No work on it has started.
 
@@ -113,9 +113,9 @@ Status labels:
 | Recompilation analysis and generation | Implemented foundation | Function discovery, control-flow and value analysis, module hints, sharded C++ generation and a content-addressed cache (Gen 5–11). Exercised on Ace Combat 6. Not shown to be reliable across retail titles generally. |
 | Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Thread, event and wait behaviour under a real title is part of the open AC6 investigation. |
 | Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL2 presentation. |
-| Xenos graphics frontend | Tested infrastructure | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. No end-to-end AC6 rendering yet. |
-| Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Not yet shown rendering a commercial title. |
-| Direct3D 12 backend | Tested infrastructure | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. As of 9 October 2026, the backend capability test was the one open Windows CI failure. |
+| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. Renders and presents AC6's boot logo; far from full speed. |
+| Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Shares all command handling with Direct3D 12, including GPU-side EDRAM tile transfers. Not yet shown rendering a commercial title. |
+| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. Has rendered AC6's boot logo. |
 | Audio and XMA | Implemented foundation | SDL2 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. Real-title playback is blocked by the AC6 stall. |
 | Input | Implemented foundation | SDL2/SDL3 controllers, XInput on Windows, keyboard and mouse, profiles, HOTAS mapping and XAM guest marshalling. |
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
@@ -125,7 +125,7 @@ Status labels:
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
-**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation is what exposes incorrect Xbox assumptions, and so far it has been performed only on Ace Combat 6, which has not progressed past the stall described above.
+**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation is what exposes incorrect Xbox assumptions, and so far it has been performed only on Ace Combat 6, which has reached its boot logo and no further.
 
 ---
 
@@ -244,7 +244,9 @@ Shaders are lowered to HLSL and compiled with DXC to DXIL (Direct3D 12) and SPIR
 
 Unsupported packets, formats and shader features are counted and reported rather than silently approximated.
 
-**What has been demonstrated:** subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI. **What has not:** sustained rendering, or any rendered frame, from Ace Combat 6. Replaying captured retail command streams is also still outstanding.
+When a render target takes over EDRAM tiles that another native image of the same format holds, the tiles move image to image on the GPU, on both backends. Guest memory reaches the GPU through a mirror that uploads only bytes the CPU changed, from a staging ring the GPU copies asynchronously. Resolves and scan-out still read back through the CPU.
+
+**What has been demonstrated:** subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI, and Ace Combat 6's boot logo rendered and presented through Direct3D 12. **What has not:** rendering at playable speed, or anything past the logo. Replaying captured retail command streams is also still outstanding.
 
 See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
 
@@ -560,9 +562,9 @@ These are goals in a rough order, not commitments or dates. Nothing here promise
 
 1. Finish the structural restructuring. *(In progress.)*
 2. Stabilise Windows and Linux build and test workflows. *(In progress: Linux passes; one Windows D3D12 test is open.)*
-3. Resolve Ace Combat 6's runtime progression issues: guest threading, events and callbacks.
-4. Validate continuous GPU and audio processing.
-5. Produce the first verified graphical output, then sustained rendering, audio and gameplay.
+3. ~~Produce the first verified graphical output.~~ *(Done: Ace Combat 6's boot logo, 28 October 2026.)*
+4. Render at speed: GPU-resident EDRAM, GPU-side resolves and scan-out, with Vulkan matching Direct3D 12.
+5. Sustained rendering, audio and gameplay past the logo.
 6. Establish the first confirmed playable title.
 
 **Framework maturity**
