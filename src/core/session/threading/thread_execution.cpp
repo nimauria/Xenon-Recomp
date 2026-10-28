@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "xenon/core/session.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -24,6 +25,15 @@ std::uint32_t XenonSession::run_execution() {
     kernel_process_->thread_manager().set_current_thread(main_thread_);
   }
   reach_boot_checkpoint(BootCheckpoint::EntryStarted);
+
+  // Every guest thread's sleeps and timed waits, and the GPU worker's polls,
+  // run at the host's finest timer step while the title runs.
+  const kernel::HostTimerResolution timer_resolution{};
+  if (!timer_resolution.active() && config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] host timer resolution could not be raised; timed waits run at "
+              << kernel::HostTimerResolution::current().count() / 1000 << " us steps" << std::endl;
+  }
 
   execution_active_.store(true);
   const auto outcome =

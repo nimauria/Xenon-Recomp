@@ -50,4 +50,26 @@ class TimeServices {
   static constexpr std::uint64_t kGuestTimeBaseFrequencyHz = 50000000ULL;
 };
 
+// Holds the host scheduler at its finest timer resolution while it lives.
+// Guest sleeps, timed waits and the GPU's WAIT_REG_MEM polls are host waits
+// of a millisecond or less; at Windows' default 15.6 ms tick each one lasted
+// a whole tick, and a frame's chain of CPU/GPU hand-offs added up to ~170 ms.
+class HostTimerResolution {
+ public:
+  HostTimerResolution();
+  ~HostTimerResolution();
+  HostTimerResolution(const HostTimerResolution&) = delete;
+  HostTimerResolution& operator=(const HostTimerResolution&) = delete;
+
+  // Whether the request was granted (always true where the host's timed
+  // waits are already high resolution).
+  [[nodiscard]] bool active() const noexcept { return active_; }
+  // The resolution host timed waits currently run at, process-wide.
+  [[nodiscard]] static std::chrono::nanoseconds current();
+
+ private:
+  bool active_{false};
+  std::uint32_t requested_{};  // 100 ns units, as granted to this scope
+};
+
 }  // namespace xenon::kernel
