@@ -1,0 +1,16 @@
+import {chromium} from 'playwright-core';
+import assert from 'node:assert/strict';
+const browser=await chromium.connectOverCDP(process.env.CEF_DEBUG_URL||'http://127.0.0.1:9223',{timeout:10000});
+const page=browser.contexts()[0].pages().find(p=>p.url()==='xenon://app/');assert.ok(page);
+await page.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:'Library',exact:true}).click();
+await page.getByRole('button',{name:'Start test session',exact:true}).click();
+await page.getByRole('region',{name:'Current session'}).getByRole('status').filter({hasText:/running/}).waitFor({timeout:5000});
+assert.equal(await page.getByRole('button',{name:'Start test session',exact:true}).isDisabled(),true,'Play must be disabled while a session is active');
+await page.getByRole('button',{name:'Stop test session',exact:true}).click();
+await page.getByRole('region',{name:'Current session'}).getByRole('status').filter({hasText:/stopped/}).waitFor({timeout:5000});
+await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+await page.getByRole('navigation',{name:'Main navigation'}).getByRole('button',{name:'Home',exact:true}).click();
+const snapshot=await page.evaluate(()=>new Promise(resolve=>window.cefQuery({request:JSON.stringify({version:1,id:'fixture-check',command:'application.snapshot',payload:{}}),onSuccess:value=>resolve(JSON.parse(value).data),onFailure:()=>resolve(null)})));
+assert.equal(snapshot.capabilities.runtime,true);assert.ok(snapshot.history.some(row=>row.fixture&&row.state==='stopped'));
+console.log('Packaged UI fixture launch, Running handshake, asynchronous stop, dismissal and session history passed.');
+await page.close();await browser.close();

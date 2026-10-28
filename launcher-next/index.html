@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:*"
+    />
+    <title>Xenon Launcher</title>
+    <script src="/startup.js"></script>
+  </head>
+  <body>
+    <div id="root">
+      <main
+        data-startup="true"
+        style="
+          min-height: 100vh;
+          background: #07131d;
+          color: #f4f8fa;
+          padding: 48px;
+          font: 16px system-ui;
+          box-sizing: border-box;
+        "
+      >
+        <h1>Xenon</h1>
+        <p id="startup-message">Opening the launcher…</p>
+      </main>
+    </div>
+    <script type="module" src="/web/main.tsx"></script>
+  </body>
+</html>

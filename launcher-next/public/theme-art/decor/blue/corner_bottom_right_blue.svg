@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="110" height="94" viewBox="0 0 110 94" fill="none">
+
+<defs><filter id="blur"><feGaussianBlur stdDeviation="2.5"/></filter></defs>
+<path d="M106 8V66Q106 90 82 90H8" stroke="#3CCBFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M92 8V54Q92 76 70 76H8" stroke="#3CCBFF" stroke-opacity="0.28" stroke-width="1.5" stroke-linecap="round"/>
+<circle cx="18" cy="80" r="8" fill="#3CCBFF" opacity="0.16" filter="url(#blur)"/>
+
+</svg>

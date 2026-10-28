@@ -1,0 +1,30 @@
+{
+  "version": "156.0.14+g4fa4ab5+chromium-156.0.8078.48",
+  "platforms": {
+    "windows64": {
+      "name": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_windows64_minimal.tar.bz2",
+      "sha1": "72dc1dd1636acc2391609fa6f410aa09f09168d4",
+      "size": 175051364
+    },
+    "linux64": {
+      "name": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_linux64_minimal.tar.bz2",
+      "sha1": "d091c82a8655113a34616c08cb340bf92310298d",
+      "size": 331729249
+    },
+    "linuxarm64": {
+      "name": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_linuxarm64_minimal.tar.bz2",
+      "sha1": "7907f1d0319a8d920be9b3ba54c0c60e2d22a7fb",
+      "size": 431248679
+    },
+    "macosx64": {
+      "name": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_macosx64_minimal.tar.bz2",
+      "sha1": "bc46c83878741fa2b23486940dacebabb294bf39",
+      "size": 141687370
+    },
+    "macosarm64": {
+      "name": "cef_binary_156.0.14+g4fa4ab5+chromium-156.0.8078.48_macosarm64_minimal.tar.bz2",
+      "sha1": "7359a9d293dd5c480bec3f18b762731b483b0e13",
+      "size": 134887274
+    }
+  }
+}
