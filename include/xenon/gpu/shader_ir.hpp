@@ -127,6 +127,9 @@ struct ShaderReflection {
   std::vector<std::uint8_t> bool_constants{};
   std::vector<std::uint8_t> loop_constants{};
   std::vector<std::uint8_t> vertex_fetch_constants{};
+  // The vertex fetch constants actually read, as fetch constant * 3 + select
+  // (three 2-dword vertex fetch constants share each 6-dword slot).
+  std::vector<std::uint8_t> vertex_fetches{};
   std::vector<std::uint8_t> texture_fetch_constants{};
   std::vector<std::uint8_t> exports{};
   // Float-constant indices used by the conventional Xenos eA memexport

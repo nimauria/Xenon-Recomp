@@ -35,6 +35,7 @@ void test_mixed_exec_and_reflection() {
   assert(decoded.instructions[1].kind == ShaderInstructionKind::Alu);
   assert(decoded.instructions[1].alu.export_data);
   assert(decoded.reflection.vertex_fetch_constants == std::vector<std::uint8_t>{7});
+  assert(decoded.reflection.vertex_fetches == std::vector<std::uint8_t>{7 * 3 + 1});
   assert((decoded.reflection.float_constants == std::vector<std::uint16_t>{1, 4, 9}));
   assert(decoded.reflection.exports == std::vector<std::uint8_t>{2});
   assert(decoded.reflection.interpolator_exports == 1);

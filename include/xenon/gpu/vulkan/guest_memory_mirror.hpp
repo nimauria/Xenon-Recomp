@@ -4,6 +4,7 @@
 #include <string>
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
+#include "xenon/gpu/staging_ring.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/memory/gpu_coherency.hpp"
@@ -42,6 +43,8 @@ class GuestMemoryMirror {
   CommandQueue* queue_{};
   Buffer mirror_{};
   Buffer upload_{};
+  // Regions of upload_ the GPU may still be copying from.
+  StagingRing upload_ring_{};
   Buffer readback_{};
   memory::GuestMemoryGpuCoherency coherency_{};
   bool shader_read_state_{};

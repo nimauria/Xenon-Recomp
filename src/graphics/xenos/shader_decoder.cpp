@@ -27,6 +27,7 @@ struct Usage {
   std::set<std::uint8_t> bools;
   std::set<std::uint8_t> loops;
   std::set<std::uint8_t> vertices;
+  std::set<std::uint8_t> vertex_fetches;
   std::set<std::uint8_t> textures;
   std::set<std::uint8_t> exports;
   std::set<std::uint16_t> memexport_stream_constants;
@@ -232,6 +233,8 @@ DecodedInstruction decode_fetch(const ShaderInstruction96& raw,
     out.stride_dwords = static_cast<std::uint8_t>(bits(w2, 0, 8));
     out.offset_dwords = signed_bits(w2, 8, 23);
     usage.vertices.insert(out.fetch_constant);
+    usage.vertex_fetches.insert(
+        static_cast<std::uint8_t>(out.fetch_constant * 3u + out.fetch_constant_select));
     reflection.uses_dynamic_addressing |= out.source_relative || out.destination_relative;
     reflection.uses_predication |= out.predicate.enabled;
   } else {
@@ -321,6 +324,7 @@ DecodedShader ShaderDecoder::decode(const ShaderProgram& program) {
   assign_sorted(usage.bools, result.reflection.bool_constants);
   assign_sorted(usage.loops, result.reflection.loop_constants);
   assign_sorted(usage.vertices, result.reflection.vertex_fetch_constants);
+  assign_sorted(usage.vertex_fetches, result.reflection.vertex_fetches);
   assign_sorted(usage.textures, result.reflection.texture_fetch_constants);
   assign_sorted(usage.exports, result.reflection.exports);
   assign_sorted(usage.memexport_stream_constants,

@@ -48,6 +48,46 @@ int main() {
   assert(lazy_plan.ranges[0].address == 0x1808u &&
          lazy_plan.ranges[0].size == 8u);
 
+  // A frame of guest vertex data arrives as thousands of small stores in any
+  // order. Ingesting them coalesced must give exactly the ranges ingesting
+  // them one by one gives: two separate runs here, with a gap between.
+  {
+    GuestMemoryCoherency stores;
+    GuestMemoryGpuCoherency batched;
+    batched.reset(0x10000u, false);
+    for (std::uint32_t i = 0; i < 2048u; ++i) {
+      const std::uint32_t slot = (i * 7919u) % 2048u;  // scrambled order
+      stores.mark_write(0x4000u + slot * 4u, 4u);
+    }
+    stores.mark_write(0x4000u, 8u);           // overlaps the first run
+    stores.mark_write(0xA000u, 16u);          // separate run
+    stores.mark_write(0xA00Cu, 8u);           // overlaps its end
+    const auto plan = batched.plan_upload(stores, 0x4000u, 0x7000u, 0u,
+                                          GpuRangeUsage::VertexBuffer);
+    const auto dirty = batched.cpu_dirty_ranges();
+    assert(dirty.size() == 2u);
+    assert(dirty[0].address == 0x4000u && dirty[0].size == 2048u * 4u);
+    assert(dirty[1].address == 0xA000u && dirty[1].size == 0x14u);
+    // Nothing is device-valid yet, so the whole request uploads once.
+    assert(plan.ranges.size() == 1u && plan.ranges[0].address == 0x4000u &&
+           plan.ranges[0].size == 0x7000u);
+    assert(!batched.device_range_valid(0x4000u, 4u));
+
+    // Mixed ordering domains are applied in publication order: the later
+    // cache-inhibited store over the same bytes decides their domain.
+    GuestMemoryCoherency mixed_stores;
+    GuestMemoryGpuCoherency mixed;
+    mixed.reset(0x10000u, false);
+    mixed_stores.mark_write(0x5000u, 8u);
+    mixed_stores.mark_write(0x5000u, 8u,
+                            xenon::cpu::MemoryOrderingDomain::CacheInhibited);
+    const auto mixed_plan = mixed.plan_upload(mixed_stores, 0x5000u, 8u, 0u,
+                                              GpuRangeUsage::VertexBuffer);
+    assert(mixed_plan.source_domain ==
+           xenon::cpu::MemoryOrderingDomain::CacheInhibited);
+    assert(mixed.cpu_dirty_ranges().size() == 1u);
+  }
+
   // Adjacent dirty physical pages are also coalesced by the canonical memory
   // tracker when exact journal history is unavailable or page ranges are used.
   GuestMemoryCoherency page_dirty;

@@ -5,6 +5,7 @@
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/memory.hpp"
+#include "xenon/gpu/staging_ring.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/memory/gpu_coherency.hpp"
 
@@ -53,6 +54,8 @@ class GuestMemoryMirror {
   CommandQueue* queue_{};
   Buffer mirror_{};
   Buffer upload_{};
+  // Regions of upload_ the GPU may still be copying from.
+  StagingRing upload_ring_{};
   Buffer readback_{};
   memory::GuestMemoryGpuCoherency coherency_{};
   D3D12_RESOURCE_STATES state_{D3D12_RESOURCE_STATE_COPY_DEST};

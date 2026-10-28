@@ -178,13 +178,34 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   }
 #endif
   // Phase 15: the guest-memory mirror is populated lazily. Vertex fetches
-  // request only the physical ranges described by the active Xenos fetch
-  // constants instead of synchronizing the entire 512 MiB aperture.
+  // request only the physical ranges of the fetch constants the draw's shaders
+  // read: the register file keeps stale constants for buffers no shader
+  // fetches, and syncing those too cost AC6 up to 100 ms per draw. A shader
+  // with no reflection syncs every valid constant.
   if (memory) {
-    for (const auto& fetch_group : state.vertex_buffers) {
-      for (const auto& fetch : fetch_group) {
+    std::array<bool, 96> fetched{};
+#ifdef XENON_HAS_DXC
+    bool all_fetched = false;
+    for (const auto* shader : {&draw->vertex_shader, &draw->pixel_shader}) {
+      if (!shader->valid) continue;
+      const auto decoded = decoded_shaders.find(shader->hash);
+      if (decoded == decoded_shaders.end()) {
+        all_fetched = true;
+        continue;
+      }
+      for (const auto index : decoded->second.reflection.vertex_fetches)
+        if (index < fetched.size()) fetched[index] = true;
+    }
+#else
+    const bool all_fetched = true;
+#endif
+    for (std::uint32_t slot = 0; slot < state.vertex_buffers.size(); ++slot) {
+      for (std::uint32_t select = 0; select < 3; ++select) {
+        const auto& fetch = state.vertex_buffers[slot][select];
+        if (!all_fetched && !fetched[slot * 3u + select]) continue;
         if (!fetch || !fetch->valid || !fetch->size_dwords) continue;
         const auto bytes64 = std::uint64_t{fetch->size_dwords} * 4u;
+        const auto sync_start = std::chrono::steady_clock::now();
         if (bytes64 > UINT32_MAX ||
             !mirror.synchronize_range(
                 fetch->physical_address, static_cast<std::uint32_t>(bytes64),
@@ -193,6 +214,16 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                              ? named("vertex fetch range is invalid")
                              : mirror.error();
           return;
+        }
+        static std::atomic_uint32_t vertex_sync_probe_count{};
+        if (vertex_sync_probe_count.fetch_add(1u, std::memory_order_relaxed) < 200u) {
+          xenon::logging::append_probe_log(
+              "vertex_sync_diag.log", "fetch %u.%u address=0x%08X bytes=%llu took %lld ms\n",
+              slot, select, fetch->physical_address,
+              static_cast<unsigned long long>(bytes64),
+              static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - sync_start)
+                                         .count()));
         }
       }
     }
@@ -218,6 +249,20 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       if (!used[slot] || !state.textures[slot]) continue;
       const auto& descriptor = *state.textures[slot];
       const auto key = descriptor.hash();
+      static std::atomic_uint32_t texture_probe_count{};
+      if (texture_probe_count.fetch_add(1u, std::memory_order_relaxed) < 200u) {
+        xenon::logging::append_probe_log(
+            "texture_fetch_diag.log",
+            "ps=%016llX slot %u: format=%u endian=%u swizzle=0x%03X signs=%u%u%u%u "
+            "%ux%u pitch=%u tiled=%d base=0x%08X exp_adjust=%d\n",
+            static_cast<unsigned long long>(draw->pixel_shader.hash), slot,
+            unsigned(descriptor.format), unsigned(descriptor.endian),
+            unsigned(descriptor.swizzle), unsigned(descriptor.signs[0]),
+            unsigned(descriptor.signs[1]), unsigned(descriptor.signs[2]),
+            unsigned(descriptor.signs[3]), descriptor.width, descriptor.height,
+            descriptor.pitch, int(descriptor.tiled), descriptor.base_address,
+            int(descriptor.exp_adjust));
+      }
       auto existing = textures.find(key);
       const bool already_cached = existing != textures.end();
       const bool dirty = already_cached &&

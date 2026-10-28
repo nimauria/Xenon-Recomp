@@ -71,7 +71,7 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             "ir_timing_diag.log",
             "%s %lld ms: primitive=%d source=%d index_count=%u vs=%016llX ps=%016llX "
             "scissor=(%d,%d)-(%d,%d) viewport scale=(%g,%g) offset=(%g,%g) pitch=%u "
-            "msaa=%u color0 base=%u (enabled %d mask=0x%X blend=%d) "
+            "msaa=%u color0 base=%u format=%u (enabled %d mask=0x%X blend=%d) "
             "depth base=%u (test %d write %d) cull=(%d,%d) alpha=(%d,%d) "
             "window offset=(%d,%d) drawable_bottom=%d\n",
             kind, static_cast<long long>(ms), static_cast<int>(draw->primitive_type),
@@ -82,7 +82,8 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
             state.raster.viewport.x_scale, state.raster.viewport.y_scale,
             state.raster.viewport.x_offset, state.raster.viewport.y_offset,
             unsigned(state.raster.surface_pitch), unsigned(state.raster.msaa_samples_log2),
-            unsigned(state.color_targets[0].base_tile), int(state.color_targets[0].enabled),
+            unsigned(state.color_targets[0].base_tile), unsigned(state.color_targets[0].format),
+            int(state.color_targets[0].enabled),
             unsigned(state.color_targets[0].write_mask), int(state.color_targets[0].blend.enabled),
             unsigned(state.depth_target.base_tile), int(state.depth_target.test_enabled),
             int(state.depth_target.write_enabled), int(state.raster.cull_front),

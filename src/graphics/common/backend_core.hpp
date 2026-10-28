@@ -55,6 +55,7 @@
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -95,6 +96,9 @@ class BackendCore {
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
   //   bool record_draw(const DrawRecording&, bool& record_failed);
+  //   bool presentation_srgb_target() const;
+  //   PresentStatus present_scanout(const ScanoutConstants&);
+  //   bool capture_scanout_image(const ScanoutConstants&, PreparedPresentationFrame&);
   //   void forget_backend_render_targets();      // EDRAM was rebound
   //   bool initialize_mirror(memory::AddressSpace&);
   //   bool bind_guest_memory();                  // mirror -> descriptor layout
@@ -127,6 +131,13 @@ class BackendCore {
                                      std::uint32_t size);
   bool invalidate_edram_native_state();
   PresentStatus present(const PresentationFrame& frame);
+  // Plans scan-out of `frame` to a width x height target and makes its source
+  // bytes current in the mirror.
+  bool prepare_scanout(const PresentationFrame& frame, std::uint32_t width,
+                       std::uint32_t height, bool srgb_target, ScanoutPlan& plan);
+  // Scan-out drawn on the GPU into an offscreen image and read back.
+  bool capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                       std::uint32_t height, PreparedPresentationFrame& output);
   bool resize_presentation(std::uint32_t width, std::uint32_t height);
   GpuPerformanceCounters performance_counters() const noexcept;
   GpuUnsupportedCounters unsupported_counters() const noexcept;
@@ -218,7 +229,7 @@ class BackendCore {
   struct TransferTiming {
     const char* name;
     std::array<const char*, 3> steps;
-    std::uint32_t width{}, height{}, samples{};
+    std::uint32_t width{}, height{}, samples{}, format{};
     std::array<long long, 3> ms{};
     template <typename Step>
     bool step(std::size_t index, Step&& run) {
@@ -232,8 +243,9 @@ class BackendCore {
     ~TransferTiming() {
       if (ms[0] + ms[1] + ms[2] < 20) return;
       xenon::logging::append_probe_log(
-          "ir_timing_diag.log", "%s %ux%u x%u: %s %lld ms, %s %lld ms, %s %lld ms\n", name,
-          width, height, samples, steps[0], ms[0], steps[1], ms[1], steps[2], ms[2]);
+          "ir_timing_diag.log", "%s %ux%u x%u format %u: %s %lld ms, %s %lld ms, %s %lld ms\n",
+          name,
+          width, height, samples, format, steps[0], ms[0], steps[1], ms[1], steps[2], ms[2]);
     }
   };
 
@@ -247,7 +259,8 @@ class BackendCore {
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"color flush", {"readback", "convert", "store"},
-                          image.width(), image.height(), sample_count};
+                          image.width(), image.height(), sample_count,
+                          static_cast<std::uint32_t>(image.guest_format())};
     for (const auto& region : regions) {
       const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
       const auto width = std::uint32_t(region.right - region.left);
@@ -283,7 +296,8 @@ class BackendCore {
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"depth flush", {"readback", "-", "store"},
-                          image.width(), image.height(), sample_count};
+                          image.width(), image.height(), sample_count,
+                          static_cast<std::uint32_t>(image.guest_format())};
     for (const auto& region : regions) {
       const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
       const auto width = std::uint32_t(region.right - region.left);
@@ -313,7 +327,8 @@ class BackendCore {
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"color acquire", {"load", "convert", "upload"},
-                          image.width(), image.height(), sample_count};
+                          image.width(), image.height(), sample_count,
+                          static_cast<std::uint32_t>(image.guest_format())};
     for (const auto& region : regions) {
       const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
       const auto width = std::uint32_t(region.right - region.left);
@@ -349,7 +364,8 @@ class BackendCore {
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"depth acquire", {"load", "-", "upload"},
-                          image.width(), image.height(), sample_count};
+                          image.width(), image.height(), sample_count,
+                          static_cast<std::uint32_t>(image.guest_format())};
     for (const auto& region : regions) {
       const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
       const auto width = std::uint32_t(region.right - region.left);

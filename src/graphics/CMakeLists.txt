@@ -12,6 +12,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/resource_barrier.cpp
     xenos/texture.cpp
     xenos/presentation.cpp
+    xenos/scanout.cpp
     xenos/edram.cpp
     xenos/edram_surface.cpp
     xenos/edram_ownership.cpp
@@ -69,6 +70,8 @@ if(XENON_ENABLE_GRAPHICS)
         vulkan/resource_layout.cpp
         vulkan/pipeline.cpp
         vulkan/render_target.cpp
+        vulkan/edram_transfer.cpp
+        vulkan/scanout.cpp
         vulkan/depth_target.cpp
         vulkan/texture.cpp
         vulkan/presentation.cpp
@@ -103,6 +106,7 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/pipeline.cpp
       d3d12/render_target.cpp
       d3d12/edram_transfer.cpp
+      d3d12/scanout.cpp
       d3d12/depth_target.cpp
       d3d12/texture.cpp
       d3d12/presentation.cpp

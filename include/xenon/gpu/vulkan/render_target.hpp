@@ -69,6 +69,10 @@ class RenderTargetImage {
     return surface_;
   }
   void transition_to_color_attachment(VkCommandBuffer command) noexcept;
+  // A descriptor set of `set_layout` (one sampled image at binding 16) holding
+  // this image in SHADER_READ_ONLY_OPTIMAL, created on first use; GPU-side
+  // EDRAM transfers read the image through it. `set_layout` must stay the same.
+  [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -85,6 +89,8 @@ class RenderTargetImage {
   EdramSurfaceLayout surface_{};
   MsaaSamples host_msaa_{MsaaSamples::X1};
   VkImageLayout layout_{VK_IMAGE_LAYOUT_UNDEFINED};
+  VkDescriptorPool sampled_pool_{VK_NULL_HANDLE};
+  VkDescriptorSet sampled_set_{VK_NULL_HANDLE};
   std::string error_{};
 };
 

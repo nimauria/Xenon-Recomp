@@ -376,10 +376,45 @@ class GuestMemoryGpuCoherency {
     const bool exact = memory.collect_exact_dirty_writes(
         synchronized_epoch_, through_epoch, exact_writes);
     if (exact) {
-      for (const auto& write : exact_writes) {
-        if (ignored_epoch && write.epoch == ignored_epoch) continue;
-        mark_cpu_write_unlocked(write.address, write.size,
-                                write.ordering_domain);
+      if (ignored_epoch) {
+        std::erase_if(exact_writes, [&](const DirtyPhysicalWrite& write) {
+          return write.epoch == ignored_epoch;
+        });
+      }
+      // Every write rebuilds each range set it touches, and a frame of guest
+      // vertex data is tens of thousands of small stores (AC6 rewrites 692 KB
+      // each frame: 20-750 ms per upload one store at a time). Within one
+      // ordering domain the updates are unions and differences by the same
+      // ranges, so applying the sorted, coalesced writes is equivalent. Mixed
+      // domains keep publication order, since a later write's domain wins.
+      const bool one_domain = std::all_of(
+          exact_writes.begin(), exact_writes.end(), [&](const DirtyPhysicalWrite& write) {
+            return write.ordering_domain == exact_writes.front().ordering_domain;
+          });
+      if (one_domain && exact_writes.size() > 1u) {
+        std::sort(exact_writes.begin(), exact_writes.end(),
+                  [](const DirtyPhysicalWrite& a, const DirtyPhysicalWrite& b) {
+                    return a.address < b.address;
+                  });
+        const auto domain = exact_writes.front().ordering_domain;
+        std::uint64_t start = exact_writes.front().address;
+        std::uint64_t end = start + exact_writes.front().size;
+        for (std::size_t i = 1; i < exact_writes.size(); ++i) {
+          const auto& write = exact_writes[i];
+          if (write.address <= end) {
+            end = (std::max)(end, std::uint64_t{write.address} + write.size);
+            continue;
+          }
+          mark_cpu_write_unlocked(static_cast<std::uint32_t>(start),
+                                  static_cast<std::uint32_t>(end - start), domain);
+          start = write.address;
+          end = start + write.size;
+        }
+        mark_cpu_write_unlocked(static_cast<std::uint32_t>(start),
+                                static_cast<std::uint32_t>(end - start), domain);
+      } else {
+        for (const auto& write : exact_writes)
+          mark_cpu_write_unlocked(write.address, write.size, write.ordering_domain);
       }
     } else {
       std::vector<DirtyPhysicalRange> dirty_pages;

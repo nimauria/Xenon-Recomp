@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "xenon/gpu/presentation.hpp"
+#include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
 
 using namespace xenon::gpu;
@@ -20,6 +21,7 @@ TextureDescriptor rgba8_descriptor(std::uint32_t base, std::uint32_t width,
   d.depth = 1;
   d.pitch = width;
   d.format = 6;  // Xenos 8_8_8_8.
+  d.swizzle = 0x688;  // .xyzw
   d.dimension = TextureDimension::TwoDOrStacked;
   d.mip_min_level = 0;
   d.mip_max_level = 0;
@@ -105,6 +107,7 @@ void test_565_conversion() {
   descriptor.width = descriptor.height = descriptor.depth = 1;
   descriptor.pitch = 1;
   descriptor.format = 4;  // 5_6_5 -> B5G6R5 host storage.
+  descriptor.swizzle = 0x688;
   descriptor.dimension = TextureDimension::TwoDOrStacked;
   descriptor.valid = true;
   const auto layout = build_texture_layout(descriptor);
@@ -121,6 +124,73 @@ void test_565_conversion() {
   const auto* pixel = reinterpret_cast<const std::uint8_t*>(prepared.rgba8.data());
   assert(pixel[0] == 255 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255);
 }
+// Scan-out reads the front buffer through its fetch constant's swizzle. An
+// A8R8G8B8 front buffer is 8_8_8_8 with .zyxw; without the swizzle AC6's
+// orange and yellow logo showed as blues.
+void test_front_buffer_swizzle() {
+  constexpr std::uint32_t base = 0x4000;
+  auto descriptor = rgba8_descriptor(base, 1, 1, false);
+  const auto layout = build_texture_layout(descriptor);
+  std::vector<std::byte> memory(base + layout.base_extent_bytes + 0x1000);
+  const std::uint8_t orange[] = {0, 165, 255, 200};  // stored B, G, R, A
+  std::vector<std::byte> linear(sizeof(orange));
+  std::memcpy(linear.data(), orange, sizeof(orange));
+  assert(encode_texture(descriptor, linear, memory));
+  PresentationFrame frame{};
+  frame.texture = descriptor;
+  frame.texture.swizzle = 2u | (1u << 3) | (0u << 6) | (3u << 9);  // .zyxw
+  auto prepared = prepare_presentation_frame(frame, memory, 1, 1, false);
+  assert(prepared.valid);
+  auto* pixel = reinterpret_cast<const std::uint8_t*>(prepared.rgba8.data());
+  assert(pixel[0] == 255 && pixel[1] == 165 && pixel[2] == 0 && pixel[3] == 200);
+
+  frame.texture.swizzle = 0u | (4u << 3) | (5u << 6) | (5u << 9);  // .x01 1
+  prepared = prepare_presentation_frame(frame, memory, 1, 1, false);
+  pixel = reinterpret_cast<const std::uint8_t*>(prepared.rgba8.data());
+  assert(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 255 && pixel[3] == 255);
+}
+
+// Scan-out filters with Catmull-Rom: at 1:1 it returns each texel exactly,
+// its weights always sum to one, and upscaling a hard edge keeps it sharper
+// than bilinear while staying symmetric about the edge.
+void test_catmull_rom_scanout() {
+  for (const auto target : {0, 1, 5, 17, 95}) {
+    const auto taps = scanout_taps(target, 0, 96, 64);
+    float sum = 0.0f;
+    for (const auto weight : taps.weights) sum += weight;
+    assert(sum > 0.9999f && sum < 1.0001f);
+  }
+  const auto identity = scanout_taps(7, 0, 32, 32);
+  assert(identity.first == 6 && identity.weights[0] == 0.0f && identity.weights[1] == 1.0f &&
+         identity.weights[2] == 0.0f && identity.weights[3] == 0.0f);
+
+  constexpr std::uint32_t base = 0x2000;
+  auto descriptor = rgba8_descriptor(base, 4, 1, false);
+  const auto layout = build_texture_layout(descriptor);
+  std::vector<std::byte> memory(base + layout.base_extent_bytes + 0x1000);
+  const std::uint8_t row[] = {0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+                              255, 255, 255, 255};
+  std::vector<std::byte> linear(sizeof(row));
+  std::memcpy(linear.data(), row, sizeof(row));
+  assert(encode_texture(descriptor, linear, memory));
+  PresentationFrame frame{};
+  frame.texture = descriptor;
+
+  const auto same = prepare_presentation_frame(frame, memory, 4, 1, false);
+  assert(same.valid);
+  for (std::size_t i = 0; i < sizeof(row); ++i)
+    assert(std::uint8_t(same.rgba8[i]) == row[i]);
+
+  const auto wide = prepare_presentation_frame(frame, memory, 16, 1, false);
+  assert(wide.valid);
+  std::uint8_t red[16]{};
+  for (std::size_t x = 0; x < 16; ++x) red[x] = std::uint8_t(wide.rgba8[x * 4u]);
+  assert(red[0] == 0 && red[15] == 255);
+  for (std::size_t x = 0; x < 16; ++x) assert(int(red[x]) + int(red[15 - x]) == 255);
+  // The two pixels either side of the edge: bilinear gives 96 and 159 here;
+  // Catmull-Rom's negative lobe pulls them further apart.
+  assert(red[7] < 96 && red[8] > 159);
+}
 }  // namespace
 
 int main() {
@@ -128,6 +198,8 @@ int main() {
   test_rgba8_scale_and_letterbox(true);
   test_visible_crop_and_stretch();
   test_565_conversion();
+  test_front_buffer_swizzle();
+  test_catmull_rom_scanout();
   std::cout << "presentation tests passed\n";
   return 0;
 }

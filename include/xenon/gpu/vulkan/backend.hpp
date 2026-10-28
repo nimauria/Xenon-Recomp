@@ -28,6 +28,10 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool make_edram_canonical() override;
   [[nodiscard]] bool invalidate_edram_native_state() override;
   [[nodiscard]] PresentStatus present(const PresentationFrame& frame) override;
+  // Draws scan-out of `frame` on the GPU into an offscreen width x height
+  // RGBA8 image and reads it back, as presentation would show it.
+  [[nodiscard]] bool capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                                     std::uint32_t height, PreparedPresentationFrame& output);
   [[nodiscard]] bool resize_presentation(std::uint32_t width,
                                          std::uint32_t height) override;
   [[nodiscard]] bool presentation_ready() const noexcept override;
