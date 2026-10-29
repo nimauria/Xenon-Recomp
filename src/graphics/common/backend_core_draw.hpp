@@ -670,6 +670,11 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                     : (std::clamp)(
                                           state.raster.scissor_bottom, scissor_top,
                                           static_cast<std::int32_t>(render_height));
+    // The vertex shader maps render-target pixels to host NDC over the whole
+    // render target, which is the host viewport (XenonDrawState[3].yz).
+    const std::array<float, 2> pixels_to_ndc{2.0f / float(render_width),
+                                             2.0f / float(render_height)};
+    std::memcpy(constants.data() + 9344 + 13 * 4, pixels_to_ndc.data(), sizeof(pixels_to_ndc));
     bool draw_record_failed = false;
     phases.at("constants, pipeline and uploads");
     if (!self().record_draw(

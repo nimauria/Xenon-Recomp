@@ -257,6 +257,25 @@ uint xenon_vertex_index(uint index) {
   return clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu);
 }
 
+// The guest's exported position as host clip coordinates over the whole
+// render target. PA_CL_VTE_CNTL's formats first: VTX_W0_FMT clear means W
+// holds 1/W0, and VTX_XY_FMT/VTX_Z_FMT mean those components were already
+// divided by W0. Then the guest viewport transform (XenonDrawState[2], in
+// render-target pixels times W) and the host's pixels-to-NDC mapping
+// (XenonDrawState[3].yz = 2 / width, 2 / height; Y down in pixels, up in
+// NDC - Vulkan flips its viewport to match).
+float4 xenon_host_position(float4 position) {
+  uint flags = XenonDrawState[3].x;
+  if ((flags & 4u) == 0u) position.w = 1.0 / position.w;
+  if ((flags & 1u) != 0u) position.xy *= position.w;
+  if ((flags & 2u) != 0u) position.z *= position.w;
+  float4 transform = asfloat(XenonDrawState[2]);
+  float2 pixels = position.xy * transform.xy + transform.zw * position.w;
+  float2 to_ndc = asfloat(XenonDrawState[3].yz);
+  return float4(pixels.x * to_ndc.x - position.w, position.w - pixels.y * to_ndc.y,
+                position.z, position.w);
+}
+
 bool xenon_bool(uint index) {
   uint word = XenonBoolConstants[(index >> 7) & 7][(index >> 5) & 3];
   return ((word >> (index & 31)) & 1) != 0;
@@ -1131,7 +1150,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   }
   out << "  XenonOutput output;\n";
   if (shader.stage == ShaderStage::Vertex) {
-    out << "  output.position=e[62];\n";
+    out << "  output.position=xenon_host_position(e[62]);\n";
     for (unsigned i=0;i<16;++i) out << "  output.i" << i << "=e[" << i << "];\n";
   } else {
     for (unsigned i=0;i<4;++i) out << "  output.c" << i << "=e[" << i << "];\n";

@@ -57,7 +57,7 @@ void test_lowering_is_deterministic() {
   assert(first.translation_hash == second.translation_hash);
   assert(first.profile == "vs_6_0");
   assert(first.hlsl.find("XenonFloatConstants") != std::string::npos);
-  assert(first.hlsl.find("output.position=e[62]") != std::string::npos);
+  assert(first.hlsl.find("output.position=xenon_host_position(e[62])") != std::string::npos);
 }
 
 void test_dxc_dual_target_and_cache() {
@@ -278,6 +278,18 @@ void test_vertex_index_applies_grouper_offset_and_clamp() {
   assert(lowered.hlsl.find("uint4 vgt = XenonDrawState[1];") != std::string::npos);
   assert(lowered.hlsl.find(
              "clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu)") !=
+         std::string::npos);
+  // Regression (Ace Combat 6 age-rating screen): the guest viewport
+  // transform runs in the shader, so a pre-transformed Clear rectangle in
+  // render-target pixels lands where the guest put it instead of being
+  // scaled by a stale viewport and clipped.
+  assert(lowered.hlsl.find("output.position=xenon_host_position(e[62]);") != std::string::npos);
+  assert(lowered.hlsl.find("if ((flags & 4u) == 0u) position.w = 1.0 / position.w;") !=
+         std::string::npos);
+  assert(lowered.hlsl.find(
+             "float2 pixels = position.xy * transform.xy + transform.zw * position.w;") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("pixels.x * to_ndc.x - position.w, position.w - pixels.y * to_ndc.y") !=
          std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);

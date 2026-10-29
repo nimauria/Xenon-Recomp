@@ -236,20 +236,16 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               resources.pipeline_layout(), 0, 1,
                               &descriptor_set, 0, nullptr);
+      // The guest X/Y viewport transform runs in the vertex shader; the host
+      // viewport is the whole render target, flipped so NDC Y points up as
+      // in Direct3D. Depth keeps the guest Z range.
       const auto& guest_viewport = draw.state.raster.viewport;
-      const bool has_viewport = std::abs(guest_viewport.x_scale) > 0.0001f &&
-                                std::abs(guest_viewport.y_scale) > 0.0001f;
       const auto depth_a = (std::clamp)(guest_viewport.z_offset, 0.0f, 1.0f);
       const auto depth_b = (std::clamp)(
           guest_viewport.z_offset + guest_viewport.z_scale, 0.0f, 1.0f);
-      const VkViewport viewport = has_viewport
-          ? VkViewport{guest_viewport.x_offset - guest_viewport.x_scale,
-                       guest_viewport.y_offset - guest_viewport.y_scale,
-                       guest_viewport.x_scale * 2.0f,
-                       guest_viewport.y_scale * 2.0f,
-                       (std::min)(depth_a, depth_b), (std::max)(depth_a, depth_b)}
-          : VkViewport{0.0f, 0.0f, float(draw.render_width),
-                       float(draw.render_height), 0.0f, 1.0f};
+      const VkViewport viewport{0.0f, float(draw.render_height), float(draw.render_width),
+                                -float(draw.render_height), (std::min)(depth_a, depth_b),
+                                (std::max)(depth_a, depth_b)};
       const VkRect2D scissor{{draw.scissor_left, draw.scissor_top},
                              {static_cast<std::uint32_t>(draw.scissor_right - draw.scissor_left),
                               static_cast<std::uint32_t>(draw.scissor_bottom - draw.scissor_top)}};

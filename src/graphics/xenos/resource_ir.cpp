@@ -24,6 +24,25 @@ std::int32_t signed_bits(std::uint32_t value, unsigned first,
   return static_cast<std::int32_t>((raw ^ sign) - sign);
 }
 
+// The viewport transform as PA_CL_VTE_CNTL (0x2206) enables it: a scale or
+// offset whose enable bit is clear is the identity (scale 1, offset 0).
+// Direct3D's pre-transformed draws - its Clear among them - turn the X/Y
+// transform off and give vertices in render-target pixels.
+ViewportState effective_viewport(const std::uint32_t* registers) noexcept {
+  const auto vte = registers[0x2206];
+  const auto pick = [&](unsigned bit, std::uint32_t index, float identity) {
+    return bits(vte, bit, 1) ? std::bit_cast<float>(registers[index]) : identity;
+  };
+  ViewportState viewport{};
+  viewport.x_scale = pick(0, 0x210F, 1.0f);
+  viewport.x_offset = pick(1, 0x2110, 0.0f);
+  viewport.y_scale = pick(2, 0x2111, 1.0f);
+  viewport.y_offset = pick(3, 0x2112, 0.0f);
+  viewport.z_scale = pick(4, 0x2113, 1.0f);
+  viewport.z_offset = pick(5, 0x2114, 0.0f);
+  return viewport;
+}
+
 std::uint64_t hash_value(std::uint64_t hash, std::uint64_t value) noexcept {
   for (unsigned i = 0; i < 8; ++i) {
     hash ^= static_cast<std::uint8_t>(value >> (i * 8u));
@@ -623,12 +642,7 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.raster.window_offset_x = signed_bits(window_offset, 0, 15);
   result.raster.window_offset_y = signed_bits(window_offset, 16, 15);
   result.raster.d3d_pixel_center = bits(registers_[0x2302], 0, 1) == 0;
-  result.raster.viewport.x_scale = std::bit_cast<float>(registers_[0x210F]);
-  result.raster.viewport.x_offset = std::bit_cast<float>(registers_[0x2110]);
-  result.raster.viewport.y_scale = std::bit_cast<float>(registers_[0x2111]);
-  result.raster.viewport.y_offset = std::bit_cast<float>(registers_[0x2112]);
-  result.raster.viewport.z_scale = std::bit_cast<float>(registers_[0x2113]);
-  result.raster.viewport.z_offset = std::bit_cast<float>(registers_[0x2114]);
+  result.raster.viewport = effective_viewport(registers_.data());
   // How far down the draw can reach (as xenia's DrawExtentEstimator::
   // EstimateMaxY, without inspecting vertices). With clipping enabled
   // (PA_CL_CLIP_CNTL.clip_disable, bit 16, clear) geometry ends at the
@@ -950,7 +964,7 @@ bool ResourceStateTracker::write_constant_buffer(
   // The final 128 bytes of the stable constant ABI are per-draw native
   // translation state. Keep this generic rather than specializing shaders for
   // alpha reference or alpha-to-mask offsets.
-  std::array<std::uint32_t, 8> draw_state{};
+  std::array<std::uint32_t, 16> draw_state{};
   const auto color_control = registers_[0x2202];
   draw_state[0] = (bits(color_control, 3, 1) ? 1u : 0u) |
                   (bits(color_control, 4, 1) ? 2u : 0u);
@@ -967,6 +981,27 @@ bool ResourceStateTracker::write_constant_buffer(
   draw_state[5] = registers_[0x2102];
   draw_state[6] = registers_[0x2101];
   draw_state[7] = registers_[0x2100];
+  // The guest viewport transform, applied by the vertex shader so that a
+  // disabled transform (pre-transformed pixel coordinates) is not clipped by
+  // a host viewport: render-target pixel = position.xy * scale + offset.
+  // The offset carries the window offset when PA_SU_SC_MODE_CNTL applies it
+  // to vertices, and half a pixel for Direct3D pixel centers (PA_SU_VTX_CNTL
+  // bit 0 clear), whose pixel i is centered at i rather than the host's
+  // i + 0.5. Words 13/14 (2 / render target width, height) are the host's.
+  const auto viewport = effective_viewport(registers_.data());
+  const float center = bits(registers_[0x2302], 0, 1) == 0u ? 0.5f : 0.0f;
+  const bool window_offset = bits(registers_[0x2205], 16, 1) != 0u;
+  const auto window = registers_[0x2080];
+  draw_state[8] = std::bit_cast<std::uint32_t>(viewport.x_scale);
+  draw_state[9] = std::bit_cast<std::uint32_t>(viewport.y_scale);
+  draw_state[10] = std::bit_cast<std::uint32_t>(
+      viewport.x_offset + center +
+      (window_offset ? static_cast<float>(signed_bits(window, 0, 15)) : 0.0f));
+  draw_state[11] = std::bit_cast<std::uint32_t>(
+      viewport.y_offset + center +
+      (window_offset ? static_cast<float>(signed_bits(window, 16, 15)) : 0.0f));
+  // PA_CL_VTE_CNTL VTX_XY_FMT, VTX_Z_FMT, VTX_W0_FMT (bits 8-10).
+  draw_state[12] = bits(registers_[0x2206], 8, 3);
   std::memcpy(destination.data() + 9344, draw_state.data(),
               draw_state.size() * sizeof(std::uint32_t));
   return true;

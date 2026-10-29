@@ -232,21 +232,16 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       list->SetGraphicsRootDescriptorTable(
           3, resources.memory_export_handle(frame_index, draw_slot));
       list->OMSetBlendFactor(draw.state.blend_constant.data());
+      // The guest X/Y viewport transform runs in the vertex shader; the host
+      // viewport is the whole render target. Depth keeps the guest Z range.
       const auto& guest_viewport = draw.state.raster.viewport;
-      const auto x_scale = std::abs(guest_viewport.x_scale);
-      const auto y_scale = std::abs(guest_viewport.y_scale);
-      const bool has_viewport = x_scale > 0.0001f && y_scale > 0.0001f;
       const auto depth_a = (std::clamp)(guest_viewport.z_offset, 0.0f, 1.0f);
       const auto depth_b = (std::clamp)(
           guest_viewport.z_offset + guest_viewport.z_scale, 0.0f, 1.0f);
-      const D3D12_VIEWPORT viewport = has_viewport
-          ? D3D12_VIEWPORT{guest_viewport.x_offset - x_scale,
-                           guest_viewport.y_offset - y_scale,
-                           x_scale * 2.0f, y_scale * 2.0f,
-                           (std::min)(depth_a, depth_b),
-                           (std::max)(depth_a, depth_b)}
-          : D3D12_VIEWPORT{0.0f, 0.0f, float(draw.render_width),
-                           float(draw.render_height), 0.0f, 1.0f};
+      const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(draw.render_width),
+                                    float(draw.render_height),
+                                    (std::min)(depth_a, depth_b),
+                                    (std::max)(depth_a, depth_b)};
       const D3D12_RECT scissor{draw.scissor_left, draw.scissor_top,
                                draw.scissor_right, draw.scissor_bottom};
       list->RSSetViewports(1, &viewport);

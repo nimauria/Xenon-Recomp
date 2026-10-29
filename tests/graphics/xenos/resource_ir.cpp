@@ -392,6 +392,7 @@ void test_vertex_and_render_state() {
                               (1u << 16) | (4u << 21) | (10u << 24)});
   tracker.apply({0x2105, std::bit_cast<std::uint32_t>(0.25f)});
   tracker.apply({0x2106, std::bit_cast<std::uint32_t>(0.5f)});
+  tracker.apply({0x2206, 0x43Fu});  // Direct3D: every scale/offset, W0 not 1/W0
   tracker.apply({0x210F, std::bit_cast<std::uint32_t>(640.0f)});
   tracker.apply({0x2110, std::bit_cast<std::uint32_t>(640.0f)});
   tracker.apply({0x2111, std::bit_cast<std::uint32_t>(-360.0f)});
@@ -526,6 +527,61 @@ void test_constant_buffer_carries_vertex_index_offset_and_clamp() {
   assert(word(9364) == 12u);
   assert(word(9368) == 4u);
   assert(word(9372) == 0x00FFFFFFu);
+}
+
+// Regression (Ace Combat 6 age-rating screen): Direct3D's Clear draws a
+// 640x360 4x MSAA rectangle in render-target pixels (-0.5..639.5) with
+// PA_CL_VTE_CNTL's X/Y transform off. Applying the game's 640/640, -360/360
+// viewport anyway left most of the target uncleared, so earlier screens
+// showed through. A disabled scale or offset is the identity, the vertex
+// shader receives the transform with the Direct3D half-pixel center and the
+// window offset folded in, and the W0/XY/Z vertex formats.
+void test_viewport_transform_follows_vte_enables() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  tracker.apply({0x210F, std::bit_cast<std::uint32_t>(640.0f)});
+  tracker.apply({0x2110, std::bit_cast<std::uint32_t>(640.0f)});
+  tracker.apply({0x2111, std::bit_cast<std::uint32_t>(-360.0f)});
+  tracker.apply({0x2112, std::bit_cast<std::uint32_t>(360.0f)});
+  tracker.apply({0x2113, std::bit_cast<std::uint32_t>(0.5f)});
+  tracker.apply({0x2114, std::bit_cast<std::uint32_t>(0.25f)});
+  const auto float_word = [](const std::vector<std::byte>& data, std::size_t offset) {
+    float value{};
+    std::memcpy(&value, data.data() + offset, sizeof(value));
+    return value;
+  };
+  std::vector<std::byte> data(9472);
+
+  // Pre-transformed: X/Y/Z transform off, XY and Z already divided by W0.
+  tracker.apply({0x2206, (1u << 8) | (1u << 9)});
+  auto state = tracker.snapshot();
+  assert(state.raster.viewport.x_scale == 1.0f && state.raster.viewport.x_offset == 0.0f);
+  assert(state.raster.viewport.y_scale == 1.0f && state.raster.viewport.y_offset == 0.0f);
+  assert(state.raster.viewport.z_scale == 1.0f && state.raster.viewport.z_offset == 0.0f);
+  assert(tracker.write_constant_buffer(data));
+  // Direct3D pixel centers (PA_SU_VTX_CNTL bit 0 clear): pixel i is at i.
+  assert(float_word(data, 9376) == 1.0f && float_word(data, 9380) == 1.0f);
+  assert(float_word(data, 9384) == 0.5f && float_word(data, 9388) == 0.5f);
+  std::uint32_t formats{};
+  std::memcpy(&formats, data.data() + 9392, sizeof(formats));
+  assert(formats == 3u);
+
+  // Direct3D's usual state: everything enabled, W0 given as W0. OpenGL
+  // pixel centers and a vertex window offset of (16, -8).
+  tracker.apply({0x2206, 0x43Fu});
+  tracker.apply({0x2302, 1u});
+  tracker.apply({0x2205, 1u << 16});
+  tracker.apply({0x2080, 16u | ((static_cast<std::uint32_t>(-8) & 0x7FFFu) << 16)});
+  state = tracker.snapshot();
+  assert(state.raster.viewport.x_scale == 640.0f && state.raster.viewport.y_scale == -360.0f);
+  assert(state.raster.viewport.z_scale == 0.5f && state.raster.viewport.z_offset == 0.25f);
+  assert(tracker.write_constant_buffer(data));
+  assert(float_word(data, 9376) == 640.0f && float_word(data, 9380) == -360.0f);
+  assert(float_word(data, 9384) == 656.0f && float_word(data, 9388) == 352.0f);
+  std::memcpy(&formats, data.data() + 9392, sizeof(formats));
+  assert(formats == 4u);
+  // Words 13/14 belong to the host (pixels to NDC) and start cleared.
+  assert(float_word(data, 9396) == 0.0f && float_word(data, 9400) == 0.0f);
 }
 
 void test_copy_resolve_state() {
@@ -873,6 +929,7 @@ int main() {
   test_vertex_and_render_state();
   test_constant_buffer_abi();
   test_constant_buffer_carries_vertex_index_offset_and_clamp();
+  test_viewport_transform_follows_vte_enables();
   test_copy_resolve_state();
   test_color_target_plan();
   test_host_polygon_mode();
