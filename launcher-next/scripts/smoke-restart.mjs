@@ -45,7 +45,7 @@ for (let attempt = 0; attempt < 40 && !safe; attempt++) {
       continue;
     }
     await page
-      .getByRole("heading", { name: "Library", exact: true, level: 1 })
+      .getByRole("heading", { name: "Settings", exact: true, level: 1 })
       .waitFor({ timeout: 750 });
     safe = await page.evaluate(
       () =>

@@ -4,17 +4,29 @@
   "version": "0.1.0",
   "type": "module",
   "engines": {
-    "node": "\u003e=22.12.0"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit \u0026\u0026 vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "cef:fetch": "node scripts/fetch-cef.mjs",
     "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
     "desktop:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -BuildOnly",
-    "test:desktop": "node scripts/smoke-desktop.mjs"
+    "test:desktop": "node scripts/smoke-desktop.mjs",
+    "test:jobs": "node scripts/smoke-jobs.mjs",
+    "test:network": "node scripts/smoke-network.mjs",
+    "test:profiles": "node scripts/smoke-profiles.mjs",
+    "test:captures": "node scripts/smoke-captures.mjs",
+    "test:migration": "node scripts/smoke-migration.mjs",
+    "test:crash": "node scripts/smoke-crash.mjs",
+    "desktop:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1",
+    "test:library": "node scripts/smoke-library.mjs",
+    "test:services": "node scripts/smoke-services.mjs",
+    "test:shell": "node scripts/smoke-shell.mjs",
+    "test:dlc": "node scripts/smoke-dlc-catalog.mjs",
+    "test:parity-actions": "node scripts/smoke-parity-actions.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

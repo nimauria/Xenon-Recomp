@@ -14,6 +14,7 @@ const page = browser
   .flatMap((c) => c.pages())
   .find((p) => p.url() === "xenon://app/");
 assert.ok(page, "Packaged launcher page must exist");
+page.setDefaultTimeout(15000);
 assert.deepEqual(
   (
     await page
@@ -61,8 +62,23 @@ await writeFile(
       heroArt: "art/cover.PNG",
       tileArtFocalX: 0.25,
     },
-    settings: [
-      { id: "example", label: "Example setting", type: "bool", default: false },
+    launcherSettings: [
+      {
+        id: "example",
+        label: "Example setting",
+        type: "bool",
+        defaultValue: true,
+      },
+      {
+        id: "quality",
+        label: "Quality",
+        type: "choice",
+        defaultValue: 2,
+        options: [
+          { label: "Low", value: 1 },
+          { label: "High", value: 2 },
+        ],
+      },
     ],
   }),
 );
@@ -133,6 +149,10 @@ assert.equal(
   true,
 );
 assert.equal(
+  (await rpc("library.favorite", { id: game.id, favorite: true })).ok,
+  true,
+);
+assert.equal(
   (
     await rpc("launcher.action", {
       action: "settings.set",
@@ -170,8 +190,42 @@ for (const name of [
 }
 await page
   .getByRole("navigation", { name: "Main navigation" })
+  .getByRole("button", { name: "Home", exact: true })
+  .click();
+await page
+  .getByRole("region", { name: "Recently added", exact: true })
+  .getByRole("button", { name: "Open local-game", exact: true })
+  .click();
+await page
+  .getByRole("heading", { name: "Library", exact: true, level: 1 })
+  .waitFor();
+await page
+  .locator("label")
+  .filter({ hasText: "Show" })
+  .locator("select")
+  .selectOption({ label: "Favourites" });
+await page
+  .getByRole("navigation", { name: "Main navigation" })
+  .getByRole("button", { name: "Home", exact: true })
+  .click();
+await page
+  .getByRole("navigation", { name: "Main navigation" })
   .getByRole("button", { name: "Library", exact: true })
   .click();
+assert.equal(
+  await page
+    .locator("label")
+    .filter({ hasText: "Show" })
+    .locator("select")
+    .inputValue(),
+  "Favourites",
+  "Library filter must survive page navigation",
+);
+assert.equal(
+  await page.locator(".detail h2").textContent(),
+  "local-game",
+  "Home should select the requested game",
+);
 await page.screenshot({ path: "build/desktop-smoke.png", fullPage: true });
 await page
   .locator("label")
@@ -200,6 +254,34 @@ await page
     exact: true,
   })
   .waitFor();
+assert.equal(
+  await page.getByLabel("Example setting", { exact: true }).isChecked(),
+  true,
+  "Legacy defaultValue should populate the control",
+);
+await page
+  .getByRole("combobox", { name: "Quality", exact: true })
+  .selectOption({ label: "Low" });
+await page.waitForFunction(
+  () => !document.querySelector('main[aria-busy="true"]'),
+);
+snapshot = (await rpc("application.snapshot")).data;
+assert.equal(
+  snapshot.modules.find((m) => m.id === `smoke.module.${stamp}`).settings
+    .quality,
+  1,
+  "Choice control must preserve numeric option values",
+);
+assert.equal(
+  (
+    await rpc("launcher.action", {
+      action: "modules.setting",
+      data: { id: `smoke.module.${stamp}`, key: "quality", value: 3 },
+    })
+  ).ok,
+  false,
+  "Native service must reject undeclared module choices",
+);
 await page.getByRole("button", { name: "Close dialog", exact: true }).click();
 await page
   .getByRole("button", { name: "Collapse navigation", exact: true })
@@ -238,11 +320,27 @@ await page
   .filter({ hasText: "View" })
   .locator("select")
   .selectOption({ label: "Focused" });
+// Selection saves are debounced so rapid carousel movement does not write on every key press.
+for (let attempt = 0; attempt < 50; attempt++) {
+  snapshot = (await rpc("application.snapshot")).data;
+  if (snapshot.settings["library/lastSelectedGameId"] === game.id) break;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.equal(
+  snapshot.settings["library/lastSelectedGameId"],
+  game.id,
+  "Selection should be committed before a renderer restart",
+);
 await page.reload();
 await page
   .getByRole("heading", { name: "Library", exact: true, level: 1 })
   .waitFor();
 snapshot = (await rpc("application.snapshot")).data;
+assert.equal(
+  snapshot.settings["library/lastSelectedGameId"],
+  game.id,
+  "Remembered selection must survive renderer restart",
+);
 assert.equal(
   snapshot.activeProfileId,
   profile.id,
