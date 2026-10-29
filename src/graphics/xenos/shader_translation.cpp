@@ -249,6 +249,14 @@ Texture3D<float4> XenonTextures3D[32] : register(t65);
 TextureCube<float4> XenonTexturesCube[32] : register(t97);
 SamplerState XenonSamplers[32] : register(s0);
 
+// The vertex grouper's index: the draw's index (generated or fetched) plus
+// VGT_INDX_OFFSET, kept to its 24 bits and clamped to
+// [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX].
+uint xenon_vertex_index(uint index) {
+  uint4 vgt = XenonDrawState[1];
+  return clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu);
+}
+
 bool xenon_bool(uint index) {
   uint word = XenonBoolConstants[(index >> 7) & 7][(index >> 5) & 3];
   return ((word >> (index & 31)) & 1) != 0;
@@ -1005,7 +1013,8 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
-  if (shader.stage == ShaderStage::Vertex) out << "  r[0].x = (float)vertex_id;\n";
+  if (shader.stage == ShaderStage::Vertex)
+    out << "  r[0].x = (float)xenon_vertex_index(vertex_id);\n";
   else for (unsigned i=0;i<16;++i) out << "  r[" << i << "] = input.i" << i << ";\n";
 
   out << "  [loop] while (running && guard++ < 65536) {\n"

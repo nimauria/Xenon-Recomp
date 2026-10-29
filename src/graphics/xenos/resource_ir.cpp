@@ -960,6 +960,13 @@ bool ResourceStateTracker::write_constant_buffer(
     draw_state[3] |= bits(color_control, 24 + i * 2u, 2) << (i * 2u);
   }
   draw_state[4] = registers_[0x210E];
+  // VGT_INDX_OFFSET, VGT_MIN_VTX_INDX and VGT_MAX_VTX_INDX: the vertex
+  // grouper adds the offset to every index (auto-generated or fetched) and
+  // clamps the sum to [min, max] before the vertex shader sees it in r0.x.
+  // Direct3D's StartVertex/BaseVertexIndex is this offset.
+  draw_state[5] = registers_[0x2102];
+  draw_state[6] = registers_[0x2101];
+  draw_state[7] = registers_[0x2100];
   std::memcpy(destination.data() + 9344, draw_state.data(),
               draw_state.size() * sizeof(std::uint32_t));
   return true;

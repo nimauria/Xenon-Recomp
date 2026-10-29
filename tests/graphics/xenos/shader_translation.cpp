@@ -264,6 +264,28 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   assert(!HlslShaderLowerer::lower(shader).complete);
 }
 
+// Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
+// grouper's index - the draw's index plus VGT_INDX_OFFSET, 24 bits, clamped
+// to [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX] - not the host's raw vertex id, or
+// every quad drawn at a StartVertex fetches the buffer's first vertices.
+void test_vertex_index_applies_grouper_offset_and_clamp() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("r[0].x = (float)xenon_vertex_index(vertex_id);") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("r[0].x = (float)vertex_id;") == std::string::npos);
+  assert(lowered.hlsl.find("uint4 vgt = XenonDrawState[1];") != std::string::npos);
+  assert(lowered.hlsl.find(
+             "clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu)") !=
+         std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+}
+
 // Every Xenos texture fetch opcode with defined semantics lowers and compiles
 // for both DXIL and SPIR-V: the LOD/gradient setters feed per-invocation state
 // read by later fetches, and the queries return LOD, derivatives and bilinear
@@ -567,6 +589,7 @@ int main() {
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
   test_vertex_fetch_select_endian_and_packed_formats();
+  test_vertex_index_applies_grouper_offset_and_clamp();
   test_texture_state_and_query_opcodes();
   test_vertex_shader_texture_fetch_uses_explicit_lod();
   test_rectangle_list_geometry_shader();

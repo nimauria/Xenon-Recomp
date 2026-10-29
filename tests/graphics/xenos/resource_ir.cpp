@@ -505,6 +505,29 @@ void test_constant_buffer_abi() {
   assert(word(9360) == std::bit_cast<std::uint32_t>(0.5f));
 }
 
+// Regression (Ace Combat 6 logos): Direct3D draws each logo quad of one
+// vertex buffer with its StartVertex in VGT_INDX_OFFSET (4, 8, 12, ...).
+// Without it every quad fetched vertices 0-3 - the full-screen background
+// with its fade alpha - so the logos stretched and overlapped. The offset
+// and the VGT_MIN/MAX_VTX_INDX clamp reach the shader in XenonDrawState[1].
+void test_constant_buffer_carries_vertex_index_offset_and_clamp() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  tracker.apply({0x2102, 12u});         // VGT_INDX_OFFSET
+  tracker.apply({0x2101, 4u});          // VGT_MIN_VTX_INDX
+  tracker.apply({0x2100, 0x00FFFFFFu}); // VGT_MAX_VTX_INDX
+  std::vector<std::byte> data(9472);
+  assert(tracker.write_constant_buffer(data));
+  const auto word = [&](std::size_t offset) {
+    std::uint32_t value{};
+    std::memcpy(&value, data.data() + offset, sizeof(value));
+    return value;
+  };
+  assert(word(9364) == 12u);
+  assert(word(9368) == 4u);
+  assert(word(9372) == 0x00FFFFFFu);
+}
+
 void test_copy_resolve_state() {
   using namespace xenon::gpu;
   ResourceStateTracker tracker;
@@ -849,6 +872,7 @@ int main() {
   test_texture_descriptor();
   test_vertex_and_render_state();
   test_constant_buffer_abi();
+  test_constant_buffer_carries_vertex_index_offset_and_clamp();
   test_copy_resolve_state();
   test_color_target_plan();
   test_host_polygon_mode();
