@@ -5,6 +5,7 @@
 
 #include "core/session/session_internal.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/cpu/call_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -53,6 +54,12 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
   if (compiled_registry_binder_) {
     compiled_registry_binder_(context);
   }
+  cpu::call_trace::bind(context);
+  // Write-trap reports name this thread's guest instruction.
+  struct WriteTrapState {
+    const cpu::CpuState* outer;
+    ~WriteTrapState() { cpu::set_write_trap_guest_state(outer); }
+  } write_trap_state{cpu::set_write_trap_guest_state(&state)};
 
   if (!context.compiled_lookup && !context.dynamic_fallback) {
     outcome.crashed = true;

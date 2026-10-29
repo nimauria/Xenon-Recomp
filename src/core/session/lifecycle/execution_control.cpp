@@ -1,4 +1,5 @@
 #include "xenon/core/session.hpp"
+#include "xenon/cpu/call_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -108,6 +109,7 @@ SessionResult XenonSession::stop() {
   // that flag and unregisters its registers, and a stall usually involves
   // the main thread.
   report_stop_diagnostics();
+  cpu::call_trace::write_report();
   stop_requested_.store(true);
 
   // Ends the kernel waits and delays guest threads are blocked in, after the

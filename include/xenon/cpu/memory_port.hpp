@@ -49,6 +49,13 @@ void set_write_traps(std::span<const GuestAddress> addresses) noexcept;
 // <windows.h> and file I/O out of this header.
 void debug_signal_write_trap(GuestAddress address, std::uint64_t value);
 
+// The guest registers of the thread the calling host thread is running, so a
+// trapped store also reports the guest cia/lr (the host stack alone cannot
+// name the guest instruction when the interpreter executed it). Set for the
+// length of a guest dispatch; returns the previous value to restore. Each
+// module linking xenon_cpu keeps its own copy.
+const struct CpuState* set_write_trap_guest_state(const CpuState* state) noexcept;
+
 // Stable executable-page identity consumed by the native translation cache.
 // The physical page prevents an unmap/remap ABA from validating merely because
 // a replacement page happens to have the same generation value. A zero

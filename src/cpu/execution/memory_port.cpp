@@ -14,6 +14,7 @@
 #pragma comment(lib, "dbghelp.lib")
 #endif
 
+#include "xenon/cpu/state.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::cpu {
@@ -61,6 +62,16 @@ namespace {
 
 }  // namespace
 
+namespace {
+thread_local const CpuState* t_write_trap_state = nullptr;
+}  // namespace
+
+const CpuState* set_write_trap_guest_state(const CpuState* state) noexcept {
+  const auto* previous = t_write_trap_state;
+  t_write_trap_state = state;
+  return previous;
+}
+
 // Defined here, in xenon_cpu alongside its declaration, so every xenon_cpu
 // consumer links (it used to live in xenon_memory, leaving xenon_cpu-only
 // targets such as xenon_cpu_tests with an unresolved external).
@@ -85,6 +96,12 @@ void debug_signal_write_trap(GuestAddress address, std::uint64_t value) {
 
   logging::append_probe_log(kFile, "WRITE to guest 0x%08X value=0x%08X (thread os_tid=%lu):\n",
                             (unsigned)address, (unsigned)value, GetCurrentThreadId());
+  if (const auto* guest = t_write_trap_state) {
+    logging::append_probe_log(kFile, "  guest cia=0x%08X lr=0x%08X r1=0x%08X r3=0x%08X\n",
+                              static_cast<unsigned>(guest->cia), static_cast<unsigned>(guest->lr),
+                              static_cast<unsigned>(guest->gpr[1]),
+                              static_cast<unsigned>(guest->gpr[3]));
+  }
   char symbol_buffer[sizeof(SYMBOL_INFO) + 256];
   SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(symbol_buffer);
   symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
@@ -112,6 +129,10 @@ void debug_signal_write_trap(GuestAddress address, std::uint64_t value) {
   // No host stack capture off Windows; the store itself is still reported.
   logging::append_probe_log(kFile, "WRITE to guest 0x%08X value=0x%08X\n", (unsigned)address,
                             (unsigned)value);
+  if (const auto* guest = t_write_trap_state) {
+    logging::append_probe_log(kFile, "  guest cia=0x%08X lr=0x%08X\n",
+                              static_cast<unsigned>(guest->cia), static_cast<unsigned>(guest->lr));
+  }
 #endif
 }
 

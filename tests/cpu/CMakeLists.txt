@@ -147,6 +147,11 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_dynamic_fallback_tests)
     add_test(NAME xenon_dynamic_fallback_tests COMMAND xenon_dynamic_fallback_tests)
 
+    add_executable(xenon_call_trace_tests call_trace_tests.cpp)
+    target_link_libraries(xenon_call_trace_tests PRIVATE xenon_cpu xenon_memory)
+    xenon_enable_test_asserts(xenon_call_trace_tests)
+    add_test(NAME xenon_call_trace_tests COMMAND xenon_call_trace_tests)
+
     add_executable(xenon_dynamic_fallback_semantic_tests
       verification/dynamic_fallback_semantic_tests.cpp)
     target_include_directories(xenon_dynamic_fallback_semantic_tests PRIVATE

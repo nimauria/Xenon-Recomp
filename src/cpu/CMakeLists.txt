@@ -34,6 +34,7 @@ add_library(xenon_cpu STATIC
   # Execution support shared with the runtime.
   execution/memory_port.cpp
   execution/external_calls.cpp
+  execution/call_trace.cpp
   execution/executable_code_cache.cpp
   execution/flat_memory.cpp
 )
