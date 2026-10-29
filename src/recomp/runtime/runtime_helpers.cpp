@@ -67,21 +67,21 @@ ExecutionResult setjmp_v2(ExecutionContext& context) {
   // than a host jmp_buf: the saved state remains endian-correct, inspectable
   // by guest code and independent of the host C++ stack architecture.
   for (std::uint32_t reg = 14u; reg <= 31u; ++reg) {
-    context.memory.write64_be(buffer + kJumpBufferFpr14Offset + (reg - 14u) * 8u,
+    context.memory_access.write64_be(buffer + kJumpBufferFpr14Offset + (reg - 14u) * 8u,
                               state.fpr_bits[reg]);
   }
-  context.memory.write64_be(buffer + kJumpBufferR1Offset, state.gpr[1]);
+  context.memory_access.write64_be(buffer + kJumpBufferR1Offset, state.gpr[1]);
   for (std::uint32_t reg = 13u; reg <= 31u; ++reg) {
-    context.memory.write64_be(buffer + kJumpBufferR13Offset + (reg - 13u) * 8u,
+    context.memory_access.write64_be(buffer + kJumpBufferR13Offset + (reg - 13u) * 8u,
                               state.gpr[reg]);
   }
-  context.memory.write32_be(buffer + kJumpBufferCrOffset, state.cr);
-  context.memory.write32_be(buffer + kJumpBufferLrOffset,
+  context.memory_access.write32_be(buffer + kJumpBufferCrOffset, state.cr);
+  context.memory_access.write32_be(buffer + kJumpBufferLrOffset,
                             static_cast<std::uint32_t>(state.lr));
   // Eight bytes of ABI padding separate LR from the vector save area.
-  context.memory.write64_be(buffer + 312u, 0u);
+  context.memory_access.write64_be(buffer + 312u, 0u);
   for (std::uint32_t reg = 64u; reg <= 127u; ++reg) {
-    context.memory.write128(buffer + kJumpBufferVr64Offset + (reg - 64u) * 16u,
+    context.memory_access.write128(buffer + kJumpBufferVr64Offset + (reg - 64u) * 16u,
                             state.vr[reg]);
   }
 
@@ -96,18 +96,18 @@ ExecutionResult longjmp_v2(ExecutionContext& context) {
   if (!valid_jump_buffer(context, buffer)) return invalid_buffer(state);
 
   for (std::uint32_t reg = 14u; reg <= 31u; ++reg) {
-    state.fpr_bits[reg] = context.memory.read64_be(
+    state.fpr_bits[reg] = context.memory_access.read64_be(
         buffer + kJumpBufferFpr14Offset + (reg - 14u) * 8u);
   }
-  state.gpr[1] = context.memory.read64_be(buffer + kJumpBufferR1Offset);
+  state.gpr[1] = context.memory_access.read64_be(buffer + kJumpBufferR1Offset);
   for (std::uint32_t reg = 13u; reg <= 31u; ++reg) {
-    state.gpr[reg] = context.memory.read64_be(
+    state.gpr[reg] = context.memory_access.read64_be(
         buffer + kJumpBufferR13Offset + (reg - 13u) * 8u);
   }
-  state.cr = context.memory.read32_be(buffer + kJumpBufferCrOffset);
-  state.lr = context.memory.read32_be(buffer + kJumpBufferLrOffset);
+  state.cr = context.memory_access.read32_be(buffer + kJumpBufferCrOffset);
+  state.lr = context.memory_access.read32_be(buffer + kJumpBufferLrOffset);
   for (std::uint32_t reg = 64u; reg <= 127u; ++reg) {
-    state.vr[reg] = context.memory.read128(
+    state.vr[reg] = context.memory_access.read128(
         buffer + kJumpBufferVr64Offset + (reg - 64u) * 16u);
   }
 

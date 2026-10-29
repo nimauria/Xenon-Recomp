@@ -29,6 +29,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/memory/types.hpp"
+#include "xenon/recomp/native_replacements.hpp"
 #include "xenon/recomp/runtime_helpers.hpp"
 
 using namespace xenon::cpu;
@@ -196,6 +197,118 @@ void test_vmx128(xenon::memory::AddressSpace& memory, TestRuntime& runtime,
     assert(state.vr[reg].bytes == original[reg].bytes);
 }
 
+// Forwards to an AddressSpace and counts every access made through the
+// virtual MemoryPort interface; the access context it hands out is the
+// address space's own, which never calls back into this port.
+class CountingPort final : public MemoryPort {
+ public:
+  explicit CountingPort(xenon::memory::AddressSpace& inner) : inner_(inner) {}
+  MemoryAccessContext access_context() noexcept override { return inner_.access_context(); }
+  std::uint8_t read8(GuestAddress a) override { ++accesses; return inner_.read8(a); }
+  std::uint16_t read16_be(GuestAddress a) override { ++accesses; return inner_.read16_be(a); }
+  std::uint32_t read32_be(GuestAddress a) override { ++accesses; return inner_.read32_be(a); }
+  std::uint64_t read64_be(GuestAddress a) override { ++accesses; return inner_.read64_be(a); }
+  Vector128 read128(GuestAddress a) override { ++accesses; return inner_.read128(a); }
+  void write8(GuestAddress a, std::uint8_t v) override { ++accesses; inner_.write8(a, v); }
+  void write16_be(GuestAddress a, std::uint16_t v) override { ++accesses; inner_.write16_be(a, v); }
+  void write32_be(GuestAddress a, std::uint32_t v) override { ++accesses; inner_.write32_be(a, v); }
+  void write64_be(GuestAddress a, std::uint64_t v) override { ++accesses; inner_.write64_be(a, v); }
+  void write128(GuestAddress a, const Vector128& v) override { ++accesses; inner_.write128(a, v); }
+  std::uint16_t read16_le(GuestAddress a) override { ++accesses; return inner_.read16_le(a); }
+  std::uint32_t read32_le(GuestAddress a) override { ++accesses; return inner_.read32_le(a); }
+  std::uint64_t read64_le(GuestAddress a) override { ++accesses; return inner_.read64_le(a); }
+  void write16_le(GuestAddress a, std::uint16_t v) override { ++accesses; inner_.write16_le(a, v); }
+  void write32_le(GuestAddress a, std::uint32_t v) override { ++accesses; inner_.write32_le(a, v); }
+  void write64_le(GuestAddress a, std::uint64_t v) override { ++accesses; inner_.write64_le(a, v); }
+  void read_bytes(GuestAddress a, std::span<std::byte> d) override { ++accesses; inner_.read_bytes(a, d); }
+  void write_bytes(GuestAddress a, std::span<const std::byte> s) override {
+    ++accesses;
+    inner_.write_bytes(a, s);
+  }
+  void fill_bytes(GuestAddress a, std::uint32_t n, std::uint8_t v) override {
+    ++accesses;
+    inner_.fill_bytes(a, n, v);
+  }
+  std::uint64_t reserve32(GuestAddress a, std::uint32_t& v) override { ++accesses; return inner_.reserve32(a, v); }
+  std::uint64_t reserve64(GuestAddress a, std::uint64_t& v) override { ++accesses; return inner_.reserve64(a, v); }
+  bool store_conditional32(GuestAddress a, std::uint64_t t, std::uint32_t v) override {
+    ++accesses;
+    return inner_.store_conditional32(a, t, v);
+  }
+  bool store_conditional64(GuestAddress a, std::uint64_t t, std::uint64_t v) override {
+    ++accesses;
+    return inner_.store_conditional64(a, t, v);
+  }
+  void barrier(BarrierKind kind) override { inner_.barrier(kind); }
+  void zero_cache_block(GuestAddress a, std::uint32_t n) override { ++accesses; inner_.zero_cache_block(a, n); }
+  void instruction_cache_invalidate(GuestAddress a) override { inner_.instruction_cache_invalidate(a); }
+
+  std::uint64_t accesses{};
+
+ private:
+  xenon::memory::AddressSpace& inner_;
+};
+
+// Regression (AC6 spent most of its remaining startup CPU in AddressSpace::
+// access_context): the prologue/epilogue spill helpers, setjmp/longjmp and
+// the CRT replacements run in nearly every guest call, and each of their
+// accesses went through the virtual MemoryPort, which builds a fresh access
+// context per access. They must use the calling context's own memory_access.
+void test_helpers_use_the_context_memory_access(xenon::memory::AddressSpace& memory,
+                                                TestRuntime& runtime, std::uint64_t frame) {
+  namespace crt = xenon::recomp::native_replacements;
+  CountingPort port(memory);
+  CpuState state{};
+  state.gpr[1] = frame;
+  state.gpr[12] = 0x80010004ull;
+  state.lr = 0x80010004ull;
+  for (std::uint32_t reg = 14u; reg <= 31u; ++reg) {
+    state.gpr[reg] = 0x4000000000000000ull | reg;
+    state.fpr_bits[reg] = 0x5000000000000000ull | reg;
+  }
+  const auto gprs = state.gpr;
+  const auto run = [&](NativeCompiledEntry entry) {
+    ExecutionContext context(state, port, runtime);
+    return entry(context);
+  };
+  run(&save_gpr_lr_v2<14>);
+  run(&save_fpr_v2<14>);
+  for (std::uint32_t reg = 14u; reg <= 31u; ++reg) state.gpr[reg] = 0u;
+  run(&restore_gpr_lr_v2<14>);
+  run(&restore_fpr_v2<14>);
+  for (std::uint32_t reg = 14u; reg <= 31u; ++reg) assert(state.gpr[reg] == gprs[reg]);
+  state.gpr[12] = frame - 0x800ull;
+  run(&save_vmx_v2<14>);
+  run(&restore_vmx_v2<14>);
+  run(&save_vmx128_v2<64>);
+  run(&restore_vmx128_v2<64>);
+
+  // CRT replacements: a string copied with memcpy, measured, compared and
+  // copied again with strncpy, then cleared with memset.
+  const auto text = static_cast<GuestAddress>(frame + 0x100u);
+  const auto copy = static_cast<GuestAddress>(frame + 0x200u);
+  const char hello[] = "xenon";
+  for (std::uint32_t i = 0; i < sizeof(hello); ++i)
+    memory.write8(text + i, static_cast<std::uint8_t>(hello[i]));
+  state.lr = 0x80020000ull;
+  state.gpr[3] = copy; state.gpr[4] = text; state.gpr[5] = sizeof(hello);
+  run(&crt::memcpy_v2);
+  state.gpr[3] = copy;
+  run(&crt::strlen_v2);
+  assert(state.gpr[3] == 5u);
+  state.gpr[3] = text; state.gpr[4] = copy; state.gpr[5] = 8u;
+  run(&crt::strncmp_v2);
+  assert(state.gpr[3] == 0u);
+  state.gpr[3] = copy + 0x20u; state.gpr[4] = text; state.gpr[5] = 8u;
+  run(&crt::strncpy_v2);
+  assert(memory.read8(copy + 0x24u) == 'n' && memory.read8(copy + 0x27u) == 0u);
+  state.gpr[3] = copy; state.gpr[4] = 0u; state.gpr[5] = 16u;
+  run(&crt::memset_v2);
+  assert(memory.read8(copy) == 0u && memory.read8(copy + 4u) == 0u);
+
+  assert(port.accesses == 0u && "helpers must not go through the virtual MemoryPort");
+}
+
 }  // namespace
 
 int main() {
@@ -287,6 +400,8 @@ int main() {
       assert(state.vr[reg].bytes == vmx_before[reg].bytes);
     }
   }
+
+  test_helpers_use_the_context_memory_access(*address_space, runtime, frame);
 
   process.terminate(0u);
   std::cout << "xenon_cpu_runtime_helpers_register_range: ok\n";
