@@ -142,6 +142,20 @@ namespace xenon::cpu::fallback {
     return true;
   }
 
+  // vmsum3fp128/vmsum4fp128 take (old vD, vA, vB) and dot vA with vB, as
+  // lifter/vector.cpp wires them for generated code. Routing them through the
+  // generic (vA, vB, none) set below dotted vB with an empty vector, so every
+  // interpreted dot product was zero.
+  if (m.starts_with("vmsum3fp") || m.starts_with("vmsum4fp")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, state.vr[reg],
+                                        state.vr[vector_va(i)], state.vr[vector_vb(i)],
+                                        Vector128{});
+    return true;
+  }
+
   if (m.starts_with("vsum") || m.starts_with("vmsum")) {
     const auto semantic = vector_semantic_for(m);
     if (!semantic) return false;
@@ -159,7 +173,7 @@ namespace xenon::cpu::fallback {
     const auto reg = vector_vd(i);
     const auto b = state.vr[vector_vb(i)];
     state.vr[reg] =
-        aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+        aot::execute_vector(*semantic, i.word, state, b, Vector128{}, Vector128{}, Vector128{});
     return true;
   }
 
@@ -175,7 +189,7 @@ namespace xenon::cpu::fallback {
     } else {
       const auto b = state.vr[vector_vb(i)];
       state.vr[reg] =
-          aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+          aot::execute_vector(*semantic, i.word, state, b, Vector128{}, Vector128{}, Vector128{});
     }
     return true;
   }
@@ -188,6 +202,21 @@ namespace xenon::cpu::fallback {
     const auto b = state.vr[vector_vb(i)];
     state.vr[reg] =
         aot::execute_vector(*semantic, i.word, state, old, b, Vector128{}, Vector128{});
+    return true;
+  }
+
+  // Unary vector semantics take their source in the first argument, just as
+  // the lifter's unary() does. VA is an immediate/reserved field for these
+  // instructions, so passing vA silently reads an unrelated register.
+  if (m.starts_with("vsplt") || m.starts_with("vupk") || m.starts_with("vcfs") || m.starts_with("vcfu") ||
+      m.starts_with("vcts") || m.starts_with("vctu") || m.starts_with("vcfps") ||
+      m.starts_with("vcfpu") || m.starts_with("vcsx") || m.starts_with("vcux") ||
+      m.starts_with("vrfi") || m.starts_with("vrefp") || m.starts_with("vrsqrtefp") ||
+      m.starts_with("vexptefp") || m.starts_with("vlogefp")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    state.vr[vector_vd(i)] = aot::execute_vector(
+        *semantic, i.word, state, state.vr[vector_vb(i)], {}, {}, {});
     return true;
   }
 

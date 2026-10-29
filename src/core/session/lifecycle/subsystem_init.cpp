@@ -1,6 +1,8 @@
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 
+#include "xenon/kernel/thread.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 
@@ -16,6 +18,10 @@ bool XenonSession::init_memory() {
     set_error("Memory subsystem initialization failed");
     return false;
   }
+  const char* strict = std::getenv("XENON_MEMORY_STRICT");
+  const bool strict_requested =
+      config_.strict_memory || (strict && *strict && *strict != '0');
+  memory_->set_native_access(!strict_requested);
   return true;
 }
 
@@ -27,6 +33,16 @@ bool XenonSession::init_filesystem() {
 bool XenonSession::init_kernel() {
   kernel_io_ = std::make_unique<kernel::KernelIoManager>(filesystem_);
   io_bridge_ = std::make_unique<kernel::xbox::GuestIoBridge>(*memory_, *kernel_io_);
+  // An I/O completion routine, IoApcRoutine(ApcContext, IoStatusBlock,
+  // Reserved), is a user APC for the thread that issued the request; I/O
+  // completes synchronously here, so that is the calling thread. It runs at
+  // that thread's next alertable wait.
+  io_bridge_->set_apc_queue([](memory::GuestAddress routine, memory::GuestAddress context,
+                               memory::GuestAddress io_status_block) {
+    if (auto* thread = kernel::KernelThread::current()) {
+      thread->queue_user_apc({routine, context, io_status_block, 0u});
+    }
+  });
   if (!xbox::register_xboxkrnl_io_imports(xbox_imports_)) {
     set_error("Failed to register xboxkrnl I/O import thunks");
     return false;
@@ -99,6 +115,13 @@ bool XenonSession::init_audio() {
     return false;
   }
   audio_->set_master_volume(config_.audio_master_volume);
+  // Development: record what the runtime sends to the audio device.
+  if (const char* capture = std::getenv("XENON_AUDIO_CAPTURE"); capture && *capture) {
+    std::string capture_error;
+    if (!audio_->start_output_recording(capture, &capture_error) && config_.enable_logging) {
+      std::cout << "[XenonSession] XENON_AUDIO_CAPTURE: " << capture_error << std::endl;
+    }
+  }
 
   // Render-driver callbacks execute guest code on the audio callback's own
   // KernelThread (see start_audio_guest_thread()). Give it a dedicated PPC
@@ -133,6 +156,14 @@ bool XenonSession::init_xam() {
   if (!xam_->initialize()) {
     set_error("XAM subsystem initialization failed");
     return false;
+  }
+  // Content packages (XamContentCreate) and title-specific profile
+  // settings are saved beside the host's saves. Without a save root, content
+  // lives in a scratch directory removed at shutdown and profile settings
+  // stay in memory.
+  if (!config_.save_root_path.empty()) {
+    xam_->content().set_content_root(config_.save_root_path / "Content");
+    xam_->profile_settings().set_storage_directory(config_.save_root_path / "ProfileSettings");
   }
   return true;
 }

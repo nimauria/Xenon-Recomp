@@ -46,6 +46,7 @@ bool XenonSession::start_audio_guest_thread() {
   }
   write_guest_thread_id(*memory_, audio_thread_tls_, audio_thread_->thread_id());
   audio_thread_->set_guest_kthread_address(audio_thread_tls_.kthread_address);
+  audio_thread_->set_guest_kpcr_address(audio_thread_tls_.kpcr_address);
 
   // Mark the pump active and wire the invoker before starting the thread, so
   // there is no window where the thread is running but has nothing to do (or
@@ -112,9 +113,11 @@ bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
       logging::append_probe_log("audio_callback_diag.log", "invoke_audio_callback #%d ENTER: callback=0x%08X argument=0x%08X\n",
                    _en, (unsigned)callback, (unsigned)argument);
     }
-    const bool _ok = run_guest_callback(state, callback, audio_thread_);
+    const bool _ok =
+        run_guest_callback(state, callback, audio_thread_, audio_callback_watch_, "audio render");
     if (_en <= 20 || (_en % 500) == 0) {
-      logging::append_probe_log("audio_callback_diag.log", "invoke_audio_callback #%d RETURNED: ok=%d\n", _en, (int)_ok);
+      logging::append_probe_log("audio_callback_diag.log",
+                                "invoke_audio_callback #%d RETURNED: ok=%d\n", _en, (int)_ok);
     }
     return _ok;
   }

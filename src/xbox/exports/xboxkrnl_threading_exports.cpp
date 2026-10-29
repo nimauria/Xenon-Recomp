@@ -1,16 +1,24 @@
 #include "xenon/xbox/xboxkrnl_threading_exports.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
+#include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/xbox_io.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
+#include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
@@ -198,21 +206,223 @@ bool ex_release_read_write_lock_export(kernel::KernelProcess& process, ExportCal
   return true;
 }
 
+// ---- Exceptions --------------------------------------------------------------
+
+namespace {
+
+// X_EXCEPTION_RECORD (the 32-bit NT EXCEPTION_RECORD): code, flags, nested
+// record, address, parameter count, then ExceptionInformation[15].
+constexpr std::uint32_t kExceptionCode = 0x00u;
+constexpr std::uint32_t kExceptionParameterCount = 0x10u;
+constexpr std::uint32_t kExceptionInformation = 0x14u;
+
+// The MSVC "set thread name" exception. Its ExceptionInformation is a
+// THREADNAME_INFO: type (0x1000), name pointer, thread id (-1 = the calling
+// thread), flags. The same convention xenia handles in RtlRaiseException.
+constexpr std::uint32_t kSetThreadNameException = 0x406D1388u;
+constexpr std::uint32_t kThreadNameInfoType = 0x1000u;
+constexpr std::size_t kMaxThreadNameLength = 64;
+
+void name_thread(kernel::KernelProcess& process, ExportCallContext& context,
+                 cpu::GuestAddress record) {
+  const auto info = record + kExceptionInformation;
+  if (context.memory.read32_be(record + kExceptionParameterCount) < 3u ||
+      context.memory.read32_be(info) != kThreadNameInfoType) {
+    return;
+  }
+  const auto name_ptr = context.memory.read32_be(info + 4u);
+  const auto requested = context.memory.read32_be(info + 8u);
+  if (name_ptr == 0u) return;
+  std::string name;
+  for (std::size_t i = 0; i < kMaxThreadNameLength; ++i) {
+    const auto c = context.memory.read8(name_ptr + static_cast<std::uint32_t>(i));
+    if (c == 0u) break;
+    name.push_back(c < 32u || c > 126u ? '?' : static_cast<char>(c));
+  }
+  const auto thread_id = requested == 0xFFFFFFFFu ? context.thread_id : requested;
+  if (auto* thread = process.thread_manager().get_thread_ptr(thread_id)) {
+    thread->set_name(std::move(name));
+  }
+}
+
+}  // namespace
+
+bool rtl_raise_exception_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto record = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (record == 0u) return true;
+  const auto code = context.memory.read32_be(record + kExceptionCode);
+  if (code == kSetThreadNameException) {
+    name_thread(process, context, record);
+    return true;
+  }
+  sync_events::record(logging::events::EventKind::ExceptionNotDispatched, context, nullptr,
+                      record, code, "RtlRaiseException");
+  static std::mutex logged_mutex;
+  static std::set<std::uint32_t> logged_codes;
+  bool first = false;
+  {
+    std::scoped_lock lock(logged_mutex);
+    first = logged_codes.insert(code).second;
+  }
+  if (first) {
+    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "exception", [&] {
+      char line[160];
+      std::snprintf(line, sizeof(line),
+                    "RtlRaiseException 0x%08X from lr=0x%08X not dispatched: no guest SEH "
+                    "unwinder; the call returns to the guest (logged once per code)",
+                    code, static_cast<unsigned>(context.cpu.lr));
+      return std::string(line);
+    });
+  }
+  return true;
+}
+
+// ---- User APCs ----------------------------------------------------------------
+
+bool nt_queue_apc_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  constexpr std::uint32_t kCurrentThreadPseudoHandle = 0xFFFFFFFEu;
+  const auto handle = static_cast<kernel::Handle>(context.cpu.gpr[3]);
+  const auto routine = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  std::shared_ptr<kernel::KernelThread> thread;
+  if (handle == kCurrentThreadPseudoHandle) {
+    thread = process.thread_manager().get_thread(context.thread_id);
+  } else {
+    kernel::HandleView view{};
+    if (process.handle_table().lookup(handle, view) != kernel::KernelIoCode::Success) {
+      context.cpu.gpr[3] = status::InvalidHandle;
+      return true;
+    }
+    if (view.object->type() != kernel::ObjectType::Thread) {
+      context.cpu.gpr[3] = status::ObjectTypeMismatch;
+      return true;
+    }
+    thread = std::static_pointer_cast<kernel::KernelThread>(view.object);
+  }
+  if (!thread) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  if (routine == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+  if (thread->is_terminated()) {
+    context.cpu.gpr[3] = kStatusThreadIsTerminating;
+    return true;
+  }
+  thread->queue_user_apc({routine, static_cast<std::uint32_t>(context.cpu.gpr[5]),
+                          static_cast<std::uint32_t>(context.cpu.gpr[6]),
+                          static_cast<std::uint32_t>(context.cpu.gpr[7])});
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+bool ke_alert_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  auto* thread = thread_for_kthread(process, static_cast<cpu::GuestAddress>(context.cpu.gpr[3]));
+  context.cpu.gpr[3] = thread ? (thread->alert() ? 1u : 0u) : 0u;
+  return true;
+}
+
+bool ke_alert_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  auto* thread = thread_for_kthread(process, static_cast<cpu::GuestAddress>(context.cpu.gpr[3]));
+  std::uint32_t previous = 0u;
+  if (thread) {
+    static_cast<void>(thread->alert());
+    previous = thread->suspend_count();
+    if (previous != 0u) static_cast<void>(thread->resume());
+  }
+  context.cpu.gpr[3] = previous;
+  return true;
+}
+
+bool ke_test_alert_thread_export(kernel::KernelProcess&, ExportCallContext& context) {
+  auto* self = kernel::KernelThread::current();
+  context.cpu.gpr[3] = self && self->take_alert() ? 1u : 0u;
+  return true;
+}
+
+bool ke_initialize_apc_export(kernel::KernelProcess&, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  const auto normal_routine = static_cast<std::uint32_t>(context.cpu.gpr[7]);
+  memory.write16_be(apc + KapcLayout::kType, KapcLayout::kApcObjectType);
+  // An APC with no normal routine is a kernel APC whatever mode is asked for.
+  memory.write8(apc + KapcLayout::kApcMode,
+                normal_routine ? static_cast<std::uint8_t>(context.cpu.gpr[8] & 1u) : 0u);
+  memory.write8(apc + KapcLayout::kEnqueued, 0u);
+  memory.write32_be(apc + KapcLayout::kThread, static_cast<std::uint32_t>(context.cpu.gpr[4]));
+  memory.write64_be(apc + KapcLayout::kListEntry, 0u);
+  memory.write32_be(apc + KapcLayout::kKernelRoutine, static_cast<std::uint32_t>(context.cpu.gpr[5]));
+  memory.write32_be(apc + KapcLayout::kRundownRoutine, static_cast<std::uint32_t>(context.cpu.gpr[6]));
+  memory.write32_be(apc + KapcLayout::kNormalRoutine, normal_routine);
+  memory.write32_be(apc + KapcLayout::kNormalContext,
+                    normal_routine ? static_cast<std::uint32_t>(context.cpu.gpr[9]) : 0u);
+  memory.write32_be(apc + KapcLayout::kArgument1, 0u);
+  memory.write32_be(apc + KapcLayout::kArgument2, 0u);
+  return true;
+}
+
+bool ke_insert_queue_apc_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  context.cpu.gpr[3] = 0u;
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  auto* thread = thread_for_kthread(process, memory.read32_be(apc + KapcLayout::kThread));
+  if (!thread || thread->is_terminated() || memory.read8(apc + KapcLayout::kEnqueued) != 0u) {
+    return true;
+  }
+  memory.write32_be(apc + KapcLayout::kArgument1, static_cast<std::uint32_t>(context.cpu.gpr[4]));
+  memory.write32_be(apc + KapcLayout::kArgument2, static_cast<std::uint32_t>(context.cpu.gpr[5]));
+  memory.write8(apc + KapcLayout::kEnqueued, 1u);
+  if (memory.read8(apc + KapcLayout::kApcMode) == 0u) {
+    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "apc", [&] {
+      char line[160];
+      std::snprintf(line, sizeof(line),
+                    "KeInsertQueueApc: kernel-mode KAPC 0x%08X queued but not delivered "
+                    "(no kernel-mode APC delivery)",
+                    static_cast<unsigned>(apc));
+      return std::string(line);
+    });
+  } else {
+    kernel::KernelThread::UserApc queued{};
+    queued.guest_apc = apc;
+    thread->queue_user_apc(queued);
+  }
+  context.cpu.gpr[3] = 1u;
+  return true;
+}
+
+bool ke_remove_queue_apc_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto apc = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  context.cpu.gpr[3] = 0u;
+  if (apc == 0u) return true;
+  auto& memory = context.memory;
+  if (memory.read8(apc + KapcLayout::kEnqueued) == 0u) return true;
+  auto* thread = thread_for_kthread(process, memory.read32_be(apc + KapcLayout::kThread));
+  const bool user = memory.read8(apc + KapcLayout::kApcMode) != 0u;
+  if (user && !(thread && thread->remove_user_apc(apc))) return true;  // already being delivered
+  memory.write8(apc + KapcLayout::kEnqueued, 0u);
+  context.cpu.gpr[3] = 1u;
+  return true;
+}
+
 // ---- Events, threads, misc ---------------------------------------------------
 
 bool ke_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header, &error);
+  auto object = sync_events::resolve_header(process, context, header, &error, "KePulseEvent");
   if (!object || object->type() != kernel::ObjectType::Event) {
     context.cpu.gpr[3] = 0u;
     return true;
   }
   auto& event = static_cast<kernel::KernelEvent&>(*object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
-  // Release the current waiters, then reset - PulseEvent's documented semantics.
-  event.set();
-  event.reset();
+  // Releases the waits registered now, then leaves the event reset.
+  event.pulse();
+  sync_events::record(logging::events::EventKind::Signal, context, object.get(), header, previous,
+                      "KePulseEvent");
   context.cpu.gpr[3] = previous;
   return true;
 }

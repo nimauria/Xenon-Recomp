@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <memory>
 #include <limits>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/shader_ir.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::gpu {
@@ -452,6 +454,25 @@ std::uint32_t GraphicsSystem::submit_ring(std::uint32_t physical_address,
                                          read_index, write_index);
 }
 
+std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physical_address,
+                                          std::uint32_t capacity_dwords,
+                                          std::uint32_t read_index,
+                                          std::uint32_t write_index) {
+  // Only a decoded draw (a resolve is one) can change what the guest
+  // observes; register writes alone wait for the next draw or the end.
+  command_processor_.set_guest_visible_barrier([this, &backend] {
+    if (command_processor_.statistics().draws != draws_at_last_execute_) execute_ir(backend);
+  });
+  struct ClearBarrier {
+    CommandProcessor& processor;
+    ~ClearBarrier() { processor.set_guest_visible_barrier({}); }
+  } clear{command_processor_};
+  const auto next_read_index =
+      command_processor_.execute_ring(physical_address, capacity_dwords, read_index, write_index);
+  execute_ir(backend);
+  return next_read_index;
+}
+
 FrontendSubmissionCapture GraphicsSystem::capture_buffer(
     std::uint32_t physical_address, std::uint32_t dword_count) {
   auto capture = std::make_unique<FrontendSubmissionCapture>();
@@ -558,9 +579,33 @@ bool GraphicsSystem::replay_portable_capture(
 }
 
 void GraphicsSystem::execute_ir(Backend& backend) {
+  draws_at_last_execute_ = command_processor_.statistics().draws;
+  using Clock = std::chrono::steady_clock;
+  const auto begin_start = Clock::now();
   backend.begin_submission(memory_, edram_);
-  for (const auto& command : stream_.commands()) backend.consume(command);
+  const auto elapsed_ms = [](Clock::time_point since) {
+    return static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since).count());
+  };
+  if (const auto ms = elapsed_ms(begin_start); ms >= 50)
+    logging::append_probe_log("ir_timing_diag.log", "begin_submission %lld ms\n", ms);
+  // The pump thread runs this between ring drains and vsync interrupts, so a
+  // slow command delays both; name the slow ones.
+  for (const auto& command : stream_.commands()) {
+    const auto start = Clock::now();
+    backend.consume(command);
+    if (const auto ms = elapsed_ms(start); ms >= 50) {
+      std::uint32_t detail = 0;
+      if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) detail = draw->index_count;
+      if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) detail = load->physical_address;
+      logging::append_probe_log("ir_timing_diag.log", "command variant %zu took %lld ms (detail 0x%X)\n",
+                                command.index(), ms, detail);
+    }
+  }
+  const auto end_start = Clock::now();
   backend.end_submission();
+  if (const auto ms = elapsed_ms(end_start); ms >= 50)
+    logging::append_probe_log("ir_timing_diag.log", "end_submission %lld ms\n", ms);
   stream_.clear();
 }
 

@@ -139,10 +139,18 @@ int main() {
   assert(decoder.decoded_samples(context) == 0);
 
   // The XMA hardware aperture must expose the physical context-array address
-  // and rotating current-context register through Memory V2 MMIO.
-  assert(memory.read32_be(kXmaMmioBase + 0x1800u) == decoder.context_array_physical());
-  const auto current0 = memory.read32_be(kXmaMmioBase + 0x1818u);
-  const auto current1 = memory.read32_be(kXmaMmioBase + 0x1818u);
+  // and rotating current-context register through Memory V2 MMIO. The APU
+  // register file is little-endian: titles read it with lwbrx (read32_le),
+  // and a plain big-endian load sees the bytes reversed.
+  const auto array_physical = decoder.context_array_physical();
+  assert(memory.read32_le(kXmaMmioBase + 0x1800u) == array_physical);
+  assert(memory.read32_be(kXmaMmioBase + 0x1800u) ==
+         ((array_physical >> 24u) | ((array_physical >> 8u) & 0xFF00u) |
+          ((array_physical << 8u) & 0xFF0000u) | (array_physical << 24u)));
+  assert(memory.read8(kXmaMmioBase + 0x1800u) == (array_physical & 0xFFu));
+  assert(memory.read16_le(kXmaMmioBase + 0x1802u) == (array_physical >> 16u));
+  const auto current0 = memory.read32_le(kXmaMmioBase + 0x1818u);
+  const auto current1 = memory.read32_le(kXmaMmioBase + 0x1818u);
   assert(current0 < kXmaContextCount);
   assert(current1 == (current0 + 1u) % kXmaContextCount);
 
@@ -164,9 +172,16 @@ int main() {
   state.input_buffer_1_valid = false;
   assert(decoder.write_context(context, state, false));
 
-  // Context 0 is the first allocation: writing bit 0 to kick group 0 must
-  // converge on the same enable path as XMAEnableContext.
-  memory.write32_be(kXmaMmioBase + 0x1940u, 1u);
+  // Regression (AC6 silence): the title's statically linked XMA code derives
+  // the hardware index from the context's physical address and the array
+  // register it read with lwbrx, then kicks with stwbrx. With big-endian
+  // registers that index was ~62000 and the kick landed outside the kick
+  // group, so nothing ever decoded. The same arithmetic must kick context 0.
+  const auto hw_index =
+      (memory.get_physical_address(context) - memory.read32_le(kXmaMmioBase + 0x1800u)) /
+      kXmaContextBytes;
+  assert(hw_index == 0u);
+  memory.write32_le(kXmaMmioBase + 0x1940u + (hw_index >> 5u) * 4u, 1u << (hw_index & 31u));
   for (int i = 0; i < 200 && completions.load(std::memory_order_acquire) == 0; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
@@ -183,7 +198,7 @@ int main() {
   state.output_buffer_read_offset = 3;
   state.output_buffer_write_offset = 4;
   assert(decoder.write_context(context, state, false));
-  memory.write32_be(kXmaMmioBase + 0x1A80u, 1u);
+  memory.write32_le(kXmaMmioBase + 0x1A80u, 1u);
   assert(decoder.read_context(context, state));
   assert(!state.input_buffer_0_valid && !state.input_buffer_1_valid);
   assert(!state.output_buffer_valid);

@@ -163,6 +163,73 @@ void test_udp_loopback_round_trip() {
             << std::endl;
 }
 
+// Regression (AC6 boot): the title opens socket(AF_INET, SOCK_DGRAM, IPPROTO_VDP=254).
+// Xenon passed 254 to the host, Winsock refused it, and the title went on with
+// socket -1 until a guest fault. A VDP socket must be a working UDP socket.
+void test_vdp_socket_is_a_working_udp_socket() {
+  std::cout << "[TEST] NetDll_socket IPPROTO_VDP creates a working UDP socket..." << std::endl;
+
+  core::ExportRegistry registry;
+  xam::XamSession xam;
+  assert(xam.initialize());
+  core::XenonSession session;
+  assert(xam.register_exports(registry, session));
+
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+
+  constexpr std::uint32_t kAfInet = 2u;
+  constexpr std::uint32_t kSockDgram = 2u;
+  constexpr std::uint32_t kIpprotoVdp = 254u;
+  constexpr std::uint32_t kThread = 33u;
+  const auto vdp = invoke_socket(registry, memory, kThread, kAfInet, kSockDgram, kIpprotoVdp);
+  const auto sender = invoke_socket(registry, memory, kThread, kAfInet, kSockDgram, kIpprotoVdp);
+  assert(vdp != 0xFFFFFFFFu && sender != 0xFFFFFFFFu && "a VDP socket must be created");
+
+  memory::GuestAddress addr{}, payload{}, recv_buf{};
+  assert(memory.allocate(16u, 4u, memory::kReadWrite, false, addr));
+  assert(memory.allocate(16u, 4u, memory::kReadWrite, false, payload));
+  assert(memory.allocate(16u, 4u, memory::kReadWrite, false, recv_buf));
+  constexpr std::uint16_t kVdpPort = 47812u;
+  write_sockaddr_in(memory, addr, kVdpPort, 0x7F000001u);
+
+  cpu::CpuState bind_cpu{};
+  bind_cpu.gpr[4] = vdp;
+  bind_cpu.gpr[5] = addr;
+  auto bind_ctx = make_context(bind_cpu, memory, kThread);
+  assert(registry.invoke("xam", xam::ordinal::NetDll_bind, bind_ctx).success);
+  assert(static_cast<std::int32_t>(bind_cpu.gpr[3]) == 0 && "a VDP socket must bind");
+
+  memory.write32_be(payload, 0x56445021u);  // "VDP!"
+  cpu::CpuState sendto_cpu{};
+  sendto_cpu.gpr[4] = sender;
+  sendto_cpu.gpr[5] = payload;
+  sendto_cpu.gpr[6] = 4u;
+  sendto_cpu.gpr[7] = 0u;
+  sendto_cpu.gpr[8] = addr;
+  auto sendto_ctx = make_context(sendto_cpu, memory, kThread);
+  assert(registry.invoke("xam", xam::ordinal::NetDll_sendto, sendto_ctx).success);
+  assert(sendto_cpu.gpr[3] == 4u);
+
+  cpu::CpuState recv_cpu{};
+  recv_cpu.gpr[4] = vdp;
+  recv_cpu.gpr[5] = recv_buf;
+  recv_cpu.gpr[6] = 16u;
+  recv_cpu.gpr[7] = 0u;
+  recv_cpu.gpr[8] = 0u;
+  auto recv_ctx = make_context(recv_cpu, memory, kThread);
+  assert(registry.invoke("xam", xam::ordinal::NetDll_recvfrom, recv_ctx).success);
+  assert(recv_cpu.gpr[3] == 4u && memory.read32_be(recv_buf) == 0x56445021u);
+
+  for (const auto handle : {vdp, sender}) {
+    cpu::CpuState close_cpu{};
+    close_cpu.gpr[4] = handle;
+    auto close_ctx = make_context(close_cpu, memory, kThread);
+    assert(registry.invoke("xam", xam::ordinal::NetDll_closesocket, close_ctx).success);
+  }
+  std::cout << "  \xE2\x9C\x93 A VDP datagram round-tripped over loopback" << std::endl;
+}
+
 // Every socket-taking NetDll_* export must fail with WSAENOTSOCK (not crash, not
 // silently succeed) on a handle that was never opened or was already closed -
 // this is the shared not-a-socket contract every handler in xam_net_exports.cpp
@@ -254,6 +321,7 @@ void test_set_and_get_last_error_round_trip() {
 
 int main() {
   test_udp_loopback_round_trip();
+  test_vdp_socket_is_a_working_udp_socket();
   test_operations_on_invalid_handle_fail_cleanly();
   test_set_and_get_last_error_round_trip();
   std::cout << "All NetDll_* socket export tests passed!" << std::endl;

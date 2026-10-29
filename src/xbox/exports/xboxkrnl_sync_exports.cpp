@@ -1,5 +1,8 @@
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
+#include "xenon/kernel/completion_port.hpp"
+
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -13,17 +16,22 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/semaphore.hpp"
 #include "xenon/kernel/thread.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/kernel/timer.hpp"
 #include "xenon/kernel/timer_manager.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/kernel/xbox_io.hpp"
 #include "xenon/logging/logger.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
+#include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
 
 using xenon::core::ExportCallContext;
+using xenon::logging::events::EventKind;
 using xenon::kernel::Handle;
 using xenon::kernel::HandleFlags;
 using xenon::kernel::HandleView;
@@ -39,6 +47,12 @@ namespace status = xenon::kernel::xbox::status;
 // xenon::kernel::xbox::status does not yet define.
 constexpr std::uint32_t kStatusMutantNotOwned = 0xC0000046u;
 constexpr std::uint32_t kStatusSemaphoreLimitExceeded = 0xC0000047u;
+constexpr std::uint32_t kStatusInvalidParameterMix = 0xC0000030u;
+
+// NT WAIT_TYPE: WaitAll is 0 and WaitAny is 1 (`typedef enum _WAIT_TYPE {
+// WaitAll, WaitAny, ... }`); xenia selects WaitAny for any nonzero value.
+constexpr std::uint32_t kWaitAll = 0u;
+constexpr std::uint32_t kWaitAny = 1u;
 
 std::uint32_t to_status(KernelIoCode code) {
   switch (code) {
@@ -56,7 +70,14 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
   switch (result) {
     case kernel::WaitResult::Success: return signaled_index_as_status;
     case kernel::WaitResult::Timeout: return status::Timeout;
-    case kernel::WaitResult::Abandoned: return 0x00000080u;  // STATUS_ABANDONED_WAIT_0
+    // STATUS_ABANDONED_WAIT_0 + index, like STATUS_WAIT_0 + index.
+    case kernel::WaitResult::Abandoned: return 0x00000080u + signaled_index_as_status;
+    // The waiting thread is being terminated; the dispatch loop stops it at
+    // its next block boundary.
+    case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
+    // An alertable wait ended to run user APCs; they ran before this returns.
+    case kernel::WaitResult::UserApc: return 0x000000C0u;  // STATUS_USER_APC
+    case kernel::WaitResult::Alerted: return 0x00000101u;  // STATUS_ALERTED
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
@@ -73,6 +94,92 @@ std::chrono::milliseconds read_timeout(ExportCallContext& context,
 }
 
 }  // namespace
+
+bool nt_create_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  if (handle_out == 0u) {
+    context.cpu.gpr[3] = status::InvalidParameter;
+    return true;
+  }
+  Handle handle{};
+  const auto code = process.handle_table().insert(std::make_shared<kernel::IoCompletionPort>(),
+                                                  0xFFFFFFFFu, HandleFlags::None, handle);
+  if (code != KernelIoCode::Success) {
+    context.cpu.gpr[3] = to_status(code);
+    return true;
+  }
+  context.memory.write32_be(handle_out, handle);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+namespace {
+
+std::shared_ptr<kernel::IoCompletionPort> lookup_port(kernel::KernelProcess& process, Handle handle) {
+  kernel::HandleView view{};
+  if (process.handle_table().lookup(handle, view) != KernelIoCode::Success || !view.object ||
+      view.object->type() != kernel::ObjectType::IoCompletionPort) {
+    return nullptr;
+  }
+  return std::static_pointer_cast<kernel::IoCompletionPort>(view.object);
+}
+
+}  // namespace
+
+bool nt_set_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto port = lookup_port(process, static_cast<Handle>(context.cpu.gpr[3]));
+  if (!port) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  kernel::CompletionPacket packet{};
+  packet.key = static_cast<std::uint32_t>(context.cpu.gpr[4]);
+  packet.context = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  // The guest's NTSTATUS travels in the packet's request id; IoStatus's own
+  // code field is the host I/O result, which a guest-posted packet has none of.
+  packet.status.request_id = static_cast<std::uint32_t>(context.cpu.gpr[6]);
+  packet.status.information = static_cast<std::uint32_t>(context.cpu.gpr[7]);
+  port->post(packet);
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
+
+bool nt_remove_io_completion_export(kernel::KernelProcess& process, ExportCallContext& context) {
+  const auto port = lookup_port(process, static_cast<Handle>(context.cpu.gpr[3]));
+  const auto key_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
+  const auto apc_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto iosb_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
+  if (!port) {
+    context.cpu.gpr[3] = status::InvalidHandle;
+    return true;
+  }
+  const auto timeout = read_timeout(context, static_cast<cpu::GuestAddress>(context.cpu.gpr[7]));
+  const bool infinite = timeout == xbox_infinite_timeout();
+  const auto deadline = std::chrono::steady_clock::now() + (infinite ? std::chrono::milliseconds(0) : timeout);
+  kernel::CompletionPacket packet{};
+  while (!port->try_remove(packet)) {
+    auto remaining = infinite ? timeout
+                              : std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    deadline - std::chrono::steady_clock::now());
+    if (!infinite && remaining.count() < 0) remaining = std::chrono::milliseconds(0);
+    const auto result = kernel::wait_for_single_object(port->ready_event(), remaining,
+                                                       context.thread_id);
+    if (result == kernel::WaitResult::Success) continue;  // another remover may win it
+    context.cpu.gpr[3] = to_status(result, 0u);
+    return true;
+  }
+  if (key_ptr != 0u) context.memory.write32_be(key_ptr, static_cast<std::uint32_t>(packet.key));
+  if (apc_ptr != 0u) context.memory.write32_be(apc_ptr, static_cast<std::uint32_t>(packet.context));
+  if (iosb_ptr != 0u) {
+    const auto completion_status = packet.status.request_id != 0u
+                                       ? static_cast<std::uint32_t>(packet.status.request_id)
+                                       : to_status(packet.status.code);
+    context.memory.write32_be(iosb_ptr, completion_status);
+    context.memory.write32_be(iosb_ptr + 4u, static_cast<std::uint32_t>(packet.status.information));
+  }
+  context.cpu.gpr[3] = status::Success;
+  return true;
+}
 
 // NtCreateEvent (ordinal 0xD1)
 // Guest ABI: r3 = PHANDLE out, r4 = POBJECT_ATTRIBUTES (unnamed-only support -
@@ -160,6 +267,8 @@ bool nt_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
     context.cpu.gpr[3] = kStatusSemaphoreLimitExceeded;
     return true;
   }
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(previous), "NtReleaseSemaphore");
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, static_cast<std::uint32_t>(previous));
   }
@@ -223,6 +332,8 @@ bool nt_release_mutant_export(kernel::KernelProcess& process, ExportCallContext&
     context.cpu.gpr[3] = kStatusMutantNotOwned;
     return true;
   }
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(previous), "NtReleaseMutant");
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, static_cast<std::uint32_t>(previous));
   }
@@ -269,20 +380,10 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   HandleView view{};
   const auto lookup_code = process.handle_table().lookup(handle, view);
   if (lookup_code != KernelIoCode::Success) {
-    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X LOOKUP FAILED code=%d\n",
-                   (unsigned)context.thread_id, (unsigned)handle, (int)lookup_code);
-      std::fclose(_d);
-    }
     context.cpu.gpr[3] = to_status(lookup_code);
     return true;
   }
   if (view.object->type() != ObjectType::Event) {
-    if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-      std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X TYPE MISMATCH type=%d\n",
-                   (unsigned)context.thread_id, (unsigned)handle, (int)view.object->type());
-      std::fclose(_d);
-    }
     context.cpu.gpr[3] = status::ObjectTypeMismatch;
     return true;
   }
@@ -290,13 +391,10 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   auto& event = static_cast<kernel::KernelEvent&>(*view.object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
   event.set();
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle, previous,
+                      "NtSetEvent");
   if (previous_state_ptr != 0u) {
     context.memory.write32_be(previous_state_ptr, previous);
-  }
-  if (FILE* _d = std::fopen("nt_set_event_diag.log", "a")) {
-    std::fprintf(_d, "NtSetEvent: thread_id=%u handle=0x%08X SUCCESS previous=%u event_ptr=%p\n",
-                 (unsigned)context.thread_id, (unsigned)handle, previous, (void*)&event);
-    std::fclose(_d);
   }
   context.cpu.gpr[3] = status::Success;
   return true;
@@ -309,13 +407,9 @@ bool nt_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
 // then immediately resets it (verified against the xenia-project/xenia
 // reference: XEvent::Pulse()).
 //
-// Real hardware's PulseEvent is documented by Microsoft as inherently
-// unreliable: a thread that has not yet reached the wait when the pulse
-// happens will never observe it, and this implementation's plain set()-
-// then-reset() has the same property for a thread that is mid-wakeup but
-// has not yet reacquired KernelEvent's internal lock to recheck its
-// predicate - that is real, spec-documented behavior to preserve, not a
-// race to engineer away with a generation counter no guest code relies on.
+// A thread that has not yet reached the wait when the pulse happens never
+// observes it; every wait already registered that the pulse can satisfy is
+// satisfied (KernelEvent::pulse()), as KePulseEvent does on NT.
 bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto previous_state_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
@@ -333,8 +427,9 @@ bool nt_pulse_event_export(kernel::KernelProcess& process, ExportCallContext& co
 
   auto& event = static_cast<kernel::KernelEvent&>(*view.object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
-  event.set();
-  event.reset();
+  event.pulse();
+  sync_events::record(EventKind::Signal, context, view.object.get(), handle, previous,
+                      "NtPulseEvent");
   if (previous_state_ptr != 0u) {
     context.memory.write32_be(previous_state_ptr, previous);
   }
@@ -401,12 +496,13 @@ bool ex_terminate_thread_export(kernel::KernelProcess& process, ExportCallContex
 
 // NtWaitForSingleObjectEx (ordinal 0xFD)
 // Guest ABI: r3 = handle, r4 = wait mode (ignored - Xenon has no distinct
-// kernel/user PPC mode), r5 = alertable (ignored - no APC delivery yet),
+// kernel/user PPC mode), r5 = alertable (user APCs run, STATUS_USER_APC),
 // r6 = PLARGE_INTEGER timeout (nullable, NULL = infinite) -> r3 = NTSTATUS
 // (STATUS_WAIT_0 / STATUS_TIMEOUT / STATUS_ABANDONED_WAIT_0).
 bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
                                          ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
 
   HandleView view{};
@@ -421,27 +517,37 @@ bool nt_wait_for_single_object_ex_export(kernel::KernelProcess& process,
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  sync_events::record(EventKind::WaitBegin, context, view.object.get(), handle,
+                      sync_events::timeout_value(timeout), "NtWaitForSingleObjectEx");
   const auto result =
-      kernel::wait_for_single_object(view.object, timeout, context.thread_id);
+      kernel::wait_for_single_object(view.object, timeout, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+  sync_events::record(EventKind::WaitEnd, context, view.object.get(), handle,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "NtWaitForSingleObjectEx");
   return true;
 }
 
 // NtWaitForMultipleObjectsEx (ordinal 0xFE)
 // Guest ABI: r3 = count, r4 = PHANDLE array (guest array of dword handles),
-// r5 = wait type (0 = any/WaitAny, 1 = all/WaitAll), r6 = wait mode
-// (ignored), r7 = alertable (ignored), r8 = PLARGE_INTEGER timeout
+// r5 = wait type (NT WAIT_TYPE: 0 = WaitAll, 1 = WaitAny), r6 = wait mode
+// (ignored), r7 = alertable (user APCs run, STATUS_USER_APC), r8 = PLARGE_INTEGER timeout
 // (nullable) -> r3 = NTSTATUS (STATUS_WAIT_0 + signaled index for WaitAny,
-// STATUS_SUCCESS for WaitAll).
+// STATUS_SUCCESS for WaitAll). As in NT's object-manager wait, a WaitAll
+// naming the same object twice (through any handles) fails with
+// STATUS_INVALID_PARAMETER_MIX: it could never be satisfied.
 bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
                                             ExportCallContext& context) {
   const auto count = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto handles_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
-  const auto wait_all = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  const bool wait_all = wait_type == kWaitAll;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[7]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
-  if (count == 0u || count > kMaxObjects || handles_ptr == 0u) {
+  if (count == 0u || count > kMaxObjects || handles_ptr == 0u ||
+      (wait_type != kWaitAll && wait_type != kWaitAny)) {
     context.cpu.gpr[3] = status::InvalidParameter;
     return true;
   }
@@ -461,14 +567,33 @@ bool nt_wait_for_multiple_objects_ex_export(kernel::KernelProcess& process,
       context.cpu.gpr[3] = status::ObjectTypeMismatch;
       return true;
     }
+    if (wait_all && std::find(objects.begin(), objects.end(), view.object) != objects.end()) {
+      context.cpu.gpr[3] = kStatusInvalidParameterMix;
+      return true;
+    }
     objects.push_back(view.object);
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    sync_events::record(EventKind::WaitBegin, context, objects[i].get(),
+                        context.memory.read32_be(handles_ptr + i * 4u),
+                        sync_events::timeout_value(timeout), "NtWaitForMultipleObjectsEx");
+  }
   std::uint32_t signaled_index = 0;
   const auto result = kernel::wait_for_multiple_objects(
-      objects, wait_all, timeout, &signaled_index, context.thread_id);
+      objects, wait_all, timeout, &signaled_index, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
+  // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
+  // has no single object.
+  const bool took_one =
+      result == kernel::WaitResult::Success || result == kernel::WaitResult::Abandoned;
+  const auto* satisfied = !wait_all && took_one && signaled_index < objects.size()
+                              ? objects[signaled_index].get()
+                              : nullptr;
+  sync_events::record(EventKind::WaitEnd, context, satisfied, 0u,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "NtWaitForMultipleObjectsEx");
   return true;
 }
 
@@ -536,15 +661,18 @@ bool nt_cancel_timer_export(kernel::KernelProcess& process, ExportCallContext& c
 // NtSetTimerEx (ordinal 0xFA)
 // Guest ABI: r3 = handle, r4 = PLARGE_INTEGER due time (100ns units, same
 // convention as wait timeouts - negative = relative, positive = absolute,
-// mandatory), r5 = guest callback routine pointer (accepted but not
-// invoked - see xboxkrnl_sync_exports.hpp), r6 = unk (ignored), r7 =
-// routine argument (ignored - the routine is never invoked), r8 = resume
-// (ignored - no APC/suspend semantics modeled), r9 = period in
-// milliseconds (0 = one-shot), r10 = unk (ignored) -> r3 = NTSTATUS.
+// mandatory), r5 = timer APC routine (nullable), r6 = unk (ignored), r7 =
+// routine argument, r8 = resume (ignored - no suspend semantics modeled),
+// r9 = period in milliseconds (0 = one-shot), r10 = unk (ignored) ->
+// r3 = NTSTATUS. Each firing queues Routine(Argument, TimeLow, TimeHigh) as
+// a user APC to the thread that set the timer (the time is the system time
+// of the firing), as xenia and rexglue-sdk do; it runs at that thread's
+// next alertable wait.
 bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto due_time_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto routine_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto routine_arg = static_cast<std::uint32_t>(context.cpu.gpr[7]);
   const auto period_ms = static_cast<std::uint32_t>(context.cpu.gpr[9]);
 
   if (due_time_ptr == 0u) {
@@ -563,19 +691,23 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
     return true;
   }
 
+  kernel::TimerCallback queue_timer_apc;
   if (routine_ptr != 0u) {
-    logging::Logger::instance().log_if_enabled(logging::Level::Warning, "timer", [&] {
-      return std::string(
-          "NtSetTimerEx: guest callback routine requested but not invoked "
-          "(DPC/APC timer callbacks are not modeled) - the timer object itself "
-          "still fires for NtWaitForSingleObjectEx-style waiters");
-    });
+    // The setting thread may exit before the timer fires; its APCs then go
+    // nowhere, as on hardware.
+    std::weak_ptr<kernel::KernelThread> target =
+        process.thread_manager().get_thread(context.thread_id);
+    queue_timer_apc = [target, routine_ptr, routine_arg] {
+      if (auto thread = target.lock()) {
+        const auto now = kernel::TimeServices::system_time();
+        thread->queue_user_apc({routine_ptr, routine_arg, static_cast<std::uint32_t>(now),
+                                static_cast<std::uint32_t>(now >> 32)});
+      }
+    };
   }
-  if (FILE* _d = std::fopen("nt_set_timer_ex_diag.log", "a")) {
-    std::fprintf(_d, "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
-                 (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log("nt_set_timer_ex_diag.log",
+                                   "NtSetTimerEx: handle=0x%08X routine_ptr=0x%08X period_ms=%u\n",
+                                   (unsigned)handle, (unsigned)routine_ptr, (unsigned)period_ms);
 
   const auto raw = static_cast<std::int64_t>(context.memory.read64_be(due_time_ptr));
   const auto relative_due = xbox_timeout_to_relative_ms(raw);
@@ -584,7 +716,7 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
                       : std::optional<std::chrono::milliseconds>(period_ms);
 
   auto timer = std::static_pointer_cast<kernel::KernelTimer>(view.object);
-  if (!timer->set(relative_due, period, nullptr)) {
+  if (!timer->set(relative_due, period, std::move(queue_timer_apc))) {
     context.cpu.gpr[3] = status::Unsuccessful;
     return true;
   }
@@ -601,20 +733,23 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
 // NtSignalAndWaitForSingleObjectEx (ordinal 0xFB / 251)
 // Guest ABI (verified against rexglue-sdk's
 // NtSignalAndWaitForSingleObjectEx_entry register mapping): r3 = signal
-// handle, r4 = wait handle, r5 = alertable (ignored - Xenon delivers no
-// guest APCs, same rationale as the Ke IRQL/critical-region no-ops in
-// xboxkrnl_ke_irql_exports.cpp), r6 = unused by that same reference
+// handle, r4 = wait handle, r5 = alertable (user APCs run,
+// STATUS_USER_APC), r6 = unused by that same reference
 // implementation, r7 = PLARGE_INTEGER timeout (nullable) -> r3 = NTSTATUS.
 // Signals signal_handle (Event -> Set, Semaphore -> Release(1), Mutant ->
-// Release) then waits on wait_handle, exactly as the two-step
-// NtSetEvent/NtReleaseSemaphore/NtReleaseMutant + NtWaitForSingleObjectEx
-// sequence above would, but atomically from the guest's perspective (no
-// other thread can observe the signal without also being subject to this
-// thread's wait starting immediately after).
+// Release) then waits on wait_handle. As on NT, the signal and the start of
+// the wait are one dispatcher operation (kernel::signal_and_wait_for_object):
+// a thread woken by the signal, or one that takes a mutant it releases,
+// cannot signal the wait object before this thread is waiting on it. Titles
+// build condition variables from exactly this (AC6: release the lock mutant,
+// wait on an auto-reset event); done as two steps, the other thread's
+// SetEvent could land before this wait and be consumed by its own next wait.
+// Both handles are resolved before anything is signalled.
 bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& process,
                                                      ExportCallContext& context) {
   const auto signal_handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto wait_handle = static_cast<Handle>(context.cpu.gpr[4]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   HandleView signal_view{};
@@ -623,32 +758,12 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
     context.cpu.gpr[3] = to_status(signal_lookup);
     return true;
   }
-
-  switch (signal_view.object->type()) {
-    case ObjectType::Event: {
-      static_cast<kernel::KernelEvent&>(*signal_view.object).set();
-      break;
-    }
-    case ObjectType::Semaphore: {
-      std::int32_t previous = 0;
-      if (!static_cast<kernel::KernelSemaphore&>(*signal_view.object).release(1, &previous)) {
-        context.cpu.gpr[3] = kStatusSemaphoreLimitExceeded;
-        return true;
-      }
-      break;
-    }
-    case ObjectType::Mutant: {
-      if (!static_cast<kernel::KernelMutant&>(*signal_view.object).release(context.thread_id)) {
-        context.cpu.gpr[3] = kStatusMutantNotOwned;
-        return true;
-      }
-      break;
-    }
-    default:
-      context.cpu.gpr[3] = status::ObjectTypeMismatch;
-      return true;
+  const auto signal_type = signal_view.object->type();
+  if (signal_type != ObjectType::Event && signal_type != ObjectType::Semaphore &&
+      signal_type != ObjectType::Mutant) {
+    context.cpu.gpr[3] = status::ObjectTypeMismatch;
+    return true;
   }
-
   HandleView wait_view{};
   const auto wait_lookup = process.handle_table().lookup(wait_handle, wait_view);
   if (wait_lookup != KernelIoCode::Success) {
@@ -661,8 +776,38 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
-  const auto result = kernel::wait_for_single_object(wait_view.object, timeout, context.thread_id);
+  std::uint32_t signal_failure = 0;
+  // Runs with the dispatcher lock held.
+  const auto signal = [&]() -> bool {
+    auto& object = *signal_view.object;
+    if (signal_type == ObjectType::Event) {
+      static_cast<kernel::KernelEvent&>(object).set_locked();
+    } else if (signal_type == ObjectType::Semaphore) {
+      if (!static_cast<kernel::KernelSemaphore&>(object).release_locked(1)) {
+        signal_failure = kStatusSemaphoreLimitExceeded;
+        return false;
+      }
+    } else if (!static_cast<kernel::KernelMutant&>(object).release_locked(context.thread_id)) {
+      signal_failure = kStatusMutantNotOwned;
+      return false;
+    }
+    sync_events::record(EventKind::Signal, context, &object, signal_handle, 0u,
+                        "NtSignalAndWaitForSingleObjectEx");
+    sync_events::record(EventKind::WaitBegin, context, wait_view.object.get(), wait_handle,
+                        sync_events::timeout_value(timeout), "NtSignalAndWaitForSingleObjectEx");
+    return true;
+  };
+  const auto result = kernel::signal_and_wait_for_object(signal, wait_view.object, timeout,
+                                                         context.thread_id, alertable);
+  if (signal_failure != 0u) {
+    context.cpu.gpr[3] = signal_failure;
+    return true;
+  }
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
+  sync_events::record(EventKind::WaitEnd, context, wait_view.object.get(), wait_handle,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]),
+                      "NtSignalAndWaitForSingleObjectEx");
   return true;
 }
 
@@ -705,6 +850,9 @@ constexpr SyncExportSpec kSyncExports[] = {
     {0x0F5u, "NtResumeThread"},
     {0x0CFu, "NtClose"},
     {0x0FBu, "NtSignalAndWaitForSingleObjectEx"},
+    {0x0D3u, "NtCreateIoCompletion"},
+    {0x0F8u, "NtSetIoCompletion"},
+    {0x0F4u, "NtRemoveIoCompletion"},
 };
 
 core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& process) {
@@ -765,6 +913,15 @@ core::ExportHandler handler_for(std::string_view name, kernel::KernelProcess& pr
   }
   if (name == "NtClose") {
     return [&process](ExportCallContext& ctx) { return nt_close_export(process, ctx); };
+  }
+  if (name == "NtCreateIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_create_io_completion_export(process, ctx); };
+  }
+  if (name == "NtSetIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_set_io_completion_export(process, ctx); };
+  }
+  if (name == "NtRemoveIoCompletion") {
+    return [&process](ExportCallContext& ctx) { return nt_remove_io_completion_export(process, ctx); };
   }
   if (name == "NtSignalAndWaitForSingleObjectEx") {
     return [&process](ExportCallContext& ctx) {

@@ -1059,3 +1059,50 @@ threads). `XENON_MEMORY_DEFAULT_DIRECT_APERTURE=OFF` keeps such builds on compac
 translation rather than reserving a 4 GiB direct aperture; compact translation remains
 the default everywhere except platforms explicitly qualified at build time (see
 section 15).
+
+## 2026-10-29 Native access (production default)
+
+Profiling Ace Combat 6 showed strict access costing more than the guest code it served:
+the game's audio mixer thread spent about 40% of its busy time in store bookkeeping. Every
+guest store took a read-side reclaim guard, counted itself into `active_coherency_writers`,
+took a unique `global_write_epoch`, and wrote a journal entry; every load took the reader
+guard too. Those are shared atomics on lines that all guest threads hit, and every `stwcx.`
+additionally waited for every in-flight store in the process to drain. The same mixer runs
+at full speed on rexglue, whose generated code stores straight through a host pointer.
+
+`AddressSpace::set_native_access(true)` (what `XenonSession` selects unless
+`SessionConfig::strict_memory` or `XENON_MEMORY_STRICT=1`) gives generated code a
+`FastMemoryView` with `native_access` set and the guard, writer, epoch, journal and
+reservation-monitor pointers null. Translation is unchanged: the compact hot entry still
+decides mapping, permission, MMIO and physical identity.
+
+- **Stores** publish only a per-physical-page dirty bit (`cpu_dirty_page_bits`), tested
+  before it is set, so a store to an already-dirty page costs one load. A summary word is
+  set when a bitmap word first becomes non-zero.
+- **Consumers** keep using page epochs. `GuestMemoryCoherency::current_epoch()` first
+  collects the dirty bits into one new epoch. A store that found its bit set may still be in
+  its core's store buffer when the collector clears the bit, so the collector calls
+  `flush_process_write_buffers()` (Windows `FlushProcessWriteBuffers`, Linux
+  `membarrier`, otherwise a protection-change TLB shootdown) before publishing the epoch.
+  The journal has no entry for that epoch, so consumers take the page-level path for it,
+  as they already did whenever the 64 Ki-entry journal overflowed.
+- **Reservations** follow XenonRecomp/rexglue: `lwarx`/`ldarx` remember the host word and
+  the observed value per host thread; `stwcx.`/`stdcx.` is one host compare-and-swap
+  against that value. Tokens carry bit 63; slot tokens from the strict monitor never do, so
+  a reservation taken through the slow path (MMIO and other unusual pages) still completes
+  there.
+- **Executable-page generations** still advance on stores to executable pages.
+
+What strict access guarantees and native access does not:
+
+| Property | Strict | Native |
+|---|---|---|
+| Reservation lost to | any store to the 128-byte granule | a store that changes the reserved value |
+| CPU write history for GPU consumers | byte-exact while the journal holds it | page granularity |
+| Freed physical page recycled under an in-flight access | never (reader guard) | possible only if the guest races its own free, as on xenia/rexglue/XenonRecomp |
+| Direct aperture | used when qualified | never used (its remapping relies on the reader guard) |
+
+`tests/memory/native_access_tests.cpp` pins the native contract, including a six-thread
+`lwarx`/`stwcx.` increment with unrelated stores to the same granule;
+`tests/memory/memory_tests.cpp` keeps covering strict access, which remains the
+`AddressSpace` default for embedders that construct one directly.

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string_view>
 
@@ -47,6 +48,12 @@ struct ExecutionResult {
   }
 };
 
+// Thrown by RuntimeServices::enter_safepoint() to take a terminated guest
+// thread out of compiled code; the dispatcher that runs the thread catches it.
+// Deliberately not a std::exception, so no generic handler mistakes it for a
+// fault.
+struct GuestThreadTerminated {};
+
 // Host/runtime services reachable from compiled CPU code. This is deliberately
 // not a kernel implementation: it is the narrow boundary used by generated
 // code for control transfers and architecturally-visible privileged events.
@@ -81,6 +88,13 @@ class RuntimeServices {
   // guest heap. Test/minimal runtimes may leave this null.
   virtual xenon::kernel::KernelProcess* current_process() noexcept { return nullptr; }
 
+  // Called by compiled code at a loop back-edge once the executing thread's
+  // safepoint flag (ExecutionContext::safepoint_flag) is set: a suspended
+  // thread parks here, and a terminated one leaves compiled code by throwing
+  // GuestThreadTerminated. A runtime that never sets the flag is never
+  // called, which is why this default does nothing.
+  virtual void enter_safepoint(CpuState& state) { static_cast<void>(state); }
+
   // CPU-v1 compatibility hook for imported platform calls. CPU v2 may replace
   // how imports reach this boundary, but subsystem handlers remain unchanged.
   virtual bool external_call(std::string_view module, std::uint32_t ordinal,
@@ -108,6 +122,24 @@ class RuntimeServices {
     return false;
   }
 };
+
+// Runs the import thunk `target` reached by an UNLINKED branch, such as the
+// `b thunk` at the end of a title's argument-shuffling wrapper. call()
+// reports a completed import as Fallthrough at state.cia, which only a linked
+// call site may use: it knows its own return address. Here state.cia is the
+// branch itself, so forwarding Fallthrough re-executes the branch and runs the
+// export a second time (AC6 created two sockets and bound one twice). A tail
+// branch never gets control back: the import's completion is the branching
+// function's own return to the untouched LR, as the console thunk's bctr is.
+[[nodiscard]] inline ExecutionResult call_import_from_branch(RuntimeServices& runtime,
+                                                             GuestAddress target,
+                                                             CpuState& state,
+                                                             MemoryPort& memory) {
+  auto result = runtime.call(target, state, memory);
+  if (result.reason == FlowReason::Fallthrough)
+    result = {FlowReason::Return, static_cast<GuestAddress>(state.lr & ~3ull), 0u};
+  return result;
+}
 
 // CPU V2 native-entry ABI. A caller creates one context for a guest execution
 // chain and compiled functions reuse its Memory V2 access view rather than
@@ -152,6 +184,17 @@ struct ExecutionContext {
   CompiledLookupMissCallback compiled_lookup_miss{};
   void* dynamic_fallback_executor{};
   DynamicFallbackCallback dynamic_fallback{};
+  // Set while the executing guest thread has been asked to suspend or
+  // terminate. Compiled loops poll it at every backward branch, so a thread
+  // spinning inside one compiled function stays preemptible, as on hardware.
+  // Appended last so modules built against the earlier layout still work.
+  const std::atomic<bool>* safepoint_flag{};
+
+  // A loop back-edge: hand the thread to the runtime if it must stop.
+  void poll_safepoint() {
+    if (safepoint_flag && safepoint_flag->load(std::memory_order_relaxed)) [[unlikely]]
+      runtime.enter_safepoint(state);
+  }
 
   [[nodiscard]] NativeCompiledEntry lookup_compiled(
       GuestAddress target,
@@ -162,6 +205,33 @@ struct ExecutionContext {
     if (!entry && compiled_lookup_miss)
       compiled_lookup_miss(compiled_lookup_observer, *this, target, kind);
     return entry;
+  }
+
+  // A callee that ends in a tail branch (`b target`, typically into the
+  // shared register-restore helper) hands back {Branch, target}; on hardware
+  // target then returns to the call site's own return address. A call site
+  // runs it here so the calling native frame survives: passing the Branch up
+  // unwound every caller to the dispatcher, which could only resume them
+  // mid-function in the interpreter. Targets with no compiled entry or
+  // import thunk still come back as Branch, for the dispatcher as before.
+  // Looks up without the miss observer: the dispatcher reports that miss.
+  [[nodiscard]] ExecutionResult follow_tail_branches(ExecutionResult result) {
+    while (result.reason == FlowReason::Branch) {
+      const auto target = result.next_address;
+      auto* native = compiled_lookup
+                         ? compiled_lookup(compiled_registry, *this, target,
+                                           CompiledLookupKind::Branch)
+                         : nullptr;
+      if (native) {
+        poll_safepoint();
+        result = native(*this);
+      } else if (runtime.is_recognized_import_thunk(target)) {
+        result = call_import_from_branch(runtime, target, state, memory);
+      } else {
+        break;
+      }
+    }
+    return result;
   }
 
   [[nodiscard]] DynamicFallbackResult try_dynamic_fallback(

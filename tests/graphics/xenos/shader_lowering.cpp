@@ -1,7 +1,10 @@
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
+#include "xenon/gpu/shader_ir.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 
 namespace {
@@ -163,6 +166,159 @@ void test_non_memexport_guest_memory_stays_read_only() {
 }
 
 
+xenon::gpu::DecodedInstruction make_alu(std::uint32_t address) {
+  using namespace xenon::gpu;
+  DecodedInstruction instruction{};
+  instruction.kind = ShaderInstructionKind::Alu;
+  instruction.alu.address = address;
+  instruction.alu.scalar_opcode = 50;
+  for (auto& source : instruction.alu.sources) {
+    source.temporary = true;
+    source.swizzle = 0xE4;
+  }
+  return instruction;
+}
+
+xenon::gpu::DecodedShader make_alu_shader(xenon::gpu::ShaderStage stage,
+                                          std::vector<xenon::gpu::DecodedInstruction> alus) {
+  using namespace xenon::gpu;
+  DecodedShader shader{};
+  shader.stage = stage;
+  shader.source_hash = 0x414C5553ull;
+  shader.complete = true;
+  shader.reflection.temporary_register_count = 4;
+  DecodedControlFlow cf{};
+  cf.opcode = ControlFlowOpcode::ExecEnd;
+  cf.count = static_cast<std::uint32_t>(alus.size());
+  shader.control_flow.push_back(cf);
+  shader.instructions = std::move(alus);
+  return shader;
+}
+
+// Microcode through the decoder: the AC6 boot logo's dp2add position
+// transform and frcs, plus a mulsc. Scalar operations must read source 3
+// (with `a` its swizzled W), never source 1.
+void test_decoded_scalar_operations_read_source_three() {
+  using namespace xenon::gpu;
+  const std::vector<std::uint32_t> words = {
+      // exec_end, four ALU instructions at slot 1.
+      1u | (4u << 12), std::uint32_t(ControlFlowOpcode::ExecEnd) << 12, 0u,
+      // dp2add e62.x, r0.yz, c40.xy, c40.w
+      62u | (1u << 15) | (1u << 16) | (50u << 26), 0x1Bu | (0xB0u << 8) | (0xC5u << 16),
+      40u | (40u << 8) | (17u << 24) | (1u << 31),
+      // frcs r0.x, r0.x (vector max with an empty write mask)
+      (1u << 20) | (11u << 26), 0x6Cu, (2u << 24) | (7u << 29),
+      // mulsc r4.x, c9.w, r23.x
+      (4u << 8) | (1u << 20) | (43u << 26), 0x14u,
+      9u | (2u << 24) | (1u << 29) | (1u << 30) | (1u << 31),
+      // sin r3.x, r1.y with the vector unit reading other registers
+      (3u << 8) | (1u << 20) | (48u << 26), 0x01u | (0u << 8) | (0u << 16),
+      1u | (2u << 8) | (0u << 16) | (2u << 24) | (7u << 29)};
+  const auto decoded = ShaderDecoder::decode(ShaderProgram(ShaderStage::Vertex, words));
+  assert(decoded.complete);
+  const auto lowered = HlslShaderLowerer::lower(decoded);
+  if (!lowered.complete) {
+    for (const auto& diagnostic : lowered.diagnostics) std::cerr << diagnostic << '\n';
+  }
+  assert(lowered.complete);
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("float4 s0 = r[(0) & 63].yzzz;") != std::string::npos);
+  assert(hlsl.find("float4 s1 = XenonFloatConstants[((40) & 255)].xyyy;") != std::string::npos);
+  assert(hlsl.find("float4 s2 = XenonFloatConstants[((40) & 255)].wwww;") != std::string::npos);
+  assert(hlsl.find("float4 s2 = r[(0) & 63].xxxx;") != std::string::npos);
+  assert(hlsl.find("xenon_scalar_op(11, s2, s2, ps") != std::string::npos);
+  assert(hlsl.find("float4 s2 = XenonFloatConstants[((9) & 255)].xzww;") != std::string::npos);
+  assert(hlsl.find("float4 s3t = r[(23) & 63].xzww;") != std::string::npos);
+  assert(hlsl.find("xenon_scalar_op(43, s2, s3t, ps") != std::string::npos);
+  // sin reads r1's swizzled W: relative field 1 in X makes it .yyzw... and the
+  // W field 0 makes `a` = (0 + 3) & 3 = W.
+  assert(hlsl.find("float4 s2 = r[(1) & 63].yyzw;") != std::string::npos);
+  assert(hlsl.find("xenon_scalar_op(48, s2, s2, ps") != std::string::npos);
+  assert(hlsl.find("xenon_scalar_op(48, s0") == std::string::npos);
+}
+
+// Export write masks: both bits give 1.0, neither bit with scalar_dest_rel
+// gives 0.0, otherwise each unit writes its own components.
+void test_export_constant_components() {
+  using namespace xenon::gpu;
+  auto alu = make_alu(0);
+  alu.alu.export_data = true;
+  alu.alu.vector_destination = 62;
+  alu.alu.vector_write_mask = 0x3;
+  alu.alu.scalar_write_mask = 0x6;
+  alu.alu.scalar_destination_relative = true;
+  const auto lowered =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Vertex, {alu}));
+  assert(lowered.complete);
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("e[62].x = pv.x;") != std::string::npos);
+  assert(hlsl.find("e[62].y = (1.0).xxxx.y;") != std::string::npos);
+  assert(hlsl.find("e[62].y = pv.y;") == std::string::npos);
+  assert(hlsl.find("e[62].y = ps_new.y;") == std::string::npos);
+  assert(hlsl.find("e[62].z = ps_new.z;") != std::string::npos);
+  assert(hlsl.find("e[62].w = (0.0).xxxx.w;") != std::string::npos);
+
+  alu.alu.scalar_destination_relative = false;
+  const auto unchanged =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Vertex, {alu}));
+  assert(unchanged.hlsl.find("e[62].w =") == std::string::npos);
+}
+
+// A vector kill must discard even though the co-issued scalar operation runs
+// after it.
+void test_vector_kill_is_not_cleared_by_scalar_operation() {
+  using namespace xenon::gpu;
+  auto alu = make_alu(0);
+  alu.alu.vector_opcode = 24;  // kill_eq
+  const auto lowered =
+      HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Pixel, {alu}));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("p0, a0, vector_killed);") != std::string::npos);
+  assert(lowered.hlsl.find("p0, a0, scalar_killed);") != std::string::npos);
+  assert(lowered.hlsl.find("if (vector_killed || scalar_killed) discard;") !=
+         std::string::npos);
+}
+
+// Relative temporaries add aL. Relative constants add a0 only when the ALU
+// instruction's const_address_register_relative bit is set.
+void test_relative_addressing_registers() {
+  using namespace xenon::gpu;
+  auto alu = make_alu(0);
+  alu.alu.vector_write_mask = 0xF;
+  alu.alu.vector_destination = 1;
+  alu.alu.sources[0].relative = true;
+  alu.alu.sources[1].temporary = false;
+  alu.alu.sources[1].index = 12;
+  alu.alu.sources[1].relative = true;
+  alu.alu.constant_address_register_relative = true;
+  auto loop_relative = alu;
+  loop_relative.alu.address = 1;
+  loop_relative.alu.constant_address_register_relative = false;
+  const auto lowered = HlslShaderLowerer::lower(
+      make_alu_shader(ShaderStage::Vertex, {alu, loop_relative}));
+  assert(lowered.complete);
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("float4 s0 = r[(0 + aL) & 63].xyzw;") != std::string::npos);
+  assert(hlsl.find("XenonFloatConstants[((12 + a0) & 255)]") != std::string::npos);
+  assert(hlsl.find("XenonFloatConstants[((12 + aL) & 255)]") != std::string::npos);
+  assert(hlsl.find("+ ar") == std::string::npos);
+}
+
+// The scalar helper follows the Xenos result values: setp_* write 0.0 when the
+// predicate becomes true, and maxas loads a0 from `a`, not the maximum.
+void test_scalar_helper_semantics() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_pixel_shader(false));
+  const auto& hlsl = lowered.hlsl;
+  assert(hlsl.find("v=p0 ? 0.0 : 1.0;") != std::string::npos);
+  assert(hlsl.find("a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);") !=
+         std::string::npos);
+  assert(hlsl.find("rsqrt(abs(") == std::string::npos);
+  assert(hlsl.find("sqrt(abs(") == std::string::npos);
+  assert(hlsl.find("p0=!p0") == std::string::npos);
+  assert(hlsl.find("float x = a.z, y = a.w, z = a.x;") != std::string::npos);
+}
+
 void test_forced_writable_guest_memory_variant() {
   using namespace xenon::gpu;
   ShaderLoweringOptions options{};
@@ -184,5 +340,10 @@ int main() {
   test_memexport_gpu_write_lowering();
   test_non_memexport_guest_memory_stays_read_only();
   test_forced_writable_guest_memory_variant();
+  test_decoded_scalar_operations_read_source_three();
+  test_export_constant_components();
+  test_vector_kill_is_not_cleared_by_scalar_operation();
+  test_relative_addressing_registers();
+  test_scalar_helper_semantics();
   std::cout << "xenon_shader_lowering_tests: ok\n";
 }

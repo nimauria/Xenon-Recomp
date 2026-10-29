@@ -11,6 +11,31 @@ namespace xenon::gpu::detail {
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                              const DrawResourceState& state) {
+  // Diagnostic: per-phase time of a draw slower than 50 ms (the GPU pump
+  // thread runs draws between ring drains and vsync interrupts).
+  struct DrawPhases {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point mark = start;
+    std::array<std::pair<const char*, long long>, 8> phases{};
+    std::size_t count = 0;
+    void at(const char* name) {
+      const auto now = std::chrono::steady_clock::now();
+      if (count < phases.size())
+        phases[count++] = {name, std::chrono::duration_cast<std::chrono::milliseconds>(now - mark).count()};
+      mark = now;
+    }
+    ~DrawPhases() {
+      at("record and finish");
+      const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start).count();
+      if (total < 50) return;
+      std::string text;
+      for (std::size_t i = 0; i < count; ++i)
+        text += std::string(phases[i].first) + " " + std::to_string(phases[i].second) + " ms; ";
+      xenon::logging::append_probe_log("ir_timing_diag.log", "draw phases (%lld ms): %s\n",
+                                       static_cast<long long>(total), text.c_str());
+    }
+  } phases;
   pipeline_states.insert(state.pipeline_hash(*draw));
   std::array<RenderTargetImage*, 4> active_targets{};
   std::array<std::uint8_t, 4> active_write_masks{};
@@ -19,6 +44,17 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   const auto color_count =
       static_cast<std::size_t>(color_plan.attachment_count);
   DepthTargetImage* active_depth = nullptr;
+  const bool depth_bound =
+      (state.edram_mode == EdramMode::ColorDepth || state.edram_mode == EdramMode::DepthOnly) &&
+      (state.depth_target.test_enabled || state.depth_target.write_enabled ||
+       state.depth_target.stencil_enabled);
+  // The surfaces bound to this draw never share EDRAM, so each one ends where
+  // the next bound surface begins (AC6's 640x360 4x MSAA color target at tile
+  // 0 is followed by its depth at tile 720).
+  std::vector<std::uint32_t> bound_bases;
+  for (std::size_t slot = 0; slot < color_count; ++slot)
+    if (color_plan.enabled[slot]) bound_bases.push_back(state.color_targets[slot].base_tile);
+  if (depth_bound) bound_bases.push_back(state.depth_target.base_tile);
   if (color_count && (!state.raster.surface_pitch ||
                       state.raster.scissor_bottom <= 0)) {
     error = named("Xenos MRT draw has an invalid EDRAM surface extent");
@@ -26,7 +62,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   }
   if (color_count && state.raster.surface_pitch &&
       state.raster.scissor_bottom > 0) {
-    const auto height = std::uint32_t(state.raster.scissor_bottom);
+    // Sized to the rows the draw can reach, not the (often open) scissor,
+    // and never taller than EDRAM can hold at this pitch.
+    const auto height = (std::min)(
+        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
+        EdramSurfaceLayout{0u, state.raster.surface_pitch, 1u,
+                           static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false,
+                           false}
+            .max_resident_height_pixels());
     for (std::size_t slot = 0; slot < color_count; ++slot) {
       if (!color_plan.enabled[slot]) continue;
       const auto& target = state.color_targets[slot];
@@ -34,11 +77,13 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       EdramSurfaceLayout surface{target.base_tile, state.raster.surface_pitch,
           height, static_cast<MsaaSamples>(state.raster.msaa_samples_log2),
           color_render_target_is_64bpp(format), false};
+      surface.height_pixels = (std::min)(surface.height_pixels,
+                                         rows_before_next_surface(surface, bound_bases));
       const auto key = surface.identity_hash() ^
                        (std::uint64_t(target.format) << 56u);
       auto existing = render_targets.find(key);
       if (existing != render_targets.end() &&
-          existing->second->height() < height) {
+          existing->second->height() < surface.height_pixels) {
         const auto owner = render_target_owners.at(key);
         if (edram_ownership.owned_tile_count(owner) &&
             !flush_color_owner(owner)) return;
@@ -75,10 +120,12 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       state.raster.surface_pitch && state.raster.scissor_bottom > 0 &&
       (state.depth_target.test_enabled || state.depth_target.write_enabled ||
        state.depth_target.stencil_enabled)) {
-    const EdramSurfaceLayout surface{
+    EdramSurfaceLayout surface{
         state.depth_target.base_tile, state.raster.surface_pitch,
-        static_cast<std::uint32_t>(state.raster.scissor_bottom),
+        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
         static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false, true};
+    surface.height_pixels = (std::min)(surface.height_pixels,
+                                       rows_before_next_surface(surface, bound_bases));
     const auto key = surface.identity_hash() ^
                      (std::uint64_t(state.depth_target.format) << 60u);
     if (const auto existing = depth_targets.find(key);
@@ -114,14 +161,51 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     if (active_depth &&
         !acquire_depth_ownership(key, *active_depth, surface)) return;
   }
+  phases.at("render targets");
+#ifdef XENON_HAS_DXC
+  // With no bound render target and no memory export a draw changes nothing
+  // the guest can observe, so it needs no vertex or texture uploads (AC6's
+  // single-point draws spent 50-225 ms each syncing vertex buffers and then
+  // returned). A shader whose reflection is missing still reaches the error
+  // below rather than being skipped here.
+  if (!color_count && !active_depth) {
+    const auto may_export = [&](const ir::ShaderReference& shader) {
+      if (!shader.valid) return false;
+      const auto decoded = decoded_shaders.find(shader.hash);
+      return decoded == decoded_shaders.end() || decoded->second.reflection.memory_exports != 0;
+    };
+    if (!may_export(draw->vertex_shader) && !may_export(draw->pixel_shader)) return;
+  }
+#endif
   // Phase 15: the guest-memory mirror is populated lazily. Vertex fetches
-  // request only the physical ranges described by the active Xenos fetch
-  // constants instead of synchronizing the entire 512 MiB aperture.
+  // request only the physical ranges of the fetch constants the draw's shaders
+  // read: the register file keeps stale constants for buffers no shader
+  // fetches, and syncing those too cost AC6 up to 100 ms per draw. A shader
+  // with no reflection syncs every valid constant.
   if (memory) {
-    for (const auto& fetch_group : state.vertex_buffers) {
-      for (const auto& fetch : fetch_group) {
+    std::array<bool, 96> fetched{};
+#ifdef XENON_HAS_DXC
+    bool all_fetched = false;
+    for (const auto* shader : {&draw->vertex_shader, &draw->pixel_shader}) {
+      if (!shader->valid) continue;
+      const auto decoded = decoded_shaders.find(shader->hash);
+      if (decoded == decoded_shaders.end()) {
+        all_fetched = true;
+        continue;
+      }
+      for (const auto index : decoded->second.reflection.vertex_fetches)
+        if (index < fetched.size()) fetched[index] = true;
+    }
+#else
+    const bool all_fetched = true;
+#endif
+    for (std::uint32_t slot = 0; slot < state.vertex_buffers.size(); ++slot) {
+      for (std::uint32_t select = 0; select < 3; ++select) {
+        const auto& fetch = state.vertex_buffers[slot][select];
+        if (!all_fetched && !fetched[slot * 3u + select]) continue;
         if (!fetch || !fetch->valid || !fetch->size_dwords) continue;
         const auto bytes64 = std::uint64_t{fetch->size_dwords} * 4u;
+        const auto sync_start = std::chrono::steady_clock::now();
         if (bytes64 > UINT32_MAX ||
             !mirror.synchronize_range(
                 fetch->physical_address, static_cast<std::uint32_t>(bytes64),
@@ -131,9 +215,20 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                              : mirror.error();
           return;
         }
+        static std::atomic_uint32_t vertex_sync_probe_count{};
+        if (vertex_sync_probe_count.fetch_add(1u, std::memory_order_relaxed) < 200u) {
+          xenon::logging::append_probe_log(
+              "vertex_sync_diag.log", "fetch %u.%u address=0x%08X bytes=%llu took %lld ms\n",
+              slot, select, fetch->physical_address,
+              static_cast<unsigned long long>(bytes64),
+              static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - sync_start)
+                                         .count()));
+        }
       }
     }
   }
+  phases.at("vertex buffers");
   auto constants = resources.constants();
   if (!resource_state.write_constant_buffer(constants)) {
     error = named("shader constant upload failed");
@@ -154,6 +249,30 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       if (!used[slot] || !state.textures[slot]) continue;
       const auto& descriptor = *state.textures[slot];
       const auto key = descriptor.hash();
+      // Each distinct shader/texture pairing once, when it first appears.
+      static std::mutex texture_probe_mutex;
+      static std::unordered_set<std::uint64_t> texture_probe_seen;
+      bool first_use = false;
+      if (xenon::logging::probe_logs_enabled()) {
+        std::scoped_lock probe_lock(texture_probe_mutex);
+        first_use = texture_probe_seen.insert(key * 31u ^ draw->pixel_shader.hash).second;
+      }
+      if (first_use) {
+        xenon::logging::append_probe_log(
+            "texture_fetch_diag.log",
+            "%lld ps=%016llX slot %u: format=%u endian=%u swizzle=0x%03X signs=%u%u%u%u "
+            "%ux%u pitch=%u tiled=%d base=0x%08X exp_adjust=%d\n",
+            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count()),
+            static_cast<unsigned long long>(draw->pixel_shader.hash), slot,
+            unsigned(descriptor.format), unsigned(descriptor.endian),
+            unsigned(descriptor.swizzle), unsigned(descriptor.signs[0]),
+            unsigned(descriptor.signs[1]), unsigned(descriptor.signs[2]),
+            unsigned(descriptor.signs[3]), descriptor.width, descriptor.height,
+            descriptor.pitch, int(descriptor.tiled), descriptor.base_address,
+            int(descriptor.exp_adjust));
+      }
       auto existing = textures.find(key);
       const bool already_cached = existing != textures.end();
       const bool dirty = already_cached &&
@@ -233,6 +352,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       }
     }
   }
+  phases.at("textures");
 #ifdef XENON_HAS_DXC
   if (memory && draw->vertex_shader.valid &&
       draw->pixel_shader.valid) {
@@ -269,15 +389,28 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     gather_memexport_ranges(decoded_pixel->second);
     if (!color_count && !active_depth && !memexport_writable) return;
 
+    phases.at("shader lookup");
     // Known memexport targets stay range-driven. Only shaders whose export
     // address cannot be resolved statically request the deliberate full-range
     // fallback required for genuinely unrestricted guest-memory access.
     if (memexport_writable) {
       if (dynamic_memexport_range) {
+        const auto sync_start = std::chrono::steady_clock::now();
         if (!mirror.synchronize()) {
           error = mirror.error();
           return;
         }
+        // Diagnostic: the whole-aperture fallback is the most expensive thing
+        // a draw can do; say when it runs and for which shaders.
+        const auto sync_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - sync_start)
+                                 .count();
+        xenon::logging::append_probe_log(
+            "ir_timing_diag.log",
+            "dynamic memexport full mirror sync %lld ms (vs %016llX memexport=%d, ps %016llX memexport=%d)\n",
+            static_cast<long long>(sync_ms),
+            static_cast<unsigned long long>(draw->vertex_shader.hash), int(vertex_memexport),
+            static_cast<unsigned long long>(draw->pixel_shader.hash), int(pixel_memexport));
       } else {
         for (const auto& range : memexport_ranges) {
           const auto address = range.base_address_dwords << 2u;
@@ -294,6 +427,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       }
     }
 
+    phases.at("memexport ranges");
     auto vertex_shader = vertex->second;
     auto pixel_shader = pixel->second;
     auto writable_variant = [&](std::uint64_t shader_hash,
@@ -537,6 +671,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                           state.raster.scissor_bottom, scissor_top,
                                           static_cast<std::int32_t>(render_height));
     bool draw_record_failed = false;
+    phases.at("constants, pipeline and uploads");
     if (!self().record_draw(
             DrawRecording{state, batch, *pipeline, active_targets, color_count,
                           active_depth, index_byte_size, memexport_writable,

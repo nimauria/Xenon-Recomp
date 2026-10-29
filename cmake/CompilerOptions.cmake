@@ -1,3 +1,12 @@
+# Every executable opts in to Windows long paths. The OS policy
+# (LongPathsEnabled) only takes effect for processes whose manifest declares
+# longPathAware; preparation caches nest content-addressed keys deeply enough
+# to pass 260 characters under an ordinary user cache directory.
+if(MSVC)
+  add_link_options(
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:/MANIFESTINPUT:${CMAKE_CURRENT_LIST_DIR}/windows/long-path-aware.manifest>")
+endif()
+
 function(xenon_enable_guest_fp_semantics target visibility)
   if(MSVC)
     target_compile_options(${target} ${visibility} /fp:strict)

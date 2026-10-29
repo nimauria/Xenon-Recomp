@@ -155,6 +155,10 @@ struct Options {
   std::filesystem::path observations;
   std::filesystem::path knowledge;
   std::string config{"Release"};
+  // Native module build parallelism; nullopt is "auto" (see
+  // xenon::recomp::resolve_native_build_jobs). Not part of the cache key:
+  // the parallelism never changes what is built.
+  std::optional<std::size_t> jobs;
   bool force{false};
   bool query{false};
 };

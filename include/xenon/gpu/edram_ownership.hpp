@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "xenon/gpu/edram_surface.hpp"
@@ -45,6 +46,9 @@ class EdramOwnershipTracker {
   void make_canonical_region(const EdramSurfaceLayout& surface,
                              EdramSurfaceRegion region) noexcept;
   void release(EdramOwnerId owner) noexcept;
+  // Returns just `tiles` to canonical storage, where `owner` holds them (a
+  // partial flush); the owner keeps the rest.
+  void release_tiles(EdramOwnerId owner, std::span<const std::uint16_t> tiles) noexcept;
 
   [[nodiscard]] EdramOwnerId owner(std::uint32_t tile) const noexcept;
   [[nodiscard]] std::size_t owned_tile_count(EdramOwnerId owner) const noexcept;

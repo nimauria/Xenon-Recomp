@@ -39,6 +39,8 @@ struct DecodedControlFlow {
 
 struct AluSource {
   std::uint32_t index{};
+  // Absolute component selects, two bits per component with X lowest (0xE4 is
+  // .xyzw). The decoder resolves the microcode's component-relative encoding.
   std::uint8_t swizzle{};
   bool temporary{};
   bool relative{};
@@ -62,7 +64,11 @@ struct AluInstruction {
   bool absolute_constants{};
   bool constant_address_register_relative{};
   Predicate predicate{};
+  // Source 1-3. Scalar operations read source 3: `a` is its swizzled W and `b`
+  // its swizzled X. The mulsc/addsc/subsc opcodes (42-47) read `a` from the
+  // constant in source 3 and `b` from temporary scalar_constant_temporary.
   std::array<AluSource, 3> sources{};
+  std::uint8_t scalar_constant_temporary{};
 };
 
 struct VertexFetchInstruction {
@@ -121,6 +127,9 @@ struct ShaderReflection {
   std::vector<std::uint8_t> bool_constants{};
   std::vector<std::uint8_t> loop_constants{};
   std::vector<std::uint8_t> vertex_fetch_constants{};
+  // The vertex fetch constants actually read, as fetch constant * 3 + select
+  // (three 2-dword vertex fetch constants share each 6-dword slot).
+  std::vector<std::uint8_t> vertex_fetches{};
   std::vector<std::uint8_t> texture_fetch_constants{};
   std::vector<std::uint8_t> exports{};
   // Float-constant indices used by the conventional Xenos eA memexport

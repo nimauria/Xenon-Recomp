@@ -14,6 +14,7 @@
 #include "xenon/kernel/time.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -85,6 +87,12 @@ struct SessionExecutionTestAccess {
   static std::uint32_t run_execution(XenonSession& session) {
     return session.run_execution();
   }
+
+  static bool call_guest_routine(XenonSession& session, cpu::CpuState& caller,
+                                 cpu::GuestAddress routine,
+                                 std::span<const std::uint64_t> arguments) {
+    return session.call_guest_routine(caller, routine, arguments);
+  }
 };
 
 }  // namespace xenon::core
@@ -111,7 +119,15 @@ std::atomic<std::uint64_t> g_observed_start_context{0};
 // returns it incremented by one, matching real PPC ABI (gpr[3] is both the
 // single argument ExCreateThread's StartContext passes and the function's
 // return value).
+std::atomic<int> g_observed_processor{-1};
+
 ExecutionResult echo_increment_entry(ExecutionContext& context) {
+  // What the title reads as its processor number: r13+0x10C (this harness's
+  // run_execution() main thread has no KPCR).
+  if (context.state.gpr[13] != 0u) {
+    g_observed_processor.store(context.memory.read8(
+        static_cast<GuestAddress>(context.state.gpr[13]) + 0x10Cu));
+  }
   g_entry_ran.store(true);
   g_observed_start_context.store(context.state.gpr[3]);
   context.state.gpr[3] = context.state.gpr[3] + 1u;
@@ -194,19 +210,7 @@ std::atomic<std::uint64_t> g_loop_iterations{0};
 // Branches to itself forever - a synthetic tight guest loop, so the
 // preemptive safepoint (dispatch_guest_thread()'s per-block-boundary
 // suspend/terminate check) has something real to interrupt.
-//
-// Throttled to roughly 20,000 dispatches/second: dispatch_guest_thread()'s
-// top-level loop has a real, pre-existing kMaxTopLevelDispatches (1,000,000)
-// safety cap intended for genuinely runaway compiled guest code. A trivial
-// native lambda dispatched with no throttling reaches that cap in well under
-// a second, which raced with (and intermittently pre-empted) this test's own
-// explicit terminate() call - the thread would already be Terminated by the
-// time the test called it, since hitting the cap falls through
-// dispatch_guest_thread() as an ordinary "natural" exit. Real compiled guest
-// code returns to the top-level dispatch loop far less often than every
-// single instruction (only at actual function-call/return boundaries), so
-// this cap is not reachable in practice at anywhere near this rate - only
-// this synthetic microbenchmark-speed test loop can hit it artificially fast.
+// Throttled so the loop does not monopolise a core while the test waits.
 ExecutionResult looping_entry(ExecutionContext&) {
   g_loop_iterations.fetch_add(1, std::memory_order_relaxed);
   std::this_thread::sleep_for(std::chrono::microseconds(50));
@@ -233,6 +237,67 @@ struct ThreadCreationHarness {
 xenon::core::ExportCallContext make_call(xenon::cpu::CpuState& cpu,
                                          xenon::memory::AddressSpace& memory) {
   return xenon::core::ExportCallContext{cpu, memory, 0, 0};
+}
+
+// call_guest_routine(): the routine the kernel calls back into (a user APC, a
+// completion routine) runs nested on the calling guest thread, below its
+// stack, with its KPCR and the given arguments, and leaves the caller's
+// registers as they were.
+xenon::core::XenonSession* g_nesting_session = nullptr;
+std::atomic<bool> g_nested_ran{false};
+std::atomic<bool> g_nested_call_succeeded{false};
+std::atomic<bool> g_caller_registers_unchanged{false};
+std::array<std::uint64_t, 5> g_nested_registers{};  // r3, r4, r5, r1, r13
+
+ExecutionResult nested_routine_entry(ExecutionContext& context) {
+  g_nested_registers = {context.state.gpr[3], context.state.gpr[4], context.state.gpr[5],
+                        context.state.gpr[1], context.state.gpr[13]};
+  g_nested_ran.store(true);
+  context.state.gpr[3] = 0x5555u;  // clobbers its own copy only
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+ExecutionResult nesting_thread_entry(ExecutionContext& context) {
+  const auto before = context.state;
+  const std::uint64_t arguments[] = {0x11u, 0x22u, 0x33u};
+  g_nested_call_succeeded.store(xenon::core::SessionExecutionTestAccess::call_guest_routine(
+      *g_nesting_session, context.state, 0x3100u, arguments));
+  g_caller_registers_unchanged.store(context.state.gpr == before.gpr &&
+                                     context.state.lr == before.lr);
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+void test_call_guest_routine_runs_nested_on_the_calling_thread() {
+  g_nested_ran.store(false);
+  g_nested_call_succeeded.store(false);
+  g_caller_registers_unchanged.store(false);
+  ThreadCreationHarness harness(&nesting_thread_entry);
+  harness.registry.entries.emplace(0x3100u, &nested_routine_entry);
+  g_nesting_session = &harness.session;
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(
+             harness.session.memory()->read32_be(handle_out), view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000));
+
+  assert(g_nested_ran.load() && g_nested_call_succeeded.load());
+  assert(g_nested_registers[0] == 0x11u && g_nested_registers[1] == 0x22u &&
+         g_nested_registers[2] == 0x33u);
+  assert(g_nested_registers[4] != 0u && "the routine runs with the thread's KPCR");
+  assert(g_caller_registers_unchanged.load() && "the caller's registers are untouched");
+  g_nesting_session = nullptr;
 }
 
 void test_ex_create_thread_runs_and_propagates_start_context_and_exit_code() {
@@ -278,6 +343,50 @@ void test_ex_create_thread_runs_and_propagates_start_context_and_exit_code() {
   assert(thread.exit_code() == 0x42u &&
          "the thread function's gpr[3] return value must become the exit code");
   assert(thread.state() == kernel::ThreadState::Terminated);
+}
+
+// XAPI's CreateThread passes its startup routine in r6; the thread then
+// starts there as XapiThreadStartup(start_address, start_context), as in
+// xenia and rexglue-sdk, instead of at start_address.
+std::atomic<std::uint64_t> g_startup_r3{0};
+std::atomic<std::uint64_t> g_startup_r4{0};
+
+ExecutionResult xapi_startup_entry(ExecutionContext& context) {
+  g_startup_r3.store(context.state.gpr[3]);
+  g_startup_r4.store(context.state.gpr[4]);
+  context.state.gpr[3] = 0x77u;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+void test_ex_create_thread_starts_at_the_xapi_startup_routine() {
+  g_entry_ran.store(false);
+  g_startup_r3.store(0);
+  g_startup_r4.store(0);
+  ThreadCreationHarness harness(&echo_increment_entry);
+  harness.registry.entries.emplace(0x4000u, &xapi_startup_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[6] = 0x4000u;  // XapiThreadStartup
+  cpu.gpr[7] = 0x3000u;  // start address
+  cpu.gpr[8] = 0x41u;    // start context
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  assert(cpu.gpr[3] == 0u);
+
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(
+             harness.session.memory()->read32_be(handle_out), view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  assert(thread.join(2000));
+  assert(g_startup_r3.load() == 0x3000u && g_startup_r4.load() == 0x41u &&
+         "XapiThreadStartup(start_address, start_context)");
+  assert(!g_entry_ran.load() && "the startup routine, not the kernel, calls start_address");
+  assert(thread.exit_code() == 0x77u);
 }
 
 void test_ex_create_thread_honors_create_suspended() {
@@ -327,7 +436,7 @@ void test_ex_create_thread_affinity_alone_does_not_suspend() {
   xenon::cpu::CpuState cpu{};
   cpu.gpr[3] = handle_out;
   cpu.gpr[7] = 0x3000u;
-  cpu.gpr[9] = 0x02000000u;  // run on processor 2, not suspended
+  cpu.gpr[9] = 0x02000000u;  // processor mask 0x02 (hardware thread 1), not suspended
   auto call = make_call(cpu, *harness.session.memory());
   assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
   const auto handle = harness.session.memory()->read32_be(handle_out);
@@ -338,6 +447,11 @@ void test_ex_create_thread_affinity_alone_does_not_suspend() {
   auto& thread = static_cast<kernel::KernelThread&>(*view.object);
   assert(thread.join(2000) && "an unsuspended thread runs without being resumed");
   assert(g_entry_ran.load());
+  // Regression (AC6 audio): the requested processor is the thread's
+  // processor number at r13+0x10C, which titles use to index per-processor
+  // state. Every thread used to read 0.
+  assert(thread.guest_kpcr_address() != 0u);
+  assert(g_observed_processor.load() == 1);
 }
 
 void test_preemptive_safepoint_terminates_a_running_created_thread() {
@@ -430,6 +544,58 @@ void test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread() {
 
   assert(thread.terminate(1u));
   assert(thread.join(2000));
+}
+
+// Never returns to the dispatcher: a compiled loop, polling at its back-edge
+// as generated code does (backend_cpp_aot.cpp).
+ExecutionResult spinning_in_one_function_entry(ExecutionContext& context) {
+  for (;;) {
+    g_loop_iterations.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+    context.poll_safepoint();
+  }
+}
+
+// Regression (AC6 shutdown hang): a thread spinning inside one compiled
+// function was out of reach of the dispatcher's safepoint, so terminate()
+// and suspend() did nothing and teardown unloaded the module under it.
+void test_a_thread_spinning_in_one_function_can_be_suspended_and_terminated() {
+  g_loop_iterations.store(0);
+  ThreadCreationHarness harness(&spinning_in_one_function_entry);
+
+  xenon::memory::GuestAddress handle_out{};
+  assert(harness.session.memory()->allocate(4, 4, xenon::memory::kReadWrite, false, handle_out));
+  xenon::cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[7] = 0x3000u;
+  auto call = make_call(cpu, *harness.session.memory());
+  assert(xenon::core::SessionExecutionTestAccess::ex_create_thread(harness.session, call));
+  const auto handle = harness.session.memory()->read32_be(handle_out);
+  kernel::HandleView view{};
+  assert(harness.session.kernel_process()->handle_table().lookup(handle, view) ==
+         kernel::KernelIoCode::Success);
+  auto& thread = static_cast<kernel::KernelThread&>(*view.object);
+  while (g_loop_iterations.load(std::memory_order_relaxed) < 200)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+  assert(thread.suspend());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto parked = g_loop_iterations.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  assert(g_loop_iterations.load(std::memory_order_relaxed) == parked &&
+         "a suspended thread parks at its loop's back-edge");
+
+  assert(thread.resume());
+  bool progressed = false;
+  for (int i = 0; i < 200 && !progressed; ++i) {
+    progressed = g_loop_iterations.load(std::memory_order_relaxed) > parked;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  assert(progressed && "a resumed thread continues its loop");
+
+  assert(thread.terminate(0x5151u));
+  assert(thread.join(2000) && "a terminated thread leaves the compiled loop");
+  assert(thread.exit_code() == 0x5151u);
 }
 
 void test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit() {
@@ -900,10 +1066,13 @@ int main() {
   std::cout << "Testing ExCreateThread / guest thread creation...\n";
 
   test_ex_create_thread_runs_and_propagates_start_context_and_exit_code();
+  test_call_guest_routine_runs_nested_on_the_calling_thread();
+  test_ex_create_thread_starts_at_the_xapi_startup_routine();
   test_ex_create_thread_honors_create_suspended();
   test_ex_create_thread_affinity_alone_does_not_suspend();
   test_preemptive_safepoint_terminates_a_running_created_thread();
   test_preemptive_safepoint_suspends_and_resumes_a_running_created_thread();
+  test_a_thread_spinning_in_one_function_can_be_suspended_and_terminated();
   test_two_concurrent_created_threads_have_independent_tls();
   test_read_time_base_tracks_real_elapsed_time_and_spr_access_is_accounted();
   test_ex_create_thread_crash_produces_terminal_state_and_nonzero_exit();

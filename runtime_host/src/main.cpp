@@ -34,6 +34,8 @@
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/probe_log.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
 #include "xenon/memory/types.hpp"
@@ -63,6 +65,13 @@ int main(int argc, char** argv) {
   redirect_log(launch.session_dir);
   std::cout << "[runtime_host] Starting session '" << launch.session_id << "' for game '"
             << launch.game_id << "' (" << launch.title << ")" << std::endl;
+  // Opt-in diagnostics; XENON_DIAG_EVENTS / XENON_PROBE_LOGS turn them on too.
+  if (launch.diagnostic_events) xenon::logging::events::set_enabled(true);
+  if (launch.probe_logs) xenon::logging::set_probe_logs_enabled(true);
+  std::cout << "[runtime_host] Diagnostic events: "
+            << (xenon::logging::events::enabled() ? "on" : "off")
+            << ", probe logs: " << (xenon::logging::probe_logs_enabled() ? "on" : "off")
+            << std::endl;
   log_host_capabilities();
 
   StatusWriter status(launch.session_dir, launch);
@@ -247,7 +256,8 @@ int main(int argc, char** argv) {
   bool presentation_active = false;
   if (session.gpu() != nullptr) {
     std::string presentation_error;
-    presentation_active = presentation.create(1280, 720, launch.title.empty() ? "Xenon" : launch.title,
+    presentation_active = presentation.create(launch.display_width, launch.display_height,
+                                              launch.title.empty() ? "Xenon" : launch.title,
                                               *session.gpu(), &presentation_error);
     if (!presentation_active) {
       if (!launch.headless_mode) {
@@ -260,7 +270,8 @@ int main(int argc, char** argv) {
                    "continuing without it): "
                 << presentation_error << std::endl;
     } else {
-      std::cout << "[runtime_host] Presentation window created (1280x720)" << std::endl;
+      std::cout << "[runtime_host] Presentation window created (" << launch.display_width << "x"
+                << launch.display_height << ")" << std::endl;
     }
   }
 #endif

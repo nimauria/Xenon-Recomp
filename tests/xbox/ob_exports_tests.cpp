@@ -1,4 +1,5 @@
-// NtDuplicateObject (Ob* family export file). Drives it through
+// NtDuplicateObject and ObReferenceObjectByHandle (Ob* family export file).
+// Drives them through
 // core::ExportRegistry::invoke() exactly as a guest thunk would, exercising
 // the real handle-table duplication/insertion paths - not by calling the
 // handler C++ function directly.
@@ -15,6 +16,7 @@
 #include "xenon/kernel/process.hpp"
 #include "xenon/kernel/thread.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 #include "xenon/xbox/xboxkrnl_ob_exports.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
@@ -54,11 +56,25 @@ struct Fixture {
     assert(registry.register_export(std::move(dup)));
 
     assert(xbox::register_xboxkrnl_sync_exports(registry, *process));
+    assert(xbox::register_xboxkrnl_ke_sync_exports(registry, *process));
   }
 
   [[nodiscard]] core::ExportCallResult invoke(std::uint32_t ordinal, cpu::CpuState& cpu) {
     core::ExportCallContext call{cpu, *address_space, 0, 0};
     return registry.invoke("xboxkrnl", ordinal, call);
+  }
+
+  // Calls an export with up to five argument registers from r3; returns r3.
+  std::uint32_t call(std::uint32_t ordinal, std::uint32_t r3, std::uint32_t r4 = 0,
+                     std::uint32_t r5 = 0, std::uint32_t r6 = 0, std::uint32_t r7 = 0) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = r3;
+    cpu.gpr[4] = r4;
+    cpu.gpr[5] = r5;
+    cpu.gpr[6] = r6;
+    cpu.gpr[7] = r7;
+    assert(invoke(ordinal, cpu).success);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
   }
 
   [[nodiscard]] memory::GuestAddress alloc32() {
@@ -168,14 +184,123 @@ void test_nt_duplicate_object_invalid_handle_is_safe() {
 
 }  // namespace
 
+// ObReferenceObjectByHandle hands out the object's own pointer on hardware,
+// which a title may pass to the Ke* exports. Those calls must reach the same
+// object the handle names, and the header must show its state.
+constexpr std::uint32_t kNtCreateEvent = 0x0D1u, kNtCreateSemaphore = 0x0D5u,
+                        kNtCreateMutant = 0x0D4u, kNtSetEvent = 0x0F6u,
+                        kNtWaitForSingleObjectEx = 0x0FDu, kObReferenceObjectByHandle = 0x110u,
+                        kKeSetEvent = 0x09Du, kKeReleaseSemaphore = 0x088u,
+                        kKeWaitForSingleObject = 0x0B0u;
+constexpr std::uint32_t kStatusTimeout = 0x102u;
+constexpr std::uint32_t kSentinel = 0xDEADF00Du;
+
+std::uint32_t reference(Fixture& f, std::uint32_t handle) {
+  const auto out = f.alloc32();
+  assert(f.call(kObReferenceObjectByHandle, handle, 0, out) == 0u);
+  return f.address_space->read32_be(out);
+}
+
+void test_referenced_event_pointer_works_with_ke_exports() {
+  Fixture f;
+  memory::GuestAddress timeout{};
+  assert(f.address_space->allocate(8, 8, memory::kReadWrite, false, timeout));
+  f.address_space->write64_be(timeout, 0);
+
+  const auto handle_out = f.alloc32();
+  assert(f.call(kNtCreateEvent, handle_out, 0, /*auto-reset*/ 1, /*signalled*/ 0) == 0u);
+  const auto handle = f.address_space->read32_be(handle_out);
+  const auto event = reference(f, handle);
+  assert(event != 0u && event != kSentinel);
+  assert(reference(f, handle) == event && "the same object always has the same pointer");
+  assert(f.address_space->read8(event) == 1u && "SynchronizationEvent header type");
+  assert(f.address_space->read32_be(event + 4u) == 0u);
+
+  assert(f.call(kKeSetEvent, event) == 0u);
+  assert(f.address_space->read32_be(event + 4u) == 1u);
+  assert(f.call(kNtWaitForSingleObjectEx, handle, 0, 0, timeout) == 0u &&
+         "KeSetEvent on the pointer signalled the handle's event");
+  assert(f.address_space->read32_be(event + 4u) == 0u);
+
+  assert(f.call(kNtSetEvent, handle) == 0u);
+  assert(f.address_space->read32_be(event + 4u) == 1u);
+  assert(f.call(kKeWaitForSingleObject, event, 0, 0, 0, timeout) == 0u &&
+         "NtSetEvent on the handle signalled the pointer's event");
+  assert(f.call(kNtWaitForSingleObjectEx, handle, 0, 0, timeout) == kStatusTimeout);
+}
+
+void test_referenced_semaphore_pointer_works_with_ke_exports() {
+  Fixture f;
+  memory::GuestAddress timeout{};
+  assert(f.address_space->allocate(8, 8, memory::kReadWrite, false, timeout));
+  f.address_space->write64_be(timeout, 0);
+  const auto handle_out = f.alloc32();
+  assert(f.call(kNtCreateSemaphore, handle_out, 0, /*count*/ 1, /*limit*/ 3) == 0u);
+  const auto handle = f.address_space->read32_be(handle_out);
+  const auto semaphore = reference(f, handle);
+  assert(semaphore != 0u && semaphore != kSentinel);
+  assert(f.address_space->read8(semaphore) == 5u);
+  assert(f.address_space->read32_be(semaphore + 4u) == 1u);
+  assert(f.address_space->read32_be(semaphore + 0x10u) == 3u && "the limit follows the header");
+
+  assert(f.call(kKeReleaseSemaphore, semaphore, 0, /*adjustment*/ 1) == 1u);
+  assert(f.address_space->read32_be(semaphore + 4u) == 2u);
+  assert(f.call(kNtWaitForSingleObjectEx, handle, 0, 0, timeout) == 0u);
+  assert(f.call(kKeWaitForSingleObject, semaphore, 0, 0, 0, timeout) == 0u);
+  assert(f.call(kNtWaitForSingleObjectEx, handle, 0, 0, timeout) == kStatusTimeout);
+  assert(f.address_space->read32_be(semaphore + 4u) == 0u);
+}
+
+// The dispatcher-header resolver does not model mutants (their Xbox layout
+// past the header is unverified), so they still get the sentinel.
+void test_referenced_mutant_still_gets_the_sentinel() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  assert(f.call(kNtCreateMutant, handle_out, 0, 0) == 0u);
+  assert(reference(f, f.address_space->read32_be(handle_out)) == kSentinel);
+}
+
+// ObLookupThreadByThreadId returns the thread's guest KTHREAD address.
+void test_lookup_thread_by_thread_id() {
+  Fixture f;
+  core::ExportDescriptor lookup{};
+  lookup.library = "xboxkrnl.exe";
+  lookup.name = "ObLookupThreadByThreadId";
+  lookup.ordinal = 0x10Bu;
+  auto* raw_process = f.process.get();
+  lookup.handler = [raw_process](core::ExportCallContext& ctx) {
+    return xbox::ob_lookup_thread_by_thread_id_export(*raw_process, ctx);
+  };
+  assert(f.registry.register_export(std::move(lookup)));
+
+  kernel::ThreadCreationParams params{};
+  params.create_suspended = true;
+  auto thread = f.process->thread_manager().create_thread([]() -> std::uint32_t { return 0; }, params);
+  assert(thread);
+  const auto out = f.alloc32();
+  f.address_space->write32_be(out, 0xAAAAAAAAu);
+  assert(f.call(0x10Bu, thread->thread_id(), out) == 0xC0000225u &&
+         "no guest KTHREAD yet: STATUS_NOT_FOUND");
+  thread->set_guest_kthread_address(0x80051234u);
+  assert(f.call(0x10Bu, thread->thread_id(), out) == 0u);
+  assert(f.address_space->read32_be(out) == 0x80051234u);
+  assert(f.call(0x10Bu, 0xFFFFu, out) == 0xC0000225u && "unknown thread id");
+  static_cast<void>(thread->terminate(0));
+  std::cout << "test_lookup_thread_by_thread_id passed\n";
+}
+
 int main() {
-  std::cout << "Testing xboxkrnl NtDuplicateObject...\n";
+  std::cout << "Testing xboxkrnl Ob exports...\n";
 
   test_nt_duplicate_object_real_handle_round_trips();
   test_nt_duplicate_object_close_source_option_closes_original();
   test_nt_duplicate_object_pseudo_handle_materializes_real_handle();
   test_nt_duplicate_object_invalid_handle_is_safe();
+  test_referenced_event_pointer_works_with_ke_exports();
+  test_referenced_semaphore_pointer_works_with_ke_exports();
+  test_referenced_mutant_still_gets_the_sentinel();
+  test_lookup_thread_by_thread_id();
 
-  std::cout << "All NtDuplicateObject tests passed!\n";
+  std::cout << "All Ob export tests passed!\n";
   return 0;
 }

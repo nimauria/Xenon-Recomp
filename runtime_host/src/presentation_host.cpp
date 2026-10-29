@@ -25,14 +25,30 @@ bool PresentationHost::create(std::uint32_t width, std::uint32_t height,
     return false;
   }
 
+  // Size the window in physical pixels. Without per-monitor DPI awareness,
+  // Windows display scaling would bitmap-stretch the whole window and blur
+  // every presented frame, whatever size the swapchain is.
+  SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
   if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
     if (error) *error = std::string("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: ") + SDL_GetError();
     return false;
   }
 
+  // A client area as large as the desktop (1920x1080 on a 1080p monitor)
+  // can't fit beside the title bar and taskbar, so it starts maximized
+  // instead of hanging off screen; the swapchain follows the real client
+  // size through the resize events.
+  Uint32 size_flags = 0;
+  SDL_Rect usable{};
+  if (SDL_GetDisplayUsableBounds(0, &usable) == 0 &&
+      (width > static_cast<std::uint32_t>(usable.w) ||
+       height > static_cast<std::uint32_t>(usable.h))) {
+    size_flags = SDL_WINDOW_MAXIMIZED;
+  }
+
 #if defined(XENON_HAS_VULKAN)
   if (auto* vulkan = dynamic_cast<xenon::gpu::vulkan::Backend*>(&backend)) {
-    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN;
+    Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_VULKAN | size_flags;
     window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               static_cast<int>(width), static_cast<int>(height), flags);
     if (!window_) {
@@ -65,7 +81,7 @@ bool PresentationHost::create(std::uint32_t width, std::uint32_t height,
 
 #if defined(XENON_HAS_D3D12)
   if (auto* d3d12 = dynamic_cast<xenon::gpu::d3d12::Backend*>(&backend)) {
-    Uint32 flags = SDL_WINDOW_RESIZABLE;
+    Uint32 flags = SDL_WINDOW_RESIZABLE | size_flags;
     window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               static_cast<int>(width), static_cast<int>(height), flags);
     if (!window_) {

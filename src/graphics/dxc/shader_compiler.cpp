@@ -1,8 +1,11 @@
 #include "xenon/gpu/dxc_shader_compiler.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
+
+#include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -181,7 +184,19 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
       return found->second;
     }
   }
+  const auto compile_start = std::chrono::steady_clock::now();
   auto compiled = std::make_shared<const CompiledShader>(compiler_->compile(shader, options));
+  const auto compile_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - compile_start)
+                              .count();
+  // Compiles run on the GPU pump thread; a slow one delays everything the
+  // pump does, vsync interrupts included.
+  if (compile_ms >= 50) {
+    xenon::logging::append_probe_log(
+        "shader_compile_diag.log", "DXC compile %lld ms: %s %s, %zu HLSL bytes, source 0x%016llX\n",
+        static_cast<long long>(compile_ms), shader.profile.c_str(), shader.entry_point.c_str(),
+        shader.hlsl.size(), static_cast<unsigned long long>(shader.source_hash));
+  }
   std::scoped_lock lock(mutex_);
   const auto [iterator, inserted] = entries_.emplace(key, compiled);
   if (inserted) ++misses_;

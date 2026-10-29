@@ -12,6 +12,9 @@
 #include <string>
 #include <thread>
 
+#include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/probe_log.hpp"
+
 namespace xenon::gpu {
 namespace {
 
@@ -74,74 +77,6 @@ namespace {
   }
 }
 
-[[nodiscard]] bool is_shader_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::ImLoad:
-    case Type3Opcode::ImLoadImmediate:
-    case Type3Opcode::ImStore:
-    case Type3Opcode::SetShaderBases:
-    case Type3Opcode::SetShaderConstants:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_sync_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::WaitForIdle:
-    case Type3Opcode::WaitRegMem:
-    case Type3Opcode::WaitRegEq:
-    case Type3Opcode::WaitRegGte:
-    case Type3Opcode::WaitUntilRead:
-    case Type3Opcode::WaitIndirectBufferPfdComplete:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_event_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::VizQuery:
-    case Type3Opcode::EventWrite:
-    case Type3Opcode::EventWriteShaderDone:
-    case Type3Opcode::EventWriteCacheFlush:
-    case Type3Opcode::EventWriteExtent:
-    case Type3Opcode::EventWriteZPassDone:
-    case Type3Opcode::Interrupt:
-      return true;
-    default:
-      return false;
-  }
-}
-
-[[nodiscard]] bool is_state_opcode(Type3Opcode opcode) noexcept {
-  switch (opcode) {
-    case Type3Opcode::RegRmw:
-    case Type3Opcode::SetState:
-    case Type3Opcode::SetConstant:
-    case Type3Opcode::SetConstant2:
-    case Type3Opcode::LoadConstantContext:
-    case Type3Opcode::LoadAluConstant:
-    case Type3Opcode::InvalidateState:
-    case Type3Opcode::CondExec:
-    case Type3Opcode::CondWrite:
-    case Type3Opcode::ContextUpdate:
-    case Type3Opcode::SetBinBaseOffset:
-    case Type3Opcode::SetBinMask:
-    case Type3Opcode::SetBinSelect:
-    case Type3Opcode::SetBinMaskLow:
-    case Type3Opcode::SetBinMaskHigh:
-    case Type3Opcode::SetBinSelectLow:
-    case Type3Opcode::SetBinSelectHigh:
-    case Type3Opcode::MeInit:
-      return true;
-    default:
-      return false;
-  }
-}
-
 [[nodiscard]] std::uint32_t constant_register_base(std::uint32_t type) {
   switch (type) {
     case 0: return 0x4000u;  // ALU constants.
@@ -190,6 +125,17 @@ struct DrawInitiatorFields {
   return format == IndexFormat::UInt32 ? 4u : 2u;
 }
 
+void record_gpu_wait_event(logging::events::EventKind kind, std::uint32_t address,
+                           std::uint32_t value) {
+  if (!logging::events::enabled()) return;
+  logging::events::Event event{};
+  event.kind = kind;
+  event.guest_address = address;
+  event.value = value;
+  event.source = "WAIT_REG_MEM";
+  logging::events::record(event);
+}
+
 }  // namespace
 
 class CommandProcessor::Reader {
@@ -222,6 +168,16 @@ class CommandProcessor::Reader {
     return value;
   }
 
+  // The next dword, without consuming it.
+  [[nodiscard]] std::uint32_t peek() const {
+    if (!remaining_) throw std::runtime_error("truncated GPU command packet");
+    std::array<std::byte, 4> snapshot{};
+    if (!memory_.copy_physical_range(base_ + index_ * 4u, snapshot)) {
+      throw std::runtime_error("GPU command read from invalid physical RAM");
+    }
+    return load_be32(snapshot.data());
+  }
+
   void skip(std::uint32_t dwords) {
     if (dwords > remaining_) {
       throw std::runtime_error("truncated PM4 conditional execution block");
@@ -247,6 +203,8 @@ CommandProcessor::CommandProcessor(memory::AddressSpace& memory,
 
 void CommandProcessor::reset() {
   registers_.reset();
+  last_wait_stall_ = {};
+  wait_park_recorded_ = false;
   stream_.clear();
   stats_ = {};
   active_vertex_shader_ = {};
@@ -285,6 +243,7 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   const std::uint32_t available = write_index >= read_index
                                       ? write_index - read_index
                                       : capacity_dwords - read_index + write_index;
+  ++stats_.ring_drains;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
 
@@ -308,6 +267,18 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   Reader reader(memory_, physical_address, capacity_dwords, read_index, available);
   while (reader.remaining()) {
     const std::uint32_t packet_start = reader.index();
+    // The write pointer can sit inside a packet the guest is still writing.
+    // The command processor then waits for the rest, as the hardware fetcher
+    // does: everything before it is applied and the read position is the
+    // packet's start. Failing the drain instead made the next drain replay
+    // every packet before it (draws, memory writes, fences, interrupts).
+    if (reader.remaining() < 1u + decode_packet_header(reader.peek()).count) {
+      ++stats_.incomplete_ring_packets;
+      resume_pending_ = false;
+      resume_frames_.clear();
+      resuming_ = false;
+      return packet_start;
+    }
     try {
       execute_packet(reader, 0);
     } catch (const WaitStalled&) {
@@ -430,6 +401,7 @@ void CommandProcessor::emit_register_write(std::uint32_t index,
       const std::array<std::byte, 4> bytes{
           static_cast<std::byte>(value >> 24), static_cast<std::byte>(value >> 16),
           static_cast<std::byte>(value >> 8), static_cast<std::byte>(value)};
+      before_guest_visible_effect();
       if (!memory_.write_physical(destination, bytes)) {
         throw std::runtime_error("Xenos scratch register write-back has no backing");
       }
@@ -455,6 +427,7 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   // The Xenos memory path is little-endian before the packet-selected endian
   // transformation; CPU-visible big-endian access is supplied by MemoryPort.
   const auto bytes = encode_le32(stored);
+  before_guest_visible_effect();
   if (!memory_.write_physical(address, bytes)) {
     throw std::runtime_error("Xenos physical write has no backing");
   }
@@ -650,6 +623,9 @@ void CommandProcessor::execute_wait_reg_mem(
   }
 
   ++stats_.wait_reg_mem_packets;
+  // What the wait polls may be written by the work before it (a resolve, a
+  // memory export).
+  before_guest_visible_effect();
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
@@ -671,6 +647,18 @@ void CommandProcessor::execute_wait_reg_mem(
     last_value = value;
     ++stats_.wait_reg_mem_polls;
     if (wait_condition_matches(wait_info, value, payload[2], payload[3])) {
+      if (wait_park_recorded_ && last_wait_stall_.memory == memory_source &&
+          last_wait_stall_.address == payload[1]) {
+        record_gpu_wait_event(logging::events::EventKind::GpuWaitResumed, payload[1], value);
+        wait_park_recorded_ = false;
+        const auto parked = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - park_started_)
+                .count());
+        ++stats_.parks_resumed;
+        stats_.parked_ns += parked;
+        stats_.longest_park_ns = (std::max)(stats_.longest_park_ns, parked);
+      }
       return;
     }
 
@@ -681,7 +669,21 @@ void CommandProcessor::execute_wait_reg_mem(
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
   }
   if (stall_on_unsatisfied_wait_) {
-    last_wait_stall_ = {true, memory_source, payload[1], wait_info, payload[2], payload[3], last_value};
+    const WaitStallInfo stall{true,       memory_source, payload[1], wait_info,
+                              payload[2], payload[3],    last_value};
+    // Record the park once per fence, not on every retried drain of it.
+    const bool same_fence = wait_park_recorded_ && last_wait_stall_.memory == stall.memory &&
+                            last_wait_stall_.address == stall.address &&
+                            last_wait_stall_.wait_info == stall.wait_info &&
+                            last_wait_stall_.reference == stall.reference &&
+                            last_wait_stall_.mask == stall.mask;
+    if (!same_fence) {
+      record_gpu_wait_event(logging::events::EventKind::GpuWaitParked, stall.address,
+                            stall.reference);
+      wait_park_recorded_ = true;
+      park_started_ = std::chrono::steady_clock::now();
+    }
+    last_wait_stall_ = stall;
     throw WaitStalled{};
   }
   // Say exactly what never became true: a title stuck here is waiting on hardware
@@ -707,6 +709,7 @@ void CommandProcessor::execute_wait_register(
         "PM4_WAIT_REG_EQ/GTE requires exactly 4 dwords");
   }
   const std::uint32_t register_index = payload[0];
+  before_guest_visible_effect();
   if (!registers_.valid(register_index)) {
     throw std::out_of_range("PM4 compact wait register outside register file");
   }
@@ -793,6 +796,7 @@ bool CommandProcessor::execute_im_store(
     throw std::out_of_range("PM4_IM_STORE destination outside physical RAM");
   }
 
+  before_guest_visible_effect();
   if (byte_count64) {
     auto write = memory_.physical_write_span(
         destination, static_cast<std::uint32_t>(byte_count64));
@@ -909,6 +913,7 @@ void CommandProcessor::execute_event_write_extent(
     encoded[i * 2u] = value[0];
     encoded[i * 2u + 1u] = value[1];
   }
+  before_guest_visible_effect();
   if (!memory_.write_physical(address, encoded)) {
     throw std::runtime_error("PM4_EVENT_WRITE_EXT write failed");
   }
@@ -958,6 +963,7 @@ void CommandProcessor::execute_interrupt(
   }
   ++stats_.interrupt_packets;
   if (!interrupt_callback_) return;
+  before_guest_visible_effect();
   for (std::uint32_t cpu = 0; cpu < 6u; ++cpu) {
     if ((payload[0] & (UINT32_C(1) << cpu)) == 0u) continue;
     interrupt_callback_(cpu);
@@ -980,6 +986,7 @@ void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload)
     throw std::out_of_range("Xenos physical write outside RAM");
   }
 
+  before_guest_visible_effect();
   auto write = memory_.physical_write_span(
       physical_base, static_cast<std::uint32_t>(byte_count64));
   if (!write) throw std::runtime_error("Xenos physical write has no backing");
@@ -1126,12 +1133,11 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     static std::atomic<int> _trunc_diag_count{0};
     const int _n = _trunc_diag_count.fetch_add(1) + 1;
     if (_n <= 10) {
-      if (FILE* _d = std::fopen("truncation_diag.log", "a")) {
-        std::fprintf(_d, "truncation #%d: opcode=%u raw=0x%08X requested_count=%u remaining=%u depth=%u predicate=%d\n",
-                     _n, static_cast<unsigned>(header.opcode), header.raw, header.count,
-                     reader.remaining(), depth, header.predicate ? 1 : 0);
-        std::fclose(_d);
-      }
+      xenon::logging::append_probe_log(
+          "truncation_diag.log",
+          "truncation #%d: opcode=%u raw=0x%08X requested_count=%u remaining=%u depth=%u predicate=%d\n",
+          _n, static_cast<unsigned>(header.opcode), header.raw, header.count, reader.remaining(),
+          depth, header.predicate ? 1 : 0);
     }
   }
   auto payload = read_payload(reader, header.count);
@@ -1266,8 +1272,9 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       stream_.emit(ir::ShaderPacket{header.opcode, payload});
       return;
     }
-    // Unknown/shared instruction-store selectors remain losslessly represented.
-    stream_.emit(ir::ShaderPacket{header.opcode, std::move(payload)});
+    // Unknown/shared instruction-store selectors were not executed.
+    ++stats_.unexecuted_packets;
+    stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
     return;
   }
 
@@ -1457,26 +1464,13 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     return;
   }
 
-  if (is_shader_opcode(header.opcode)) {
-    stream_.emit(ir::ShaderPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_sync_opcode(header.opcode)) {
-    stream_.emit(ir::SynchronizationPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_event_opcode(header.opcode)) {
-    stream_.emit(ir::EventPacket{header.opcode, std::move(payload)});
-    return;
-  }
-  if (is_state_opcode(header.opcode)) {
-    stream_.emit(ir::StatePacket{header.opcode, std::move(payload)});
-    return;
-  }
-
-  // Unknown/undocumented type-3 values are retained exactly. This is not a
-  // runtime emulation fallback: it is lossless frontend IR so a later analysis
-  // or backend can diagnose/implement the command without corrupting the stream.
+  // Everything above executed its packet before emitting it; the semantic IR
+  // variants (ShaderPacket, SynchronizationPacket, EventPacket, StatePacket)
+  // are records of work already done. A packet that reaches this point was
+  // not executed, whether or not its opcode is recognized, so it is emitted
+  // as an unlowered Type3Packet and counted: it must never look executed.
+  // The payload is retained exactly so it can be diagnosed or implemented.
+  ++stats_.unexecuted_packets;
   stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});
 }
 

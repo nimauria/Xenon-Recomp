@@ -4,6 +4,7 @@
 // kernel::KernelProcess + memory::AddressSpace, exactly as a guest thunk
 // would - mirrors tls_export_tests.cpp's fixture pattern.
 
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <memory>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/gpu/types.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -86,13 +88,16 @@ void test_ordinals_are_registered() {
   }
 }
 
-// VdInitializeRingBuffer must convert log2(size) to a dword capacity
-// (size_bytes = 1 << log2; capacity_dwords = size_bytes / 4) and store the
-// physical base address verbatim.
+// VdInitializeRingBuffer's r4 is log2 of the ring size in 8-byte units: the
+// ring is 1 << (r4 + 3) bytes (xenia's and rexglue's InitializeRingBuffer).
+// AC6 sizes its first ring with r4 = 12 and places its second ring exactly
+// 32 KiB later; read as 1 << r4 bytes the second ring was 16384 dwords
+// instead of 131072, the title's write pointer ran past the end and the
+// GPU stopped executing commands after 1366 frames.
 void test_initialize_ring_buffer_converts_log2_size() {
   Fixture fixture;
   constexpr std::uint32_t kBaseAddress = 0x0010'0000u;
-  constexpr std::uint32_t kSizeLog2 = 16u;  // 65536 bytes -> 16384 dwords
+  constexpr std::uint32_t kSizeLog2 = 16u;  // 512 KiB -> 131072 dwords
   cpu::CpuState cpu{};
   cpu.gpr[3] = kBaseAddress;
   cpu.gpr[4] = kSizeLog2;
@@ -100,8 +105,15 @@ void test_initialize_ring_buffer_converts_log2_size() {
 
   const auto ring = fixture.process->gpu_ring_buffer();
   assert(ring.base_address == kBaseAddress);
-  assert(ring.capacity_dwords == 65536u / 4u);
+  assert(ring.capacity_dwords == (1u << (kSizeLog2 + 3u)) / 4u);
   assert(ring.configured());
+
+  // AC6's first ring: r4 = 12 spans the 32 KiB up to its second ring.
+  cpu.gpr[3] = 0x19B38000u;
+  cpu.gpr[4] = 12u;
+  assert(fixture.invoke(kOrdInitializeRingBuffer, cpu).success);
+  const auto first = fixture.process->gpu_ring_buffer();
+  assert(first.base_address + first.capacity_dwords * 4u == 0x19B40000u);
 }
 
 // VdEnableRingBufferRPtrWriteBack must store the physical writeback address.
@@ -294,45 +306,81 @@ void test_swap_populates_front_buffer() {
   assert(front_buffer.pitch == kWidth * 4u);
   assert(front_buffer.format == kFormat);
   assert(front_buffer.generation >= 1u);
+  assert(!front_buffer.has_fetch_constant);
 }
 
-// VdSwap must also advance the ring buffer's write cursor by a real amount
-// derived from the guest's own ring-cursor pointer (buffer_ptr), including
-// correct wraparound modulo capacity_dwords.
-void test_swap_advances_ring_write_index() {
+// Regression (Ace Combat 6): VdSwap's second argument is the front buffer's
+// texture fetch constant, which says how scan-out reads it (tiled, endian
+// swap, pitch, format). It was ignored, the presented texture was described
+// from width/height alone and never valid, and every present failed with
+// "invalid Xenos texture descriptor" - a black window. VdSwap now keeps the
+// fetch constant with its base address set to the front buffer, as xenia's
+// VdSwap does.
+void test_swap_keeps_the_front_buffer_fetch_constant() {
   Fixture fixture;
-  constexpr std::uint32_t kCapacityDwords = 16u;
-  constexpr std::uint32_t kRingBytes = kCapacityDwords * 4u;
-  const auto ring_va = fixture.alloc(kRingBytes, 0x1000u);
+  const auto front_buffer_va = fixture.alloc(0x4000u, 0x1000u);
+  const auto physical = fixture.address_space->get_physical_address(front_buffer_va);
+  assert(physical != 0xFFFFFFFFu && (physical & 0xFFFu) == 0u);
+  const auto frontbuffer_cell = fixture.alloc(4u);
+  const auto format_cell = fixture.alloc(4u);
+  const auto width_cell = fixture.alloc(4u);
+  const auto height_cell = fixture.alloc(4u);
+  fixture.address_space->write32_be(frontbuffer_cell, front_buffer_va);
+  fixture.address_space->write32_be(format_cell, 6u);
+  fixture.address_space->write32_be(width_cell, 1280u);
+  fixture.address_space->write32_be(height_cell, 720u);
+  // A tiled 1280x720 k_8_8_8_8 texture, 8in32 endian, whose header holds a
+  // stale base address (0x12345000).
+  const std::array<std::uint32_t, 6> header{
+      0x80000002u | (1280u / 32u) << 22, 0x12345000u | 2u << 6 | 6u,
+      (1279u) | (719u << 13), 0x00000000u, 0x00000000u, 0x00000200u};
+  const auto fetch = fixture.alloc(24u, 16u);
+  for (std::uint32_t i = 0; i < 6u; ++i) fixture.address_space->write32_be(fetch + i * 4u, header[i]);
+  const auto stack = fixture.alloc(0x80u, 16u);
+  fixture.address_space->write32_be(stack + 0x54u, width_cell);
+  fixture.address_space->write32_be(stack + 0x5Cu, height_cell);
+
+  cpu::CpuState cpu{};
+  cpu.gpr[1] = stack;
+  cpu.gpr[3] = 0u;
+  cpu.gpr[4] = fetch;
+  cpu.gpr[8] = frontbuffer_cell;
+  cpu.gpr[9] = format_cell;
+  assert(fixture.invoke(kOrdSwap, cpu).success);
+
+  const auto front_buffer = fixture.process->gpu_front_buffer();
+  assert(front_buffer.has_fetch_constant);
+  auto expected = header;
+  expected[1] = (header[1] & 0xFFFu) | physical;
+  assert(front_buffer.fetch_constant == expected);
+}
+
+// VdSwap fills its reserved ring region but never moves the ring's write
+// pointer: the title publishes it with its own CP_RB_WPTR store, as on
+// hardware. Moving it as well raced that store - AC6's command processor
+// ended up past a write pointer VdSwap had moved backwards and replayed its
+// whole ring as new work.
+void test_swap_leaves_ring_write_index_to_the_title() {
+  Fixture fixture;
+  constexpr std::uint32_t kCapacityDwords = 256u;
+  const auto ring_va = fixture.alloc(kCapacityDwords * 4u, 0x1000u);
   const auto ring_physical = fixture.address_space->get_physical_address(ring_va);
   assert(ring_physical != 0xFFFFFFFFu);
   fixture.process->configure_gpu_ring_buffer(ring_physical, kCapacityDwords);
-
-  // Minimal front-buffer plumbing so the export's other half doesn't fault -
-  // point r8/r9 at zero (skipped) and leave width/height stack slots at 0
-  // via a small dedicated stack allocation.
   const auto stack = fixture.alloc(0x80u, 16u);
 
-  // First call: guest ring cursor sits at dword offset 10 within the ring.
-  {
-    cpu::CpuState cpu{};
-    cpu.gpr[1] = stack;
-    cpu.gpr[3] = ring_va + 10u * 4u;
-    assert(fixture.invoke(kOrdSwap, cpu).success);
-    // kSwapPacketDwords is 5 (documented in xboxkrnl_video_exports.cpp) ->
-    // (10 + 5) % 16 == 15.
-    assert(fixture.process->gpu_ring_buffer().write_index == 15u);
-  }
-
-  // Second call: cursor near the end of the ring must wrap around.
-  {
-    cpu::CpuState cpu{};
-    cpu.gpr[1] = stack;
-    cpu.gpr[3] = ring_va + 14u * 4u;
-    assert(fixture.invoke(kOrdSwap, cpu).success);
-    // (14 + 5) % 16 == 3.
-    assert(fixture.process->gpu_ring_buffer().write_index == 3u);
-  }
+  // The title has already published work up to dword 120; its swap region
+  // starts earlier, at dword 10.
+  fixture.process->set_gpu_ring_buffer_write_index(120u);
+  cpu::CpuState cpu{};
+  cpu.gpr[1] = stack;
+  cpu.gpr[3] = ring_va + 10u * 4u;
+  assert(fixture.invoke(kOrdSwap, cpu).success);
+  assert(fixture.process->gpu_ring_buffer().write_index == 120u);
+  // The 64 reserved dwords hold NOPs for the command processor to skip.
+  for (std::uint32_t i = 0; i < 64u; ++i)
+    assert(fixture.address_space->read32_be(ring_va + (10u + i) * 4u) ==
+           gpu::make_packet_type2());
 }
 
 }  // namespace
@@ -349,7 +397,8 @@ int main() {
   test_get_current_display_information_populates_struct();
   test_simple_return_value_exports();
   test_swap_populates_front_buffer();
-  test_swap_advances_ring_write_index();
+  test_swap_keeps_the_front_buffer_fetch_constant();
+  test_swap_leaves_ring_write_index_to_the_title();
 
   std::cout << "All xboxkrnl Vd* GPU control-plane export tests passed!\n";
   return 0;

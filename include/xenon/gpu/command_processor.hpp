@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -47,6 +48,11 @@ class CommandProcessor {
     // Ring-level waits that could not be satisfied yet and were suspended (the ring
     // read index stays at the wait packet and execution resumes there later).
     std::uint64_t wait_stalls{};
+    // How long parked waits lasted, from the drain that parked to the one
+    // that found the condition true (host steady-clock nanoseconds).
+    std::uint64_t parks_resumed{};
+    std::uint64_t parked_ns{};
+    std::uint64_t longest_park_ns{};
     // COHER_STATUS_HOST requests completed by a WAIT_REG_MEM poll.
     std::uint64_t coherency_syncs{};
     // SCRATCH_REGn writes mirrored to memory at SCRATCH_ADDR + n*4.
@@ -66,6 +72,14 @@ class CommandProcessor {
     std::uint64_t viz_query_visible_results{};
     std::uint64_t interrupt_packets{};
     std::uint64_t interrupt_dispatches{};
+    // Type-3 packets with no executor (NOP excepted), emitted as unlowered
+    // ir::Type3Packet. Nonzero is a real gap in the command processor.
+    std::uint64_t unexecuted_packets{};
+    // Ring drains that stopped before a packet extending past the write
+    // pointer, to continue once the guest submits the rest.
+    std::uint64_t incomplete_ring_packets{};
+    // execute_ring() calls: how often the pump drained (or retried) the ring.
+    std::uint64_t ring_drains{};
     // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
     // fallback audit"): a guest register write whose index is outside the
     // known register file. emit_register_write() still throws for this (a
@@ -105,6 +119,16 @@ class CommandProcessor {
       std::function<void(std::uint32_t cpu_index)> callback) {
     interrupt_callback_ = std::move(callback);
   }
+  // Called before every effect of the command stream a guest can observe:
+  // a write to guest memory (fences, MEM_WRITE, REG_TO_MEM, scratch
+  // write-back, EVENT_WRITE_EXT, IM_STORE), an interrupt, and the evaluation
+  // of a wait on memory or a register. On hardware those happen after the
+  // commands before them have executed, so a renderer that executes graphics
+  // IR after decoding installs a barrier that executes what is pending
+  // (GraphicsSystem::submit_ring(Backend&, ...)). Empty: decode only.
+  void set_guest_visible_barrier(std::function<void()> barrier) {
+    guest_visible_barrier_ = std::move(barrier);
+  }
 
   // The WAIT_REG_MEM the most recent stalled drain is parked on (diagnostics: a
   // title stuck at this point is waiting on state nothing in the host model sets).
@@ -118,6 +142,10 @@ class CommandProcessor {
     std::uint32_t last_value{};
   };
   [[nodiscard]] const WaitStallInfo& last_wait_stall() const noexcept { return last_wait_stall_; }
+  // A ring drain is suspended at an unsatisfied wait and resumes there at
+  // the next drain. What it waits for may be a guest CPU store, which raises
+  // no notification, so the drainer polls while this holds.
+  [[nodiscard]] bool parked_on_wait() const noexcept { return resume_pending_; }
 
   [[nodiscard]] const Statistics& statistics() const noexcept { return stats_; }
   [[nodiscard]] std::uint32_t max_indirect_depth() const noexcept {
@@ -216,6 +244,10 @@ class CommandProcessor {
   std::uint64_t viz_query_draws_{};
   std::uint32_t swap_counter_{};
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
+  std::function<void()> guest_visible_barrier_{};
+  void before_guest_visible_effect() {
+    if (guest_visible_barrier_) guest_visible_barrier_();
+  }
   std::uint64_t submission_dwords_{};
   std::uint32_t max_indirect_depth_{};
   // True while execute_ring() runs: an unsatisfied wait then suspends the drain
@@ -223,6 +255,9 @@ class CommandProcessor {
   // callers (captures, tools) keep the blocking behaviour.
   bool stall_on_unsatisfied_wait_{false};
   WaitStallInfo last_wait_stall_{};
+  // A GpuWaitParked event was recorded for last_wait_stall_ and no resume yet.
+  bool wait_park_recorded_{false};
+  std::chrono::steady_clock::time_point park_started_{};
 
   // Where a suspended wait sits inside nested indirect buffers, so the next drain
   // resumes AT the wait rather than replaying the buffer from its start.

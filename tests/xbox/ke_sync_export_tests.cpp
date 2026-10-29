@@ -10,10 +10,13 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
@@ -109,6 +112,111 @@ void test_ke_initialize_event_set_and_wait_round_trip() {
   result = f.invoke(0x0B0u, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+}
+
+// With diagnostic events on, a timed-out wait, the signal and the satisfied
+// wait are recorded against one kernel object, by guest thread, with the
+// timeout and the returned status.
+void test_waits_and_signals_are_recorded_as_diagnostic_events() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 1;  // SynchronizationEvent
+  cpu.gpr[5] = 0;
+  assert(f.invoke(0x070u, cpu).success);  // KeInitializeEvent
+
+  events::set_enabled(true);
+  events::clear();
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  cpu.gpr[7] = zero_timeout;
+  assert(f.invoke(0x0B0u, cpu, 11).success && cpu.gpr[3] == 0x00000102u);  // KeWaitForSingleObject
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 12).success);  // KeSetEvent
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x0B0u, cpu, 11).success && cpu.gpr[3] == 0u);
+  events::set_enabled(false);
+
+  const auto recorded = events::snapshot();
+  assert(recorded.size() == 5);
+  using events::EventKind;
+  const EventKind kinds[] = {EventKind::WaitBegin, EventKind::WaitEnd, EventKind::Signal,
+                             EventKind::WaitBegin, EventKind::WaitEnd};
+  const std::uint32_t threads[] = {11, 11, 12, 11, 11};
+  const std::uint32_t values[] = {0, 0x102u, 0, 0xFFFFFFFFu, 0};
+  for (std::size_t i = 0; i < recorded.size(); ++i) {
+    assert(recorded[i].kind == kinds[i]);
+    assert(recorded[i].guest_thread_id == threads[i]);
+    assert(recorded[i].value == values[i]);
+    assert(recorded[i].guest_address == header);
+    assert(recorded[i].object_id != 0 && recorded[i].object_id == recorded[0].object_id &&
+           "the waiter and the signaller name the same kernel object");
+  }
+  events::clear();
+}
+
+// A captured synthetic stall: t22 signals an auto-reset event, t23's wait
+// consumes it, and t21 then waits on it forever. The event snapshot alone
+// says which thread is stuck, on which object, and who last signalled it.
+void test_a_stalled_wait_is_explained_by_the_event_snapshot() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 1;  // SynchronizationEvent (auto-reset)
+  cpu.gpr[5] = 0;
+  assert(f.invoke(0x070u, cpu).success);  // KeInitializeEvent
+
+  events::set_enabled(true);
+  events::clear();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 22).success);  // KeSetEvent by t22
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x0B0u, cpu, 23).success && cpu.gpr[3] == 0u);  // t23 consumes it
+
+  std::thread stalled([&] {
+    cpu::CpuState waiter{};
+    waiter.gpr[3] = header;
+    waiter.gpr[7] = 0;  // NULL timeout: wait forever
+    waiter.lr = 0x82123450u;  // the guest code that called the export
+    assert(f.invoke(0x0B0u, waiter, 21).success);
+  });
+  // Wait (bounded) until t21's wait has begun.
+  std::vector<events::BlockedWait> waits;
+  for (int attempt = 0; attempt < 2000 && waits.empty(); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const auto snapshot = events::snapshot();
+    waits = events::blocked_waits(snapshot);
+  }
+  assert(waits.size() == 1);
+  assert(waits[0].guest_thread_id == 21 && waits[0].guest_address == header);
+  assert(waits[0].timeout_ms == 0xFFFFFFFFu);
+  assert(waits[0].guest_caller == 0x82123450u);
+  assert(waits[0].category == xenon::logging::FailureCategory::DeadlockCandidate);
+  assert(waits[0].last_signal && waits[0].last_signal->guest_thread_id == 22);
+  assert(!waits[0].signalled_after_wait_began &&
+         "the only signal came before the wait and another thread consumed it");
+  const auto text = events::format_blocked_waits(waits, waits[0].waiting_since_ns);
+  assert(text.find("t21 waits in KeWaitForSingleObject") != std::string::npos);
+  assert(text.find("last signalled by t22 in KeSetEvent") != std::string::npos);
+
+  // Release the stalled thread.
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = header;
+  assert(f.invoke(0x09Du, cpu, 22).success);
+  stalled.join();
+  assert(events::blocked_waits(events::snapshot()).empty());
+  events::set_enabled(false);
+  events::clear();
 }
 
 void test_repeated_calls_on_the_same_header_resolve_to_the_same_object() {
@@ -217,7 +325,7 @@ void test_ke_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = headers_array;
-  cpu.gpr[5] = 0;  // any
+  cpu.gpr[5] = 1;  // WaitAny (NT WAIT_TYPE)
   cpu.gpr[9] = zero_timeout;
   auto result = f.invoke(0x0AFu, cpu);  // KeWaitForMultipleObjects
   assert(result.handled && result.success);
@@ -226,11 +334,28 @@ void test_ke_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = headers_array;
-  cpu.gpr[5] = 1;  // all
+  cpu.gpr[5] = 0;  // WaitAll (NT WAIT_TYPE)
   cpu.gpr[9] = zero_timeout;
   result = f.invoke(0x0AFu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0x00000102u);  // header2 is not signaled -> timeout
+}
+
+void test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type() {
+  Fixture f;
+  const auto header = f.alloc_header();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = header;
+  cpu.gpr[4] = 0;  // NotificationEvent
+  cpu.gpr[5] = 1;  // signalled
+  assert(f.invoke(0x070u, cpu).success);
+  const auto headers = f.alloc64();
+  f.address_space->write32_be(headers, header);
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 1;
+  cpu.gpr[4] = headers;
+  cpu.gpr[5] = 2;  // neither WaitAll (0) nor WaitAny (1)
+  assert(f.invoke(0x0AFu, cpu).success && cpu.gpr[3] == 0xC000000Du);
 }
 
 void test_unsupported_dispatcher_type_is_rejected_not_misinterpreted() {
@@ -284,19 +409,242 @@ void test_ke_resume_thread_unknown_pointer_returns_invalid_handle() {
   assert(unknown_cpu.gpr[3] == 0xC0000008u);  // STATUS_INVALID_HANDLE
 }
 
+// Regression (AC6 audio): KeSetAffinityThread moves a thread to another
+// hardware thread, so the processor number in its KPCR (r13+0x10C) must
+// change with it; titles index per-processor state with that byte.
+void test_ke_set_affinity_thread_moves_the_kpcr_processor_number() {
+  static_assert(kernel::guest_processor_for_affinity(0x01u) == 0u);
+  static_assert(kernel::guest_processor_for_affinity(0x20u) == 5u);
+  static_assert(kernel::guest_processor_for_affinity(0x0Cu) == 3u);
+  static_assert(kernel::guest_processor_for_affinity(0x0u) == 0u);
+  static_assert(kernel::guest_processor_for_affinity(0xC0u) == 0u);
+
+  Fixture f;
+  kernel::ThreadCreationParams params{};
+  auto thread = f.process->thread_manager().create_thread([] { return 0u; }, params);
+  assert(thread);
+  memory::GuestAddress kthread{}, kpcr{}, previous{};
+  assert(f.address_space->allocate(0x1000, 16, memory::kReadWrite, false, kthread));
+  assert(f.address_space->allocate(0x1000, 16, memory::kReadWrite, false, kpcr));
+  previous = f.alloc64();
+  thread->set_guest_kthread_address(kthread);
+  thread->set_guest_kpcr_address(kpcr);
+
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = kthread;
+  cpu.gpr[4] = 0x10u;  // hardware thread 4
+  cpu.gpr[5] = previous;
+  core::ExportCallContext call{cpu, *f.address_space, 0, 0};
+  assert(xbox::ke_set_affinity_thread_export(*f.process, call));
+  assert(cpu.gpr[3] == 0u);
+  assert(thread->processor_affinity() == 0x10u);
+  assert(f.address_space->read8(kpcr + kernel::kGuestKpcrCurrentCpuOffset) == 4u);
+
+  cpu.gpr[3] = kthread;
+  cpu.gpr[4] = 0x02u;
+  assert(xbox::ke_set_affinity_thread_export(*f.process, call));
+  assert(f.address_space->read8(kpcr + kernel::kGuestKpcrCurrentCpuOffset) == 1u);
+  assert(f.address_space->read32_be(previous) == 0x10u);
+}
+
 }  // namespace
+
+// ---- Guest SignalState consistency -------------------------------------
+// On hardware a DISPATCHER_HEADER's SignalState is the object's state: the
+// kernel writes it on every signal, reset and consuming wait, and guest code
+// may read or write it directly.
+
+constexpr std::uint32_t kSignalState = 0x4u;
+
+struct KeCalls {
+  Fixture& f;
+  memory::GuestAddress zero_timeout;
+
+  explicit KeCalls(Fixture& fixture) : f(fixture), zero_timeout(fixture.alloc64()) {
+    f.address_space->write64_be(zero_timeout, 0);
+  }
+  void init_event(memory::GuestAddress header, bool auto_reset, bool signalled) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = header;
+    cpu.gpr[4] = auto_reset ? 1u : 0u;
+    cpu.gpr[5] = signalled ? 1u : 0u;
+    assert(f.invoke(0x070u, cpu).success);  // KeInitializeEvent
+  }
+  void init_semaphore(memory::GuestAddress header, std::uint32_t count, std::uint32_t limit) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = header;
+    cpu.gpr[4] = count;
+    cpu.gpr[5] = limit;
+    assert(f.invoke(0x074u, cpu).success);  // KeInitializeSemaphore
+  }
+  std::uint32_t call(std::uint32_t ordinal, memory::GuestAddress header, std::uint32_t r5 = 0) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = header;
+    cpu.gpr[5] = r5;
+    assert(f.invoke(ordinal, cpu).success);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  }
+  std::uint32_t set(memory::GuestAddress header) { return call(0x09Du, header); }
+  std::uint32_t reset(memory::GuestAddress header) { return call(0x08Fu, header); }
+  std::uint32_t release(memory::GuestAddress header, std::uint32_t n) {
+    return call(0x088u, header, n);
+  }
+  // KeWaitForSingleObject with a zero timeout: STATUS_SUCCESS or STATUS_TIMEOUT.
+  std::uint32_t poll(memory::GuestAddress header) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = header;
+    cpu.gpr[7] = zero_timeout;
+    assert(f.invoke(0x0B0u, cpu).success);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  }
+  std::uint32_t signal_state(memory::GuestAddress header) {
+    return f.address_space->read32_be(header + kSignalState);
+  }
+  void guest_writes(memory::GuestAddress header, std::uint32_t value) {
+    f.address_space->write32_be(header + kSignalState, value);
+  }
+};
+
+void test_event_signal_state_follows_every_change() {
+  Fixture f;
+  KeCalls ke(f);
+  const auto sync = f.alloc_header();
+  ke.init_event(sync, /*auto_reset=*/true, false);
+  assert(ke.reset(sync) == 0u && ke.signal_state(sync) == 0u);
+  assert(ke.set(sync) == 0u && ke.signal_state(sync) == 1u);
+  assert(ke.poll(sync) == 0u && ke.signal_state(sync) == 0u &&
+         "a satisfied wait on a synchronization event clears SignalState");
+  assert(ke.poll(sync) == 0x102u);
+
+  const auto notification = f.alloc_header();
+  ke.init_event(notification, /*auto_reset=*/false, false);
+  assert(ke.set(notification) == 0u && ke.signal_state(notification) == 1u);
+  assert(ke.poll(notification) == 0u && ke.signal_state(notification) == 1u &&
+         "a notification event stays signalled");
+  assert(ke.reset(notification) == 1u && ke.signal_state(notification) == 0u);
+}
+
+void test_semaphore_signal_state_is_its_count() {
+  Fixture f;
+  KeCalls ke(f);
+  const auto header = f.alloc_header();
+  ke.init_semaphore(header, 1, 4);
+  assert(ke.release(header, 2) == 1u && ke.signal_state(header) == 3u);
+  assert(ke.poll(header) == 0u && ke.signal_state(header) == 2u);
+
+  // A WaitAll consumes through the multi-object path.
+  const auto event = f.alloc_header();
+  ke.init_event(event, /*auto_reset=*/true, true);
+  const auto headers = f.alloc64();
+  f.address_space->write32_be(headers, header);
+  f.address_space->write32_be(headers + 4u, event);
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = 2;
+  cpu.gpr[4] = headers;
+  cpu.gpr[5] = 0;  // WaitAll
+  cpu.gpr[9] = ke.zero_timeout;
+  assert(f.invoke(0x0AFu, cpu).success && cpu.gpr[3] == 0u);
+  assert(ke.signal_state(header) == 1u && ke.signal_state(event) == 0u);
+}
+
+void test_a_signal_from_another_thread_updates_signal_state_for_the_waiter() {
+  Fixture f;
+  KeCalls ke(f);
+  const auto header = f.alloc_header();
+  ke.init_event(header, /*auto_reset=*/true, false);
+  assert(ke.reset(header) == 0u);
+  std::uint32_t status = 0xFFFFFFFFu;
+  std::thread waiter([&] {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = header;  // r7 = 0: no timeout
+    assert(f.invoke(0x0B0u, cpu, 31).success);
+    status = static_cast<std::uint32_t>(cpu.gpr[3]);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  assert(ke.set(header) == 0u);
+  waiter.join();
+  assert(status == 0u && ke.signal_state(header) == 0u);
+}
+
+void test_a_direct_guest_write_to_signal_state_is_adopted_and_recorded() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  KeCalls ke(f);
+  const auto header = f.alloc_header();
+  ke.init_event(header, /*auto_reset=*/true, false);
+  assert(ke.poll(header) == 0x102u);  // resolves the host object
+
+  events::set_enabled(true);
+  events::clear();
+  ke.guest_writes(header, 1u);
+  assert(ke.poll(header) == 0u && "the wait sees the state the guest wrote");
+  assert(ke.signal_state(header) == 0u);
+  ke.init_event(header, /*auto_reset=*/true, true);  // fresh, signalled
+  assert(ke.reset(header) == 1u);
+  assert(ke.set(header) == 0u);
+  ke.guest_writes(header, 0u);
+  assert(ke.poll(header) == 0x102u && "a guest-cleared event no longer satisfies a wait");
+  events::set_enabled(false);
+
+  std::size_t adopted = 0;
+  for (const auto& event : events::snapshot()) {
+    if (event.kind != events::EventKind::GuestStateAdopted) continue;
+    assert(event.guest_address == header && event.object_id != 0);
+    assert(event.value == (adopted == 0 ? 1u : 0u));
+    assert(std::string(event.source) == "KeWaitForSingleObject");
+    ++adopted;
+  }
+  assert(adopted == 2);
+  events::clear();
+}
+
+void test_an_impossible_guest_semaphore_count_is_rejected_and_recorded() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  KeCalls ke(f);
+  const auto header = f.alloc_header();
+  ke.init_semaphore(header, 0, 2);
+  assert(ke.poll(header) == 0x102u);
+  ke.guest_writes(header, 1u);
+  assert(ke.poll(header) == 0u && "a valid guest count is adopted");
+
+  events::set_enabled(true);
+  events::clear();
+  ke.guest_writes(header, 7u);  // above the limit of 2
+  assert(ke.poll(header) == 0x102u && "the semaphore keeps its own count (0)");
+  events::set_enabled(false);
+  bool rejected = false;
+  for (const auto& event : events::snapshot()) {
+    if (event.kind == events::EventKind::GuestStateRejected) {
+      assert(event.value == 7u && event.guest_address == header);
+      rejected = true;
+    }
+    assert(event.kind != events::EventKind::GuestStateAdopted);
+  }
+  assert(rejected);
+  events::clear();
+}
 
 int main() {
   std::cout << "Testing xboxkrnl Ke* sync exports...\n";
 
   test_ordinals_are_registered();
   test_ke_initialize_event_set_and_wait_round_trip();
+  test_waits_and_signals_are_recorded_as_diagnostic_events();
+  test_a_stalled_wait_is_explained_by_the_event_snapshot();
   test_repeated_calls_on_the_same_header_resolve_to_the_same_object();
   test_ke_semaphore_initialize_release_and_wait();
   test_ke_wait_for_multiple_objects_any_and_all();
+  test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type();
   test_unsupported_dispatcher_type_is_rejected_not_misinterpreted();
+  test_ke_set_affinity_thread_moves_the_kpcr_processor_number();
   test_ke_query_base_priority_thread_unknown_thread_is_safe();
   test_ke_resume_thread_unknown_pointer_returns_invalid_handle();
+  test_event_signal_state_follows_every_change();
+  test_semaphore_signal_state_is_its_count();
+  test_a_signal_from_another_thread_updates_signal_state_for_the_waiter();
+  test_a_direct_guest_write_to_signal_state_is_adopted_and_recorded();
+  test_an_impossible_guest_semaphore_count_is_rejected_and_recorded();
 
   std::cout << "All xboxkrnl Ke* sync export tests passed!\n";
   return 0;

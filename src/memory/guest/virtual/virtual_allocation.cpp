@@ -180,10 +180,9 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
   std::lock_guard lock(mutex_);
   const std::uint32_t _orig_size = size, _orig_alignment = alignment;
   if (!initialized_ || !size) {
-    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-      std::fprintf(_d, "EARLY FAIL: initialized_=%d size=%u\n", initialized_ ? 1 : 0, size);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log("allocate_early_fail_diag.log",
+                                     "EARLY FAIL: initialized_=%d size=%u\n", initialized_ ? 1 : 0,
+                                     size);
     return false;
   }
   const std::uint32_t page_size = requested_page_size.value_or(kBasePageSize);
@@ -195,18 +194,15 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
     }
   }
   if (!region) {
-    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-      std::fprintf(_d, "NO REGION FAIL: page_size=%u\n", page_size);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log("allocate_early_fail_diag.log",
+                                     "NO REGION FAIL: page_size=%u\n", page_size);
     return false;
   }
   alignment = std::max(alignment ? alignment : page_size, page_size);
   if (!std::has_single_bit(alignment)) {
-    if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-      std::fprintf(_d, "BAD ALIGNMENT FAIL: alignment=%u (orig=%u)\n", alignment, _orig_alignment);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log("allocate_early_fail_diag.log",
+                                     "BAD ALIGNMENT FAIL: alignment=%u (orig=%u)\n", alignment,
+                                     _orig_alignment);
     return false;
   }
   size = align_up(size, page_size);
@@ -214,14 +210,12 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
     static std::atomic<int> _alloc_entry_count{0};
     if (_alloc_entry_count.fetch_add(1) < 5 ||
         (_alloc_entry_count.load() % 1000) == 0) {
-      if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-        std::fprintf(_d,
-                     "ALLOCATE ENTRY #%d: region=[0x%08X-0x%08X] page_size=%u "
-                     "orig_size=%u rounded_size=%u alignment=%u top_down=%d\n",
-                     _alloc_entry_count.load(), region->base, region->end, page_size,
-                     _orig_size, size, alignment, top_down ? 1 : 0);
-        std::fclose(_d);
-      }
+      xenon::logging::append_probe_log(
+          "allocate_early_fail_diag.log",
+          "ALLOCATE ENTRY #%d: region=[0x%08X-0x%08X] page_size=%u "
+          "orig_size=%u rounded_size=%u alignment=%u top_down=%d\n",
+          _alloc_entry_count.load(), region->base, region->end, page_size, _orig_size, size,
+          alignment, top_down ? 1 : 0);
     }
   }
 
@@ -268,22 +262,18 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       if (free) {
         out_address = static_cast<GuestAddress>(candidate);
         if (!reserve_pages(out_address, size, protect, false)) {
-          if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-            std::fprintf(_d, "RESERVE_PAGES FAIL: addr=0x%08X size=%u\n",
-                         (unsigned)out_address, size);
-            std::fclose(_d);
-          }
+          xenon::logging::append_probe_log("allocate_early_fail_diag.log",
+                                           "RESERVE_PAGES FAIL: addr=0x%08X size=%u\n",
+                                           (unsigned)out_address, size);
           return false;
         }
         if (!options.commit) return true;
         const bool committed = commit_pages(out_address, size, protect,
                                             options.zero_initialize);
         if (!committed) {
-          if (FILE* _d = std::fopen("allocate_early_fail_diag.log", "a")) {
-            std::fprintf(_d, "COMMIT_PAGES FAIL: addr=0x%08X size=%u\n",
-                         (unsigned)out_address, size);
-            std::fclose(_d);
-          }
+          xenon::logging::append_probe_log("allocate_early_fail_diag.log",
+                                           "COMMIT_PAGES FAIL: addr=0x%08X size=%u\n",
+                                           (unsigned)out_address, size);
         }
         return committed;
       }
@@ -310,12 +300,11 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       if (candidate < region->base + alignment) break;
     }
   }
-  if (std::FILE* diag = std::fopen("virt_alloc_fail_diag.log", "a")) {
-    std::fprintf(diag, "VIRT_ALLOC_FAIL size=%u alignment=%u top_down=%d\n", size,
-                 alignment, top_down ? 1 : 0);
-    std::fclose(diag);
-  }
+  xenon::logging::append_probe_log("virt_alloc_fail_diag.log",
+                                   "VIRT_ALLOC_FAIL size=%u alignment=%u top_down=%d\n", size,
+                                   alignment, top_down ? 1 : 0);
   return false;
 }
 
-}  // namespace xenon::memory
+}  // namespace xenon::memory#include "xenon/logging/probe_log.hpp"
+

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 #include "xenon/core/json.hpp"
 
@@ -95,6 +96,34 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.renderer = root.get_string("renderer", "Automatic");
   out.shader_cache = root.get_bool("shaderCache", true);
   out.shader_cache_mode = root.get_string("shaderCacheMode", "Persistent");
+  if (const auto resolution = root.get_string("displayResolution"); !resolution.empty()) {
+    const auto separator = resolution.find_first_of("xX");
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (separator != std::string::npos) {
+      const auto parse = [](std::string_view text, std::uint32_t& value) {
+        if (text.empty() || text.size() > 5) return false;
+        value = 0;
+        for (const char c : text) {
+          if (c < '0' || c > '9') return false;
+          value = value * 10u + static_cast<std::uint32_t>(c - '0');
+        }
+        return true;
+      };
+      const std::string_view text{resolution};
+      if (!parse(text.substr(0, separator), width) ||
+          !parse(text.substr(separator + 1), height)) {
+        width = height = 0;
+      }
+    }
+    if (width < 320u || height < 240u || width > 16384u || height > 16384u) {
+      error = "Launch configuration field 'displayResolution' must be WIDTHxHEIGHT between "
+              "320x240 and 16384x16384: " + resolution;
+      return false;
+    }
+    out.display_width = width;
+    out.display_height = height;
+  }
 
   out.input_backend = root.get_string("inputBackend", "Automatic");
   out.input_preferred_device = root.get_string("inputPreferredDevice", "Automatic");
@@ -125,6 +154,8 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.audio_mute_unfocused = root.get_bool("audioMuteUnfocused", false);
   out.audio_latency_profile = root.get_string("audioLatencyProfile");
   out.log_verbose = root.get_bool("logVerbose", false);
+  out.diagnostic_events = root.get_bool("diagnosticEvents", false);
+  out.probe_logs = root.get_bool("probeLogs", false);
 
   out.memory_watch_addresses.clear();
   if (const auto* watch = root.find("memoryWatch")) {

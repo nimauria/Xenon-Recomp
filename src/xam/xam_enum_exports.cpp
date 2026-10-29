@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "xam/xam_overlapped.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/handle_table.hpp"
@@ -43,30 +44,39 @@ bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& s
     const auto buffer_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[5]);
     const auto buffer_length = static_cast<std::uint32_t>(ctx.cpu.gpr[6]);
     const auto items_returned_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[7]);
+    const auto overlapped = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[8]);
+    // Through an XOVERLAPPED the item count is the overlapped Length and the
+    // extended error is HRESULT_FROM_WIN32(result), as in rexglue-sdk;
+    // items_returned is then not written.
+    const auto finish = [&](std::uint32_t result, std::uint32_t items) {
+      if (overlapped == 0u) {
+        if (items_returned_ptr != 0u) ctx.memory.write32_be(items_returned_ptr, items);
+        ctx.cpu.gpr[3] = result;
+        return true;
+      }
+      const auto extended = result == 0u ? 0u : (0x80070000u | (result & 0xFFFFu));
+      ctx.cpu.gpr[3] = complete_overlapped(ctx, session.kernel_process(), overlapped, result,
+                                           extended, items);
+      return true;
+    };
 
     auto* process = session.kernel_process();
     kernel::HandleView view{};
     if (process == nullptr ||
         process->handle_table().lookup(handle, view) != kernel::KernelIoCode::Success ||
         !view.object || view.object->type() != kernel::ObjectType::Enumerator) {
+      // An invalid handle fails the call itself, with or without an overlapped.
       if (items_returned_ptr != 0u) ctx.memory.write32_be(items_returned_ptr, 0u);
       ctx.cpu.gpr[3] = kErrorInvalidHandle;
       return true;
     }
 
     auto* enumerator = static_cast<GuestEnumeratorObject*>(view.object.get());
-    if (buffer_ptr == 0u) {
-      ctx.cpu.gpr[3] = result::InvalidParameter;
-      return true;
-    }
+    if (buffer_ptr == 0u) return finish(result::InvalidParameter, 0u);
 
     std::vector<std::byte> batch;
     const auto copied = enumerator->next(batch);
-    if (copied == 0u) {
-      if (items_returned_ptr != 0u) ctx.memory.write32_be(items_returned_ptr, 0u);
-      ctx.cpu.gpr[3] = kErrorNoMoreFiles;
-      return true;
-    }
+    if (copied == 0u) return finish(kErrorNoMoreFiles, 0u);
 
     const auto item_size = enumerator->item_size();
     const auto max_bytes_from_caller_buffer =
@@ -79,9 +89,7 @@ bool register_enum_exports(core::ExportRegistry& registry, core::XenonSession& s
     }
     const auto items_written = item_size > 0u ? bytes_to_write / item_size : 0u;
 
-    if (items_returned_ptr != 0u) ctx.memory.write32_be(items_returned_ptr, items_written);
-    ctx.cpu.gpr[3] = result::Success;
-    return true;
+    return finish(result::Success, items_written);
   };
   ok = registry.register_export(std::move(desc)) && ok;
 

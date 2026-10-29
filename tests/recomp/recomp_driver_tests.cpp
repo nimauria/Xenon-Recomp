@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -115,6 +116,17 @@ int main() {
   assert(std::filesystem::exists(output / "analysis.json"));
   assert(std::filesystem::exists(output / "manifest.txt"));
   assert(std::filesystem::exists(output / "CMakeLists.txt"));
+  {
+    // Generated code targets the preparing machine's x86-64-v3 features when
+    // its CPU has them, never with FP contraction.
+    std::ifstream cmake_file(output / "CMakeLists.txt");
+    const std::string cmake((std::istreambuf_iterator<char>(cmake_file)),
+                            std::istreambuf_iterator<char>());
+    assert(cmake.find("option(XENON_GAME_X86_64_V3") != std::string::npos);
+    assert(cmake.find("check_cxx_source_runs") != std::string::npos);
+    assert(cmake.find("/arch:AVX2") != std::string::npos);
+    assert(cmake.find("-march=x86-64-v3 -ffp-contract=off") != std::string::npos);
+  }
   const auto first = std::filesystem::file_size(output / "functions" / "shard_000.cpp");
   assert(xenon::recomp::generate_project(options, report, error));
   assert(std::filesystem::file_size(output / "functions" / "shard_000.cpp") == first);

@@ -1,4 +1,5 @@
 #include "xenon/core/session.hpp"
+#include "xenon/cpu/call_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -47,10 +48,13 @@ SessionResult XenonSession::start() {
   }
   write_guest_thread_id(*memory_, main_thread_tls_, main_thread_->thread_id());
   main_thread_->set_guest_kthread_address(main_thread_tls_.kthread_address);
+  main_thread_->set_guest_kpcr_address(main_thread_tls_.kpcr_address);
   kernel_process_->set_main_thread(main_thread_);
-  logging::append_probe_log("thread_identity_diag.log", "main_thread_ assigned thread_id=%u\n", main_thread_->thread_id());
+  logging::append_probe_log("thread_identity_diag.log", "main_thread_ assigned thread_id=%u\n",
+                            main_thread_->thread_id());
   // Take the watch baseline before any guest code runs.
   start_memory_watch_poll();
+  start_guest_profile();
   if (!main_thread_->start()) {
     set_error("Failed to start main KernelThread");
     return SessionResult::failure(last_error_);
@@ -89,11 +93,11 @@ SessionResult XenonSession::stop() {
   }
 
   set_state(SessionState::Stopping, "Stop requested...");
-  stop_requested_.store(true);
 
   if (!execution_active_.load()) {
     // The execution thread never actually got into guest code (e.g. it
     // failed immediately), so it is safe to join synchronously here.
+    stop_requested_.store(true);
     if (main_thread_) static_cast<void>(main_thread_->join());
     set_state(SessionState::Stopped, "Game stopped");
     return SessionResult::ok("Game stopped", SessionState::Stopped);
@@ -101,16 +105,34 @@ SessionResult XenonSession::stop() {
 
   // A stop that finds the guest still executing usually means it is stalled
   // (blocked in a kernel wait or spinning). Say what each thread last asked the
-  // kernel for, so the stall can be diagnosed from the log alone.
+  // kernel for, so the stall can be diagnosed from the log alone. This runs
+  // before stop_requested_ is set: the main thread's dispatch loop exits on
+  // that flag and unregisters its registers, and a stall usually involves
+  // the main thread.
   report_stop_diagnostics();
+  cpu::call_trace::write_report();
+  stop_requested_.store(true);
 
-  // Already-running native compiled code cannot be preempted from here. The
-  // caller (runtime host) owns the actual hard-stop policy: wait for
-  // stop_requested()-aware code to exit cooperatively, then terminate the
-  // process if it does not. Report "Stopping" rather than blocking.
+  // Ends the kernel waits and delays guest threads are blocked in, after the
+  // report above has recorded them. Already-running native compiled code
+  // still cannot be preempted: a thread stops at its next block boundary.
+  // The caller (runtime host) owns the actual hard-stop policy: wait for the
+  // guest to exit cooperatively, then terminate the process if it does not.
+  // Report "Stopping" rather than blocking.
+  terminate_guest_threads(/*include_pumps=*/false);
   return SessionResult::ok(
       "Stop requested; waiting for guest execution to end cooperatively",
       SessionState::Stopping);
+}
+
+void XenonSession::terminate_guest_threads(bool include_pumps) noexcept {
+  if (!kernel_process_) return;
+  for (const auto& thread : kernel_process_->thread_manager().enumerate_threads()) {
+    if (!include_pumps && (thread == gpu_pump_thread_ || thread == gpu_vsync_thread_ ||
+                           thread == audio_thread_))
+      continue;
+    static_cast<void>(thread->terminate(0));
+  }
 }
 
 }  // namespace xenon::core

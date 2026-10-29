@@ -17,6 +17,7 @@
 // xbox.h (X_VIDEO_MODE), fetched 2026-09-27 - see the doc comment on each
 // export below for the specific citation.
 
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 
 #include <atomic>
@@ -49,14 +50,6 @@ using xenon::core::ExportCallContext;
 // untiled linear swap-chain surface D3D9's presentation blit produces is
 // exactly width * 4 for either valid format.
 constexpr std::uint32_t kFrontBufferBytesPerPixel = 4u;
-
-// Internal-only dword budget this implementation reserves per VdSwap call
-// when advancing the ring buffer's write cursor - see vd_swap_export's doc
-// comment for why this does not need to match real PM4_XE_SWAP's exact
-// on-hardware encoding (opcode header + kSwapSignature + physical address +
-// width + height, 5 dwords total in real hardware, which is what this
-// constant mirrors anyway for documentation purposes).
-constexpr std::uint32_t kSwapPacketDwords = 5u;
 
 // Reads a spilled (argument index 8+) 32-bit guest argument per this
 // codebase's documented PPC calling convention (docs/xbox/IMPORT_DISPATCH.md
@@ -215,15 +208,18 @@ bool vd_initialize_engines_export(kernel::KernelProcess& /*process*/,
 // VdInitializeRingBuffer (ordinal 0x1C3) - verified against xenia's
 // VdInitializeRingBuffer_entry, which delegates to
 // GraphicsSystem::InitializeRingBuffer(ptr, size_log2). r3 is the ring
-// buffer's physical base address; r4 is log2(size in bytes). size_bytes =
-// 1 << r4; capacity_dwords = size_bytes / 4, matching
+// buffer's physical base address; r4 is log2 of its size in 8-byte units,
+// so size_bytes = 1 << (r4 + 3) (xenia's primary_buffer_size_). AC6 places
+// its second ring exactly 1 << (12 + 3) bytes after a first ring set up with
+// r4 = 12. capacity_dwords = size_bytes / 4, matching
 // KernelProcess::GpuRingBufferState's dword-indexed contract.
 bool vd_initialize_ring_buffer_export(kernel::KernelProcess& process,
                                       ExportCallContext& context) {
   const auto base_address = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto size_log2 = static_cast<std::uint32_t>(context.cpu.gpr[4]);
 
-  const std::uint64_t size_bytes = (size_log2 < 32u) ? (std::uint64_t{1} << size_log2) : 0u;
+  const std::uint64_t size_bytes =
+      (size_log2 + 3u < 32u) ? (std::uint64_t{1} << (size_log2 + 3u)) : 0u;
   const auto capacity_dwords = static_cast<std::uint32_t>(size_bytes / 4u);
   process.configure_gpu_ring_buffer(base_address, capacity_dwords);
 
@@ -296,11 +292,10 @@ bool vd_set_graphics_interrupt_callback_export(kernel::KernelProcess& process,
                                                ExportCallContext& context) {
   const auto callback_address = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto callback_context = static_cast<std::uint32_t>(context.cpu.gpr[4]);
-  if (FILE* _d = std::fopen("vsync_callback_diag.log", "a")) {
-    std::fprintf(_d, "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
-                 callback_address, callback_context);
-    std::fclose(_d);
-  }
+  xenon::logging::append_probe_log(
+      "vsync_callback_diag.log",
+      "VdSetGraphicsInterruptCallback: callback_address=0x%08X callback_context=0x%08X\n",
+      callback_address, callback_context);
   process.set_gpu_interrupt_callback(callback_address, callback_context);
   context.cpu.gpr[3] = 0u;
   return true;
@@ -371,37 +366,36 @@ bool vd_shutdown_engines_export(kernel::KernelProcess& /*process*/,
 // PM4_XE_SWAP packet (with its own magic "kSwapSignature", the translated
 // physical front-buffer address, and width/height) directly into ring-buffer
 // bytes at buffer_ptr for the real Xenos command processor to later parse.
-// Xenon does not need byte-exact PM4 here: xboxkrnl_video_exports.cpp is the
-// only writer of the ring's write_index, and the GPU pump thread's
-// CommandProcessor/GraphicsSystem (a separate, already-landed workstream) is
-// the only reader of that same ring - nothing else round-trips through the
+// Xenon does not need byte-exact PM4 here: nothing round-trips through the
 // literal PM4 bytes this call would produce for the swap signal itself. So
 // this implementation does the genuinely guest-observable parts of VdSwap's
 // contract in full - decoding the real front-buffer address/format/
 // dimensions the game passed and publishing them via
 // KernelProcess::set_gpu_front_buffer() for the pump thread to present - and
-// treats the ring's internal PM4 byte encoding as free to simplify: it still
-// advances write_index by a real, guest-derived amount (the game's own ring
-// cursor position translated to a dword offset, plus kSwapPacketDwords for
-// the packet this call conceptually appends) so the pump thread's
-// execute_ring() call has real progress to drain, without claiming a false,
-// byte-exact PM4_XE_SWAP encoding this codebase does not actually produce.
+// fills the reserved ring region with NOPs. It never moves the ring's write
+// pointer: as on hardware, the title publishes the swap region and
+// everything before it with its own CP_RB_WPTR store once VdSwap returns.
+// Advancing it here as well raced that store - a swap landing after the
+// command processor had read further moved the write pointer backwards, the
+// read pointer ended up past it, and AC6 replayed its whole ring as new work
+// (324 million packets in three minutes).
 bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) {
   {
     static std::atomic<int> _vd_swap_call_count{0};
     const int _n = _vd_swap_call_count.fetch_add(1) + 1;
     // First 20 in full, then a running total every 60 swaps (~1 s at 60 Hz).
     if (_n <= 20 || _n % 60 == 0) {
-      if (FILE* _d = std::fopen("vdswap_calls_diag.log", "a")) {
-        std::fprintf(_d, "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
-                     _n, context.thread_id, (unsigned long long)context.cpu.lr,
-                     (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
-                     (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
-        std::fclose(_d);
-      }
+      xenon::logging::append_probe_log(
+          "vdswap_calls_diag.log",
+          "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
+          _n, context.thread_id, (unsigned long long)context.cpu.lr,
+          (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
+          (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
     }
   }
   const auto buffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  // The front buffer's Direct3D texture header: a texture fetch constant.
+  const auto fetch_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
   const auto frontbuffer_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[8]);
   const auto texture_format_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
   // color_space_ptr (r10) is read for completeness/documentation parity with
@@ -426,8 +420,21 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     const auto front_buffer_physical = address_space->get_physical_address(front_buffer_virtual);
     if (front_buffer_physical != 0xFFFFFFFFu) {
       const auto pitch = width * kFrontBufferBytesPerPixel;
-      process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
-                                   static_cast<std::uint8_t>(format));
+      if (fetch_ptr != 0u) {
+        // Scan-out reads the front buffer as this fetch constant describes
+        // it (tiled, endian-swapped, its own pitch). As xenia does, the base
+        // address is the front buffer the title passed, which the header
+        // need not carry yet.
+        std::array<std::uint32_t, 6> fetch{};
+        for (std::uint32_t i = 0; i < fetch.size(); ++i)
+          fetch[i] = context.memory.read32_be(fetch_ptr + i * 4u);
+        fetch[1] = (fetch[1] & 0xFFFu) | (front_buffer_physical & ~0xFFFu);
+        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
+                                     static_cast<std::uint8_t>(format), fetch);
+      } else {
+        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
+                                     static_cast<std::uint8_t>(format));
+      }
     }
   }
 
@@ -450,24 +457,6 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
     for (std::uint32_t i = 0; i < kReservedDwords; ++i) {
       context.memory.write32_be(buffer_ptr + i * 4u, kNopPacket);
     }
-  }
-
-  // Advance the ring buffer's write cursor by a real, guest-derived amount -
-  // see this function's doc comment for why the PM4 bytes themselves are not
-  // byte-exact.
-  const auto ring = process.gpu_ring_buffer();
-  if (ring.configured() && address_space != nullptr) {
-    auto base_write_index = ring.write_index;
-    const auto buffer_physical = address_space->get_physical_address(buffer_ptr);
-    if (buffer_physical != 0xFFFFFFFFu && buffer_physical >= ring.base_address) {
-      const auto byte_offset = buffer_physical - ring.base_address;
-      if (byte_offset % 4u == 0u) {
-        const auto candidate = byte_offset / 4u;
-        if (candidate < ring.capacity_dwords) base_write_index = candidate;
-      }
-    }
-    const auto new_write_index = (base_write_index + kSwapPacketDwords) % ring.capacity_dwords;
-    process.set_gpu_ring_buffer_write_index(new_write_index);
   }
 
   context.cpu.gpr[3] = 0u;

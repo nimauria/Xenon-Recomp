@@ -25,6 +25,30 @@ std::string_view to_string(ImportClassification classification) noexcept {
   return "MISSING";
 }
 
+std::optional<XexImportResolution> classify_xex_import(const ExportRegistry& registry,
+                                                       const xbox::XexImport& import) {
+  if (import.is_function_address()) return std::nullopt;
+
+  XexImportResolution resolution{};
+  if (import.is_variable()) {
+    if (!import.symbol.empty()) {
+      resolution.variable_address = registry.resolve_variable(import.module, import.symbol);
+    }
+    if (!resolution.variable_address) {
+      resolution.variable_address = registry.resolve_variable(import.module, import.ordinal);
+    }
+    resolution.status = resolution.variable_address ? ImportClassification::Implemented
+                                                    : ImportClassification::Missing;
+    return resolution;
+  }
+  if (import.callable()) {
+    resolution.function = !import.symbol.empty() ? registry.resolve(import.module, import.symbol)
+                                                 : registry.resolve(import.module, import.ordinal);
+  }
+  resolution.status = classify_import(resolution.function);
+  return resolution;
+}
+
 ImportCapabilityVerdict compute_import_capability_verdict(
     std::size_t implemented, std::size_t safe_stub, std::size_t partial,
     std::size_t missing) noexcept {

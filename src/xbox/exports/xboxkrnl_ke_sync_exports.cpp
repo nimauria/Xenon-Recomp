@@ -1,7 +1,6 @@
 #include "xenon/xbox/xboxkrnl_ke_sync_exports.hpp"
 
 #include <cstdint>
-#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -21,11 +20,14 @@
 #include "xenon/logging/logger.hpp"
 #include "xenon/xbox/xbox_time_convert.hpp"
 #include "xenon/xbox/xex_dispatcher_header.hpp"
+#include "xbox/exports/sync_events.hpp"
+#include "xbox/exports/user_apcs.hpp"
 
 namespace xenon::xbox {
 namespace {
 
 using xenon::core::ExportCallContext;
+using xenon::logging::events::EventKind;
 using xenon::kernel::KernelObject;
 using xenon::kernel::ObjectType;
 
@@ -57,7 +59,14 @@ std::uint32_t to_status(kernel::WaitResult result, std::uint32_t signaled_index_
   switch (result) {
     case kernel::WaitResult::Success: return signaled_index_as_status;
     case kernel::WaitResult::Timeout: return status::Timeout;
-    case kernel::WaitResult::Abandoned: return 0x00000080u;  // STATUS_ABANDONED_WAIT_0
+    // STATUS_ABANDONED_WAIT_0 + index, like STATUS_WAIT_0 + index.
+    case kernel::WaitResult::Abandoned: return 0x00000080u + signaled_index_as_status;
+    // The waiting thread is being terminated; the dispatch loop stops it at
+    // its next block boundary.
+    case kernel::WaitResult::Terminating: return 0xC000004Bu;  // STATUS_THREAD_IS_TERMINATING
+    // An alertable wait ended to run user APCs; they ran before this returns.
+    case kernel::WaitResult::UserApc: return 0x000000C0u;  // STATUS_USER_APC
+    case kernel::WaitResult::Alerted: return 0x00000101u;  // STATUS_ALERTED
     case kernel::WaitResult::Failed: return status::Unsuccessful;
   }
   return status::Unsuccessful;
@@ -111,14 +120,9 @@ bool ke_initialize_semaphore_export(kernel::KernelProcess&, ExportCallContext& c
 bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
-  if (FILE* _d = std::fopen("set_event_all_diag.log", "a")) {
-    std::fprintf(_d, "KeSetEvent: thread_id=%u header=0x%08X\n",
-                 (unsigned)context.thread_id, (unsigned)header_address);
-    std::fclose(_d);
-  }
-
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeSetEvent");
   if (!object || object->type() != ObjectType::Event) {
     log_resolution_failure("KeSetEvent", object ? "resolved object is not an Event" : error);
     context.cpu.gpr[3] = 0u;
@@ -128,6 +132,8 @@ bool ke_set_event_export(kernel::KernelProcess& process, ExportCallContext& cont
   auto& event = static_cast<kernel::KernelEvent&>(*object);
   const std::uint32_t previous = event.signaled() ? 1u : 0u;
   event.set();
+  sync_events::record(EventKind::Signal, context, object.get(), header_address, previous,
+                      "KeSetEvent");
   context.cpu.gpr[3] = previous;
   return true;
 }
@@ -138,7 +144,8 @@ bool ke_reset_event_export(kernel::KernelProcess& process, ExportCallContext& co
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeResetEvent");
   if (!object || object->type() != ObjectType::Event) {
     log_resolution_failure("KeResetEvent", object ? "resolved object is not an Event" : error);
     context.cpu.gpr[3] = 0u;
@@ -161,7 +168,8 @@ bool ke_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
   const auto adjustment = static_cast<std::int32_t>(context.cpu.gpr[5]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeReleaseSemaphore");
   if (!object || object->type() != ObjectType::Semaphore) {
     log_resolution_failure("KeReleaseSemaphore",
                            object ? "resolved object is not a Semaphore" : error);
@@ -179,62 +187,63 @@ bool ke_release_semaphore_export(kernel::KernelProcess& process, ExportCallConte
     context.cpu.gpr[3] = static_cast<std::uint32_t>(semaphore.count());
     return true;
   }
+  sync_events::record(EventKind::Signal, context, object.get(), header_address,
+                      static_cast<std::uint32_t>(previous), "KeReleaseSemaphore");
   context.cpu.gpr[3] = static_cast<std::uint32_t>(previous);
   return true;
 }
 
 // KeWaitForSingleObject (ordinal 0xB0)
 // Guest ABI: r3 = dispatcher object header pointer, r4 = wait reason
-// (ignored), r5 = processor mode (ignored), r6 = alertable (ignored),
+// (ignored), r5 = processor mode (ignored), r6 = alertable (user APCs run,
+// STATUS_USER_APC),
 // r7 = PLARGE_INTEGER timeout (nullable, NULL = infinite) -> r3 = NTSTATUS.
 bool ke_wait_for_single_object_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto header_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[6]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   std::string error;
-  auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+  auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                            "KeWaitForSingleObject");
   if (!object) {
     log_resolution_failure("KeWaitForSingleObject", error);
     context.cpu.gpr[3] = status::InvalidParameter;
     return true;
   }
 
-  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
-    std::fprintf(_d, "KeWaitForSingleObject ENTER: thread_id=%u header=0x%08X type=%d timeout_ptr=0x%08X object_ptr=%p\n",
-                 (unsigned)context.thread_id, (unsigned)header_address, (int)object->type(),
-                 (unsigned)timeout_ptr, (void*)object.get());
-    std::fclose(_d);
-  }
-
   const auto timeout = read_timeout(context, timeout_ptr);
-  const auto result = kernel::wait_for_single_object(object, timeout, context.thread_id);
+  sync_events::record(EventKind::WaitBegin, context, object.get(), header_address,
+                      sync_events::timeout_value(timeout), "KeWaitForSingleObject");
+  const auto result =
+      kernel::wait_for_single_object(object, timeout, context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/0u);
-
-  if (FILE* _d = std::fopen("ke_wait_diag.log", "a")) {
-    std::fprintf(_d, "KeWaitForSingleObject RETURNED: thread_id=%u header=0x%08X result=%d\n",
-                 (unsigned)context.thread_id, (unsigned)header_address, (int)result);
-    std::fclose(_d);
-  }
+  sync_events::record(EventKind::WaitEnd, context, object.get(), header_address,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "KeWaitForSingleObject");
   return true;
 }
 
 // KeWaitForMultipleObjects (ordinal 0xAF)
 // Guest ABI (matching the real, stable NT KeWaitForMultipleObjects
 // signature): r3 = count, r4 = object header pointer array (guest array of
-// GUEST ADDRESSES, not handles), r5 = wait type (0 = WaitAny, 1 = WaitAll),
+// GUEST ADDRESSES, not handles), r5 = wait type (NT WAIT_TYPE: 0 = WaitAll,
+// 1 = WaitAny; `typedef enum _WAIT_TYPE { WaitAll, WaitAny, ... }`),
 // r6 = wait reason (ignored), r7 = processor mode (ignored), r8 = alertable
-// (ignored), r9 = PLARGE_INTEGER timeout (nullable), r10 = wait block array
+// (user APCs run, STATUS_USER_APC), r9 = PLARGE_INTEGER timeout (nullable), r10 = wait block array
 // (ignored - real-hardware-only kernel bookkeeping, not needed here) ->
 // r3 = NTSTATUS.
 bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
                                         ExportCallContext& context) {
   const auto count = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   const auto headers_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[4]);
-  const auto wait_all = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const auto wait_type = static_cast<std::uint32_t>(context.cpu.gpr[5]);
+  const bool wait_all = wait_type == 0u;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[8]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[9]);
 
   constexpr std::uint32_t kMaxObjects = 64u;
-  if (count == 0u || count > kMaxObjects || headers_ptr == 0u) {
+  if (count == 0u || count > kMaxObjects || headers_ptr == 0u || wait_type > 1u) {
     context.cpu.gpr[3] = status::InvalidParameter;
     return true;
   }
@@ -244,7 +253,8 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   for (std::uint32_t i = 0; i < count; ++i) {
     const auto header_address = context.memory.read32_be(headers_ptr + i * 4u);
     std::string error;
-    auto object = resolve_dispatcher_object(process, context.memory, header_address, &error);
+    auto object = sync_events::resolve_header(process, context, header_address, &error,
+                                              "KeWaitForMultipleObjects");
     if (!object) {
       std::ostringstream detail;
       detail << error << " [entry " << i << " of " << count << " at array 0x" << std::hex
@@ -262,11 +272,26 @@ bool ke_wait_for_multiple_objects_export(kernel::KernelProcess& process,
   }
 
   const auto timeout = read_timeout(context, timeout_ptr);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    sync_events::record(EventKind::WaitBegin, context, objects[i].get(),
+                        context.memory.read32_be(headers_ptr + i * 4u),
+                        sync_events::timeout_value(timeout), "KeWaitForMultipleObjects");
+  }
   std::uint32_t signaled_index = 0;
   const auto result =
       kernel::wait_for_multiple_objects(objects, wait_all, timeout, &signaled_index,
-                                        context.thread_id);
+                                        context.thread_id, alertable);
+  if (result == kernel::WaitResult::UserApc) deliver_user_apcs(context);
   context.cpu.gpr[3] = to_status(result, /*signaled_index_as_status=*/signaled_index);
+  // A WaitAny names the object that satisfied it; a WaitAll or a failed wait
+  // has no single object.
+  const bool took_one =
+      result == kernel::WaitResult::Success || result == kernel::WaitResult::Abandoned;
+  const auto* satisfied = !wait_all && took_one && signaled_index < objects.size()
+                              ? objects[signaled_index].get()
+                              : nullptr;
+  sync_events::record(EventKind::WaitEnd, context, satisfied, 0u,
+                      static_cast<std::uint32_t>(context.cpu.gpr[3]), "KeWaitForMultipleObjects");
   return true;
 }
 
@@ -363,6 +388,12 @@ bool ke_set_affinity_thread_export(kernel::KernelProcess& process, ExportCallCon
     context.memory.write32_be(previous_affinity_ptr, target->processor_affinity());
   }
   target->set_processor_affinity(affinity);
+  // The thread now runs on the requested hardware thread, and code that
+  // reads its processor number (r13+0x10C) must see that one.
+  if (const auto kpcr = target->guest_kpcr_address(); kpcr != 0u) {
+    context.memory.write8(kpcr + kernel::kGuestKpcrCurrentCpuOffset,
+                          kernel::guest_processor_for_affinity(affinity));
+  }
   context.cpu.gpr[3] = status::Success;
   return true;
 }

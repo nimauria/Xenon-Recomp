@@ -198,6 +198,13 @@ const AesKey& devkit_key() noexcept {
   return key;
 }
 
+std::array<std::byte, 176> aes128_expand_key(const AesKey& key) noexcept {
+  const auto w = expand_key(key);
+  std::array<std::byte, 176> out{};
+  for (std::size_t i = 0; i < out.size(); ++i) out[i] = static_cast<std::byte>(w[i]);
+  return out;
+}
+
 void aes128_encrypt_block(const AesKey& key, const AesBlock& plaintext,
                           AesBlock& out_ciphertext) noexcept {
   const auto w = expand_key(key);

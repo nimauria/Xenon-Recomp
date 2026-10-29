@@ -10,6 +10,11 @@
 
 namespace xenon::core {
 
+std::uint32_t XenonSession::default_guest_stack_size() const noexcept {
+  return loaded_xex_ ? xbox::default_thread_stack_size(loaded_xex_->image)
+                     : xbox::kFallbackThreadStackSize;
+}
+
 bool XenonSession::create_guest_process() {
   if (!loaded_xex_ || !main_cpu_state_ || !memory_) {
     return false;
@@ -18,10 +23,9 @@ bool XenonSession::create_guest_process() {
   *main_cpu_state_ = cpu::CpuState{};
   main_cpu_state_->cia = loaded_xex_->image.entry_point;
 
-  // Allocate the main thread's stack. 1 MiB matches the Xbox 360's typical
-  // default thread stack size; games needing a different size do so via
-  // their own thread creation once running, not the initial stack.
-  constexpr std::uint32_t kDefaultStackSize = 1u * 1024u * 1024u;
+  // The main thread gets the image's XEX_HEADER_DEFAULT_STACK_SIZE, like the
+  // retail loader; titles budget their physical memory around it.
+  const std::uint32_t kDefaultStackSize = default_guest_stack_size();
   memory::GuestAddress stack_address{};
   if (!memory_->allocate(kDefaultStackSize, 16, memory::kReadWrite,
                         /*top_down=*/true, stack_address)) {
@@ -181,8 +185,10 @@ void XenonSession::release_partial_guest_process() noexcept {
   stop_gpu_pump_thread();
   if (memory_) {
     release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    release_guest_thread_tls_context(*memory_, gpu_vsync_thread_tls_);
   }
   gpu_pump_thread_tls_ = {};
+  gpu_vsync_thread_tls_ = {};
 }
 
 }  // namespace xenon::core

@@ -117,15 +117,30 @@ void emit_longjump_dispatch(std::ostringstream& o, std::string_view rr,
     << "=" << rr << "; goto " << kLongJumpLabel << "; }\n";
 }
 
+// A callee ending in a tail branch returns Branch; following it here returns
+// to this call site natively (see ExecutionContext::follow_tail_branches).
 void emit_call_result_check(std::ostringstream& o, std::string_view rr,
                             GuestAddress expected_return,
                             std::string_view indent = "  ") {
+  o << indent << "if(" << rr << ".reason==FlowReason::Branch) " << rr
+    << "=context.follow_tail_branches(" << rr << ");\n";
   emit_longjump_dispatch(o, rr, indent);
   o << indent << "if(" << rr << ".reason==FlowReason::Return) { if("
     << rr << ".next_address!=" << expected_return << "u) return " << rr
     << "; } else if(" << rr << ".reason!=FlowReason::Fallthrough) return "
     << rr << ";\n";
 }
+
+// A local branch to an address at or before the branch closes a loop. Every
+// such back-edge polls the thread's safepoint, so a guest thread spinning in
+// one compiled function can still be suspended or terminated; forward edges
+// cannot loop without passing a back-edge, so they need no poll.
+bool is_back_edge(const Instruction& i, const ir::Block& block, GuestAddress target) {
+  return target <= std::max<GuestAddress>(static_cast<GuestAddress>(i.guest_address),
+                                          block.guest_address);
+}
+
+constexpr std::string_view kSafepointPoll = "context.poll_safepoint(); ";
 
 std::string emit_one_in_function(const Instruction& i,
                                  const std::vector<Type>& value_types,
@@ -140,6 +155,7 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       o << "  state.nia=" << guest_target << "u;\n";
       if (local_targets.contains(guest_target)) {
+        if (is_back_edge(i, block, guest_target)) o << "  " << kSafepointPoll << "\n";
         o << "  goto " << local_label(guest_target) << ";\n";
       } else {
         o << "  return {FlowReason::Branch," << guest_target << "u,0};\n";
@@ -205,6 +221,7 @@ std::string emit_one_in_function(const Instruction& i,
       const auto guest_target = static_cast<GuestAddress>(*target);
       o << "  if(" << arg(i,0) << ") { state.nia=" << guest_target << "u; ";
       if (local_targets.contains(guest_target)) {
+        if (is_back_edge(i, block, guest_target)) o << kSafepointPoll;
         o << "goto " << local_label(guest_target) << "; }\n";
       } else {
         o << "return {FlowReason::Branch," << guest_target << "u,0}; }\n";
@@ -434,7 +451,9 @@ std::string CppAotBackend::emit_function(
     o << "    default: return " << kLongJumpResult << ";\n  }\n";
   }
   if (uses_local_branch) {
-    o << kLocalBranchLabel << ":\n  switch(" << kLocalBranchTarget << ") {\n";
+    // An indirect local branch may go backwards (a jump table inside a loop).
+    o << kLocalBranchLabel << ":\n  " << kSafepointPoll << "\n  switch("
+      << kLocalBranchTarget << ") {\n";
     for (const auto target : sorted_targets) {
       o << "    case " << target << "u: state.nia=" << target << "u; goto "
         << local_label(target) << ";\n";

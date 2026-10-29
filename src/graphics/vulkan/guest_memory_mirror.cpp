@@ -35,6 +35,7 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   memory_ = &memory;
   queue_ = &queue;
   coherency_.reset(memory::kPhysicalMemorySize, false);
+  upload_ring_.reset(kTransferSize);
   return true;
 }
 
@@ -45,6 +46,7 @@ void GuestMemoryMirror::reset() noexcept {
   upload_.reset();
   mirror_.reset();
   coherency_.clear();
+  upload_ring_.reset(0);
   shader_read_state_ = false;
   shader_write_state_ = false;
 }
@@ -71,25 +73,36 @@ bool GuestMemoryMirror::synchronize_range(
     return false;
   }
 
+  // Each range is staged in its own region of the upload ring and copied in
+  // queue order, ahead of the work that reads it; the CPU waits only when the
+  // ring wraps onto a region the GPU has not copied yet.
+  const auto wait = [&](std::uint64_t value) {
+    return queue_->flush() && queue_->wait_for_completion(value);
+  };
   for (const auto& range : plan.ranges) {
       const auto chunk_address = range.address;
       const auto chunk_size = range.size;
+      const auto offset = upload_ring_.reserve(chunk_size, queue_->completed_value(), wait);
+      if (!offset) {
+        error_ = queue_->error().empty() ? "Vulkan upload ring reservation failed"
+                                         : queue_->error();
+        return false;
+      }
       coherency_.commit_cpu_upload(chunk_address, chunk_size);
       if (!memory_->copy_physical_range(
-              chunk_address, upload_bytes.first(chunk_size))) {
+              chunk_address, upload_bytes.subspan(*offset, chunk_size))) {
         coherency_.rollback_cpu_upload(chunk_address, chunk_size);
         error_ = "failed to snapshot Xbox physical memory";
         return false;
       }
-      if (!queue_->execute([&](VkCommandBuffer command) {
+      if (!queue_->execute_async([&](VkCommandBuffer command, std::uint32_t,
+                                     std::uint32_t) {
+            // Earlier work in this batch or a previous one may still read or
+            // write the range.
             VkBufferMemoryBarrier2 before{
                 VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-            before.srcStageMask = (shader_read_state_ || shader_write_state_)
-                                      ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
-                                      : VK_PIPELINE_STAGE_2_NONE;
-            before.srcAccessMask =
-                (shader_read_state_ ? VK_ACCESS_2_MEMORY_READ_BIT : 0) |
-                (shader_write_state_ ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0);
+            before.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            before.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
             before.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
             before.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
             before.buffer = mirror_.buffer();
@@ -99,7 +112,7 @@ bool GuestMemoryMirror::synchronize_range(
             dependency.bufferMemoryBarrierCount = 1;
             dependency.pBufferMemoryBarriers = &before;
             vkCmdPipelineBarrier2(command, &dependency);
-            VkBufferCopy copy{0, chunk_address, chunk_size};
+            VkBufferCopy copy{*offset, chunk_address, chunk_size};
             vkCmdCopyBuffer(command, upload_.buffer(), mirror_.buffer(), 1,
                             &copy);
             VkBufferMemoryBarrier2 after{
@@ -118,6 +131,7 @@ bool GuestMemoryMirror::synchronize_range(
         error_ = queue_->error();
         return false;
       }
+      upload_ring_.commit(*offset, chunk_size, queue_->retirement_value());
       shader_read_state_ = true;
       shader_write_state_ = false;
   }
@@ -240,7 +254,9 @@ void GuestMemoryMirror::prepare_shader_access(VkCommandBuffer command,
   barrier.srcAccessMask =
       (shader_read_state_ ? VK_ACCESS_2_MEMORY_READ_BIT : 0) |
       (shader_write_state_ ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0);
-  barrier.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+  // GPU resolves write the mirror from compute.
+  barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                         VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
   barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT |
                           (writable ? VK_ACCESS_2_SHADER_WRITE_BIT : 0);

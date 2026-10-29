@@ -43,6 +43,28 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
+    add_executable(xenon_scanout_integration_tests
+      backends/scanout_integration.cpp)
+    target_link_libraries(xenon_scanout_integration_tests
+      PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_scanout_integration_tests
+        PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_scanout_integration_tests
+        PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_scanout_integration_tests
+        PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_scanout_integration_tests
+        PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_scanout_integration_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_scanout_integration_tests)
+    add_test(NAME xenon_scanout_integration_tests
+      COMMAND xenon_scanout_integration_tests)
     add_executable(xenon_cross_backend_canonical_tests
       backends/cross_backend_canonical.cpp)
     target_link_libraries(xenon_cross_backend_canonical_tests PRIVATE xenon_graphics)
@@ -83,6 +105,10 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_resource_ir_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_resource_ir_tests)
     add_test(NAME xenon_resource_ir_tests COMMAND xenon_resource_ir_tests)
+    add_executable(xenon_staging_ring_tests xenos/staging_ring.cpp)
+    target_link_libraries(xenon_staging_ring_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_staging_ring_tests)
+    add_test(NAME xenon_staging_ring_tests COMMAND xenon_staging_ring_tests)
     add_executable(xenon_resource_barrier_tests
       xenos/resource_barrier.cpp)
     target_link_libraries(xenon_resource_barrier_tests PRIVATE xenon_graphics)

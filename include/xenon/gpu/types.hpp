@@ -17,6 +17,7 @@ enum class ShaderStage : std::uint8_t {
   Vertex,
   Pixel,
   Geometry,
+  Compute,
 };
 
 enum class PrimitiveType : std::uint8_t {

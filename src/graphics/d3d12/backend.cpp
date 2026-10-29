@@ -15,10 +15,13 @@
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/depth_target.hpp"
+#include "xenon/gpu/d3d12/edram_transfer.hpp"
+#include "xenon/gpu/d3d12/gpu_resolve.hpp"
 #include "xenon/gpu/d3d12/guest_memory_mirror.hpp"
 #include "xenon/gpu/d3d12/pipeline.hpp"
 #include "xenon/gpu/d3d12/presentation.hpp"
 #include "xenon/gpu/d3d12/resource_layout.hpp"
+#include "xenon/gpu/d3d12/scanout.hpp"
 #include "xenon/gpu/d3d12/render_target.hpp"
 #include "xenon/gpu/d3d12/texture.hpp"
 #include "graphics/common/backend_core.hpp"
@@ -59,6 +62,7 @@ struct BackendApi {
   }
   // D3D12 has no FRONT_AND_BACK cull mode.
   static constexpr bool kEmulatesFrontAndBackCull = true;
+  static constexpr bool kSupportsDirectColorTransfer = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Dxil;
@@ -75,6 +79,49 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     (void)queue.wait_idle();
   }
   std::unordered_map<std::uint64_t, std::unique_ptr<RenderTargetImage>> dummy_render_targets{};
+  EdramColorTransfer edram_color_transfer{};
+  GpuResolver gpu_resolver{};
+
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
+    if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  ScanoutRenderer scanout{};
+
+  bool presentation_srgb_target() const { return false; }
+  PresentStatus present_scanout(const ScanoutConstants& constants) {
+    constexpr auto format = PresentationSwapchain::format();
+    if (!scanout.prepare(context.device(), format)) {
+      error = named(scanout.error());
+      return PresentStatus::Error;
+    }
+    return presentation.present(
+        [&](ID3D12GraphicsCommandList* list, D3D12_CPU_DESCRIPTOR_HANDLE target) {
+          scanout.record(list, mirror, target, format, constants);
+        });
+  }
+  bool capture_scanout_image(const ScanoutConstants& constants,
+                             PreparedPresentationFrame& output) {
+    if (scanout.capture(context.device(), queue, mirror, constants, output)) return true;
+    error = named(scanout.error());
+    return false;
+  }
+
+  bool transfer_color_tiles(RenderTargetImage& source, RenderTargetImage& destination,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (edram_color_transfer.transfer(context.device(), queue, source, destination, constants,
+                                      regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
 
   bool create_render_target(RenderTargetImage& image,
                             const EdramSurfaceLayout& surface,
@@ -297,6 +344,11 @@ bool Backend::make_edram_canonical() {
 
 bool Backend::invalidate_edram_native_state() {
   return impl_->invalidate_edram_native_state();
+}
+
+bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                              std::uint32_t height, PreparedPresentationFrame& output) {
+  return impl_->capture_scanout(frame, width, height, output);
 }
 
 PresentStatus Backend::present(const PresentationFrame& frame) {

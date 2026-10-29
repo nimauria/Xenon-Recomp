@@ -123,7 +123,8 @@ void sample_title_vsync_probes(memory::AddressSpace& memory, std::uint32_t inter
         }
         if (!label.empty()) {
           _label_dumped.store(true);
-          logging::append_probe_log("subsystem_label_diag.log", "label at 0x82067EC8: \"%s\"\n", label.c_str());
+          logging::append_probe_log("subsystem_label_diag.log", "label at 0x82067EC8: \"%s\"\n",
+                                    label.c_str());
         }
       } catch (const std::exception&) {
       }
@@ -138,9 +139,10 @@ void sample_title_vsync_probes(memory::AddressSpace& memory, std::uint32_t inter
   // called for either. This probe tests whether the GUEST's own memory at
   // the SignalState offset ever flips to nonzero anyway (i.e. the game
   // signals via a direct memory write, bypassing the KeSetEvent export
-  // entirely - a legitimate real-hardware "fast path" pattern) while
-  // Xenon's host-side KernelEvent, which only reads this field once at
-  // first resolution, never finds out. Logged on change only.
+  // entirely). The kernel now writes this field on every state change and
+  // adopts a direct guest write at the next Ke* call on the object, so a
+  // change here may be Xenon's own write; a direct write does not wake a
+  // waiter that is already blocked, as on hardware. Logged on change only.
   {
     static std::atomic<std::uint32_t> _last_sig1{0xFFFFFFFFu};
     static std::atomic<std::uint32_t> _last_sig2{0xFFFFFFFFu};

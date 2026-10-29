@@ -7,18 +7,24 @@
 // codes) is correct, not just the underlying kernel:: objects in isolation.
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <thread>
 
 #include "xenon/core/export_registry.hpp"
 #include "xenon/kernel/event.hpp"
 #include "xenon/kernel/handle_table.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/mutant.hpp"
+#include "xenon/kernel/object_description.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/kernel/semaphore.hpp"
+#include "xenon/kernel/thread.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xboxkrnl_sync_exports.hpp"
 
@@ -123,6 +129,49 @@ void test_nt_create_event_and_wait_single() {
   result = f.invoke(0x0FDu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0u);  // STATUS_WAIT_0
+}
+
+// Handle-based signals and waits record one kernel object, by guest thread;
+// NtSignalAndWaitForSingleObjectEx records its signal before its wait.
+void test_nt_waits_and_signals_are_recorded_as_diagnostic_events() {
+  namespace events = xenon::logging::events;
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1;  // SynchronizationEvent (auto-reset)
+  cpu.gpr[6] = 0;  // not signaled
+  assert(f.invoke(0x0D1u, cpu).success && cpu.gpr[3] == 0u);  // NtCreateEvent
+  const auto handle = f.address_space->read32_be(handle_out);
+
+  events::set_enabled(true);
+  events::clear();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  assert(f.invoke(0x0F6u, cpu, 31).success && cpu.gpr[3] == 0u);  // NtSetEvent
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  assert(f.invoke(0x0FDu, cpu, 32).success && cpu.gpr[3] == 0u);  // NtWaitForSingleObjectEx
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;  // signal
+  cpu.gpr[4] = handle;  // then wait on the same event
+  assert(f.invoke(0x0FBu, cpu, 33).success && cpu.gpr[3] == 0u);  // NtSignalAndWait...
+  events::set_enabled(false);
+
+  const auto recorded = events::snapshot();
+  assert(recorded.size() == 6);
+  using events::EventKind;
+  const EventKind kinds[] = {EventKind::Signal,    EventKind::WaitBegin, EventKind::WaitEnd,
+                             EventKind::Signal,    EventKind::WaitBegin, EventKind::WaitEnd};
+  const std::uint32_t threads[] = {31, 32, 32, 33, 33, 33};
+  for (std::size_t i = 0; i < recorded.size(); ++i) {
+    assert(recorded[i].kind == kinds[i] && recorded[i].guest_thread_id == threads[i]);
+    assert(recorded[i].guest_address == handle);
+    assert(recorded[i].object_id != 0 && recorded[i].object_id == recorded[0].object_id);
+  }
+  assert(recorded[1].value == 0xFFFFFFFFu && recorded[2].value == 0u);
+  assert(events::blocked_waits(recorded).empty());
+  events::clear();
 }
 
 void test_nt_pulse_event_signals_then_resets() {
@@ -290,6 +339,64 @@ void test_nt_create_mutant_uses_real_thread_id_and_ownership() {
   assert(!mutant.is_owned());
 }
 
+// A guest thread that exits owning a mutant abandons it; the next wait
+// returns STATUS_ABANDONED_WAIT_0 plus the mutant's index and takes ownership.
+void test_waits_report_a_mutant_abandoned_by_an_exiting_thread() {
+  Fixture f;
+  constexpr std::uint32_t kExitingThread = 42;
+  constexpr std::uint32_t kWaitingThread = 43;
+  const auto create_owned_mutant_and_exit = [&] {
+    const auto handle_out = f.alloc32();
+    kernel::ThreadCreationParams params{};
+    auto thread = std::make_shared<kernel::KernelThread>(
+        [&]() -> std::uint32_t {
+          cpu::CpuState cpu{};
+          cpu.gpr[3] = handle_out;
+          cpu.gpr[5] = 1;  // initial owner = true
+          assert(f.invoke(0x0D4u, cpu, kExitingThread).success && cpu.gpr[3] == 0u);
+          return 0;
+        },
+        params);
+    assert(thread->start() && thread->join());
+    return f.address_space->read32_be(handle_out);
+  };
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+
+  const auto single = create_owned_mutant_and_exit();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = single;
+  cpu.gpr[6] = zero_timeout;
+  assert(f.invoke(0x0FDu, cpu, kWaitingThread).success);
+  assert(cpu.gpr[3] == 0x00000080u);  // STATUS_ABANDONED_WAIT_0
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = single;
+  assert(f.invoke(0x0F2u, cpu, kWaitingThread).success && cpu.gpr[3] == 0u &&
+         "the waiter that took the abandoned mutant owns it");
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = single;
+  cpu.gpr[6] = zero_timeout;
+  assert(f.invoke(0x0FDu, cpu, kWaitingThread).success && cpu.gpr[3] == 0u &&
+         "abandonment is reported once");
+
+  const auto semaphore_out = f.alloc32();
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = semaphore_out;
+  cpu.gpr[5] = 0;  // count 0: never satisfies this wait
+  cpu.gpr[6] = 1;
+  assert(f.invoke(0x0D5u, cpu).success && cpu.gpr[3] == 0u);
+  const auto handles = f.alloc64();
+  f.address_space->write32_be(handles, f.address_space->read32_be(semaphore_out));
+  f.address_space->write32_be(handles + 4u, create_owned_mutant_and_exit());
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 2;
+  cpu.gpr[4] = handles;
+  cpu.gpr[5] = 1;  // wait type: WaitAny
+  cpu.gpr[8] = zero_timeout;
+  assert(f.invoke(0x0FEu, cpu, kWaitingThread).success);
+  assert(cpu.gpr[3] == 0x00000081u);  // STATUS_ABANDONED_WAIT_0 + 1
+}
+
 void test_nt_wait_for_multiple_objects_any_and_all() {
   Fixture f;
 
@@ -322,7 +429,7 @@ void test_nt_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = handles_array;
-  cpu.gpr[5] = 0;  // wait type: any
+  cpu.gpr[5] = 1;  // wait type: WaitAny (NT WAIT_TYPE)
   cpu.gpr[8] = zero_timeout;
   auto result = f.invoke(0x0FEu, cpu);
   assert(result.handled && result.success);
@@ -332,11 +439,42 @@ void test_nt_wait_for_multiple_objects_any_and_all() {
   cpu = cpu::CpuState{};
   cpu.gpr[3] = 2;
   cpu.gpr[4] = handles_array;
-  cpu.gpr[5] = 1;  // wait type: all
+  cpu.gpr[5] = 0;  // wait type: WaitAll (NT WAIT_TYPE)
   cpu.gpr[8] = zero_timeout;
   result = f.invoke(0x0FEu, cpu);
   assert(result.handled && result.success);
   assert(cpu.gpr[3] == 0x00000102u);  // STATUS_TIMEOUT
+}
+
+// NT WAIT_TYPE is WaitAll = 0, WaitAny = 1; anything else is rejected rather
+// than treated as one of them. A WaitAll naming one object twice can never be
+// satisfied and fails with STATUS_INVALID_PARAMETER_MIX; a WaitAny may.
+void test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1;  // count 1
+  cpu.gpr[6] = 2;
+  assert(f.invoke(0x0D5u, cpu).success && cpu.gpr[3] == 0u);  // NtCreateSemaphore
+  const auto handle = f.address_space->read32_be(handle_out);
+  const auto handles = f.alloc64();
+  f.address_space->write32_be(handles, handle);
+  f.address_space->write32_be(handles + 4u, handle);
+  const auto zero_timeout = f.alloc64();
+  f.address_space->write64_be(zero_timeout, 0);
+  const auto wait = [&](std::uint32_t wait_type) {
+    cpu = cpu::CpuState{};
+    cpu.gpr[3] = 2;
+    cpu.gpr[4] = handles;
+    cpu.gpr[5] = wait_type;
+    cpu.gpr[8] = zero_timeout;
+    assert(f.invoke(0x0FEu, cpu).success);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  };
+  assert(wait(2u) == 0xC000000Du);  // STATUS_INVALID_PARAMETER
+  assert(wait(0u) == 0xC0000030u);  // WaitAll: STATUS_INVALID_PARAMETER_MIX
+  assert(wait(1u) == 0u && "a WaitAny may name an object twice");
 }
 
 void test_nt_create_timer_set_and_cancel() {
@@ -422,6 +560,141 @@ void test_nt_signal_and_wait_signals_then_waits() {
   assert(bad_result.success && bad_cpu.gpr[3] != 0u);
 }
 
+// A stalled wait's report must name the object's last signaller however long
+// ago that was, so every guest signal is noted on the object itself, even
+// with diagnostic event recording off (AC6's main thread waited 42 s on a
+// handle whose last signal had long left the bounded event ring).
+void test_signals_are_noted_on_the_object_without_event_recording() {
+  namespace events = xenon::logging::events;
+  const bool was_enabled = events::enabled();
+  events::set_enabled(false);
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  cpu.gpr[5] = 1u;  // SynchronizationEvent (auto-reset)
+  assert(f.invoke(0x0D1u, cpu).success && cpu.gpr[3] == 0u);
+  const auto handle = f.address_space->read32_be(handle_out);
+  kernel::HandleView view{};
+  assert(f.process->handle_table().lookup(handle, view) == kernel::KernelIoCode::Success);
+  const auto now = [] {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+  assert(view.object->last_signal().count == 0u);
+  assert(kernel::describe_object_state(*view.object, now()) ==
+         "event (auto-reset) not signalled; never signalled through a recorded export");
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.lr = 0x821F4144u;
+  assert(f.invoke(0x0F6u, cpu, 7u).success && cpu.gpr[3] == 0u);  // NtSetEvent
+  auto note = view.object->last_signal();
+  assert(note.count == 1u && note.guest_thread_id == 7u && note.guest_caller == 0x821F4144u);
+  assert(std::string(note.source) == "NtSetEvent");
+  const auto text = kernel::describe_object_state(*view.object, now());
+  assert(text.rfind("event (auto-reset) signalled; last signalled by t7 (NtSetEvent from 0x821F4144)",
+                    0) == 0);
+  assert(text.find(", 1 signals") != std::string::npos);
+
+  // The signal half of NtSignalAndWaitForSingleObjectEx is noted too.
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = handle;
+  cpu.gpr[4] = handle;
+  cpu.lr = 0x821F58ACu;
+  assert(f.invoke(0x0FBu, cpu, 9u).success && cpu.gpr[3] == 0u);
+  note = view.object->last_signal();
+  assert(note.count == 2u && note.guest_thread_id == 9u &&
+         std::string(note.source) == "NtSignalAndWaitForSingleObjectEx");
+  events::set_enabled(was_enabled);
+}
+
+// I/O completion ports: packets come out in order with their key, APC
+// context, status and byte count; an empty port times out; a remove blocked
+// with no timeout ends when its thread is terminated.
+void test_io_completion_ports() {
+  Fixture f;
+  const auto handle_out = f.alloc32();
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = handle_out;
+  assert(f.invoke(0x0D3u, cpu).success && cpu.gpr[3] == 0u);
+  const auto port = f.address_space->read32_be(handle_out);
+
+  const auto set = [&](std::uint32_t key, std::uint32_t apc, std::uint32_t status, std::uint32_t bytes) {
+    cpu::CpuState c{};
+    c.gpr[3] = port;
+    c.gpr[4] = key;
+    c.gpr[5] = apc;
+    c.gpr[6] = status;
+    c.gpr[7] = bytes;
+    assert(f.invoke(0x0F8u, c).success && c.gpr[3] == 0u);
+  };
+  set(0x11u, 0x22u, 0u, 512u);
+  set(0x33u, 0x44u, 0xC0000011u, 0u);  // STATUS_END_OF_FILE
+
+  const auto key = f.alloc32();
+  const auto apc = f.alloc32();
+  const auto iosb = f.alloc64();
+  const auto timeout = f.alloc64();
+  f.address_space->write64_be(timeout, 0u);  // poll
+  const auto remove = [&](memory::GuestAddress timeout_ptr, std::uint32_t thread_id = 0u) {
+    cpu::CpuState c{};
+    c.gpr[3] = port;
+    c.gpr[4] = key;
+    c.gpr[5] = apc;
+    c.gpr[6] = iosb;
+    c.gpr[7] = timeout_ptr;
+    assert(f.invoke(0x0F4u, c, thread_id).success);
+    return static_cast<std::uint32_t>(c.gpr[3]);
+  };
+  assert(remove(timeout) == 0u);
+  assert(f.address_space->read32_be(key) == 0x11u && f.address_space->read32_be(apc) == 0x22u);
+  assert(f.address_space->read32_be(iosb) == 0u && f.address_space->read32_be(iosb + 4u) == 512u);
+  assert(remove(timeout) == 0u);
+  assert(f.address_space->read32_be(key) == 0x33u);
+  assert(f.address_space->read32_be(iosb) == 0xC0000011u && "the posted status is kept");
+  assert(remove(timeout) == 0x102u && "STATUS_TIMEOUT on an empty port");
+  f.address_space->write64_be(timeout, static_cast<std::uint64_t>(-200000));  // 20 ms relative
+  const auto started = std::chrono::steady_clock::now();
+  assert(remove(timeout) == 0x102u);
+  assert(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(15));
+
+  // A packet posted while a remover waits wakes it.
+  std::atomic<std::uint32_t> woken{0};
+  kernel::ThreadCreationParams params{};
+  auto waiter = f.process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        woken = remove(0u, kernel::KernelThread::current()->thread_id());
+        return 0;
+      },
+      params);
+  assert(waiter->start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  set(0x55u, 0u, 0u, 1u);
+  assert(waiter->join(5000));
+  assert(woken.load() == 0u && f.address_space->read32_be(key) == 0x55u);
+
+  // An infinite remove on an empty port ends when its thread is terminated.
+  std::atomic<std::uint32_t> terminated_status{0};
+  auto blocked = f.process->thread_manager().create_thread(
+      [&]() -> std::uint32_t {
+        terminated_status = remove(0u, kernel::KernelThread::current()->thread_id());
+        return 0;
+      },
+      params);
+  assert(blocked->start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  static_cast<void>(blocked->terminate(0));
+  assert(blocked->join(5000));
+  assert(terminated_status.load() == 0xC000004Bu && "STATUS_THREAD_IS_TERMINATING");
+
+  cpu = cpu::CpuState{};
+  cpu.gpr[3] = 0x1234u;
+  assert(f.invoke(0x0F8u, cpu).success && cpu.gpr[3] == 0xC0000008u && "STATUS_INVALID_HANDLE");
+  std::cout << "test_io_completion_ports passed\n";
+}
+
 }  // namespace
 
 int main() {
@@ -429,13 +702,18 @@ int main() {
 
   test_ordinals_are_registered();
   test_nt_create_event_and_wait_single();
+  test_nt_waits_and_signals_are_recorded_as_diagnostic_events();
   test_nt_pulse_event_signals_then_resets();
   test_ex_terminate_thread_sets_state_and_exit_code();
   test_nt_create_semaphore_release_and_limit();
   test_nt_create_mutant_uses_real_thread_id_and_ownership();
+  test_waits_report_a_mutant_abandoned_by_an_exiting_thread();
   test_nt_wait_for_multiple_objects_any_and_all();
+  test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();
+  test_signals_are_noted_on_the_object_without_event_recording();
+  test_io_completion_ports();
 
   std::cout << "All xboxkrnl sync export tests passed!\n";
   return 0;

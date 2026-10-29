@@ -134,6 +134,8 @@ void StatusWriter::write(core::XenonSession& session, const std::string& phase_m
   root.set("requestedRenderer", config_.renderer);
   root.set("shaderCache", config_.shader_cache);
   root.set("shaderCacheMode", config_.shader_cache_mode);
+  root.set("displayResolution", std::to_string(config_.display_width) + "x" +
+                                    std::to_string(config_.display_height));
   root.set("inputBackend", config_.input_backend);
   root.set("inputPreferredDevice", config_.input_preferred_device);
   root.set("inputDeadzone", config_.input_deadzone);

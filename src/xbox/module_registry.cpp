@@ -248,4 +248,10 @@ bool GuestModuleRegistry::is_module_handle(cpu::GuestAddress handle) const {
   return modules_.contains(handle);
 }
 
+bool GuestModuleRegistry::is_executable_handle(cpu::GuestAddress handle) const {
+  std::scoped_lock lock(mutex_);
+  const auto it = modules_.find(handle);
+  return it != modules_.end() && it->second.executable;
+}
+
 }  // namespace xenon::xbox

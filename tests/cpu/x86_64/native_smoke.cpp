@@ -33,6 +33,9 @@ ExecutionResult smoke_fcmpu(CpuState&,MemoryPort&,RuntimeServices&);
 ExecutionResult smoke_fcmpo(CpuState&,MemoryPort&,RuntimeServices&);
 
 int main(){
+  // The FPSCR status checks pin strict floating point (XENON_FP_STRICT=1);
+  // cpu_tests.cpp covers the native default.
+  aot::fp_strict_mode = true;
   CpuState s{}; FlatMemory mem(0x2000u,0x200u); NullRuntimeServices rt;
   assert(smoke_addi3(s,mem,rt).reason==FlowReason::Fallthrough);
   smoke_addi4(s,mem,rt); smoke_add(s,mem,rt);

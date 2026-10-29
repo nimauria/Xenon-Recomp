@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/core/guest_stack_walk.hpp"
 
 namespace xenon::core::detail {
 
@@ -77,7 +78,14 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
              << " r8=0x" << state.gpr[8]
              << " r9=0x" << state.gpr[9]
              << " r10=0x" << state.gpr[10]
-             << " r13=0x" << state.gpr[13] << ']';
+             << " r11=0x" << state.gpr[11]
+             << " r12=0x" << state.gpr[12]
+             << " r13=0x" << state.gpr[13];
+  // Callee-saved registers usually hold the object a faulting function is
+  // working on, which is what tracing a bad guest pointer back needs.
+  for (unsigned reg = 14u; reg < 32u; ++reg)
+    diagnostic << " r" << std::dec << reg << "=0x" << std::hex << state.gpr[reg];
+  diagnostic << ']';
   // The XEX loader already parsed the title's runtime-function directory.
   // Report coverage from that source of truth; coverage alone is not
   // evidence that a language/exception handler exists.
@@ -108,30 +116,17 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
   };
   append_function_metadata("cia", state.cia);
   append_function_metadata("lr", static_cast<cpu::GuestAddress>(state.lr));
-  // Diagnostic-only guest stack walk (read-only, never changes execution):
-  // standard PPC back-chain convention - [r1] = caller's saved r1, [r1+8] =
-  // caller's saved LR (the return address into this frame). Best-effort:
-  // a corrupt/absent frame chain stops the walk early rather than faulting
-  // again while already handling a fault.
+  // Diagnostic-only guest stack walk (read-only, never changes execution);
+  // see walk_guest_stack() for the Xbox 360 frame convention.
   {
     diagnostic << " stack=[";
-    auto frame = static_cast<memory::GuestAddress>(state.gpr[1]);
     bool first = true;
-    for (int depth = 0; depth < 16 && frame != 0u; ++depth) {
-      std::uint32_t saved_lr = 0u;
-      std::uint32_t next_frame = 0u;
-      try {
-        saved_lr = memory.read32_be(frame + 8u);
-        next_frame = memory.read32_be(frame);
-      } catch (const memory::MemoryFault&) {
-        break;
-      }
+    for (const auto& frame :
+         walk_guest_stack(memory, static_cast<std::uint32_t>(state.gpr[1]))) {
       if (!first) diagnostic << ',';
       first = false;
-      diagnostic << "0x" << std::hex << saved_lr;
-      append_function_metadata("stack", saved_lr);
-      if (next_frame <= frame) break;  // frame chain must strictly ascend
-      frame = static_cast<memory::GuestAddress>(next_frame);
+      diagnostic << "frame=0x" << std::hex << frame.frame << " ret=0x" << frame.return_address;
+      append_function_metadata("ret", frame.return_address);
     }
     diagnostic << ']' << std::dec;
   }
@@ -167,32 +162,6 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
     append_export_records("export_trace_global", export_trace.recent_global(64u));
   }
   return diagnostic.str();
-}
-
-std::string describe_dispatch_limit(const cpu::CpuState& state, const ExportTrace& export_trace,
-                                    std::uint32_t thread_id) {
-  std::ostringstream spin;
-  spin << "Guest execution exceeded the top-level dispatch limit [cia=0x" << std::hex
-       << std::uppercase << state.cia << " lr=0x" << state.lr << std::dec
-       << " last_exports=[";
-  const auto recent =
-      export_trace.recent_for_thread(thread_id, 12u);
-  for (std::size_t i = 0; i < recent.size(); ++i) {
-    const auto& trace = recent[i];
-    if (i != 0u) spin << ' ';
-    spin << trace.library_view() << '!';
-    if (!trace.name_view().empty()) {
-      spin << trace.name_view();
-    } else {
-      spin << trace.ordinal;
-    }
-    spin << "(ord=" << trace.ordinal << ",lr=0x" << std::hex << trace.lr << ",r3in=0x"
-         << trace.arguments[0] << ",r4=0x" << trace.arguments[1] << ",r5=0x"
-         << trace.arguments[2] << ",r6=0x" << trace.arguments[3] << ",ret=0x"
-         << trace.result_r3 << std::dec << ")";
-  }
-  spin << "]]";
-  return spin.str();
 }
 
 }  // namespace xenon::core::detail

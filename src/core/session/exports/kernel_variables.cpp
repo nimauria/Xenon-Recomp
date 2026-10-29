@@ -65,12 +65,6 @@ bool XenonSession::init_kernel_variable_exports() {
     memory_->write32_be(page + 0x0A0u, 0u);
     memory_->write32_be(page + 0x0E0u, 0u);
 
-    // KeTimeStampBundle is 24 bytes. It starts zeroed; time services can
-    // refresh it later without changing the exported address.
-    for (std::uint32_t offset = 0; offset < 24u; offset += 4u) {
-      memory_->write32_be(page + 0x020u + offset, 0u);
-    }
-
     // Retail-compatible kernel version storage. This follows the established
     // Xbox runtime convention used by recomp/emulation projects: major 2 and
     // permissive high build/revision fields for compatibility checks.
@@ -109,7 +103,10 @@ bool XenonSession::init_kernel_variable_exports() {
     return false;
   }
 
-  return true;
+  // The console's clock interrupt rewrites KeTimeStampBundle every
+  // millisecond; titles poll its TickCount for elapsed time (AC6's BGM thread
+  // steps its music fades by it), so a frozen bundle stops their clocks.
+  return time_stamp_clock_.start(memory_, page + 0x020u);
 }
 
 bool XenonSession::bind_xex_variable_imports() {

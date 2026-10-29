@@ -989,7 +989,47 @@ void RenderTargetImage::transition_to_color_attachment(
   layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 
+VkDescriptorSet RenderTargetImage::sampled_descriptor_set(VkDescriptorSetLayout set_layout) {
+  if (sampled_set_) return sampled_set_;
+  if (!device_ || !view_ || !set_layout) {
+    error_ = "Vulkan color target has no view to sample";
+    return VK_NULL_HANDLE;
+  }
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pool_info.maxSets = 1;
+  pool_info.poolSizeCount = 1;
+  pool_info.pPoolSizes = &pool_size;
+  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &sampled_pool_) != VK_SUCCESS) {
+    error_ = "Vulkan color target descriptor pool creation failed";
+    sampled_pool_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  allocate.descriptorPool = sampled_pool_;
+  allocate.descriptorSetCount = 1;
+  allocate.pSetLayouts = &set_layout;
+  if (vkAllocateDescriptorSets(device_, &allocate, &sampled_set_) != VK_SUCCESS) {
+    error_ = "Vulkan color target descriptor allocation failed";
+    vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+    sampled_pool_ = VK_NULL_HANDLE;
+    sampled_set_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorImageInfo image_info{};
+  image_info.imageView = view_;
+  image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  const VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_,
+                                   16, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &image_info,
+                                   nullptr, nullptr};
+  vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+  return sampled_set_;
+}
+
 void RenderTargetImage::reset() noexcept {
+  if (device_ && sampled_pool_) vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+  sampled_pool_ = VK_NULL_HANDLE;
+  sampled_set_ = VK_NULL_HANDLE;
   if (device_ && view_) vkDestroyImageView(device_, view_, nullptr);
   if (device_ && image_) vkDestroyImage(device_, image_, nullptr);
   if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);

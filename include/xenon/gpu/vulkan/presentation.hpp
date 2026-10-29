@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -27,7 +28,16 @@ class PresentationSwapchain {
                                 bool take_surface_ownership = false);
   void reset() noexcept;
   [[nodiscard]] bool resize(std::uint32_t width, std::uint32_t height);
-  [[nodiscard]] PresentStatus present(const PreparedPresentationFrame& frame);
+  // Records `draw` into the acquired image (in COLOR_ATTACHMENT_OPTIMAL
+  // layout, of format()) and presents it.
+  using DrawBackBuffer = std::function<void(VkCommandBuffer, VkImageView)>;
+  [[nodiscard]] PresentStatus present(const DrawBackBuffer& draw);
+  [[nodiscard]] VkFormat format() const noexcept { return surface_format_.format; }
+  // The surface re-encodes written colors to sRGB.
+  [[nodiscard]] bool srgb() const noexcept {
+    return surface_format_.format == VK_FORMAT_R8G8B8A8_SRGB ||
+           surface_format_.format == VK_FORMAT_B8G8R8A8_SRGB;
+  }
 
   [[nodiscard]] bool ready() const noexcept { return swapchain_ != VK_NULL_HANDLE; }
   [[nodiscard]] std::uint32_t width() const noexcept { return extent_.width; }
@@ -38,8 +48,7 @@ class PresentationSwapchain {
  private:
   struct ImageState {
     VkImage image{VK_NULL_HANDLE};
-    Buffer upload{};
-    std::span<std::byte> upload_mapping{};
+    VkImageView view{VK_NULL_HANDLE};
     VkSemaphore rendered{VK_NULL_HANDLE};
     std::uint64_t timeline_value{};
   };

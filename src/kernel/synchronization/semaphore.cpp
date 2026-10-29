@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "xenon/kernel/wait_util.hpp"
+#include "xenon/kernel/wait.hpp"
 
 namespace xenon::kernel {
 
@@ -16,41 +16,55 @@ bool KernelSemaphore::release(std::int32_t release_count, std::int32_t* previous
     return false;
   }
 
-  {
-    std::scoped_lock lock(mutex_);
-    if (previous_count) {
-      *previous_count = count_;
-    }
+  std::scoped_lock lock(mutex_);
+  return release_locked(release_count, previous_count);
+}
 
-    if (count_ + release_count > maximum_count_) {
-      return false;  // Would exceed maximum
-    }
-
-    count_ += release_count;
+bool KernelSemaphore::release_locked(std::int32_t release_count, std::int32_t* previous_count) {
+  if (release_count <= 0) {
+    return false;
+  }
+  if (previous_count) {
+    *previous_count = count_;
   }
 
-  // Notify waiting threads
-  if (release_count == 1) {
-    condition_.notify_one();
-  } else {
-    condition_.notify_all();
+  if (release_count > maximum_count_ - count_) {
+    return false;  // Would exceed maximum
   }
 
+  count_ += release_count;
+  // Released units go to waiters, oldest first, while any can take one.
+  multi_waiters_.satisfy_waiters_locked();
+  if (mirror_) mirror_->store(count_);
   return true;
 }
 
 bool KernelSemaphore::wait_for(std::chrono::milliseconds timeout) {
-  std::unique_lock lock(mutex_);
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return count_ > 0; })) {
-    return false;
-  }
-  --count_;
-  return true;
+  KernelObject* const self = this;
+  return wait_for_objects(std::span(&self, 1), false, timeout) == WaitResult::Success;
 }
 
 std::int32_t KernelSemaphore::count() const {
   std::scoped_lock lock(mutex_);
   return count_;
+}
+
+void KernelSemaphore::attach_signal_state_mirror(std::unique_ptr<SignalStateMirror> mirror) {
+  std::scoped_lock lock(mutex_);
+  mirror_ = std::move(mirror);
+  mirror_->store(count_);
+}
+
+GuestStateSync KernelSemaphore::reconcile_with_guest_state() {
+  std::scoped_lock lock(mutex_);
+  if (!mirror_) return GuestStateSync::Unchanged;
+  const auto guest_count = mirror_->load();
+  if (guest_count == count_) return GuestStateSync::Unchanged;
+  if (guest_count < 0 || guest_count > maximum_count_) return GuestStateSync::Rejected;
+  count_ = guest_count;
+  multi_waiters_.satisfy_waiters_locked();
+  if (count_ != guest_count) mirror_->store(count_);
+  return GuestStateSync::Adopted;
 }
 
 }  // namespace xenon::kernel

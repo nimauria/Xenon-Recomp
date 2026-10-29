@@ -90,6 +90,11 @@ bool register_locale_exports(core::ExportRegistry& registry, LocaleManager& loca
     desc.name = "XamQueryTimeZoneInformation";
     desc.ordinal = ordinal::XamQueryTimeZoneInformation;
     desc.requirement = core::ExportRequirement::Stubbed;
+    desc.partial = true;
+    desc.partial_note =
+        "ABI and structure unverified: no reference implements this export "
+        "(rexglue-sdk stubs it, xenia only lists it); writes the bias and the "
+        "two zone names at assumed offsets 0, 4 and 68";
     desc.handler = [&locale_manager](core::ExportCallContext& ctx) -> bool {
       const auto out_tz_ptr = static_cast<cpu::GuestAddress>(ctx.cpu.gpr[3]);
 

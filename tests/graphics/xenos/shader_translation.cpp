@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 #include "xenon/gpu/dxc_shader_compiler.hpp"
 #include "xenon/gpu/shader_translation.hpp"
@@ -233,6 +236,10 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
     for (const auto& diagnostic : lowered.diagnostics) std::cerr << diagnostic << '\n';
   }
   assert(lowered.complete);
+  assert(lowered.hlsl.find(
+             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.0);") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("source_index = asuint") == std::string::npos);
   assert(lowered.hlsl.find("xenon_vertex_fetch(5, 2, source_index") != std::string::npos);
   assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
          std::string::npos);
@@ -247,8 +254,36 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
 
   shader.instructions[0].vertex_fetch.data_format = 17;  // 11_11_10
   assert(HlslShaderLowerer::lower(shader).complete);
+  shader.instructions[0].vertex_fetch.index_rounded = true;
+  const auto rounded = HlslShaderLowerer::lower(shader);
+  assert(rounded.complete);
+  assert(rounded.hlsl.find(
+             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.5);") !=
+         std::string::npos);
   shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
   assert(!HlslShaderLowerer::lower(shader).complete);
+}
+
+// Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
+// grouper's index - the draw's index plus VGT_INDX_OFFSET, 24 bits, clamped
+// to [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX] - not the host's raw vertex id, or
+// every quad drawn at a StartVertex fetches the buffer's first vertices.
+void test_vertex_index_applies_grouper_offset_and_clamp() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("r[0].x = (float)xenon_vertex_index(vertex_id);") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("r[0].x = (float)vertex_id;") == std::string::npos);
+  assert(lowered.hlsl.find("uint4 vgt = XenonDrawState[1];") != std::string::npos);
+  assert(lowered.hlsl.find(
+             "clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu)") !=
+         std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
 }
 
 // Every Xenos texture fetch opcode with defined semantics lowers and compiles
@@ -352,6 +387,70 @@ void test_vertex_shader_texture_fetch_uses_explicit_lod() {
   assert(compiler.compile(lowered, spirv).succeeded);
 }
 
+struct Point2 {
+  double x, y;
+};
+
+double signed_area(Point2 p, Point2 q, Point2 r) {
+  return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+}
+
+bool strictly_inside(Point2 p, Point2 a, Point2 b, Point2 c) {
+  const double s0 = signed_area(a, b, p), s1 = signed_area(b, c, p),
+               s2 = signed_area(c, a, p);
+  return (s0 > 0 && s1 > 0 && s2 > 0) || (s0 < 0 && s1 < 0 && s2 < 0);
+}
+
+// Regression (AC6 logo fade): the geometry shader emitted the strip A,C,B,D,
+// whose shared v1-v2 edge C-B is a side, not the diagonal, so a corner wedge of
+// every rectangle stayed undrawn. Model the emitted strip on the CPU: every
+// interior point must be covered exactly once, with the input's winding.
+bool rectangle_strip_covers(const std::vector<char>& order,
+                            const std::array<Point2, 3>& input) {
+  // The shader's own vertex classification: A-B is the longest edge.
+  const auto d2 = [](Point2 p, Point2 q) {
+    return (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y);
+  };
+  const double d01 = d2(input[0], input[1]), d12 = d2(input[1], input[2]),
+               d20 = d2(input[2], input[0]);
+  Point2 a, b, c;
+  if (d01 >= d12 && d01 >= d20) { a = input[0]; b = input[1]; c = input[2]; }
+  else if (d12 >= d20) { a = input[1]; b = input[2]; c = input[0]; }
+  else { a = input[2]; b = input[0]; c = input[1]; }
+  const Point2 d{a.x + b.x - c.x, a.y + b.y - c.y};
+  std::array<Point2, 4> strip{};
+  if (order.size() != 4u) return false;
+  for (std::size_t i = 0; i < 4; ++i) {
+    switch (order[i]) {
+      case 'a': strip[i] = a; break;
+      case 'b': strip[i] = b; break;
+      case 'c': strip[i] = c; break;
+      case 'd': strip[i] = d; break;
+      default: return false;
+    }
+  }
+  // D3D/Vulkan strips: (v0,v1,v2), then (v2,v1,v3) for the odd triangle.
+  const double input_winding = signed_area(input[0], input[1], input[2]);
+  if (signed_area(strip[0], strip[1], strip[2]) * input_winding <= 0) return false;
+  if (signed_area(strip[2], strip[1], strip[3]) * input_winding <= 0) return false;
+
+  double min_x = a.x, max_x = a.x, min_y = a.y, max_y = a.y;
+  for (const auto& p : {b, c, d}) {
+    min_x = std::min(min_x, p.x); max_x = std::max(max_x, p.x);
+    min_y = std::min(min_y, p.y); max_y = std::max(max_y, p.y);
+  }
+  for (int iy = 1; iy < 64; ++iy) {
+    for (int ix = 1; ix < 64; ++ix) {
+      const Point2 p{min_x + (max_x - min_x) * (ix + 0.37) / 64.0,
+                     min_y + (max_y - min_y) * (iy + 0.21) / 64.0};
+      const int covered = int(strictly_inside(p, strip[0], strip[1], strip[2])) +
+                          int(strictly_inside(p, strip[1], strip[2], strip[3]));
+      if (covered != 1) return false;
+    }
+  }
+  return true;
+}
+
 void test_rectangle_list_geometry_shader() {
   using namespace xenon::gpu;
   const auto lowered = make_rectangle_list_geometry_shader();
@@ -359,6 +458,22 @@ void test_rectangle_list_geometry_shader() {
   assert(lowered.profile == "gs_6_0");
   assert(lowered.hlsl.find("d01 >= d12") != std::string::npos);
   assert(lowered.hlsl.find("maxvertexcount(4)") != std::string::npos);
+  // The emitted strip, as the shader appends it.
+  std::vector<char> order;
+  for (std::size_t at = lowered.hlsl.find("stream.Append("); at != std::string::npos;
+       at = lowered.hlsl.find("stream.Append(", at + 1)) {
+    order.push_back(lowered.hlsl[at + std::strlen("stream.Append(")]);
+    assert(lowered.hlsl[at + std::strlen("stream.Append(") + 1] == ')');
+  }
+  // Full-screen rectangle in each vertex rotation (the longest edge lands on
+  // every classification branch), plus a non-square, off-center one.
+  const std::array<Point2, 3> tl_tr_bl{{{-1, 1}, {1, 1}, {-1, -1}}};
+  assert(rectangle_strip_covers(order, tl_tr_bl));
+  assert(rectangle_strip_covers(order, {tl_tr_bl[1], tl_tr_bl[2], tl_tr_bl[0]}));
+  assert(rectangle_strip_covers(order, {tl_tr_bl[2], tl_tr_bl[0], tl_tr_bl[1]}));
+  assert(rectangle_strip_covers(order, {{{0.25, -0.5}, {0.25, 0.75}, {-0.6, -0.5}}}));
+  // The previous A,C,B,D strip shares side C-B and leaves a corner wedge.
+  assert(!rectangle_strip_covers({'a', 'c', 'b', 'd'}, tl_tr_bl));
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
   ShaderCompileOptions spirv{};
@@ -435,6 +550,38 @@ void test_memexport_translation_targets() {
 
 }  // namespace
 
+// Scalar operations read source 3, mulsc/addsc/subsc add a temporary operand,
+// and exports can write constant components: all of it must compile for both
+// DXIL and SPIR-V.
+void test_scalar_source_and_export_constants_compile() {
+  using namespace xenon::gpu;
+  for (const auto stage : {ShaderStage::Vertex, ShaderStage::Pixel}) {
+    auto shader = make_shader(stage);
+    auto& alu = shader.instructions[0].alu;
+    alu.scalar_opcode = 45;  // addsc
+    alu.sources[2].temporary = false;
+    alu.sources[2].index = 3;
+    alu.sources[2].relative = true;
+    alu.constant_address_register_relative = true;
+    alu.scalar_constant_temporary = 0;
+    alu.vector_write_mask = 0x3;
+    alu.scalar_write_mask = 0x6;
+    alu.scalar_destination_relative = true;
+    const auto lowered = HlslShaderLowerer::lower(shader);
+    assert(lowered.complete);
+    assert(lowered.hlsl.find("xenon_scalar_op(45, s2, s3t, ps") != std::string::npos);
+    DxcShaderCompiler compiler;
+    const auto dxil = compiler.compile(lowered, {});
+    if (!dxil.succeeded) {
+      for (const auto& diagnostic : dxil.diagnostics) std::cerr << diagnostic << '\n';
+    }
+    assert(dxil.succeeded);
+    ShaderCompileOptions spirv{};
+    spirv.format = ShaderBinaryFormat::Spirv;
+    assert(compiler.compile(lowered, spirv).succeeded);
+  }
+}
+
 int main() {
   test_lowering_is_deterministic();
   test_dxc_dual_target_and_cache();
@@ -442,10 +589,12 @@ int main() {
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
   test_vertex_fetch_select_endian_and_packed_formats();
+  test_vertex_index_applies_grouper_offset_and_clamp();
   test_texture_state_and_query_opcodes();
   test_vertex_shader_texture_fetch_uses_explicit_lod();
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
   test_memexport_translation_targets();
+  test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

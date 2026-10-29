@@ -1,0 +1,1030 @@
+[
+  {
+    "key": "general/startupPage",
+    "category": "general",
+    "type": "enum",
+    "label": "Startup Page",
+    "default": "Library",
+    "options": [
+      {
+        "label": "Home",
+        "value": "Home"
+      },
+      {
+        "label": "Library",
+        "value": "Library"
+      },
+      {
+        "label": "Downloads",
+        "value": "Downloads"
+      },
+      {
+        "label": "Modules",
+        "value": "Modules"
+      },
+      {
+        "label": "Profiles",
+        "value": "Profiles"
+      },
+      {
+        "label": "Captures",
+        "value": "Captures"
+      },
+      {
+        "label": "Network",
+        "value": "Network"
+      },
+      {
+        "label": "Support",
+        "value": "Support"
+      },
+      {
+        "label": "Settings",
+        "value": "Settings"
+      }
+    ]
+  },
+  {
+    "key": "general/sidebarMode",
+    "category": "general",
+    "type": "enum",
+    "label": "Sidebar Mode",
+    "default": "Auto",
+    "options": [
+      {
+        "label": "Auto",
+        "value": "Auto"
+      },
+      {
+        "label": "Expanded",
+        "value": "Expanded"
+      },
+      {
+        "label": "Compact",
+        "value": "Compact"
+      }
+    ]
+  },
+  {
+    "key": "general/restoreLastPage",
+    "category": "general",
+    "type": "bool",
+    "label": "Restore Last Page",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "general/animations",
+    "category": "general",
+    "type": "bool",
+    "label": "Animations",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "general/compact",
+    "category": "appearance",
+    "type": "bool",
+    "label": "Compact",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "system/rememberWindowGeometry",
+    "category": "system",
+    "type": "bool",
+    "label": "Remember Window Geometry",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "system/restoreMaximized",
+    "category": "system",
+    "type": "bool",
+    "label": "Restore Maximized",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "system/startMinimized",
+    "category": "system",
+    "type": "bool",
+    "label": "Start Minimized",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "appearance/themeBackdrop",
+    "category": "appearance",
+    "type": "bool",
+    "label": "Theme Backdrop",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "appearance/backdropIntensity",
+    "category": "appearance",
+    "type": "number",
+    "label": "Backdrop Intensity",
+    "default": 0.72,
+    "options": [
+      {
+        "label": "Subtle",
+        "value": 0.42
+      },
+      {
+        "label": "Standard",
+        "value": 0.72
+      },
+      {
+        "label": "Strong",
+        "value": 1
+      }
+    ],
+    "minimum": 0.2,
+    "maximum": 1
+  },
+  {
+    "key": "appearance/artworkBackgrounds",
+    "category": "appearance",
+    "type": "bool",
+    "label": "Artwork Backgrounds",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "appearance/decorLevel",
+    "category": "appearance",
+    "type": "enum",
+    "label": "Decor Level",
+    "default": "Balanced",
+    "options": [
+      {
+        "label": "Minimal",
+        "value": "Minimal"
+      },
+      {
+        "label": "Balanced",
+        "value": "Balanced"
+      },
+      {
+        "label": "Full",
+        "value": "Full"
+      }
+    ]
+  },
+  {
+    "key": "appearance/panelOpacity",
+    "category": "appearance",
+    "type": "number",
+    "label": "Panel Opacity",
+    "default": 0.94,
+    "options": [
+      {
+        "label": "0%",
+        "value": 0
+      },
+      {
+        "label": "25%",
+        "value": 0.25
+      },
+      {
+        "label": "50%",
+        "value": 0.5
+      },
+      {
+        "label": "75%",
+        "value": 0.75
+      },
+      {
+        "label": "100%",
+        "value": 1
+      }
+    ],
+    "minimum": 0,
+    "maximum": 1
+  },
+  {
+    "key": "library/showCompatibility",
+    "category": "library",
+    "type": "bool",
+    "label": "Show Compatibility",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "library/missingContent",
+    "category": "library",
+    "type": "enum",
+    "label": "Missing Content",
+    "default": "Show in catalogue",
+    "options": [
+      {
+        "label": "Show in catalogue",
+        "value": "Show in catalogue"
+      },
+      {
+        "label": "Hide missing content",
+        "value": "Hide missing content"
+      }
+    ]
+  },
+  {
+    "key": "library/filter",
+    "category": "library",
+    "type": "enum",
+    "label": "Filter",
+    "default": "All Games",
+    "options": [
+      {
+        "label": "All Games",
+        "value": "All Games"
+      },
+      {
+        "label": "Installed",
+        "value": "Installed"
+      },
+      {
+        "label": "Ready to Play",
+        "value": "Ready to Play"
+      },
+      {
+        "label": "Needs Attention",
+        "value": "Needs Attention"
+      },
+      {
+        "label": "Module Disabled",
+        "value": "Module Disabled"
+      },
+      {
+        "label": "Update Available",
+        "value": "Update Available"
+      },
+      {
+        "label": "Favorites",
+        "value": "Favorites"
+      }
+    ]
+  },
+  {
+    "key": "library/sort",
+    "category": "library",
+    "type": "enum",
+    "label": "Sort",
+    "default": "Recently Played",
+    "options": [
+      {
+        "label": "Recently Played",
+        "value": "Recently Played"
+      },
+      {
+        "label": "Recently Added",
+        "value": "Recently Added"
+      },
+      {
+        "label": "A-Z",
+        "value": "A-Z"
+      },
+      {
+        "label": "Z-A",
+        "value": "Z-A"
+      },
+      {
+        "label": "Playtime: High to Low",
+        "value": "Playtime: High to Low"
+      },
+      {
+        "label": "Playtime: Low to High",
+        "value": "Playtime: Low to High"
+      },
+      {
+        "label": "Favorites First",
+        "value": "Favorites First"
+      },
+      {
+        "label": "Updates First",
+        "value": "Updates First"
+      }
+    ]
+  },
+  {
+    "key": "library/viewMode",
+    "category": "library",
+    "type": "enum",
+    "label": "View Mode",
+    "default": "Focused",
+    "options": [
+      {
+        "label": "Focused",
+        "value": "Focused"
+      },
+      {
+        "label": "Carousel",
+        "value": "Carousel"
+      },
+      {
+        "label": "Grid",
+        "value": "Grid"
+      }
+    ]
+  },
+  {
+    "key": "library/gridDensity",
+    "category": "library",
+    "type": "enum",
+    "label": "Grid Density",
+    "default": "Auto",
+    "options": [
+      {
+        "label": "Auto",
+        "value": "Auto"
+      },
+      {
+        "label": "3",
+        "value": "3"
+      },
+      {
+        "label": "6",
+        "value": "6"
+      }
+    ]
+  },
+  {
+    "key": "library/wrapNavigation",
+    "category": "library",
+    "type": "bool",
+    "label": "Wrap Navigation",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "library/rememberSelection",
+    "category": "library",
+    "type": "bool",
+    "label": "Remember Selection",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "library/lastSelectedGameId",
+    "category": "internal",
+    "type": "string",
+    "label": "Last Selected Game Id",
+    "default": "",
+    "options": []
+  },
+  {
+    "key": "downloads/viewMode",
+    "category": "internal",
+    "type": "enum",
+    "label": "View Mode",
+    "default": "Overview",
+    "options": [
+      {
+        "label": "Overview",
+        "value": "Overview"
+      },
+      {
+        "label": "Active",
+        "value": "Active"
+      },
+      {
+        "label": "Ready",
+        "value": "Ready"
+      },
+      {
+        "label": "Issues",
+        "value": "Issues"
+      },
+      {
+        "label": "History",
+        "value": "History"
+      }
+    ]
+  },
+  {
+    "key": "runtime/graphicsBackend",
+    "category": "runtime",
+    "type": "enum",
+    "label": "Graphics Backend",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Vulkan",
+        "value": "Vulkan"
+      },
+      {
+        "label": "Direct3D 12",
+        "value": "Direct3D 12"
+      }
+    ]
+  },
+  {
+    "key": "runtime/offline",
+    "category": "runtime",
+    "type": "bool",
+    "label": "Offline",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "runtime/afterLaunch",
+    "category": "runtime",
+    "type": "enum",
+    "label": "After Launch",
+    "default": "Keep launcher open",
+    "options": [
+      {
+        "label": "Keep launcher open",
+        "value": "Keep launcher open"
+      },
+      {
+        "label": "Minimize launcher",
+        "value": "Minimize launcher"
+      },
+      {
+        "label": "Close launcher",
+        "value": "Close launcher"
+      }
+    ]
+  },
+  {
+    "key": "network/enabled",
+    "category": "network",
+    "type": "bool",
+    "label": "Enabled",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "network/environment",
+    "category": "network",
+    "type": "enum",
+    "label": "Environment",
+    "default": "Offline",
+    "options": [
+      {
+        "label": "Offline",
+        "value": "Offline"
+      },
+      {
+        "label": "Development",
+        "value": "Development"
+      },
+      {
+        "label": "Production",
+        "value": "Production"
+      }
+    ]
+  },
+  {
+    "key": "network/baseUrl",
+    "category": "network",
+    "type": "string",
+    "label": "Base Url",
+    "default": "",
+    "options": []
+  },
+  {
+    "key": "network/connectTimeoutMs",
+    "category": "network",
+    "type": "number",
+    "label": "Connect Timeout Ms",
+    "default": 5000,
+    "options": [],
+    "minimum": 250,
+    "maximum": 30000
+  },
+  {
+    "key": "network/requestTimeoutMs",
+    "category": "network",
+    "type": "number",
+    "label": "Request Timeout Ms",
+    "default": 10000,
+    "options": [],
+    "minimum": 500,
+    "maximum": 60000
+  },
+  {
+    "key": "graphics/shaderCache",
+    "category": "graphics",
+    "type": "bool",
+    "label": "Shader Cache",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "graphics/shaderCacheMode",
+    "category": "graphics",
+    "type": "enum",
+    "label": "Shader Cache Mode",
+    "default": "Persistent",
+    "options": [
+      {
+        "label": "Persistent",
+        "value": "Persistent"
+      },
+      {
+        "label": "Session only",
+        "value": "Session only"
+      }
+    ]
+  },
+  {
+    "key": "input/backend",
+    "category": "input",
+    "type": "enum",
+    "label": "Backend",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Native XInput",
+        "value": "Native XInput"
+      },
+      {
+        "label": "SDL",
+        "value": "SDL"
+      }
+    ]
+  },
+  {
+    "key": "input/preferredDevice",
+    "category": "input",
+    "type": "enum",
+    "label": "Preferred Device",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Controller",
+        "value": "Controller"
+      },
+      {
+        "label": "Keyboard & Mouse",
+        "value": "Keyboard & Mouse"
+      },
+      {
+        "label": "Flight Stick / HOTAS",
+        "value": "Flight Stick / HOTAS"
+      },
+      {
+        "label": "Multiple Sources",
+        "value": "Multiple Sources"
+      }
+    ]
+  },
+  {
+    "key": "input/backgroundInput",
+    "category": "input",
+    "type": "bool",
+    "label": "Background Input",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "input/rumble",
+    "category": "input",
+    "type": "bool",
+    "label": "Rumble",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "input/deadzone",
+    "category": "input",
+    "type": "number",
+    "label": "Deadzone",
+    "default": 0.1,
+    "options": [
+      {
+        "label": "5%",
+        "value": 0.05
+      },
+      {
+        "label": "10%",
+        "value": 0.1
+      },
+      {
+        "label": "15%",
+        "value": 0.15
+      },
+      {
+        "label": "20%",
+        "value": 0.2
+      },
+      {
+        "label": "25%",
+        "value": 0.25
+      },
+      {
+        "label": "30%",
+        "value": 0.3
+      }
+    ],
+    "minimum": 0,
+    "maximum": 0.5
+  },
+  {
+    "key": "audio/masterVolume",
+    "category": "audio",
+    "type": "number",
+    "label": "Master Volume",
+    "default": 1,
+    "options": [
+      {
+        "label": "25%",
+        "value": 0.25
+      },
+      {
+        "label": "50%",
+        "value": 0.5
+      },
+      {
+        "label": "75%",
+        "value": 0.75
+      },
+      {
+        "label": "100%",
+        "value": 1
+      }
+    ],
+    "minimum": 0,
+    "maximum": 1
+  },
+  {
+    "key": "audio/muteUnfocused",
+    "category": "audio",
+    "type": "bool",
+    "label": "Mute Unfocused",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "audio/latencyProfile",
+    "category": "audio",
+    "type": "enum",
+    "label": "Latency Profile",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Low latency",
+        "value": "Low latency"
+      },
+      {
+        "label": "Balanced",
+        "value": "Balanced"
+      },
+      {
+        "label": "Stable",
+        "value": "Stable"
+      }
+    ]
+  },
+  {
+    "key": "updates/automaticChecks",
+    "category": "updates",
+    "type": "bool",
+    "label": "Automatic Checks",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "updates/checkInterval",
+    "category": "updates",
+    "type": "enum",
+    "label": "Check Interval",
+    "default": "Daily",
+    "options": [
+      {
+        "label": "At startup",
+        "value": "At startup"
+      },
+      {
+        "label": "Daily",
+        "value": "Daily"
+      },
+      {
+        "label": "Weekly",
+        "value": "Weekly"
+      },
+      {
+        "label": "Manual",
+        "value": "Manual"
+      }
+    ]
+  },
+  {
+    "key": "updates/prerelease",
+    "category": "updates",
+    "type": "bool",
+    "label": "Prerelease",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "updates/modules",
+    "category": "updates",
+    "type": "bool",
+    "label": "Modules",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "updates/modulePrerelease",
+    "category": "updates",
+    "type": "bool",
+    "label": "Module Prerelease",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "community/discordRichPresence",
+    "category": "community",
+    "type": "bool",
+    "label": "Discord Rich Presence",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "community/discordShowGameTitle",
+    "category": "community",
+    "type": "bool",
+    "label": "Discord Show Game Title",
+    "default": true,
+    "options": []
+  },
+  {
+    "key": "accessibility/textScale",
+    "category": "accessibility",
+    "type": "number",
+    "label": "Text Scale",
+    "default": 1,
+    "options": [
+      {
+        "label": "100%",
+        "value": 1
+      },
+      {
+        "label": "110%",
+        "value": 1.1
+      },
+      {
+        "label": "125%",
+        "value": 1.25
+      },
+      {
+        "label": "150%",
+        "value": 1.5
+      },
+      {
+        "label": "175%",
+        "value": 1.75
+      },
+      {
+        "label": "200%",
+        "value": 2
+      }
+    ],
+    "minimum": 1,
+    "maximum": 2
+  },
+  {
+    "key": "accessibility/highContrast",
+    "category": "accessibility",
+    "type": "bool",
+    "label": "High Contrast",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "accessibility/reduceMotion",
+    "category": "accessibility",
+    "type": "bool",
+    "label": "Reduce Motion",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "accessibility/enhancedFocus",
+    "category": "accessibility",
+    "type": "bool",
+    "label": "Enhanced Focus",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "developer/fixtureMode",
+    "category": "developer",
+    "type": "enum",
+    "label": "Fixture Mode",
+    "default": "none",
+    "options": [
+      {
+        "label": "None",
+        "value": "none"
+      },
+      {
+        "label": "Generic Xenon UI",
+        "value": "generic"
+      },
+      {
+        "label": "Project Gracemeria UI Preview",
+        "value": "gracemeria"
+      }
+    ]
+  },
+  {
+    "key": "developer/verboseLogging",
+    "category": "developer",
+    "type": "bool",
+    "label": "Verbose Logging",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "developer/modeEnabled",
+    "category": "about",
+    "type": "bool",
+    "label": "Mode Enabled",
+    "default": false,
+    "options": []
+  },
+  {
+    "key": "ui/theme",
+    "category": "appearance",
+    "label": "Theme",
+    "type": "enum",
+    "default": "system",
+    "options": [
+      {
+        "label": "System",
+        "value": "system"
+      },
+      {
+        "label": "Xenon Dark",
+        "value": "xenon-dark"
+      },
+      {
+        "label": "Carbon",
+        "value": "carbon"
+      },
+      {
+        "label": "Industrial",
+        "value": "industrial"
+      },
+      {
+        "label": "Light",
+        "value": "light"
+      }
+    ]
+  },
+  {
+    "key": "ui/accent",
+    "category": "appearance",
+    "label": "Accent colour",
+    "type": "enum",
+    "default": "default",
+    "options": [
+      {
+        "label": "Theme default",
+        "value": "default"
+      },
+      {
+        "label": "Cyan",
+        "value": "cyan"
+      },
+      {
+        "label": "Emerald",
+        "value": "emerald"
+      },
+      {
+        "label": "Amber",
+        "value": "amber"
+      },
+      {
+        "label": "Violet",
+        "value": "violet"
+      },
+      {
+        "label": "Rose",
+        "value": "rose"
+      },
+      {
+        "label": "Custom",
+        "value": "custom"
+      }
+    ]
+  },
+  {
+    "key": "ui/corners",
+    "category": "appearance",
+    "label": "Corner style",
+    "type": "enum",
+    "default": "rounded",
+    "options": [
+      {
+        "label": "Rounded",
+        "value": "rounded"
+      },
+      {
+        "label": "Soft",
+        "value": "soft"
+      },
+      {
+        "label": "Square",
+        "value": "square"
+      }
+    ]
+  },
+  {
+    "key": "ui/customAccent",
+    "category": "appearance",
+    "label": "Custom accent colour",
+    "type": "string",
+    "default": "#35D7EA",
+    "options": []
+  },
+  {
+    "key": "appearance/backdropVariant/carbon",
+    "category": "appearance",
+    "label": "Background variant",
+    "type": "enum",
+    "default": "nebula",
+    "options": [
+      {
+        "label": "nebula",
+        "value": "nebula"
+      },
+      {
+        "label": "tech",
+        "value": "tech"
+      }
+    ]
+  },
+  {
+    "key": "appearance/backdropVariant/industrial",
+    "category": "appearance",
+    "label": "Background variant",
+    "type": "enum",
+    "default": "orbit",
+    "options": [
+      {
+        "label": "orbit",
+        "value": "orbit"
+      },
+      {
+        "label": "tech",
+        "value": "tech"
+      }
+    ]
+  },
+  {
+    "key": "appearance/backdropVariant/light",
+    "category": "appearance",
+    "label": "Background variant",
+    "type": "enum",
+    "default": "minimal",
+    "options": [
+      {
+        "label": "minimal",
+        "value": "minimal"
+      }
+    ]
+  },
+  {
+    "key": "appearance/backdropVariant/xenon-dark",
+    "category": "appearance",
+    "label": "Background variant",
+    "type": "enum",
+    "default": "orbit",
+    "options": [
+      {
+        "label": "orbit",
+        "value": "orbit"
+      },
+      {
+        "label": "tech",
+        "value": "tech"
+      },
+      {
+        "label": "hud",
+        "value": "hud"
+      }
+    ]
+  }
+]

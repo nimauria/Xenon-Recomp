@@ -33,9 +33,20 @@ class XamSocketManager {
   XamSocketManager(const XamSocketManager&) = delete;
   XamSocketManager& operator=(const XamSocketManager&) = delete;
 
-  // af/type/protocol are the guest's raw AF_INET/SOCK_* values, which are numerically
-  // identical to the host's (both are Berkeley-socket-derived). Returns kInvalidHandle
-  // and records a WSA error for `thread_id` on failure.
+  // Xbox Live's Voice and Data Protocol (IPPROTO_VDP, 254) is carried in UDP
+  // datagrams and has no host equivalent, so a VDP socket is a host UDP socket
+  // (xenia maps it the same way). Payloads are not re-framed: VDP's
+  // [cbGameData][game data][voice data] layout only matters to a peer console.
+  static constexpr std::uint32_t kGuestProtocolVdp = 254u;
+  static constexpr std::uint32_t kHostProtocolUdp = 17u;
+  [[nodiscard]] static constexpr std::uint32_t host_socket_protocol(std::uint32_t protocol) noexcept {
+    return protocol == kGuestProtocolVdp ? kHostProtocolUdp : protocol;
+  }
+
+  // af/type are the guest's raw AF_INET/SOCK_* values, numerically identical to the
+  // host's (both are Berkeley-socket-derived); protocol goes through
+  // host_socket_protocol(). Returns kInvalidHandle and records a WSA error for
+  // `thread_id` on failure.
   [[nodiscard]] GuestHandle create(std::uint32_t af, std::uint32_t type,
                                    std::uint32_t protocol, std::uint32_t thread_id);
   // Registers an already-open native socket descriptor (e.g. accept()'s

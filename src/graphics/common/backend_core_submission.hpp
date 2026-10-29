@@ -94,68 +94,67 @@ bool BackendCore<Derived, Api>::invalidate_edram_native_state() {
 }
 
 template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::prepare_scanout(const PresentationFrame& frame,
+                                                std::uint32_t width,
+                                                std::uint32_t height,
+                                                bool srgb_target,
+                                                ScanoutPlan& plan) {
+  plan = plan_scanout(frame, width, height,
+                      presentation.config().preserve_aspect_ratio, srgb_target);
+  if (!plan.valid) {
+    error = plan.error;
+    return false;
+  }
+  // The scan-out shader reads the mirror by physical address with no bounds
+  // check of its own.
+  if (std::uint64_t{plan.guest_address} + plan.guest_size >
+      memory::kPhysicalMemorySize) {
+    error = named("scanout source range is outside physical memory");
+    return false;
+  }
+  // Bytes the CPU wrote since the GPU last saw them are uploaded; bytes the
+  // GPU wrote are already current in the mirror. Nothing is read back.
+  if (!mirror.synchronize_range(plan.guest_address, plan.guest_size,
+                                memory::GpuRangeUsage::Texture)) {
+    error = mirror.error().empty() ? named("scanout source upload failed")
+                                   : mirror.error();
+    return false;
+  }
+  return true;
+}
+
+template <typename Derived, typename Api>
 PresentStatus BackendCore<Derived, Api>::present(
     const PresentationFrame& frame) {
   if (!presentation.ready()) return PresentStatus::NotConfigured;
   if (!ready || !memory) return PresentStatus::Error;
-  TextureDescriptor descriptor = frame.texture;
-  descriptor.mip_min_level = 0;
-  descriptor.mip_max_level = 0;
-  descriptor.packed_mips = false;
-  const auto layout = build_texture_layout(descriptor);
-  if (!layout.valid) {
-    error = layout.error;
-    return PresentStatus::Error;
+  if (!presentation.width() || !presentation.height())
+    return PresentStatus::Minimized;
+  ScanoutPlan plan{};
+  if (!prepare_scanout(frame, presentation.width(), presentation.height(),
+                       self().presentation_srgb_target(), plan)) {
+    return plan.valid ? PresentStatus::Error : PresentStatus::Unsupported;
   }
-  for (const auto& subresource : layout.subresources) {
-    if (subresource.guest_size_bytes > UINT32_MAX ||
-        !mirror.make_cpu_visible(
-            subresource.guest_address,
-            static_cast<std::uint32_t>(subresource.guest_size_bytes),
-            memory::GpuRangeUsage::RenderReadback)) {
-      error = mirror.error().empty()
-                         ? named("scanout source range is invalid")
-                         : mirror.error();
-      return PresentStatus::Error;
-    }
-  }
-  std::uint32_t presentation_snapshot_base = memory::kPhysicalMemorySize;
-  std::uint64_t presentation_snapshot_end = 0u;
-  for (const auto& subresource : layout.subresources) {
-    presentation_snapshot_base =
-        (std::min)(presentation_snapshot_base, subresource.guest_address);
-    presentation_snapshot_end = (std::max)(
-        presentation_snapshot_end,
-        std::uint64_t{subresource.guest_address} +
-            subresource.guest_size_bytes);
-  }
-  if (presentation_snapshot_base >= memory::kPhysicalMemorySize ||
-      presentation_snapshot_end > memory::kPhysicalMemorySize ||
-      presentation_snapshot_end <= presentation_snapshot_base) {
-    error = named("presentation snapshot range is invalid");
-    return PresentStatus::Error;
-  }
-  std::vector<std::byte> presentation_snapshot(
-      static_cast<std::size_t>(presentation_snapshot_end -
-                               presentation_snapshot_base));
-  if (!memory->copy_physical_range(presentation_snapshot_base,
-                                           presentation_snapshot)) {
-    error = named("presentation snapshot failed");
-    return PresentStatus::Error;
-  }
-  const auto prepared = prepare_presentation_frame(
-      frame, presentation_snapshot, presentation.width(),
-      presentation.height(),
-      presentation.config().preserve_aspect_ratio,
-      presentation_snapshot_base);
-  if (!prepared.valid) {
-    error = prepared.error;
-    return PresentStatus::Unsupported;
-  }
-  const auto status = presentation.present(prepared);
-  if (status == PresentStatus::Error || status == PresentStatus::SurfaceLost)
+  const auto status = self().present_scanout(plan.constants);
+  if ((status == PresentStatus::Error || status == PresentStatus::SurfaceLost) &&
+      error.empty())
     error = presentation.error();
   return status;
+}
+
+template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::capture_scanout(const PresentationFrame& frame,
+                                                std::uint32_t width,
+                                                std::uint32_t height,
+                                                PreparedPresentationFrame& output) {
+  output = {};
+  if (!ready || !memory) {
+    error = named("backend is not ready");
+    return false;
+  }
+  ScanoutPlan plan{};
+  if (!prepare_scanout(frame, width, height, false, plan)) return false;
+  return self().capture_scanout_image(plan.constants, output);
 }
 
 template <typename Derived, typename Api>

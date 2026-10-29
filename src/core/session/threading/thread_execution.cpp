@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "xenon/core/session.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -24,6 +25,15 @@ std::uint32_t XenonSession::run_execution() {
     kernel_process_->thread_manager().set_current_thread(main_thread_);
   }
   reach_boot_checkpoint(BootCheckpoint::EntryStarted);
+
+  // Every guest thread's sleeps and timed waits, and the GPU worker's polls,
+  // run at the host's finest timer step while the title runs.
+  const kernel::HostTimerResolution timer_resolution{};
+  if (!timer_resolution.active() && config_.enable_logging) {
+    std::scoped_lock console_log_lock(console_log_mutex());
+    std::cout << "[XenonSession] host timer resolution could not be raised; timed waits run at "
+              << kernel::HostTimerResolution::current().count() / 1000 << " us steps" << std::endl;
+  }
 
   execution_active_.store(true);
   const auto outcome =
@@ -51,6 +61,7 @@ std::uint32_t XenonSession::run_execution() {
 
   if (outcome.crashed) {
     set_error(outcome.crash_message);
+    report_pump_state("main thread crashed");
     return outcome.crash_exit_code;
   }
   if (outcome.thread_terminated) {
@@ -75,7 +86,7 @@ std::uint32_t XenonSession::run_execution() {
 std::uint32_t XenonSession::run_created_guest_thread(
     std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
     std::uint64_t start_context, memory::GuestAddress stack_base,
-    std::uint32_t stack_size, GuestThreadTlsContext tls) {
+    std::uint32_t stack_size, GuestThreadTlsContext tls, std::uint64_t second_argument) {
   {
     static std::atomic<int> _thread_start_diag_count{0};
     const int _n = _thread_start_diag_count.fetch_add(1) + 1;
@@ -115,6 +126,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
   // thread stack setup and start_audio_guest_thread()'s callback stack.
   state.gpr[1] = static_cast<std::uint64_t>(stack_base) + stack_size - 64u;
   state.gpr[3] = start_context;
+  state.gpr[4] = second_argument;
   state.gpr[13] = tls.kpcr_address;
 
   const auto outcome = dispatch_guest_thread(state, start_address, thread);
@@ -140,6 +152,7 @@ std::uint32_t XenonSession::run_created_guest_thread(
                 << (thread ? thread->thread_id() : 0u)
                 << " crashed: " << outcome.crash_message << std::endl;
     }
+    report_pump_state("guest thread crashed");
   } else if (outcome.thread_terminated) {
     // terminate() was called on this thread (possibly mid-dispatch, via the
     // preemptive safepoint) - its own committed exit code is authoritative,

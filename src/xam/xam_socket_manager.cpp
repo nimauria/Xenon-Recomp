@@ -40,7 +40,7 @@ XamSocketManager::GuestHandle XamSocketManager::create(std::uint32_t af, std::ui
     ensure_winsock_ready();
   }
   const SOCKET native = ::socket(static_cast<int>(af), static_cast<int>(type),
-                                 static_cast<int>(protocol));
+                                 static_cast<int>(host_socket_protocol(protocol)));
   if (native == INVALID_SOCKET) {
     set_last_error(thread_id, static_cast<std::uint32_t>(::WSAGetLastError()));
     return kInvalidHandle;

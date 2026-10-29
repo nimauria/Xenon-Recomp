@@ -20,8 +20,16 @@ using detail::ascii_lower;
 
 void* load_native_library(const std::string& path, std::string* error) {
 #if defined(_WIN32)
+  // A damaged module must fail the load, not raise Windows' modal "Bad
+  // Image" dialog, which would block the runtime host until someone clicks.
+  DWORD previous_error_mode = 0;
+  const bool restore_error_mode =
+      ::SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &previous_error_mode) != 0;
   HMODULE handle = ::LoadLibraryA(path.c_str());
-  if (!handle && error) *error = "LoadLibrary failed for '" + path + "'";
+  const auto load_error = ::GetLastError();
+  if (restore_error_mode) ::SetThreadErrorMode(previous_error_mode, nullptr);
+  if (!handle && error)
+    *error = "LoadLibrary failed for '" + path + "' (error " + std::to_string(load_error) + ")";
   return static_cast<void*>(handle);
 #else
   void* handle = ::dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);

@@ -89,6 +89,7 @@ constexpr std::uint32_t kImportLibrariesKey = 0x000103FFu;
 constexpr std::uint32_t kTlsInfoKey = 0x00020104u;
 constexpr std::uint32_t kEntryPointKey = 0x00010100u;
 constexpr std::uint32_t kDeltaPatchDescriptorKey = 0x000005FFu;
+constexpr std::uint32_t kDefaultStackSizeKey = 0x00020200u;
 
 constexpr std::uint32_t kImageBase = 0x82000000u;
 constexpr std::uint32_t kPageSize4KB = 0x1000u;
@@ -281,6 +282,8 @@ struct XexBuildOptions {
   std::uint32_t module_flags{0x00000001u};  // XEX_MODULE_TITLE
   bool with_import_libraries{true};
   bool with_native_tls{true};
+  // XEX_HEADER_DEFAULT_STACK_SIZE (inline); zero omits the header.
+  std::uint32_t default_stack_size{0};
   bool with_delta_patch_descriptor{false};
   std::array<std::byte, 20> delta_base_signature_digest{};
   std::uint32_t delta_source_version{0};
@@ -330,6 +333,7 @@ XexBuildResult build_base_xex(const PeBuildResult& pe, const XexBuildOptions& op
   std::uint32_t opt_count = 3u;  // execution info, original pe name, file format info
   if (opts.with_import_libraries) opt_count += 1u;
   if (opts.with_native_tls) opt_count += 1u;
+  if (opts.default_stack_size != 0u) opt_count += 1u;
   if (opts.with_delta_patch_descriptor) opt_count += 1u;
   opt_count += 1u;  // entry point (inline)
   header.append_be32(opt_count);
@@ -350,6 +354,7 @@ XexBuildResult build_base_xex(const PeBuildResult& pe, const XexBuildOptions& op
 
   // Entry point (inline).
   set_slot(kEntryPointKey, kImageBase + pe.entry_point_rva);
+  if (opts.default_stack_size != 0u) set_slot(kDefaultStackSizeKey, opts.default_stack_size);
 
   // Execution info.
   const auto execution_info_offset = header.size();
@@ -859,6 +864,37 @@ void test_parse_and_load_uncompressed_unencrypted() {
   assert(loaded.loaded);
   assert(!loaded.executable_ranges.empty());
   assert(address_space.read8(kImageBase + kSectionSize) == 0x4Eu);
+}
+
+// Regression (AC6): the image's XEX_HEADER_DEFAULT_STACK_SIZE (256 KiB in
+// AC6) sizes the main thread and every ExCreateThread(stack_size = 0). Xenon
+// used a fixed 1 MiB, which spent the headroom AC6 leaves after sizing its
+// heap from MmQueryStatistics and crashed it on a failed allocation.
+void test_default_stack_size_header_sizes_default_thread_stacks() {
+  auto pe = build_pe_body(kImageBase, true);
+  patch_import_placeholders(pe.bytes, pe.data_rva, 0x0042u, 0x0099u);
+  XexBuildOptions opts{};
+  opts.default_stack_size = 0x40000u;
+  const auto fixture = build_base_xex(pe, opts);
+  xbox::XexImage image{};
+  std::string error;
+  assert(xbox::parse_xex_image(fixture.file, image, &error) && error.empty());
+  assert(image.default_stack_size == 0x40000u);
+  assert(xbox::default_thread_stack_size(image) == 0x40000u);
+  // The other optional headers are unaffected by the extra table entry.
+  assert(image.entry_point == kImageBase + kSectionSize);
+  assert(image.tls.has_value() && image.tls->slot == 1u);
+
+  // A size that is not a page multiple is rounded up to a whole page.
+  image.default_stack_size = 0x10001u;
+  assert(xbox::default_thread_stack_size(image) == 0x11000u);
+
+  // Without the header the kernel fallback applies.
+  const auto plain = make_uncompressed_fixture();
+  xbox::XexImage plain_image{};
+  assert(xbox::parse_xex_image(plain.file, plain_image, &error));
+  assert(plain_image.default_stack_size == 0u);
+  assert(xbox::default_thread_stack_size(plain_image) == xbox::kFallbackThreadStackSize);
 }
 
 // map_xex_image() is load_xex()'s mapping half, factored out so a caller
@@ -2185,6 +2221,7 @@ int main() {
   test_loaded_image_rva_semantics_ignore_raw_pointer();
   test_relocation_entries_are_inline_in_directory();
   test_parse_and_load_uncompressed_unencrypted();
+  test_default_stack_size_header_sizes_default_thread_stacks();
   test_native_function_import_pair_is_classified_without_rewriting_address_slot();
   test_map_xex_image_rounds_section_size_up_to_memory_page();
   test_map_xex_image_merges_sections_that_share_allocation_pages();

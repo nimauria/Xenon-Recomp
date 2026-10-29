@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -12,9 +13,11 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "xenon/audio/backend.hpp"
 #include "xenon/audio/mixer.hpp"
+#include "xenon/audio/output_monitor.hpp"
 #include "xenon/audio/xma.hpp"
 #include "xenon/cpu/types.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -78,12 +81,53 @@ class AudioSystem final {
   [[nodiscard]] bool submit_render_frame(RenderClientHandle handle,
                                          cpu::GuestAddress samples);
   [[nodiscard]] bool suspend_render_clients(bool suspend);
+
+  // What one render client has done, for diagnosing stalled audio: a client
+  // gets a callback only while it holds a credit, and a credit comes back
+  // only when a frame it submitted has been consumed by the host mixer.
+  struct RenderClientStats {
+    RenderClientHandle handle{};
+    bool suspended{};
+    std::size_t callback_credits{};
+    std::size_t queued_frames{};
+    std::size_t callbacks_in_flight{};
+    std::uint64_t callbacks_issued{};
+    std::uint64_t callbacks_returned{};
+    std::uint64_t callbacks_failed{};
+    std::uint64_t frames_submitted{};
+    std::uint64_t frames_consumed{};
+    std::uint64_t rejected_untranslatable{};
+    std::uint64_t rejected_suspended{};
+    std::uint64_t rejected_queue_full{};
+  };
+  [[nodiscard]] std::vector<RenderClientStats> render_client_stats() const;
+  // Submissions naming no registered client.
+  [[nodiscard]] std::uint64_t rejected_unregistered_submissions() const noexcept {
+    return rejected_unregistered_.load(std::memory_order_relaxed);
+  }
+  // One line: whether the client can still get callbacks and, if not, why.
+  [[nodiscard]] static std::string describe(const RenderClientStats& stats);
   [[nodiscard]] std::uint32_t render_driver_tic() const noexcept {
     return static_cast<std::uint32_t>(render_tic_samples_.load());
   }
   [[nodiscard]] std::uint32_t underrun_count() const noexcept {
     return underrun_count_.load();
   }
+  // Loudest sample in any frame the title submitted, before downmix: tells a
+  // silent title mix apart from a loss in Xenon's output path.
+  [[nodiscard]] float submitted_peak() const noexcept {
+    return std::bit_cast<float>(submitted_peak_bits_.load(std::memory_order_relaxed));
+  }
+  // What reached the host device so far (levels, audible time).
+  [[nodiscard]] OutputMeter::Snapshot output_levels() const noexcept { return meter_.snapshot(); }
+  // Records the device output to a WAV file from now until shutdown (or
+  // stop_output_recording()): the runtime's own output, for development.
+  [[nodiscard]] bool start_output_recording(const std::filesystem::path& path,
+                                            std::string* error = nullptr) {
+    return recorder_.start(path, kXboxSampleRate, 4, error);
+  }
+  void stop_output_recording() { recorder_.stop(); }
+  [[nodiscard]] const OutputRecorder& output_recorder() const noexcept { return recorder_; }
 
   [[nodiscard]] std::uint32_t speaker_config() const noexcept {
     return speaker_config_.load();
@@ -145,6 +189,7 @@ class AudioSystem final {
     // only when a submitted 256-sample frame is actually consumed.
     std::size_t callback_credits{};
     std::size_t callback_in_flight{};
+    RenderClientStats counters{};
   };
 
   [[nodiscard]] bool translate_render_frame(cpu::GuestAddress samples,
@@ -167,6 +212,9 @@ class AudioSystem final {
   std::thread callback_thread_{};
   GuestCallbackInvoker guest_callback_invoker_{};
   std::atomic<std::uint32_t> underrun_count_{0};
+  std::atomic<std::uint64_t> rejected_unregistered_{0};
+  std::atomic<std::uint32_t> submitted_peak_bits_{0};
+  std::atomic<std::uint64_t> traced_frames_{0};  // Frames seen by the probe trace.
   // Xbox render-driver clock, in 48 kHz samples consumed by the host. This
   // advances through underrun silence as well as submitted audio so guest AV
   // synchronization follows real playback time rather than queue occupancy.
@@ -187,6 +235,8 @@ class AudioSystem final {
   std::atomic<float> ducker_hold_{0.05f};
   float ducker_gain_{1.0f};
   std::uint32_t ducker_hold_frames_{};
+  OutputMeter meter_{};
+  OutputRecorder recorder_{};
 };
 
 }  // namespace xenon::audio

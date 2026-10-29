@@ -111,13 +111,15 @@ void multichannel_downmix_and_format_validation() {
 
   VoiceBuffer surround{};
   surround.channels = 6;
-  surround.samples = {1.0f, 0.5f, 0.25f, 1.0f, 0.25f, 0.0f};
+  surround.samples = {0.5f, 0.25f, 0.2f, 1.0f, 0.1f, 0.0f};
   assert(mixer.submit(voice, std::move(surround)));
   assert(mixer.start(voice));
   std::vector<float> output(2, 0.0f);
   mixer.mix(output, 48000);
-  assert(output[0] > output[1]);
-  assert(output[0] < 1.0f);
+  // Lo/Ro: fronts at unity, center and surrounds at -3 dB, LFE dropped. The
+  // old 0.4-scaled fold played front-heavy mixes 8 dB low.
+  assert(std::abs(output[0] - (0.5f + 0.2f * 0.70710678f + 0.1f * 0.70710678f)) < 1e-5f);
+  assert(std::abs(output[1] - (0.25f + 0.2f * 0.70710678f)) < 1e-5f);
 }
 
 void callback_is_reentrant() {

@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+#include "xenon/audio/downmix.hpp"
+
 namespace xenon::audio {
 namespace {
 
@@ -148,13 +150,9 @@ std::pair<float, float> Mixer::sample_stereo(const QueuedBuffer& queued,
   // downmix, matching the render-driver path. Other multichannel layouts keep
   // the first two channels as front L/R and fold remaining channels equally.
   if (buffer.channels == 6) {
-    const float fl = buffer.samples[base + 0];
-    const float fr = buffer.samples[base + 1];
-    const float center = buffer.samples[base + 2];
-    const float back_left = buffer.samples[base + 4];
-    const float back_right = buffer.samples[base + 5];
-    return {(fl + back_left + center * 0.5f) * (1.0f / 2.5f),
-            (fr + back_right + center * 0.5f) * (1.0f / 2.5f)};
+    return downmix_5_1_to_stereo(buffer.samples[base + 0], buffer.samples[base + 1],
+                                 buffer.samples[base + 2], buffer.samples[base + 4],
+                                 buffer.samples[base + 5]);
   }
 
   float left = buffer.samples[base];

@@ -40,6 +40,8 @@ constexpr std::uint32_t kHeaderOriginalPeName = 0x000183FFu;
 
 constexpr std::uint32_t kHeaderTlsInfo = 0x00020104u;
 
+constexpr std::uint32_t kHeaderDefaultStackSize = 0x00020200u;
+
 constexpr std::uint32_t kHeaderExecutionInfo = 0x00040006u;
 
 constexpr std::size_t kOptionalHeaderEntrySize = 8u;

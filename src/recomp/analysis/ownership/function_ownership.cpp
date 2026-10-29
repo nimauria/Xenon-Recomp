@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
 #include "recomp/analysis/analysis_phases.hpp"
 #include "recomp/driver/driver_support.hpp"
@@ -100,6 +102,32 @@ WeakFunctionAbsorption absorb_weak_functions(AnalysisReport& report) {
   auto& absorbed_entries = absorption.entries;
   auto& weak_functions_absorbed = absorption.absorbed;
   std::vector<bool> absorbed(report.functions.size(), false);
+
+  // A root is a compiled function whose start is not a materialized block of
+  // any other compiled function. A root can never be absorbed itself (every
+  // victim below is, by definition, a block of its owner), so absorbing into
+  // it cannot build an owner chain even when the root's own evidence is weak.
+  // This covers a switch dispatcher reached only through a vtable or gap
+  // recovery: its jump-table cases are its own blocks, not separate functions,
+  // and leaving them as overlapping functions strands branches between
+  // sibling cases (AC6: 0x821a6df0 -> 0x821a6d8c inside 0x821a6bc0).
+  std::unordered_map<GuestAddress, std::vector<std::size_t>> block_starts;
+  for (std::size_t k = 0; k < report.functions.size(); ++k) {
+    const auto& function = report.functions[k];
+    if (!function.compiled || function.native_replacement) continue;
+    for (const auto& block : function.ir.blocks)
+      if (owns_address(function, block.guest_address)) block_starts[block.guest_address].push_back(k);
+  }
+  std::vector<bool> is_root(report.functions.size(), false);
+  for (std::size_t j = 0; j < report.functions.size(); ++j) {
+    const auto& candidate = report.functions[j];
+    if (!candidate.compiled || candidate.native_replacement) continue;
+    const auto owners = block_starts.find(candidate.guest_start);
+    is_root[j] = owners == block_starts.end() ||
+                 std::none_of(owners->second.begin(), owners->second.end(),
+                              [j](std::size_t k) { return k != j; });
+  }
+
   for (std::size_t i = 0; i < report.functions.size(); ++i) {
     auto& victim = report.functions[i];
     if (!victim.compiled || victim.native_replacement || has_semantic_boundary_evidence(victim))
@@ -112,11 +140,12 @@ WeakFunctionAbsorption absorb_weak_functions(AnalysisReport& report) {
       if (!owner.compiled || owner.native_replacement || !owns_address(owner, victim.guest_start) ||
           !has_block_entry(owner, victim.guest_start))
         continue;
-      // Alternate-entry absorption must always land on a stable semantic owner.
+      // Alternate-entry absorption must always land on a stable owner: one with
+      // semantic boundary evidence, or a root that this pass can never remove.
       // Never build owner chains (weak function -> weak function -> strong function):
       // they make registry aliases order-dependent and can leave an alias naming an
       // owner that is itself removed later in this pass.
-      if (!has_semantic_boundary_evidence(owner)) continue;
+      if (!has_semantic_boundary_evidence(owner) && !is_root[j]) continue;
       if (!best_owner ||
           static_cast<unsigned>(owner.authority) >
               static_cast<unsigned>(report.functions[*best_owner].authority) ||

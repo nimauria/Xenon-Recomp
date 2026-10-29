@@ -49,6 +49,9 @@ struct EdramSurfaceLayout {
   [[nodiscard]] std::uint32_t row_tiles() const noexcept;
   [[nodiscard]] std::uint32_t tile_rows() const noexcept;
   [[nodiscard]] std::uint32_t tile_count() const noexcept;
+  // The most rows this pitch and sample count can hold in EDRAM. Tile
+  // addresses wrap, so a taller surface would only alias its own rows.
+  [[nodiscard]] std::uint32_t max_resident_height_pixels() const noexcept;
   [[nodiscard]] bool valid() const noexcept;
   // Stable native-resource identity. Height is deliberately excluded because
   // it is a drawable extent (often derived from the current scissor), not a
@@ -172,6 +175,23 @@ enum class ColorHostStorage : std::uint8_t {
 // Copies one selected sample per pixel into a tightly packed host buffer.
 // This raw path is the lossless basis for format conversion and guest-memory
 // resolves; 64bpp samples contain two consecutive little-endian dwords.
+// The pixel rectangles of `layout` holding exactly `tiles` (each tile is an
+// 80x16-sample block): runs of tiles in a tile row merged, and identical runs
+// in consecutive rows joined. Lets an ownership change move only the tiles
+// that change hands. False when a tile lies outside the surface or a 64bpp
+// pixel column arrives with only one of its two tiles - such a set does not
+// map to whole pixels, and the caller must move the full surface.
+// The most rows `layout` can have without running into another surface bound
+// to the same draw. Surfaces of one draw never share EDRAM, so each ends where
+// the next bound base tile begins, counting cyclically through EDRAM. Bases
+// equal to layout's own are ignored; with none, this is the resident limit.
+[[nodiscard]] std::uint32_t rows_before_next_surface(const EdramSurfaceLayout& layout,
+                                                     std::span<const std::uint32_t> bound_bases);
+
+[[nodiscard]] bool edram_tile_regions(const EdramSurfaceLayout& layout,
+                                      std::span<const std::uint16_t> tiles,
+                                      std::vector<EdramSurfaceRegion>& regions);
+
 [[nodiscard]] bool resolve_edram_raw(
     const Edram& edram, const EdramSurfaceLayout& layout,
     std::uint32_t left, std::uint32_t top, std::uint32_t width,
@@ -185,5 +205,47 @@ enum class ColorHostStorage : std::uint8_t {
     std::uint32_t left, std::uint32_t top, std::uint32_t width,
     std::uint32_t height, std::uint32_t sample,
     std::span<const std::byte> source, std::uint32_t source_pitch) noexcept;
+
+// Moving EDRAM tiles directly from one native image to another, on the GPU,
+// without passing through the canonical byte store: each destination sample
+// takes the source sample that holds the same EDRAM word. The transfer shader
+// (make_edram_color_transfer_shader) and edram_transfer_source() implement
+// the same mapping from these constants.
+struct EdramTransferConstants {
+  // Per surface: base tile, pitch in tiles, guest sample count (log2), and
+  // how guest samples sit in the host image: 0 one for one, 1 native 2x
+  // (indices reversed), 2 2x held in a 4x image (host samples 0 and 3).
+  std::array<std::uint32_t, 4> destination{};
+  std::array<std::uint32_t, 4> source{};
+  // Tile stride (2 for 64bpp), depth flags (bit 0 destination, bit 1
+  // source: depth tiles swap their 40-sample halves), source image width and
+  // height in pixels.
+  std::array<std::uint32_t, 4> extent{};
+};
+
+[[nodiscard]] EdramTransferConstants make_edram_transfer_constants(
+    const EdramSurfaceLayout& source, MsaaSamples source_host_samples,
+    const EdramSurfaceLayout& destination,
+    MsaaSamples destination_host_samples) noexcept;
+
+// Whether `source` holds every word of `tiles` as whole samples a direct
+// transfer can read: same bits per pixel, 64bpp tile pairs aligned alike,
+// and each tile entirely inside the source image.
+[[nodiscard]] bool edram_direct_transfer_supported(
+    const EdramSurfaceLayout& source, const EdramSurfaceLayout& destination,
+    std::span<const std::uint16_t> tiles) noexcept;
+
+struct EdramTransferSample {
+  std::uint32_t x{};
+  std::uint32_t y{};
+  std::uint32_t host_sample{};
+};
+
+// The source sample the destination host sample at (x, y) takes; nullopt for
+// a host sample that holds no guest sample (2x in a 4x image) or one the
+// source image does not cover. The CPU reference of the transfer shader.
+[[nodiscard]] std::optional<EdramTransferSample> edram_transfer_source(
+    const EdramTransferConstants& constants, std::uint32_t x, std::uint32_t y,
+    std::uint32_t destination_host_sample) noexcept;
 
 }  // namespace xenon::gpu

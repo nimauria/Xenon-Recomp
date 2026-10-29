@@ -32,6 +32,50 @@ namespace xenon::xbox {
 [[nodiscard]] bool ex_release_read_write_lock_export(xenon::kernel::KernelProcess& process,
                                                      xenon::core::ExportCallContext& context);
 
+// RtlRaiseException (0x136): r3 = EXCEPTION_RECORD* -> returns only if the
+// exception is continued. Xenon has no guest SEH unwinder: the MSVC
+// thread-naming exception (0x406D1388) names the thread and returns, as the
+// __except handler around it would; any other exception is logged and
+// recorded as ExceptionNotDispatched, and the call returns.
+[[nodiscard]] bool rtl_raise_exception_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
+// NtQueueApcThread (0xE3): r3 = thread handle (0xFFFFFFFE = the calling
+// thread), r4 = APC routine, r5 = routine context, r6 = argument 1, r7 =
+// argument 2 -> NTSTATUS. Queues Routine(Context, Argument1, Argument2) as a
+// user APC; it runs at the target thread's next alertable wait or delay.
+[[nodiscard]] bool nt_queue_apc_thread_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
+// Thread alerts. KeAlertThread (0x4F): r3 = KTHREAD*, r4 = alert mode
+// (ignored) -> BOOLEAN previously alerted. KeAlertResumeThread (0x4E):
+// r3 = KTHREAD* -> previous suspend count; alerts, then resumes the thread.
+// KeTestAlertThread (0xAC): r3 = mode (ignored) -> BOOLEAN; returns and
+// clears the calling thread's alert. An alert ends the thread's next
+// alertable wait or delay with STATUS_ALERTED.
+[[nodiscard]] bool ke_alert_thread_export(xenon::kernel::KernelProcess& process,
+                                          xenon::core::ExportCallContext& context);
+[[nodiscard]] bool ke_alert_resume_thread_export(xenon::kernel::KernelProcess& process,
+                                                 xenon::core::ExportCallContext& context);
+[[nodiscard]] bool ke_test_alert_thread_export(xenon::kernel::KernelProcess& process,
+                                               xenon::core::ExportCallContext& context);
+
+// KeInitializeApc (0x6D): r3 = KAPC*, r4 = target KTHREAD*, r5 = kernel
+// routine, r6 = rundown routine, r7 = normal routine, r8 = processor mode
+// (0 kernel, 1 user), r9 = normal context -> void.
+[[nodiscard]] bool ke_initialize_apc_export(xenon::kernel::KernelProcess& process,
+                                            xenon::core::ExportCallContext& context);
+// KeInsertQueueApc (0x7A): r3 = KAPC*, r4 = argument 1, r5 = argument 2,
+// r6 = priority increment (ignored) -> BOOLEAN queued. A user-mode KAPC runs
+// at the target's next alertable wait or delay. A kernel-mode KAPC is queued
+// but not delivered (Xenon, like xenia and rexglue-sdk, has no kernel-mode
+// APC delivery); that is logged.
+[[nodiscard]] bool ke_insert_queue_apc_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+// KeRemoveQueueApc (0x2F0): r3 = KAPC* -> BOOLEAN removed.
+[[nodiscard]] bool ke_remove_queue_apc_export(xenon::kernel::KernelProcess& process,
+                                              xenon::core::ExportCallContext& context);
+
 // KePulseEvent (0x7F): r3 = KEVENT*, r4 = increment, r5 = wait -> r3 = previous state.
 [[nodiscard]] bool ke_pulse_event_export(xenon::kernel::KernelProcess& process,
                                          xenon::core::ExportCallContext& context);

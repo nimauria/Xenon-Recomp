@@ -4,6 +4,9 @@
 #include <cassert>
 #include <cstdio>
 
+#include "xenon/kernel/mutant.hpp"
+#include "xenon/logging/probe_log.hpp"
+
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -92,7 +95,8 @@ KernelThread::KernelThread(ThreadEntry entry, const ThreadCreationParams& params
 
 KernelThread::~KernelThread() {
   if (host_thread_) {
-    terminate(0xDEADBEEF);
+    // False only when the thread already finished, which is fine here.
+    static_cast<void>(terminate(0xDEADBEEF));
     // A bounded wait, not the previous unconditional host_thread_->join():
     // terminate() cannot interrupt a thread already running non-preemptible
     // compiled guest code (see terminate()'s own doc comment), so an
@@ -143,6 +147,45 @@ void KernelThread::set_processor_affinity(std::uint32_t affinity) noexcept {
 #endif
 }
 
+void KernelThread::queue_user_apc(const UserApc& apc) {
+  {
+    std::scoped_lock lock(apc_mutex_);
+    user_apcs_.push_back(apc);
+    user_apc_pending_.store(true, std::memory_order_release);
+  }
+  // An alertable wait registers on this thread's own list; see wait.cpp.
+  multi_waiters_.notify_always();
+}
+
+std::vector<KernelThread::UserApc> KernelThread::take_user_apcs() {
+  std::scoped_lock lock(apc_mutex_);
+  std::vector<UserApc> apcs(user_apcs_.begin(), user_apcs_.end());
+  user_apcs_.clear();
+  user_apc_pending_.store(false, std::memory_order_release);
+  return apcs;
+}
+
+bool KernelThread::alert() {
+  const bool previous = alerted_.exchange(true, std::memory_order_acq_rel);
+  multi_waiters_.notify_always();
+  return previous;
+}
+
+bool KernelThread::remove_user_apc(std::uint32_t guest_apc) {
+  std::scoped_lock lock(apc_mutex_);
+  const auto found = std::find_if(user_apcs_.begin(), user_apcs_.end(),
+                                  [&](const UserApc& apc) { return apc.guest_apc == guest_apc; });
+  if (found == user_apcs_.end()) return false;
+  user_apcs_.erase(found);
+  user_apc_pending_.store(!user_apcs_.empty(), std::memory_order_release);
+  return true;
+}
+
+std::string KernelThread::name() const {
+  std::scoped_lock lock(mutex_);
+  return name_;
+}
+
 void KernelThread::set_name(std::string name) {
   std::scoped_lock lock(mutex_);
   name_ = std::move(name);
@@ -181,6 +224,7 @@ bool KernelThread::suspend() {
   if (old_count == 0) {
     state_ = ThreadState::Suspended;
   }
+  safepoint_requested_.store(true, std::memory_order_release);
   return true;
 }
 
@@ -192,11 +236,9 @@ bool KernelThread::resume() {
 
   const auto old_count = suspend_count_.load(std::memory_order_acquire);
   {
-    if (FILE* _d = std::fopen("thread_resume_diag.log", "a")) {
-      std::fprintf(_d, "resume() called: thread_id=%u old_suspend_count=%d\n",
-                   thread_id_, (int)old_count);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log("thread_resume_diag.log",
+                                     "resume() called: thread_id=%u old_suspend_count=%d\n",
+                                     thread_id_, (int)old_count);
   }
   if (old_count == 0) {
     return false;  // Not suspended
@@ -205,6 +247,7 @@ bool KernelThread::resume() {
   const auto new_count = suspend_count_.fetch_sub(1, std::memory_order_release);
   if (new_count == 1) {  // Was 1, now 0
     state_ = ThreadState::Ready;
+    safepoint_requested_.store(false, std::memory_order_release);
     // Wakes a thread_main() still parked at entry (create_suspended, never
     // yet resumed) so it can proceed to Running and call entry_(). A no-op
     // wait notification for a thread that is already past that point.
@@ -222,6 +265,8 @@ bool KernelThread::terminate(std::uint32_t exit_code) {
   exit_code_ = exit_code;
   state_ = ThreadState::Terminated;
   terminated_.store(true, std::memory_order_release);
+  safepoint_requested_.store(true, std::memory_order_release);
+  multi_waiters_.notify_always();
   // Wakes a thread_main() parked at entry (create_suspended, never resumed),
   // or mid-execution at a dispatch_guest_thread() safepoint via
   // wait_while_suspended(), so it observes Terminated and exits instead of
@@ -315,7 +360,14 @@ bool KernelThread::set_tls(std::uint32_t slot, std::uint64_t value) {
   return true;
 }
 
+namespace {
+thread_local KernelThread* t_current_thread = nullptr;
+}  // namespace
+
+KernelThread* KernelThread::current() noexcept { return t_current_thread; }
+
 void KernelThread::thread_main() {
+  t_current_thread = this;
   // Honors CREATE_SUSPENDED: park here until resume() drops suspend_count_
   // to zero, or terminate() is called while still parked - either way, this
   // never runs entry_() before the thread has actually been resumed at
@@ -334,16 +386,22 @@ void KernelThread::thread_main() {
   }
 
   {
-    if (FILE* _d = std::fopen("thread_main_entry_diag.log", "a")) {
-      std::fprintf(_d, "thread_main: thread_id=%u should_run_entry=%d has_entry=%d\n",
-                   thread_id_, should_run_entry ? 1 : 0, entry_ ? 1 : 0);
-      std::fclose(_d);
-    }
+    xenon::logging::append_probe_log(
+        "thread_main_entry_diag.log",
+        "thread_main: thread_id=%u should_run_entry=%d has_entry=%d\n", thread_id_,
+        should_run_entry ? 1 : 0, entry_ ? 1 : 0);
   }
   std::uint32_t result = 0;
   if (should_run_entry && entry_) {
     result = entry_();
   }
+
+  // Thread rundown: mutants this thread still owns become abandoned before
+  // the thread is signalled, so their waiters do not hang on an owner that
+  // no longer exists. Done here, after guest code has stopped running on
+  // this host thread, and not in terminate(), which can run while guest
+  // code is still inside the critical section the mutant guards.
+  abandon_mutants_owned_by_this_thread();
 
   {
     std::scoped_lock lock(mutex_);
@@ -358,8 +416,10 @@ void KernelThread::thread_main() {
       exit_code_ = result;
       state_ = ThreadState::Terminated;
       terminated_.store(true, std::memory_order_release);
+      multi_waiters_.notify_always();
     }
   }
+  t_current_thread = nullptr;
   completion_promise_.set_value();
 }
 
@@ -446,7 +506,7 @@ std::size_t ThreadManager::reap_finished_threads() {
   return finished.size();
 }
 
-void ThreadManager::shutdown() {
+std::vector<std::uint32_t> ThreadManager::shutdown() {
   std::vector<std::shared_ptr<KernelThread>> threads_copy;
   {
     std::scoped_lock lock(mutex_);
@@ -464,10 +524,13 @@ void ThreadManager::shutdown() {
   // timeout - reached here too if a thread is still joinable when
   // threads_copy is destroyed at the end of this function).
   constexpr std::uint32_t kShutdownJoinTimeoutMs = 5000;
+  for (auto& thread : threads_copy) static_cast<void>(thread->terminate(0));
+  std::vector<std::uint32_t> still_running;
   for (auto& thread : threads_copy) {
-    thread->terminate(0);
-    static_cast<void>(thread->join(kShutdownJoinTimeoutMs));
+    if (thread->started() && !thread->join(kShutdownJoinTimeoutMs))
+      still_running.push_back(thread->thread_id());
   }
+  return still_running;
 }
 
 std::vector<std::shared_ptr<KernelThread>> ThreadManager::enumerate_threads() const {

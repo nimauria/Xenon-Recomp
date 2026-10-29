@@ -15,10 +15,13 @@
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/depth_target.hpp"
+#include "xenon/gpu/vulkan/edram_transfer.hpp"
+#include "xenon/gpu/vulkan/gpu_resolve.hpp"
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
 #include "xenon/gpu/vulkan/pipeline.hpp"
 #include "xenon/gpu/vulkan/presentation.hpp"
 #include "xenon/gpu/vulkan/resource_layout.hpp"
+#include "xenon/gpu/vulkan/scanout.hpp"
 #include "xenon/gpu/vulkan/render_target.hpp"
 #include "xenon/gpu/vulkan/texture.hpp"
 #include "graphics/common/backend_core.hpp"
@@ -58,6 +61,7 @@ struct BackendApi {
   }
   // VK_CULL_MODE_FRONT_AND_BACK is native.
   static constexpr bool kEmulatesFrontAndBackCull = false;
+  static constexpr bool kSupportsDirectColorTransfer = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;
@@ -72,6 +76,50 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     // snapshots and upload arenas owned by this Impl. Drain them before member
     // destruction starts.
     (void)queue.wait_idle();
+  }
+  EdramColorTransfer edram_color_transfer{};
+  GpuResolver gpu_resolver{};
+
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
+    if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  ScanoutRenderer scanout{};
+
+  bool presentation_srgb_target() const { return presentation.srgb(); }
+  PresentStatus present_scanout(const ScanoutConstants& constants) {
+    const auto format = presentation.format();
+    if (!scanout.prepare(context.device(), format, mirror)) {
+      error = named(scanout.error());
+      return PresentStatus::Error;
+    }
+    return presentation.present([&](VkCommandBuffer command, VkImageView target) {
+      scanout.record(command, mirror, target, format, constants);
+    });
+  }
+  bool capture_scanout_image(const ScanoutConstants& constants,
+                             PreparedPresentationFrame& output) {
+    if (scanout.capture(context.physical_device(), context.device(), queue, mirror, constants,
+                        output))
+      return true;
+    error = named(scanout.error());
+    return false;
+  }
+
+  bool transfer_color_tiles(RenderTargetImage& source, RenderTargetImage& destination,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (edram_color_transfer.transfer(context.device(), queue, source, destination, constants,
+                                      regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
   }
 
   bool create_render_target(RenderTargetImage& image,
@@ -318,6 +366,11 @@ bool Backend::make_edram_canonical() {
 
 bool Backend::invalidate_edram_native_state() {
   return impl_->invalidate_edram_native_state();
+}
+
+bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                              std::uint32_t height, PreparedPresentationFrame& output) {
+  return impl_->capture_scanout(frame, width, height, output);
 }
 
 PresentStatus Backend::present(const PresentationFrame& frame) {

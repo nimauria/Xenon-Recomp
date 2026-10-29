@@ -25,17 +25,20 @@ std::string swizzle(std::uint8_t value) {
   return result;
 }
 
-std::string source(const AluSource& value, ShaderStage stage) {
+// Relative temporaries add the loop index aL. Relative constants add a0 when
+// the instruction's const_address_register_relative bit is set, otherwise aL.
+std::string source(const AluSource& value, ShaderStage stage,
+                   bool constant_address_register_relative) {
   std::ostringstream out;
   if (value.negate) out << "-";
   if (value.absolute_value) out << "abs(";
   if (value.temporary) {
     out << "r[(" << value.index;
-    if (value.relative) out << " + ar";
+    if (value.relative) out << " + aL";
     out << ") & 63]";
   } else {
     out << "XenonFloatConstants[((" << value.index;
-    if (value.relative) out << " + ar";
+    if (value.relative) out << (constant_address_register_relative ? " + a0" : " + aL");
     out << ") & 255)";
     if (stage == ShaderStage::Pixel) out << " + 256";
     out << "]";
@@ -77,7 +80,7 @@ std::string destination(const AluInstruction& alu, bool scalar) {
     out << "e[" << unsigned(index) << "]";
   } else {
     out << "r[(" << unsigned(index);
-    if (relative) out << " + ar";
+    if (relative) out << " + aL";
     out << ") & 63]";
   }
   return out.str();
@@ -85,32 +88,58 @@ std::string destination(const AluInstruction& alu, bool scalar) {
 
 void emit_alu(std::ostringstream& out, const AluInstruction& alu,
               ShaderStage stage, bool memexport_enabled) {
+  const bool a0_constants = alu.constant_address_register_relative;
   out << "        if (" << predicate(alu.predicate) << ") {\n"
-      << "          float4 s0 = " << source(alu.sources[0], stage) << ";\n"
-      << "          float4 s1 = " << source(alu.sources[1], stage) << ";\n"
-      << "          float4 s2 = " << source(alu.sources[2], stage) << ";\n"
-      << "          bool killed = false;\n"
+      << "          float4 s0 = " << source(alu.sources[0], stage, a0_constants) << ";\n"
+      << "          float4 s1 = " << source(alu.sources[1], stage, a0_constants) << ";\n"
+      << "          float4 s2 = " << source(alu.sources[2], stage, a0_constants) << ";\n";
+  // The scalar unit reads source 3. mulsc/addsc/subsc pair its constant with
+  // a temporary, which takes source 3's negation and the constant abs flag.
+  std::string scalar_b = "s2";
+  if (alu.scalar_opcode >= 42u && alu.scalar_opcode <= 47u) {
+    AluSource temporary = alu.sources[2];
+    temporary.index = alu.scalar_constant_temporary;
+    temporary.temporary = true;
+    temporary.relative = false;
+    out << "          float4 s3t = " << source(temporary, stage, a0_constants) << ";\n";
+    scalar_b = "s3t";
+  }
+  out << "          bool vector_killed = false, scalar_killed = false;\n"
       << "          float4 pv = xenon_vector_op(" << unsigned(alu.vector_opcode)
-      << ", s0, s1, s2, p0, a0, killed);\n"
+      << ", s0, s1, s2, p0, a0, vector_killed);\n"
       << "          float4 ps_new = xenon_scalar_op(" << unsigned(alu.scalar_opcode)
-      << ", s0, s1, ps, p0, a0, killed);\n";
+      << ", s2, " << scalar_b << ", ps, p0, a0, scalar_killed);\n";
   if (alu.vector_clamp) out << "          pv = saturate(pv);\n";
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
-  write_masked(out, destination(alu, false), "pv", alu.vector_write_mask, 10);
-  write_masked(out, destination(alu, true), "ps_new", alu.scalar_write_mask, 10);
+  // Both results of an export go to vector_dest. A component selected by both
+  // write masks receives 1.0; with scalar_dest_rel set, one selected by
+  // neither receives 0.0.
+  std::uint8_t vector_mask = alu.vector_write_mask;
+  std::uint8_t scalar_mask = alu.scalar_write_mask;
+  std::uint8_t one_mask = 0, zero_mask = 0;
+  if (alu.export_data) {
+    one_mask = vector_mask & scalar_mask;
+    if (alu.scalar_destination_relative) zero_mask = 0xFu & ~(vector_mask | scalar_mask);
+    vector_mask &= static_cast<std::uint8_t>(~one_mask);
+    scalar_mask &= static_cast<std::uint8_t>(~one_mask);
+  }
+  write_masked(out, destination(alu, false), "pv", vector_mask, 10);
+  write_masked(out, destination(alu, true), "ps_new", scalar_mask, 10);
+  write_masked(out, destination(alu, false), "(1.0).xxxx", one_mask, 10);
+  write_masked(out, destination(alu, false), "(0.0).xxxx", zero_mask, 10);
   if (memexport_enabled && alu.export_data && alu.vector_destination >= 33u &&
       alu.vector_destination <= 37u &&
-      (alu.vector_write_mask || alu.scalar_write_mask)) {
+      (vector_mask | scalar_mask | one_mask | zero_mask) != 0) {
     out << "          memexport_written_mask |= "
         << (1u << (alu.vector_destination - 33u)) << "u;\n";
   }
   out << "          ps = ps_new;\n";
   if (stage == ShaderStage::Pixel) {
     if (memexport_enabled) {
-      out << "          if (killed) { xenon_memexport_flush(e[32], e[33], e[34], "
-             "e[35], e[36], e[37], memexport_written_mask); discard; }\n";
+      out << "          if (vector_killed || scalar_killed) { xenon_memexport_flush(e[32], "
+             "e[33], e[34], e[35], e[36], e[37], memexport_written_mask); discard; }\n";
     } else {
-      out << "          if (killed) discard;\n";
+      out << "          if (vector_killed || scalar_killed) discard;\n";
     }
   }
   out << "        }\n";
@@ -120,16 +149,17 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
   if (instruction.kind == ShaderInstructionKind::VertexFetch) {
     const auto& fetch = instruction.vertex_fetch;
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          uint source_index = asuint(r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + ar";
-    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "]);\n"
+        << "          uint source_index = (uint)floor(r[(" << unsigned(fetch.source_register);
+    if (fetch.source_relative) out << " + aL";
+    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "] + "
+        << (fetch.index_rounded ? "0.5" : "0.0") << ");\n"
         << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
         << ", " << unsigned(fetch.fetch_constant_select) << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
         << fetch.offset_dwords << ", " << unsigned(fetch.data_format) << ", "
         << (fetch.signed_data ? "true" : "false") << ", "
         << (fetch.normalized ? "true" : "false") << ");\n"
         << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + ar";
+    if (fetch.destination_relative) out << " + aL";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
         << "        }\n";
   } else {
@@ -143,7 +173,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
     };
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
         << "          float4 coord = r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + ar";
+    if (fetch.source_relative) out << " + aL";
     out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n";
     // Xenos setTextureLod / setTextureGradientsHorz / setTextureGradientsVert
     // write per-shader-invocation state that later tfetches read when their
@@ -189,7 +219,7 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
           << offsets() << ");\n";
     }
     out << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + ar";
+    if (fetch.destination_relative) out << " + aL";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
         << "        }\n";
   }
@@ -218,6 +248,14 @@ Texture2D<float4> XenonTextures2D[32] : register(t33);
 Texture3D<float4> XenonTextures3D[32] : register(t65);
 TextureCube<float4> XenonTexturesCube[32] : register(t97);
 SamplerState XenonSamplers[32] : register(s0);
+
+// The vertex grouper's index: the draw's index (generated or fetched) plus
+// VGT_INDX_OFFSET, kept to its 24 bits and clamped to
+// [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX].
+uint xenon_vertex_index(uint index) {
+  uint4 vgt = XenonDrawState[1];
+  return clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu);
+}
 
 bool xenon_bool(uint index) {
   uint word = XenonBoolConstants[(index >> 7) & 7][(index >> 5) & 3];
@@ -327,8 +365,15 @@ float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
   if (op == 16) return dot(a.xyz, b.xyz).xxxx;
   if (op == 17) return (dot(a.xy, b.xy) + c.x).xxxx;
   if (op == 18) {
-    float3 q = abs(a.xyz); float m = max(q.x, max(q.y, q.z));
-    return float4(m, 1.0, 1.0, 1.0);
+    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
+    // and the D3DCUBEMAP_FACES face.
+    float x = a.z, y = a.w, z = a.x;
+    float3 q = abs(float3(x, y, z));
+    if (q.z >= q.x && q.z >= q.y)
+      return float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);
+    if (q.y >= q.x)
+      return float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);
+    return float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0);
   }
   if (op == 19) return max(max(a.x, a.y), max(a.z, a.w)).xxxx;
   if (op >= 20 && op <= 23) {
@@ -344,27 +389,64 @@ float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
     return (killed ? 1.0 : 0.0).xxxx;
   }
   if (op == 28) return float4(1.0, a.y * b.y, a.z, b.w);
-  if (op == 29) { a0 = (int)floor(a.w + 0.5); return max(a, b); }
+  if (op == 29) {
+    a0 = (int)clamp(floor(a.w + 0.5), -256.0, 255.0);
+    return max(a, b);
+  }
   return 0.0.xxxx;
 }
 
+)hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
+R"hlsl(static const float XENON_FLT_MAX = 3.402823466e+38;
+// Infinite results of the clamping reciprocal forms: _CLAMP saturates to
+// +-FLT_MAX, _FF flushes to signed zero.
+float xenon_clamp_infinity(float value, bool to_zero) {
+  if (!isinf(value)) return value;
+  if (to_zero) return value < 0.0 ? -0.0 : 0.0;
+  return value < 0.0 ? -XENON_FLT_MAX : XENON_FLT_MAX;
+}
+
+// `a` is the scalar operand (source 3) and `b` the mulsc/addsc/subsc
+// temporary. Operand `a` is a.w, operand `b` is a.x (or b.x for the constant
+// forms).
 float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
                        inout bool p0, inout int a0, out bool killed) {
-  killed = false; float x = a.w; float y = a.x; float v = 0.0;
-  if (op == 0) v=x+y; else if (op == 1) v=x+previous.x;
-  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3 || op==4) v=xenon_legacy_mul(x,previous.x);
-  else if (op==5) v=max(x,y); else if (op==6) v=min(x,y);
+  killed = false; float x = a.w; float y = a.x; float ps = previous.x; float v = 0.0;
+  if (op == 0) v=x+y; else if (op == 1) v=x+ps;
+  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3) v=xenon_legacy_mul(x,ps);
+  else if (op==4) v=(ps==-XENON_FLT_MAX || !isfinite(ps) || !isfinite(y) || y<=0.0)
+                    ? -XENON_FLT_MAX : xenon_legacy_mul(x,ps);
+  else if (op==5) v=x>=y?x:y; else if (op==6) v=x<y?x:y;
   else if (op==7) v=x==0.0; else if (op==8) v=x>0.0; else if (op==9) v=x>=0.0; else if (op==10) v=x!=0.0;
-  else if (op==11) v=frac(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
-  else if (op==14) v=exp2(x); else if (op==15 || op==16) v=log2(x);
-  else if (op>=17 && op<=19) v=rcp(x); else if (op>=20 && op<=22) v=rsqrt(abs(x));
-  else if (op==23 || op==24) { v=max(x,y); a0=(int)floor(v + (op==24 ? 0.0 : 0.5)); }
-  else if (op==25) v=x-y; else if (op==26) v=x-previous.x;
-  else if (op>=27 && op<=30) { p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0; v=p0; }
-  else if (op==31) { p0=!p0; v=p0; } else if (op==32) { p0=false; v=0.0; }
-  else if (op==33) { p0=false; v=0.0; } else if (op==34) v=p0;
+  else if (op==11) v=x-floor(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
+  else if (op==14) v=exp2(x);
+  else if (op==15 || op==16) {
+    v=x==1.0 ? 0.0 : log2(x);
+    if (op==15 && isinf(v) && v<0.0) v=-XENON_FLT_MAX;
+  }
+  else if (op>=17 && op<=19) {
+    v=x==1.0 ? 1.0 : 1.0/x;
+    if (op!=19) v=xenon_clamp_infinity(v, op==18);
+  }
+  else if (op>=20 && op<=22) {
+    v=x==1.0 ? 1.0 : 1.0/sqrt(x);
+    if (op!=22) v=xenon_clamp_infinity(v, op==21);
+  }
+  else if (op==23 || op==24) {
+    a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);
+    v=x>=y?x:y;
+  }
+  else if (op==25) v=x-y; else if (op==26) v=x-ps;
+  else if (op>=27 && op<=30) {
+    p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0;
+    v=p0 ? 0.0 : 1.0;
+  }
+  else if (op==31) { p0=x==1.0; v=p0 ? 0.0 : (x==0.0 ? 1.0 : x); }
+  else if (op==32) { p0=x-1.0<=0.0; v=p0 ? 0.0 : x-1.0; }
+  else if (op==33) { p0=false; v=XENON_FLT_MAX; }
+  else if (op==34) { p0=x==0.0; v=p0 ? 0.0 : x; }
   else if (op>=35 && op<=39) { killed=op==35?x==0.0:op==36?x>0.0:op==37?x>=0.0:op==38?x!=0.0:x==1.0; v=killed; }
-  else if (op==40) v=sqrt(abs(x)); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
+  else if (op==40) v=sqrt(x); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
   else if (op==44 || op==45) v=x+b.x; else if (op==46 || op==47) v=x-b.x;
   else if (op==48) v=sin(x); else if (op==49) v=cos(x); else if (op==50) return previous;
   return v.xxxx;
@@ -931,7 +1013,8 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
-  if (shader.stage == ShaderStage::Vertex) out << "  r[0].x = (float)vertex_id;\n";
+  if (shader.stage == ShaderStage::Vertex)
+    out << "  r[0].x = (float)xenon_vertex_index(vertex_id);\n";
   else for (unsigned i=0;i<16;++i) out << "  r[" << i << "] = input.i" << i << ";\n";
 
   out << "  [loop] while (running && guard++ < 65536) {\n"
@@ -957,8 +1040,6 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
         condition = cf.predicate.condition ? "p0" : "!p0";
       }
       out << "        bool execute = " << condition << ";\n"
-          << "        int ar = "
-          << (cf.addressing == AddressingMode::Absolute ? "a0" : "aL") << ";\n"
           << "        if (execute) {\n";
       for (std::uint32_t address = cf.target; address < cf.target + cf.count; ++address) {
         auto found = instructions.find(address);
@@ -1144,14 +1225,19 @@ void main(triangle XenonVertex input[3],
   if (d01 >= d12 && d01 >= d20) { a=input[0]; b=input[1]; c=input[2]; }
   else if (d12 >= d20) { a=input[1]; b=input[2]; c=input[0]; }
   else { a=input[2]; b=input[0]; c=input[1]; }
-  stream.Append(a);
+  // A four-vertex strip rasterizes (v0,v1,v2) and (v1,v2,v3): the shared
+  // v1-v2 edge must be the A-B diagonal or one corner of the rectangle is
+  // never covered. C,A,B is a cyclic rotation of the input order in every
+  // case above, so the title's winding (and therefore culling) is kept.
+  XenonVertex d = xenon_rectangle_corner(a,b,c);
   stream.Append(c);
+  stream.Append(a);
   stream.Append(b);
-  stream.Append(xenon_rectangle_corner(a,b,c));
+  stream.Append(d);
   stream.RestartStrip();
 }
 )hlsl";
-  result.source_hash = hash_text("xenon.rectangle-list.geometry.v1");
+  result.source_hash = hash_text("xenon.rectangle-list.geometry.v2");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
   return result;
@@ -1285,6 +1371,76 @@ float main(float4 position : SV_Position,
   result.source_hash = hash_text("xenon.transfer.depth.write.only.v1");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
+  return result;
+}
+
+LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << R"hlsl(struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };
+#ifdef __spirv__
+[[vk::push_constant]] TransferConstants transfer;
+#else
+ConstantBuffer<TransferConstants> transfer : register(b0);
+#endif
+)hlsl";
+  if (count == 1)
+    out << "Texture2D<float4> Source : register(t0);\n";
+  else
+    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
+  out << R"hlsl(float4 main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) : SV_Target0 {
+  const uint x = uint(position.x);
+  const uint y = uint(position.y);
+  const uint dst_base = transfer.destination.x, dst_pitch = transfer.destination.y;
+  const uint dst_msaa = transfer.destination.z, dst_mode = transfer.destination.w;
+  const uint src_base = transfer.source.x, src_pitch = transfer.source.y;
+  const uint src_msaa = transfer.source.z, src_mode = transfer.source.w;
+  const uint stride = transfer.extent.x, depth_flags = transfer.extent.y;
+  // The destination host sample's guest sample.
+  uint guest = host_sample;
+  if (dst_mode == 1u) {
+    guest = host_sample != 0u ? 0u : 1u;
+  } else if (dst_mode == 2u) {
+    if (host_sample == 0u) guest = 0u;
+    else if (host_sample == 3u) guest = 1u;
+    else discard;
+  }
+  // Its EDRAM word.
+  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
+  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
+                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
+  uint in_tile_x = sample_x % 80u;
+  if ((depth_flags & 1u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const uint row_in_tile = sample_y % 16u;
+  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
+  // The source sample holding that word.
+  const uint relative = (tile + 2048u - src_base) % 2048u;
+  if ((depth_flags & 2u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
+  const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
+  const uint source_sample_y = (relative / src_pitch) * 16u + row_in_tile;
+  const uint source_x = source_sample_x >> (src_msaa == 2u ? 1u : 0u);
+  const uint source_y = source_sample_y >> (src_msaa == 0u ? 0u : 1u);
+  if (source_x >= transfer.extent.z || source_y >= transfer.extent.w) discard;
+  uint source_guest = 0u;
+  if (src_msaa == 2u) source_guest = (source_sample_y & 1u) * 2u + (source_sample_x & 1u);
+  else if (src_msaa == 1u) source_guest = source_sample_y & 1u;
+  const uint source_host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
+                         : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
+)hlsl";
+  if (count == 1)
+    out << "  return Source.Load(int3(int2(source_x, source_y), 0));\n}\n";
+  else
+    out << "  return Source.Load(int2(source_x, source_y), source_host);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.color.v1") ^ count;
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
   return result;
 }
 

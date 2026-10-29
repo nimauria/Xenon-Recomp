@@ -6,6 +6,11 @@
 
 #include "xenon/recomp/artifact_cache.hpp"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace {
 
 std::string quote(const std::filesystem::path& p) { return "\"" + p.string() + "\""; }
@@ -70,6 +75,13 @@ xenon::recomp::ArtifactCacheKey make_key(const char* image_hash) {
 }  // namespace
 
 int main() {
+#if defined(_WIN32)
+  // Regression: validating a corrupt module raised Windows' modal "Bad Image"
+  // dialog and blocked forever whenever the process allowed such dialogs (as
+  // under ctest). Allow them here so step 6 below fails rather than passes by
+  // inheriting a suppressing error mode from its parent.
+  SetErrorMode(0);
+#endif
   const auto root = std::filesystem::temp_directory_path() / "xenon_artifact_cache_test";
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);

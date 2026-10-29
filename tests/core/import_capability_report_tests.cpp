@@ -9,6 +9,8 @@
 
 #include <cassert>
 #include <iostream>
+#include <string>
+#include <utility>
 
 using namespace xenon::core;
 
@@ -91,6 +93,86 @@ void test_verdict_is_fail_whenever_anything_is_missing() {
   assert(to_string(ImportCapabilityVerdict::Fail) == "FAIL");
 }
 
+xenon::xbox::XexImport make_import(std::string module, std::uint16_t ordinal,
+                                   xenon::xbox::XexImportKind kind) {
+  xenon::xbox::XexImport import{};
+  import.module = std::move(module);
+  import.ordinal = ordinal;
+  import.kind = kind;
+  return import;
+}
+
+void register_function(ExportRegistry& registry, std::uint32_t ordinal, bool partial) {
+  ExportDescriptor descriptor{};
+  descriptor.library = "xboxkrnl";
+  descriptor.name = "Function" + std::to_string(ordinal);
+  descriptor.ordinal = ordinal;
+  descriptor.partial = partial;
+  descriptor.handler = [](ExportCallContext&) { return true; };
+  assert(registry.register_export(std::move(descriptor)));
+}
+
+// Regression: import-scanner reported every xboxkrnl variable import of a
+// retail title (KeTimeStampBundle, XboxKrnlVersion, ...) as MISSING because it
+// looked variables up in the function namespace, and counted each function
+// import twice (its FunctionAddress record and its thunk).
+void test_xex_variable_import_resolves_in_the_variable_namespace() {
+  using xenon::xbox::XexImportKind;
+  ExportRegistry registry;
+  VariableExportDescriptor variable{};
+  variable.library = "xboxkrnl.exe";
+  variable.name = "KeTimeStampBundle";
+  variable.ordinal = 0xADu;
+  variable.guest_address = 0x80001020u;
+  assert(registry.register_variable(variable));
+
+  const auto resolved =
+      classify_xex_import(registry, make_import("xboxkrnl.exe", 0xAD, XexImportKind::Variable));
+  assert(resolved.has_value());
+  assert(resolved->status == ImportClassification::Implemented);
+  assert(resolved->function == nullptr);
+  assert(resolved->variable_address == 0x80001020u);
+
+  // An unregistered variable is Missing, never resolved through a function
+  // export that happens to share its ordinal.
+  register_function(registry, 0x158u, false);
+  const auto missing =
+      classify_xex_import(registry, make_import("xboxkrnl.exe", 0x158, XexImportKind::Variable));
+  assert(missing.has_value());
+  assert(missing->status == ImportClassification::Missing);
+  assert(!missing->variable_address.has_value());
+}
+
+void test_xex_function_import_is_counted_once_through_its_thunk() {
+  using xenon::xbox::XexImportKind;
+  ExportRegistry registry;
+  register_function(registry, 0x10u, false);
+  register_function(registry, 0x11u, true);
+
+  assert(!classify_xex_import(registry, make_import("xboxkrnl.exe", 0x10,
+                                                    XexImportKind::FunctionAddress))
+              .has_value());
+
+  const auto thunk = classify_xex_import(
+      registry, make_import("xboxkrnl.exe", 0x10, XexImportKind::FunctionThunk));
+  assert(thunk.has_value());
+  assert(thunk->status == ImportClassification::Implemented);
+  assert(thunk->function != nullptr && thunk->function->ordinal == 0x10u);
+
+  const auto partial = classify_xex_import(
+      registry, make_import("xboxkrnl.exe", 0x11, XexImportKind::FunctionThunk));
+  assert(partial.has_value() && partial->status == ImportClassification::Partial);
+
+  const auto absent = classify_xex_import(
+      registry, make_import("xboxkrnl.exe", 0x12, XexImportKind::FunctionThunk));
+  assert(absent.has_value() && absent->status == ImportClassification::Missing);
+
+  // A record of unknown kind resolves to nothing at load time either.
+  const auto unknown =
+      classify_xex_import(registry, make_import("xboxkrnl.exe", 0x10, XexImportKind::Unknown));
+  assert(unknown.has_value() && unknown->status == ImportClassification::Missing);
+}
+
 }  // namespace
 
 int main() {
@@ -104,6 +186,8 @@ int main() {
   test_verdict_is_pass_only_when_fully_gap_free();
   test_verdict_is_pass_with_fallback_for_stub_or_partial_with_no_missing();
   test_verdict_is_fail_whenever_anything_is_missing();
+  test_xex_variable_import_resolves_in_the_variable_namespace();
+  test_xex_function_import_is_counted_once_through_its_thunk();
 
   std::cout << "All import capability classification tests passed!\n";
   return 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <variant>
 
 #include "xenon/gpu/edram.hpp"
@@ -30,6 +31,17 @@ struct GpuPerformanceCounters {
   // path, not a first-time texture creation (which is not a re-validation
   // and is not counted here).
   std::uint64_t texture_cache_invalidations{};
+  // Draws and resolves the backend could not carry out (each sets the
+  // backend's last_error()); a resolve that fails leaves its destination,
+  // possibly the front buffer, unwritten.
+  std::uint64_t failed_draws{};
+  std::uint64_t failed_resolves{};
+  // Tile sets handed from one native image to another on the GPU, without
+  // a round trip through canonical EDRAM.
+  std::uint64_t direct_edram_transfers{};
+  // Color resolves done on the GPU out of the image owning their tiles,
+  // without flushing it to canonical EDRAM.
+  std::uint64_t gpu_resolves{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
@@ -42,7 +54,7 @@ struct GpuPerformanceCounters {
 // any nonzero value is real, actionable evidence of a gap, not noise to be
 // hidden.
 struct GpuUnsupportedCounters {
-  std::uint64_t unknown_packets{};                 // IR command variant consume() has no handler for.
+  std::uint64_t unknown_packets{};                 // PM4 type-3 packet the command processor did not execute.
   std::uint64_t unknown_registers{};                // Xenos register index outside the known register file.
   std::uint64_t unsupported_fetch_formats{};        // Vertex/texture fetch format the shader lowerer rejects.
   std::uint64_t unsupported_texture_formats{};      // Guest texture format with no host equivalent.
@@ -108,9 +120,24 @@ class Backend {
   // Presents an explicit runtime-provided scanout resource. Native window /
   // surface attachment is backend-specific, while frame semantics stay common.
   [[nodiscard]] virtual PresentStatus present(const PresentationFrame& frame) = 0;
+  // Draws scan-out of `frame` into an offscreen width x height RGBA8 image and
+  // reads it back, as presentation would show it. False where the backend
+  // cannot capture.
+  [[nodiscard]] virtual bool capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                                             std::uint32_t height,
+                                             PreparedPresentationFrame& output) {
+    static_cast<void>(frame);
+    static_cast<void>(width);
+    static_cast<void>(height);
+    output.error = "this backend cannot capture scan-out";
+    return false;
+  }
   [[nodiscard]] virtual bool resize_presentation(std::uint32_t width,
                                                  std::uint32_t height) = 0;
   [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;
+  // What the most recent failure was (a present that returned Error, a
+  // draw that could not be recorded), for diagnostics; empty if none.
+  [[nodiscard]] virtual std::string last_error() const { return {}; }
   [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
     return {};
   }

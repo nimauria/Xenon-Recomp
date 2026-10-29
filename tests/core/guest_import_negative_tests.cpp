@@ -74,6 +74,8 @@ constexpr std::uint32_t kDataRva = 0x20000u;
 struct ImportSpec {
   std::string library;
   std::uint32_t ordinal;
+  // 1 = callable function thunk; 0 = a variable record (no matching thunk).
+  std::uint32_t record_type{1u};
 };
 
 // Builds a minimal, structurally-valid XEX2 image (one executable .text page
@@ -163,13 +165,16 @@ std::vector<std::byte> make_minimal_xex(const std::vector<ImportSpec>& imports,
       be16(bytes, lib_offset + 0x24, static_cast<std::uint16_t>(i));
       be16(bytes, lib_offset + 0x26, 1);
       be32(bytes, lib_offset + 0x28, kLoadAddress + thunk_rva);
-      be32(bytes, header + thunk_rva,
-           0x01000000u | imports[i].ordinal);  // type-1 callable import thunk
+      be32(bytes, header + thunk_rva, (imports[i].record_type << 24u) | imports[i].ordinal);
       lib_offset += 0x2C;
       data_cursor += 4;
     }
 
     const auto table_size = static_cast<std::uint32_t>(0xC + string_table_size + 0x2C * imports.size());
+    // The table must end before the PE image at `header`; an overrun would
+    // silently corrupt the import header and the image would parse with no
+    // imports at all.
+    assert(import_table + table_size <= header && "too many/long imports for this fixture");
     be32(bytes, import_table + 0x0, table_size);
     be32(bytes, import_table + 0x4, string_table_size);
     be32(bytes, import_table + 0x8, static_cast<std::uint32_t>(imports.size()));
@@ -379,10 +384,14 @@ void test_unresolved_import_diagnostics() {
 // reasons.
 void test_capability_report_imports_section_classifies_real_mix() {
   const auto bytes = make_minimal_xex({
-      {"totally_bogus_lib", 1u},  // nothing registers this -> Missing
+      {"bogus_lib", 1u},          // nothing registers this -> Missing
       {"test_stub_lib", 10u},     // registered below as Stubbed, not partial -> SafeStub
       {"test_partial_lib", 20u},  // registered below with partial=true -> Partial
       {"xboxkrnl", 0x083u},       // KeQueryPerformanceFrequency, real and complete -> Implemented
+      // KeTimeStampBundle, a variable export -> Implemented. Regression: the
+      // report looked variables up as functions and counted every kernel
+      // variable a retail title imports as Missing.
+      {"xboxkrnl", 0x0ADu, 0u},
   });
 
   xenon::core::XenonSession session;
@@ -425,7 +434,7 @@ void test_capability_report_imports_section_classifies_real_mix() {
   assert(imports->get_number("missing") == 1.0);
   assert(imports->get_number("safeStub") == 1.0);
   assert(imports->get_number("partial") == 1.0);
-  assert(imports->get_number("implemented") >= 1.0);
+  assert(imports->get_number("implemented") == 2.0);
   assert(imports->get_string("verdict") == "FAIL" &&
          "any Missing import must make the imports-section verdict FAIL, "
          "matching compute_import_capability_verdict()");

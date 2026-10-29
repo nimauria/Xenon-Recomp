@@ -14,6 +14,7 @@
 #include "xenon/gpu/command_processor.hpp"
 #include "xenon/gpu/graphics_system.hpp"
 #include "xenon/gpu/types.hpp"
+#include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
 
 using xenon::gpu::CommandProcessor;
@@ -566,6 +567,116 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// Executes graphics IR and records, for each draw, the guest-visible state at
+// the moment the draw executes.
+class OrderRecordingBackend final : public xenon::gpu::Backend {
+ public:
+  OrderRecordingBackend(AddressSpace& memory, std::uint32_t fence) : memory_(memory), fence_(fence) {}
+  void begin_submission(AddressSpace&, xenon::gpu::Edram&) override {}
+  void consume(const xenon::gpu::ir::Command& command) override {
+    if (!std::holds_alternative<xenon::gpu::ir::DrawPacket>(command)) return;
+    ++draws_executed;
+    fence_when_drawn.push_back(load_physical_be32(memory_, fence_));
+  }
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+    return xenon::gpu::PresentStatus::NotConfigured;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+  bool presentation_ready() const noexcept override { return false; }
+
+  int draws_executed = 0;
+  std::vector<std::uint32_t> fence_when_drawn;
+
+ private:
+  AddressSpace& memory_;
+  std::uint32_t fence_;
+};
+
+// Regression: the command processor wrote fences and dispatched interrupts as
+// it decoded the ring, and the draws before them executed only afterwards, so
+// a guest could see a fence pass (and reuse what the draw read, or read a
+// resolve's destination) before the draw had run. With a backend bound, the
+// work before each guest-visible effect executes first.
+void test_ring_effects_follow_the_work_before_them() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x01009000;
+  constexpr std::uint32_t fence = 0x01219000;
+  constexpr std::uint32_t mem_write_target = 0x01219010;
+  store_be32(memory, fence, 0u);
+  store_be32(memory, mem_write_target, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  std::vector<int> draws_at_interrupt;
+  graphics.set_interrupt_callback([&](std::uint32_t) {
+    draws_at_interrupt.push_back(backend.draws_executed);
+  });
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
+  write_words(memory, ring,
+              {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+               make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x00000006u, fence | swap,
+               1u,
+               make_packet_type3(Type3Opcode::Interrupt, 1), 1u << 2u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+               make_packet_type3(Type3Opcode::MemWrite, 2), mem_write_target | swap, 0x77u,
+               make_packet_type3(Type3Opcode::EventWriteShaderDone, 3), 0x00000006u, fence | swap,
+               2u,
+               make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  constexpr std::uint32_t words = 2 + 4 + 2 + 2 + 3 + 4 + 2;
+  const auto next = graphics.submit_ring(backend, ring, 64, 0, words);
+  assert(next == words);
+  // Each draw ran before the fence that follows it was written.
+  assert(backend.draws_executed == 3);
+  assert((backend.fence_when_drawn == std::vector<std::uint32_t>{0u, 1u, 2u}));
+  // The interrupt after the first fence saw the first draw executed.
+  assert((draws_at_interrupt == std::vector<int>{1}));
+  assert(load_physical_be32(memory, fence) == 2u);
+  assert(load_physical_be32(memory, mem_write_target) == 0x77u);
+  // Nothing is left pending: the read index returned is safe to write back.
+  assert(graphics.stream().commands().empty());
+}
+
+// Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
+// drain at startup): the write pointer can sit inside a packet the guest is
+// still writing. The drain must stop before that packet, with everything
+// before it applied exactly once, and continue it when the rest arrives. A
+// failed drain made the next one replay the earlier packets.
+void test_ring_waits_for_a_packet_past_the_write_pointer(AddressSpace& memory,
+                                                         CommandProcessor& cp,
+                                                         RegisterFile& regs) {
+  constexpr std::uint32_t ring = 0x01006200;
+  constexpr std::uint32_t capacity = 16;
+  constexpr std::uint32_t counter = 0x01216000;
+  store_be32(memory, counter, 0u);
+  // MEM_WRITE of 1 to `counter`, then SET_CONSTANT2 of two registers.
+  write_words(memory, ring,
+              {make_packet_type3(Type3Opcode::MemWrite, 2),
+               counter | static_cast<std::uint32_t>(Endian::Swap8In32), 1u,
+               make_packet_type3(Type3Opcode::SetConstant2, 3), 0x2F10u, 0xAAAA0000u,
+               0xBBBB0000u});
+  const auto writes_before = cp.statistics().physical_writes;
+  const auto incomplete_before = cp.statistics().incomplete_ring_packets;
+
+  // Only the header and first value of SET_CONSTANT2 are submitted.
+  const auto first = cp.execute_ring(ring, capacity, 0, 5);
+  assert(first == 3u && "the read position stays at the incomplete packet");
+  assert(cp.statistics().incomplete_ring_packets == incomplete_before + 1u);
+  assert(cp.statistics().physical_writes == writes_before + 1u);
+  assert(regs.read(0x2F10u) != 0xAAAA0000u && "an incomplete packet is not executed");
+
+  const auto second = cp.execute_ring(ring, capacity, first, 7);
+  assert(second == 7u);
+  assert(regs.read(0x2F10u) == 0xAAAA0000u && regs.read(0x2F11u) == 0xBBBB0000u);
+  assert(cp.statistics().physical_writes == writes_before + 1u &&
+         "packets before the incomplete one are not replayed");
+}
+
 // Regression (Ace Combat 6): a WAIT_REG_MEM in the ring whose memory value is
 // produced by CPU code used to spin the one host thread that also delivers vsync
 // interrupts, so the CPU code that would satisfy it never ran. At ring level an
@@ -586,6 +697,9 @@ void test_ring_wait_stall_resumes(AddressSpace& memory, CommandProcessor& cp,
                0x12345678u, 0xFFFFFFFFu, 0u,
                make_packet_type1(0x342, 0x343), 0xBBBB0001u, 0xBBBB0002u});
 
+  namespace events = xenon::logging::events;
+  events::set_enabled(true);
+  events::clear();
   const auto stalls_before = cp.statistics().wait_stalls;
   const auto read = cp.execute_ring(ring, capacity, 0, 12);
   assert(read == 3 && "the ring must stop AT the unsatisfied wait packet");
@@ -596,12 +710,29 @@ void test_ring_wait_stall_resumes(AddressSpace& memory, CommandProcessor& cp,
 
   // Still not satisfied: a second drain stalls at the same place, cheaply.
   assert(cp.execute_ring(ring, capacity, read, 12) == 3);
+  // The park is recorded once for the fence, not once per drain.
+  const auto polled = poll_memory | static_cast<std::uint32_t>(Endian::Swap8In32);
+  {
+    const auto recorded = events::snapshot();
+    assert(recorded.size() == 1 && recorded[0].kind == events::EventKind::GpuWaitParked);
+    assert(recorded[0].guest_address == polled && recorded[0].value == 0x12345678u);
+    const auto parked = events::parked_gpu_wait(recorded);
+    assert(parked && parked->guest_address == polled);
+  }
 
   // The CPU produces the value; the next drain resumes at the wait and finishes.
   store_be32(memory, poll_memory, 0x12345678u);
   regs.write(0x340, 0u);  // would be rewritten if earlier packets were replayed
   const auto finished = cp.execute_ring(ring, capacity, read, 12);
   assert(finished == 12);
+  {
+    const auto recorded = events::snapshot();
+    assert(recorded.size() == 2 && recorded[1].kind == events::EventKind::GpuWaitResumed);
+    assert(recorded[1].guest_address == polled && recorded[1].value == 0x12345678u);
+    assert(!events::parked_gpu_wait(recorded));
+  }
+  events::set_enabled(false);
+  events::clear();
   assert(regs.read(0x340) == 0u && "earlier packets are not replayed on resume");
   assert(regs.read(0x342) == 0xBBBB0001u && regs.read(0x343) == 0xBBBB0002u);
 }
@@ -1202,7 +1333,8 @@ void test_portable_capture_round_trip(AddressSpace& memory) {
 
   const auto path = std::filesystem::temp_directory_path() /
                     "xenon_gpu_portable_capture_test.xgcap";
-  std::filesystem::remove(path);
+  std::error_code cleanup_error;  // a scanner may briefly hold the file
+  std::filesystem::remove(path, cleanup_error);
   assert(xenon::gpu::save_portable_capture(capture, path, &error));
   assert(error.empty());
   const auto loaded = xenon::gpu::load_portable_capture(path, &error);
@@ -1223,7 +1355,7 @@ void test_portable_capture_round_trip(AddressSpace& memory) {
   assert(graphics.edram().read8(0x1234u) == 0x5Au);
   assert(replay_backend.command_count() ==
          RegisterFile::kRegisterCount + loaded->frontend.commands.size() + 1u);
-  std::filesystem::remove(path);
+  std::filesystem::remove(path, cleanup_error);
 }
 
 void test_frontend_ring_capture(AddressSpace& memory) {
@@ -1297,6 +1429,42 @@ void test_unknown_register_write_is_counted(AddressSpace& memory, CommandProcess
   assert(cp.statistics().unknown_register_writes == before + 1u);
 }
 
+// Regression (AC6 logs were full of "unhandled GPU command variant"): the
+// semantic IR variants are records of packets the command processor already
+// executed, so the backend has nothing left to do for them. Recognized
+// packets the command processor never executed used to be emitted with the
+// same variants, so the two could not be told apart. They now arrive as an
+// unlowered Type3Packet and are counted.
+void test_unexecuted_packets_are_unlowered(AddressSpace& memory, CommandProcessor& cp,
+                                           xenon::gpu::ir::Stream& stream) {
+  constexpr std::uint32_t commands = 0x0100A000;
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::EventWrite, 1), 0x00000016u,
+               make_packet_type3(Type3Opcode::Nop, 1), 0x12345678u,
+               make_packet_type3(Type3Opcode::WaitForIdle, 1), 0u,
+               make_packet_type3(Type3Opcode::EventWriteZPassDone, 1), 0u,
+               make_packet_type3(Type3Opcode::ContextUpdate, 1), 0u});
+  const auto before = cp.statistics().unexecuted_packets;
+  const auto first = stream.size();
+  cp.execute_buffer(commands, 10);
+  assert(cp.statistics().unexecuted_packets == before + 3u);
+
+  std::vector<const xenon::gpu::ir::Command*> emitted;
+  for (std::size_t i = first; i < stream.size(); ++i) {
+    const auto& command = stream.commands()[i];
+    if (!std::holds_alternative<xenon::gpu::ir::RegisterWrite>(command)) emitted.push_back(&command);
+  }
+  assert(emitted.size() == 5u);
+  const auto* event = std::get_if<xenon::gpu::ir::EventPacket>(emitted[0]);
+  assert(event && event->opcode == Type3Opcode::EventWrite && "an executed packet keeps its record");
+  const Type3Opcode unlowered[] = {Type3Opcode::Nop, Type3Opcode::WaitForIdle,
+                                   Type3Opcode::EventWriteZPassDone, Type3Opcode::ContextUpdate};
+  for (std::size_t i = 0; i < 4u; ++i) {
+    const auto* packet = std::get_if<xenon::gpu::ir::Type3Packet>(emitted[i + 1u]);
+    assert(packet && packet->opcode == unlowered[i] && packet->payload.size() == 1u);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1326,8 +1494,11 @@ int main() {
   test_visibility_queries(memory, cp, regs);
   test_interrupt_dispatch(memory, cp);
   test_mem_write(memory, cp);
+  test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_ring_effects_follow_the_work_before_them();
+  test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);
   test_scratch_register_writeback_satisfies_memory_wait(memory, cp, regs);

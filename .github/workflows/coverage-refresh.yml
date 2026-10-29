@@ -55,7 +55,7 @@ jobs:
       sha: ${{ steps.checkout.outputs.commit }}
     steps:
       - id: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event_name == 'push' && github.sha || format('refs/heads/{0}', env.COVERAGE_TARGET_BRANCH) }}
           persist-credentials: false
@@ -92,7 +92,7 @@ jobs:
           git diff --stat
       - name: Keep the refresh reports
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-refresh
           path: ${{ runner.temp }}/coverage/
@@ -107,11 +107,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.audit.outputs.sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: coverage-refresh
           path: ${{ runner.temp }}/coverage

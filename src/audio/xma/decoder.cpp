@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -287,6 +288,7 @@ bool XmaDecoder::initialize_context(cpu::GuestAddress context,
 bool XmaDecoder::enable_context(cpu::GuestAddress context) {
   const auto index = index_of(context);
   if (!index || !allocated_[*index].load() || !runtimes_[*index]) return false;
+  kicks_.fetch_add(1, std::memory_order_relaxed);
   {
     std::lock_guard lock(runtimes_[*index]->mutex);
     runtimes_[*index]->disable_requested = false;
@@ -364,9 +366,55 @@ std::uint64_t XmaDecoder::decoded_samples(cpu::GuestAddress context) const {
   return runtimes_[*index]->decoded_samples.load(std::memory_order_relaxed);
 }
 
+XmaDecoder::Stats XmaDecoder::stats() const noexcept {
+  Stats out{};
+  for (const auto& allocated : allocated_) out.contexts_allocated += allocated.load() ? 1u : 0u;
+  out.kicks = kicks_.load(std::memory_order_relaxed);
+  out.decode_passes = decode_passes_.load(std::memory_order_relaxed);
+  out.idle_no_output_buffer = idle_passes_[kIdleNoOutputBuffer].load(std::memory_order_relaxed);
+  out.idle_output_full = idle_passes_[kIdleOutputFull].load(std::memory_order_relaxed);
+  out.idle_no_input = idle_passes_[kIdleNoInput].load(std::memory_order_relaxed);
+  out.frames_decoded = frames_decoded_.load(std::memory_order_relaxed);
+  out.parser_errors = parser_errors_.load(std::memory_order_relaxed);
+  for (std::size_t i = 0; i < out.decode_errors.size(); ++i) {
+    out.decode_errors[i] = decode_errors_[i].load(std::memory_order_relaxed);
+  }
+  out.peak = std::bit_cast<float>(peak_bits_.load(std::memory_order_relaxed));
+  return out;
+}
+
+std::string XmaDecoder::describe(const Stats& stats) {
+  std::string line = "XMA: " + std::to_string(stats.contexts_allocated) +
+                     " contexts allocated, " + std::to_string(stats.kicks) + " kicks, " +
+                     std::to_string(stats.decode_passes) + " decode passes (idle: no output buffer " +
+                     std::to_string(stats.idle_no_output_buffer) + ", output full " +
+                     std::to_string(stats.idle_output_full) + ", no input " +
+                     std::to_string(stats.idle_no_input) + "), " +
+                     std::to_string(stats.frames_decoded) +
+                     " frames decoded, decoded peak " + std::to_string(stats.peak) +
+                     ", parser errors " + std::to_string(stats.parser_errors);
+  std::string errors;
+  for (std::size_t i = 0; i < stats.decode_errors.size(); ++i) {
+    if (!stats.decode_errors[i]) continue;
+    errors += (errors.empty() ? "" : ", ") + std::string("status ") + std::to_string(i) +
+              " x" + std::to_string(stats.decode_errors[i]);
+  }
+  return line + "; decode errors: " + (errors.empty() ? "none" : errors);
+}
+
 bool XmaDecoder::merge_hardware_progress(
     cpu::GuestAddress context, const XmaContextData& initial,
     const XmaContextData& progressed) {
+  // Count each error state the engine enters (the context's error fields are
+  // sticky until the guest clears them, so a repeat of the same state is not
+  // a new failure).
+  if (progressed.error_set &&
+      !(initial.error_set && initial.error_status == progressed.error_status)) {
+    decode_errors_[progressed.error_status & 15u].fetch_add(1, std::memory_order_relaxed);
+  }
+  if (progressed.parser_error_set && !initial.parser_error_set) {
+    parser_errors_.fetch_add(1, std::memory_order_relaxed);
+  }
   XmaContextData fresh{};
   if (!read_context(context, fresh)) return false;
 

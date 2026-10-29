@@ -57,6 +57,16 @@ namespace xenon::recomp {
 //                 cannot accidentally request a zero-worker pool.
 [[nodiscard]] std::size_t resolve_worker_count(std::optional<std::size_t> requested) noexcept;
 
+// Default cap on concurrent compiler processes for a generated game module.
+// Each generated shard is a large translation unit, so "auto" is bounded to
+// keep peak compiler memory on an ordinary machine; a caller that knows the
+// host has the memory asks for more explicitly (xenon-prepare --jobs N).
+inline constexpr std::size_t kDefaultNativeBuildJobs = 8;
+
+// The native module build's parallelism: N (>= 1) exactly; nullopt or 0 is
+// "auto", min(kDefaultNativeBuildJobs, resolve_worker_count(nullopt)).
+[[nodiscard]] std::size_t resolve_native_build_jobs(std::optional<std::size_t> requested) noexcept;
+
 // A fixed worker-count handle offering one operation: parallel_for(). See
 // this header's top comment for the implementation strategy. Safe on
 // Windows and Linux; uses only the standard library.

@@ -75,9 +75,6 @@ add_library(xenon_recomp STATIC
   reporting/report_json.cpp
   reporting/report_text.cpp
   intake/game_intake.cpp
-  # Runtime support linked into generated game modules.
-  runtime/native_replacements.cpp
-  runtime/runtime_helpers.cpp
 )
 target_compile_definitions(xenon_recomp PRIVATE
   XENON_GRAPH_IR_PRODUCER="${XENON_GRAPH_IR_PRODUCER}"
@@ -87,11 +84,25 @@ target_include_directories(xenon_recomp
   PUBLIC "${XENON_SOURCE_DIR}/include"
   # Private headers are included as "recomp/<area>/<header>.hpp".
   PRIVATE "${XENON_SOURCE_DIR}/src")
-# XEX parsing comes from xenon_xex. runtime/ (helpers and native replacements
-# called by generated modules) uses kernel::KernelProcess and its guest heaps,
-# and intake/ reads GDFX images through the filesystem, so xenon_kernel is a
-# direct dependency. The guest export bridge (xenon_xbox_kernel_io) is not.
-target_link_libraries(xenon_recomp PUBLIC xenon_cpu xenon_xex xenon_kernel Threads::Threads)
+# XEX parsing comes from xenon_xex. intake/ reads GDFX images through the
+# filesystem, so xenon_kernel is a direct dependency. The guest export bridge
+# (xenon_xbox_kernel_io) is not.
+target_link_libraries(xenon_recomp PUBLIC xenon_recomp_runtime xenon_cpu xenon_xex xenon_kernel
+                                          Threads::Threads)
 target_compile_features(xenon_recomp PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_recomp)
 add_library(Xenon::Recomp ALIAS xenon_recomp)
+
+# Runtime support called by generated game modules: helpers and native
+# replacements, which use kernel::KernelProcess and its guest heaps. Generated
+# projects link only this, not the recompiler, so building a game module does
+# not compile the analysis and code-generation sources.
+add_library(xenon_recomp_runtime STATIC
+  runtime/native_replacements.cpp
+  runtime/runtime_helpers.cpp
+)
+target_include_directories(xenon_recomp_runtime PUBLIC "${XENON_SOURCE_DIR}/include")
+target_link_libraries(xenon_recomp_runtime PUBLIC xenon_cpu xenon_kernel)
+target_compile_features(xenon_recomp_runtime PUBLIC cxx_std_20)
+xenon_enable_warnings(xenon_recomp_runtime)
+add_library(Xenon::RecompRuntime ALIAS xenon_recomp_runtime)

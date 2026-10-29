@@ -94,10 +94,16 @@ constexpr std::uint32_t XamNotifyCreateListener = 0x028A;
 // separate export that does keep the prefix.
 constexpr std::uint32_t XNotifyGetNext = 0x028B;
 constexpr std::uint32_t XNotifyPositionUI = 0x028C;
+constexpr std::uint32_t XNotifyDelayUI = 0x028D;
+constexpr std::uint32_t XamShowKeyboardUI = 0x02C1;
+constexpr std::uint32_t XamIsUIActive = 0x02EC;
+constexpr std::uint32_t XamUserGetGamerTag = 0x020C;
+constexpr std::uint32_t XamNotifyCreateListenerInternal = 0x0291;
 
 // ---------------------------------------------------------------------------
 // Content and storage (xam_table.inc ~0x259-0x269)
 // ---------------------------------------------------------------------------
+constexpr std::uint32_t XamContentCreate = 0x0258;
 constexpr std::uint32_t XamContentCreateEx = 0x0259;
 constexpr std::uint32_t XamContentClose = 0x025A;
 constexpr std::uint32_t XamContentDelete = 0x025B;
@@ -192,9 +198,9 @@ constexpr std::uint32_t XamLoaderTerminateTitle = 0x01A9;
 // a working voice channel.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamVoiceCreate = 0x030C;
-constexpr std::uint32_t XamVoiceClose = 0x030D;
-constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030E;
-constexpr std::uint32_t XamVoiceSubmitPacket = 0x030F;
+constexpr std::uint32_t XamVoiceHeadsetPresent = 0x030D;
+constexpr std::uint32_t XamVoiceSubmitPacket = 0x030E;
+constexpr std::uint32_t XamVoiceClose = 0x030F;
 
 // ---------------------------------------------------------------------------
 // XAM background tasks (xam_table.inc 0x1AF/0x1B1/0x1B3) - XamTaskSchedule
@@ -208,14 +214,16 @@ constexpr std::uint32_t XamTaskShouldExit = 0x01B3;
 // ---------------------------------------------------------------------------
 // XMsg* app-message IPC (xam_table.inc 0x1F4/0x1F7/0x1F8/0x1FC) - routes
 // through a registered in-process "XAM app" dispatcher (dashboard blades,
-// content apps). Xenon has no such app registry, so every call resolves to
-// the real "app undefined" outcome real hardware itself reports for an
-// unregistered app id - not a fabricated success.
+// content apps). XMP playback-controller queries and changes have a shared
+// stateful dispatcher. Other app ids report the "app undefined" outcome.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XMsgInProcessCall = 0x01F4;
 constexpr std::uint32_t XMsgStartIORequest = 0x01F7;
 constexpr std::uint32_t XMsgCancelIORequest = 0x01F8;
 constexpr std::uint32_t XMsgStartIORequestEx = 0x01FC;
+// XamGetOverlappedResult (what XGetOverlappedResult calls): reads back an
+// XOVERLAPPED's result, see src/xam/xam_overlapped.hpp.
+constexpr std::uint32_t XamGetOverlappedResult = 0x01FB;
 
 // ---------------------------------------------------------------------------
 // Generic enumerator walk (xam_table.inc 0x250) - walks a handle produced by
@@ -251,9 +259,11 @@ constexpr std::uint32_t XamShowDirtyDiscErrorUI = 0x02D9;
 constexpr std::uint32_t XamShowMessageBoxUIEx = 0x02DC;
 
 // ---------------------------------------------------------------------------
-// User profile additions (xam_table.inc 0x219) and gamer tile (0x2F0)
+// Profile settings (xam_table.inc 0x219, 0x21A, 0x22A) and gamer tile (0x2F0)
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XamUserReadProfileSettings = 0x0219;
+constexpr std::uint32_t XamUserWriteProfileSettings = 0x021A;
+constexpr std::uint32_t XamUserReadProfileSettingsEx = 0x022A;
 constexpr std::uint32_t XamWriteGamerTile = 0x02F0;
 
 // ---------------------------------------------------------------------------

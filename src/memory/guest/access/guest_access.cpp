@@ -2,7 +2,30 @@
 
 namespace xenon::memory {
 
+// The view guest code and MemoryPort accessors use: native when native
+// access is selected, strict otherwise.
 xenon::cpu::FastMemoryView AddressSpace::make_fast_memory_view() noexcept {
+  if (!native_access_) return make_strict_fast_memory_view();
+  xenon::cpu::FastMemoryView view{};
+  if (initialized_ && physical_ && physical_->data()) {
+    view.physical_base = physical_->data();
+    view.page_table = hot_pages_.data();
+    view.page_count = kPageCount;
+    view.page_shift = kPageShift;
+    view.physical_size = kPhysicalMemorySize;
+    view.physical_page_count = kPhysicalPageCount;
+    view.executable_page_generations = executable_page_generations_.data();
+    view.native_access = true;
+    view.cpu_dirty_page_bits = coherency_.cpu_dirty_page_bits_data();
+    view.cpu_dirty_summary_bits = coherency_.cpu_dirty_summary_bits_data();
+  }
+  return view;
+}
+
+// The full strict view. Device-side writers (write_physical, GPU readback
+// windows) and the strict reservation monitor always use it, so their writes
+// keep exact epochs and journal entries in either access mode.
+xenon::cpu::FastMemoryView AddressSpace::make_strict_fast_memory_view() noexcept {
   xenon::cpu::FastMemoryView view{};
   if (initialized_ && physical_ && physical_->data()) {
     view.physical_base = physical_->data();
@@ -351,7 +374,7 @@ T AddressSpace::read_integer(GuestAddress address, bool little_endian) {
 template <typename T>
 void AddressSpace::write_integer(GuestAddress address, T value, bool little_endian) {
   if constexpr (sizeof(T) == 4u) {
-    if (address == 0x62D78u || address == 0x62DC8u) {
+    if (xenon::cpu::is_write_trapped(address)) {
       xenon::cpu::debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
     }
   }
@@ -711,7 +734,7 @@ void AddressSpace::fill_bytes(GuestAddress address, std::uint32_t size,
 bool AddressSpace::begin_physical_write(std::uint32_t physical_address,
                                        std::uint32_t width) noexcept {
   if (!width || physical_address >= kPhysicalMemorySize) return false;
-  auto view = make_fast_memory_view();
+  auto view = make_strict_fast_memory_view();
   return xenon::cpu::reservation_monitor_detail::enter_write(
       view, physical_address, width);
 }
@@ -721,7 +744,7 @@ std::uint64_t AddressSpace::complete_physical_write(
     bool reservation_participant,
     xenon::cpu::MemoryOrderingDomain ordering_domain) noexcept {
   if (!width || physical_address >= kPhysicalMemorySize) return 0u;
-  auto view = make_fast_memory_view();
+  auto view = make_strict_fast_memory_view();
   return xenon::cpu::reservation_monitor_detail::finish_write(
       view, physical_address, width, reservation_participant, ordering_domain);
 }

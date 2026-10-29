@@ -1,0 +1,45 @@
+{
+  "name": "xenon-launcher-next",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "cef:fetch": "node scripts/fetch-cef.mjs",
+    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
+    "desktop:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -BuildOnly",
+    "test:desktop": "node scripts/smoke-desktop.mjs",
+    "test:jobs": "node scripts/smoke-jobs.mjs",
+    "test:network": "node scripts/smoke-network.mjs",
+    "test:profiles": "node scripts/smoke-profiles.mjs",
+    "test:captures": "node scripts/smoke-captures.mjs",
+    "test:migration": "node scripts/smoke-migration.mjs",
+    "test:crash": "node scripts/smoke-crash.mjs",
+    "desktop:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1",
+    "test:library": "node scripts/smoke-library.mjs",
+    "test:services": "node scripts/smoke-services.mjs",
+    "test:shell": "node scripts/smoke-shell.mjs",
+    "test:dlc": "node scripts/smoke-dlc-catalog.mjs",
+    "test:parity-actions": "node scripts/smoke-parity-actions.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "playwright-core": "1.64.1",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

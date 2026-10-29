@@ -134,3 +134,54 @@ CLAUDE.md
 !third_party/xenon-ffmpeg/
 !third_party/xenon-ffmpeg/**
 !third_party/xenon-ffmpeg/**/*.lib
+
+# Design notes and trackers stay local and are not published. Only the
+# documents README.md links to are tracked, plus the CI-generated coverage
+# dashboard. A new document stays local unless it is listed here.
+/docs/**
+!/docs/**/
+!/docs/coverage/**
+!/docs/architecture/PROJECT_STRUCTURE.md
+!/docs/audio/AUDIO_V1.md
+!/docs/cpu/CPU_V2_DESIGN.md
+!/docs/cpu/DYNAMIC_FALLBACK_GEN7.md
+!/docs/cpu/SEMANTIC_VERIFICATION_GEN8.md
+!/docs/development/DEPENDENCIES.md
+!/docs/development/GAME_PREPARATION.md
+!/docs/development/RELEASE_PACKAGING.md
+!/docs/development/RESEARCH_PROVENANCE.md
+!/docs/development/RESTRUCTURE_FINDINGS.md
+!/docs/development/TESTING.md
+!/docs/development/WINDOWS_NATIVE.md
+!/docs/filesystem/FILESYSTEM_V1.md
+!/docs/graphics/EDRAM_RENDERING.md
+!/docs/graphics/GPU_V1.md
+!/docs/graphics/HLSL_DXC.md
+!/docs/graphics/NATIVE_BACKENDS.md
+!/docs/graphics/VALIDATION.md
+!/docs/input/INPUT_V2.md
+!/docs/kernel/KERNEL_V1.md
+!/docs/memory/MEMORY_V2.md
+!/docs/modules/CONTENT_IDENTITY.md
+!/docs/modules/CONTENT_SERVICES.md
+!/docs/modules/INPUT_API_V1.md
+!/docs/network/XENON_NETWORK_V1.md
+!/docs/platforms/HOST_PORTABILITY_V1.md
+!/docs/recomp/COMPILATION_GRAPH_GEN10.md
+!/docs/recomp/GAME_INTAKE_GEN11.md
+!/docs/recomp/RECOMPILATION_PIPELINE.md
+!/docs/recomp/RECOMP_ANALYSIS_GEN5.md
+!/docs/recomp/RECOMP_ANALYSIS_GEN6.md
+!/docs/recomp/RECOMP_ANALYSIS_V2.md
+!/docs/recomp/RECOMP_ANALYSIS_V3.md
+!/docs/recomp/UNIVERSAL_KNOWLEDGE_GEN9.md
+!/docs/runtime/AC6_RUNTIME_INVESTIGATION.md
+!/docs/runtime/BOOT_CHECKPOINTS.md
+!/docs/runtime/RUNTIME_HOST.md
+!/docs/runtime/RUNTIME_SESSION.md
+!/docs/xam/XAM_V1.md
+!/docs/xbox/IMPORT_DISPATCH.md
+!/docs/xbox/XEX_LOADER_V2.md
+
+# Retired Qt launcher is kept locally, outside version control.
+/launcher/

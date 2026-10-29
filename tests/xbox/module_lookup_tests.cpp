@@ -332,6 +332,67 @@ void test_get_procedure_address_abi() {
 
 }  // namespace
 
+// XexGetModuleSection(handle, name, data_ptr, size_ptr): the executable's
+// XEX_HEADER_RESOURCE_INFO table, names up to 8 characters (an 8-character
+// name has no terminator), as in xenia's UserModule::GetSection.
+void test_get_module_section_reads_the_resource_table() {
+  Fixture f;
+  xbox::XexImage image{};
+  image.original_pe_name = "AceCombat6.exe";
+  std::vector<std::byte> header(0x20u + 4u + 2u * 16u, std::byte{0});
+  const auto put32 = [&](std::size_t at, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) header[at + i] = static_cast<std::byte>(v >> (24 - i * 8));
+  };
+  const auto put_name = [&](std::size_t at, const char* name) {
+    for (std::size_t i = 0; i < 8u && name[i] != '\0'; ++i) header[at + i] = static_cast<std::byte>(name[i]);
+  };
+  put32(0x00u, 0x58455832u);  // "XEX2"
+  put32(0x08u, static_cast<std::uint32_t>(header.size()));
+  put32(0x14u, 1u);
+  put32(0x18u, 0x000002FFu);  // XEX_HEADER_RESOURCE_INFO
+  put32(0x1Cu, 0x20u);
+  put32(0x20u, 4u + 2u * 16u);
+  put_name(0x24u, "4E4D07D6");
+  put32(0x2Cu, 0x82500000u);
+  put32(0x30u, 0x1234u);
+  put_name(0x34u, "xui");
+  put32(0x3Cu, 0x82600000u);
+  put32(0x40u, 0x80u);
+  image.header_bytes = header;
+  f.modules->set_executable(f.exe_record, image, {"default.xex"});
+
+  core::ExportDescriptor descriptor{};
+  descriptor.library = "xboxkrnl.exe";
+  descriptor.name = "XexGetModuleSection";
+  descriptor.ordinal = 0x196u;
+  xbox::GuestModuleRegistry* raw = f.modules.get();
+  descriptor.handler = [raw, image](core::ExportCallContext& ctx) {
+    return xbox::xex_get_module_section_export(*raw, image, ctx);
+  };
+  assert(f.guest_abi.register_export(std::move(descriptor)));
+
+  const auto data = f.scratch(4);
+  const auto size = f.scratch(4);
+  const auto section = [&](std::uint64_t handle, const std::string& name) {
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = handle;
+    cpu.gpr[4] = f.cstring(name);
+    cpu.gpr[5] = data;
+    cpu.gpr[6] = size;
+    core::ExportCallContext ctx{cpu, *f.address_space, 0, 0};
+    assert(f.guest_abi.invoke("xboxkrnl", 0x196u, ctx).handled);
+    return static_cast<std::uint32_t>(cpu.gpr[3]);
+  };
+  assert(section(f.exe_record, "4E4D07D6") == 0u);
+  assert(f.address_space->read32_be(data) == 0x82500000u && f.address_space->read32_be(size) == 0x1234u);
+  assert(section(f.exe_record, "xui") == 0u);
+  assert(f.address_space->read32_be(data) == 0x82600000u && f.address_space->read32_be(size) == 0x80u);
+  assert(section(f.exe_record, "missing") == 0xC0000225u && "STATUS_NOT_FOUND");
+  const auto xam = f.modules->module_handle("xam.xex");
+  assert(xam && section(*xam, "xui") == 0xC0000225u && "system modules have no resources");
+  assert(section(0x1234u, "xui") == 0xC0000008u && "STATUS_INVALID_HANDLE");
+}
+
 int main() {
   std::cout << "Testing XexGetModuleHandle/XexGetProcedureAddress...\n";
   test_system_module_handles();
@@ -341,6 +402,7 @@ int main() {
   test_thunk_page_rollover();
   test_get_module_handle_abi();
   test_get_procedure_address_abi();
+  test_get_module_section_reads_the_resource_table();
   std::cout << "All module lookup tests passed!\n";
   return 0;
 }

@@ -2,7 +2,78 @@
 
 #include <thread>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
 namespace xenon::kernel {
+namespace {
+#if defined(_WIN32)
+// ntdll's timer-resolution calls, in 100 ns units. Unlike timeBeginPeriod
+// they reach the hardware's finest step (0.5 ms on current Windows) and report
+// the resolution actually in force.
+using NtQueryTimerResolutionFn = LONG(NTAPI*)(PULONG, PULONG, PULONG);
+using NtSetTimerResolutionFn = LONG(NTAPI*)(ULONG, BOOLEAN, PULONG);
+
+template <typename Fn>
+Fn ntdll_function(const char* name) {
+  const auto module = GetModuleHandleW(L"ntdll.dll");
+  return module ? reinterpret_cast<Fn>(GetProcAddress(module, name)) : nullptr;
+}
+#endif
+}  // namespace
+
+HostTimerResolution::HostTimerResolution() {
+#if defined(_WIN32)
+  const auto query = ntdll_function<NtQueryTimerResolutionFn>("NtQueryTimerResolution");
+  const auto set = ntdll_function<NtSetTimerResolutionFn>("NtSetTimerResolution");
+  if (!query || !set) return;
+  ULONG coarsest = 0, finest = 0, current = 0;
+  if (query(&coarsest, &finest, &current) < 0) return;
+  // Windows 11 drops a process's resolution request while its window is
+  // hidden unless the process opts out of that throttling.
+  PROCESS_POWER_THROTTLING_STATE throttling{};
+  throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  throttling.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+  throttling.StateMask = 0;
+  static_cast<void>(SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                                          &throttling, sizeof(throttling)));
+  ULONG granted = 0;
+  if (set(finest, TRUE, &granted) < 0) return;
+  requested_ = finest;
+  active_ = true;
+#else
+  timespec resolution{};
+  active_ = clock_getres(CLOCK_MONOTONIC, &resolution) == 0 &&
+            resolution.tv_sec == 0 && resolution.tv_nsec <= 1'000'000;
+#endif
+}
+
+HostTimerResolution::~HostTimerResolution() {
+#if defined(_WIN32)
+  if (!active_) return;
+  if (const auto set = ntdll_function<NtSetTimerResolutionFn>("NtSetTimerResolution")) {
+    ULONG current = 0;
+    static_cast<void>(set(requested_, FALSE, &current));
+  }
+#endif
+}
+
+std::chrono::nanoseconds HostTimerResolution::current() {
+#if defined(_WIN32)
+  const auto query = ntdll_function<NtQueryTimerResolutionFn>("NtQueryTimerResolution");
+  ULONG coarsest = 0, finest = 0, current = 0;
+  if (!query || query(&coarsest, &finest, &current) < 0) return (std::chrono::nanoseconds::max)();
+  return std::chrono::nanoseconds(std::int64_t(current) * 100);
+#else
+  timespec resolution{};
+  if (clock_getres(CLOCK_MONOTONIC, &resolution) != 0) return (std::chrono::nanoseconds::max)();
+  return std::chrono::seconds(resolution.tv_sec) + std::chrono::nanoseconds(resolution.tv_nsec);
+#endif
+}
 
 std::uint64_t TimeServices::system_time() {
   // Get current time as Unix timestamp

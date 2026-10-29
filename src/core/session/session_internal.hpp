@@ -32,9 +32,6 @@ std::string describe_guest_memory_fault(const memory::MemoryFault& fault,
                                         memory::AddressSpace& memory,
                                         const ExportTrace& export_trace,
                                         std::uint32_t thread_id);
-// Message for a guest that exhausted the top-level dispatch budget.
-std::string describe_dispatch_limit(const cpu::CpuState& state, const ExportTrace& export_trace,
-                                    std::uint32_t thread_id);
 
 // --- Title-specific investigation probes (diagnostics/title_probes.cpp) ----
 // Ace Combat 6 probes. Each keeps its own guard, statics and output file so

@@ -18,7 +18,66 @@
 
 using namespace xenon::cpu;
 
+// Native floating point (the default): every arithmetic helper returns the
+// value strict mode computes, FPSCR status is left alone, the guest's control
+// fields are kept, and a non-nearest rounding mode still rounds exactly.
+static void test_native_floating_point() {
+  aot::fp_strict_mode = false;
+  CpuState fp{};
+  const std::uint32_t control =
+      fpscr_bits::VE | static_cast<std::uint32_t>(FpRoundingMode::Nearest);
+  fp.fpscr = control;
+
+  const double values[] = {1.0, 0x1p-60, -3.5, 1e300, 1e-310, 0.1, 7.0,
+                           std::numeric_limits<double>::infinity(), 0.0, -0.0};
+  for (const double a : values) {
+    for (const double b : values) {
+      CpuState strict_state{};
+      strict_state.fpscr = control;
+      const auto same = [](double x, double y) {
+        return std::bit_cast<std::uint64_t>(x) == std::bit_cast<std::uint64_t>(y) ||
+               (std::isnan(x) && std::isnan(y));
+      };
+      aot::fp_strict_mode = true;
+      const double s_add = aot::fp_add(strict_state, a, b);
+      const double s_mul = aot::fp_mul(strict_state, a, b);
+      const double s_div = aot::fp_div(strict_state, a, b);
+      const double s_fma = aot::fp_fma(strict_state, a, b, 0.25);
+      const double s_single = aot::fp_round_single(strict_state, a * b);
+      aot::fp_strict_mode = false;
+      assert(same(aot::fp_add(fp, a, b), s_add));
+      assert(same(aot::fp_mul(fp, a, b), s_mul));
+      assert(same(aot::fp_div(fp, a, b), s_div));
+      assert(same(aot::fp_fma(fp, a, b, 0.25), s_fma));
+      assert(same(aot::fp_round_single(fp, a * b), s_single));
+      aot::update_fpscr(fp, s_add);
+    }
+  }
+  // Status is untracked and control is preserved.
+  assert(fp.fpscr == control);
+  aot::update_fp_compare_status(fp, std::nan(""), 1.0, true);
+  assert(fp.fpscr == control);
+
+  // Conversions keep their exact results without a rounding-mode switch.
+  assert(aot::fp_to_integer_bits(fp, 2.5, 32, false) == 2u);
+  assert(aot::fp_to_integer_bits(fp, 3.5, 32, false) == 4u);
+  assert(aot::fp_to_integer_bits(fp, -2.7, 32, true) == 0xFFFFFFFFFFFFFFFEull);
+
+  // A non-nearest guest rounding mode takes the exact path.
+  fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardPositive);
+  assert(aot::fp_add(fp, 1.0, 0x1p-60) == std::nextafter(1.0, 2.0));
+  fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardZero);
+  assert(aot::fp_add(fp, 1.0, 0x1p-60) == 1.0);
+  assert(aot::fp_to_integer_bits(fp, 2.9, 32, false) == 2u);
+  assert(std::fegetround() == FE_TONEAREST);
+  aot::fp_strict_mode = true;
+}
+
 int main() {
+  // The FPSCR checks below pin strict floating point (XENON_FP_STRICT=1);
+  // test_native_floating_point() covers the default.
+  aot::fp_strict_mode = true;
+  test_native_floating_point();
   CpuState s{};
   assert(s.xer == 0);
   s.set_xer_ca(true);
@@ -219,6 +278,28 @@ int main() {
     aot::update_fpscr(fp, 1.0);
     assert(std::fegetround() == FE_DOWNWARD);
     std::fesetround(host_round);
+
+    // Every operation applies the guest's rounding mode, not only the first
+    // after a mode change: restoring the host environment after one add used
+    // to leave the next add rounding to nearest under a cached guest mode.
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardPositive);
+    for (int i = 0; i < 3; ++i) {
+      assert(aot::fp_add(fp, 1.0, 0x1p-60) == std::nextafter(1.0, 2.0));
+      assert(aot::fp_mul(fp, 1.0 + 0x1p-52, 1.0 + 0x1p-52) > 1.0 + 0x1p-51);
+    }
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardZero);
+    for (int i = 0; i < 3; ++i) assert(aot::fp_add(fp, 1.0, 0x1p-60) == 1.0);
+    fp.fpscr = static_cast<std::uint32_t>(FpRoundingMode::TowardNegative);
+    for (int i = 0; i < 3; ++i)
+      assert(aot::fp_sub(fp, 1.0, 0x1p-60) == std::nextafter(1.0, 0.0));
+    // An inexact result is reported on every operation, not just the first.
+    fp.fpscr = 0;
+    for (int i = 0; i < 3; ++i) {
+      (void)aot::fp_add(fp, 1.0, 0x1p-60);
+      assert((aot::last_fp_exceptions & FE_INEXACT) != 0);
+      (void)aot::fp_add(fp, 1.0, 1.0);
+      assert(aot::last_fp_exceptions == 0);
+    }
 
     // Divide by zero and negative square root produce architected sticky state.
     fp.fpscr = 0;

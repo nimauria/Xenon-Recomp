@@ -247,3 +247,27 @@ Until real-title playback has been performed, Audio V1 should be treated as
 code-complete for the common path but not title-qualified. Do not replace that
 qualification with a null backend, fake-success exports, or a game-specific AC6
 audio engine.
+
+### Real-title investigation, 2026-10-29
+
+AC6 has now been launched against the real SDL/FFmpeg path. It is **not audio
+qualified**: the captured startup contains silence followed by very quiet
+output (submitted peak about 0.002492), while decoded XMA peaks reach about
+0.373. Probes confirmed that the XMA-to-float conversion can preserve normal
+sample levels; an isolated execution of the generated unity-gain mixing
+kernel preserved all 256 input samples exactly. XMP playback-controller
+dispatch did not resolve the remaining silence/attenuation.
+
+The investigation also fixed shared CPU vector semantics: `vnmsubfp128` now
+uses its old destination as the addend, and both negative multiply-subtract
+forms retain fused rounding. The interpreter now passes VB as the source for
+unary vector conversions, unpacks, estimates, splats and word permutations.
+Previously, an interpreted audio comparison could read an immediate field as
+a register and therefore was not a valid control for compiled execution.
+`xenon_cpu_vector_audio` checks independent expected values through generated
+native code and the interpreter, including PCM signs and fused cancellation.
+
+Remaining title-level work is to trace the gain and playback state preceding
+the final mixing stage and establish the startup timing. Unit-test success
+does not establish audible AC6 playback; its graphical startup defects also
+remain unresolved.

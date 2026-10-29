@@ -65,6 +65,8 @@ bool PresentationSwapchain::create_sync_objects() {
 void PresentationSwapchain::destroy_swapchain_resources() noexcept {
   if (context_ && context_->device()) {
     for (auto& image : images_) {
+      if (image.view) vkDestroyImageView(context_->device(), image.view, nullptr);
+      image.view = VK_NULL_HANDLE;
       if (image.rendered)
         vkDestroySemaphore(context_->device(), image.rendered, nullptr);
       image.rendered = VK_NULL_HANDLE;
@@ -102,8 +104,10 @@ bool PresentationSwapchain::create_swapchain(VkSwapchainKHR old_swapchain) {
     error_ = "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed";
     return false;
   }
-  if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
-    error_ = "Vulkan presentation surface does not support transfer-destination images";
+  // Scan-out draws straight into swapchain images; every surface supports
+  // color-attachment use.
+  if (!(capabilities.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+    error_ = "Vulkan presentation surface does not support color-attachment images";
     return false;
   }
   std::uint32_t format_count{};
@@ -177,7 +181,7 @@ bool PresentationSwapchain::create_swapchain(VkSwapchainKHR old_swapchain) {
   info.imageColorSpace = selected_format.colorSpace;
   info.imageExtent = selected_extent;
   info.imageArrayLayers = 1;
-  info.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
   info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   info.preTransform = capabilities.currentTransform;
   constexpr VkCompositeAlphaFlagBitsKHR kCompositeAlphaPreference[] = {
@@ -220,21 +224,18 @@ bool PresentationSwapchain::create_swapchain(VkSwapchainKHR old_swapchain) {
 
   std::vector<ImageState> replacement_images;
   replacement_images.resize(actual_count);
-  const auto upload_size = VkDeviceSize(selected_extent.width) *
-                           selected_extent.height * 4u;
   bool resources_ok = true;
   for (std::uint32_t i = 0; i < actual_count; ++i) {
     auto& image = replacement_images[i];
     image.image = native_images[i];
-    if (!image.upload.initialize(
-            context_->physical_device(), context_->device(), upload_size,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
-        !image.upload.map(image.upload_mapping)) {
-      error_ = image.upload.error().empty()
-                   ? "Vulkan presentation upload allocation failed"
-                   : image.upload.error();
+    VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.image = image.image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = selected_format.format;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(context_->device(), &view_info, nullptr, &image.view) !=
+        VK_SUCCESS) {
+      error_ = "vkCreateImageView failed for a swapchain image";
       resources_ok = false;
       break;
     }
@@ -248,6 +249,8 @@ bool PresentationSwapchain::create_swapchain(VkSwapchainKHR old_swapchain) {
   }
   if (!resources_ok) {
     for (auto& image : replacement_images) {
+      if (image.view) vkDestroyImageView(context_->device(), image.view, nullptr);
+      image.view = VK_NULL_HANDLE;
       if (image.rendered)
         vkDestroySemaphore(context_->device(), image.rendered, nullptr);
       image.rendered = VK_NULL_HANDLE;
@@ -296,6 +299,8 @@ bool PresentationSwapchain::resize(std::uint32_t width, std::uint32_t height) {
   // Upload buffers and image-scoped render-finished semaphores belong to the
   // old images. The VkSwapchainKHR itself is retained for WSI handoff.
   for (auto& image : images_) {
+    if (image.view) vkDestroyImageView(context_->device(), image.view, nullptr);
+    image.view = VK_NULL_HANDLE;
     if (image.rendered)
       vkDestroySemaphore(context_->device(), image.rendered, nullptr);
     image.rendered = VK_NULL_HANDLE;
@@ -309,15 +314,9 @@ bool PresentationSwapchain::resize(std::uint32_t width, std::uint32_t height) {
   return true;
 }
 
-PresentStatus PresentationSwapchain::present(
-    const PreparedPresentationFrame& frame) {
+PresentStatus PresentationSwapchain::present(const DrawBackBuffer& draw) {
   if (!context_ || !queue_ || !surface_) return PresentStatus::NotConfigured;
   if (!swapchain_ || !extent_.width || !extent_.height) return PresentStatus::Minimized;
-  if (!frame.valid || frame.width != extent_.width || frame.height != extent_.height ||
-      frame.row_pitch < extent_.width * 4u) {
-    error_ = "Vulkan presentation frame extent does not match the swapchain";
-    return PresentStatus::Error;
-  }
   auto& sync = sync_[next_sync_];
   if (sync.timeline_value && queue_->completed_value() < sync.timeline_value &&
       !queue_->wait_for_completion(sync.timeline_value)) {
@@ -344,67 +343,35 @@ PresentStatus PresentationSwapchain::present(
     error_ = queue_->error();
     return PresentStatus::Error;
   }
-  const bool bgra = surface_format_.format == VK_FORMAT_B8G8R8A8_UNORM ||
-                    surface_format_.format == VK_FORMAT_B8G8R8A8_SRGB;
-  for (std::uint32_t y = 0; y < extent_.height; ++y) {
-    const auto* src = reinterpret_cast<const std::uint8_t*>(
-        frame.rgba8.data() + std::size_t(y) * frame.row_pitch);
-    auto* dst = reinterpret_cast<std::uint8_t*>(
-        image.upload_mapping.data() + std::size_t(y) * extent_.width * 4u);
-    if (!bgra) {
-      std::memcpy(dst, src, std::size_t(extent_.width) * 4u);
-    } else {
-      for (std::uint32_t x = 0; x < extent_.width; ++x) {
-        dst[x * 4u + 0u] = src[x * 4u + 2u];
-        dst[x * 4u + 1u] = src[x * 4u + 1u];
-        dst[x * 4u + 2u] = src[x * 4u + 0u];
-        dst[x * 4u + 3u] = src[x * 4u + 3u];
-      }
-    }
-  }
-
   if (!queue_->execute_present(
           [&](VkCommandBuffer command) {
-            VkImageMemoryBarrier2 to_copy{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-            to_copy.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-            to_copy.srcAccessMask = 0;
-            to_copy.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            to_copy.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            to_copy.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            to_copy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_copy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_copy.image = image.image;
-            to_copy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            to_copy.subresourceRange.levelCount = 1;
-            to_copy.subresourceRange.layerCount = 1;
+            VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.srcAccessMask = 0;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image.image;
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
             VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
             dependency.imageMemoryBarrierCount = 1;
-            dependency.pImageMemoryBarriers = &to_copy;
+            dependency.pImageMemoryBarriers = &barrier;
             vkCmdPipelineBarrier2(command, &dependency);
 
-            VkBufferImageCopy copy{};
-            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            copy.imageSubresource.layerCount = 1;
-            copy.imageExtent = {extent_.width, extent_.height, 1};
-            vkCmdCopyBufferToImage(command, image.upload.buffer(), image.image,
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            draw(command, image.view);
 
-            VkImageMemoryBarrier2 to_present{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-            to_present.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            to_present.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            to_present.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-            to_present.dstAccessMask = 0;
-            to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            to_present.image = image.image;
-            to_present.subresourceRange = to_copy.subresourceRange;
-            dependency.pImageMemoryBarriers = &to_present;
+            barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+            barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+            barrier.dstAccessMask = 0;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
             vkCmdPipelineBarrier2(command, &dependency);
           },
-          sync.acquired, VK_PIPELINE_STAGE_2_TRANSFER_BIT, image.rendered)) {
+          sync.acquired, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, image.rendered)) {
     error_ = queue_->error();
     return PresentStatus::Error;
   }

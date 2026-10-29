@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -17,11 +18,14 @@
 #include <vector>
 
 #include "xenon/core/boot_checkpoints.hpp"
+#include "xenon/core/callback_watch.hpp"
 #include "xenon/core/capability_report.hpp"
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/export_trace.hpp"
 #include "xenon/core/guest_memory_watch.hpp"
+#include "xenon/core/guest_profiler.hpp"
 #include "xenon/core/guest_thread_context.hpp"
+#include "xenon/core/wake_signal.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
 #include "xenon/cpu/executable_code_cache.hpp"
 #include "xenon/cpu/external_calls.hpp"
@@ -36,6 +40,7 @@
 #include "xenon/kernel/exception.hpp"
 #include "xenon/kernel/io_manager.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/kernel/time_stamp_bundle.hpp"
 #include "xenon/kernel/xbox_io_guest.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -90,6 +95,12 @@ struct SessionConfig {
   std::string audio_latency_profile{};
   bool enable_network{false};
   memory::GuestTranslationMode memory_mode{memory::GuestTranslationMode::Auto};
+  // Guest RAM uses native access (AddressSpace::set_native_access) unless
+  // this is set, or XENON_MEMORY_STRICT=1 is in the environment. Strict
+  // access keeps byte-exact write history and store-invalidated
+  // reservations at the cost of shared atomics on every guest access; it is
+  // for chasing accuracy bugs, not for play.
+  bool strict_memory{false};
   bool enable_dynamic_compilation{false};
   // Gen 7 correctness/discovery safety net. AOT remains primary; this only
   // executes a bounded PPC fragment after a compiled lookup genuinely misses.
@@ -230,7 +241,8 @@ class XenonSession final : public cpu::RuntimeServices {
       const std::filesystem::path& dlc_path,
       std::uint64_t profile_xuid);
   
-  // Simple content mounting (legacy)
+  // Legacy entry point that mounts nothing: it always fails, naming
+  // mount_content_graph(), which is the supported way to mount content.
   [[nodiscard]] SessionResult mount_content(std::string_view host_path,
                                            std::string_view guest_mount_point);
   
@@ -372,6 +384,9 @@ class XenonSession final : public cpu::RuntimeServices {
   void write_spr(std::uint32_t spr, std::uint64_t value, cpu::CpuState& state) override;
   std::uint64_t read_time_base(const cpu::CpuState& state) override;
   kernel::KernelProcess* current_process() noexcept override { return kernel_process_.get(); }
+  // Parks a suspended guest thread at a compiled loop back-edge, or takes a
+  // terminated one out of compiled code (cpu::GuestThreadTerminated).
+  void enter_safepoint(cpu::CpuState& state) override;
   bool external_call(std::string_view module, std::uint32_t ordinal,
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
   bool is_recognized_import_thunk(cpu::GuestAddress target) override;
@@ -398,6 +413,8 @@ class XenonSession final : public cpu::RuntimeServices {
   bool resolve_xex_imports();
   bool bind_compiled_code();
   bool create_guest_process();
+  // Stack size for the main thread and for thread creation that passes zero.
+  [[nodiscard]] std::uint32_t default_guest_stack_size() const noexcept;
   // Releases whatever create_guest_process() had already allocated when a
   // later step in that same call fails (guest stack, kernel_process_ and the
   // kernel_memory_/module registration it owns). Without this, a failure
@@ -458,9 +475,20 @@ class XenonSession final : public cpu::RuntimeServices {
   // function boundaries, so it must be driven through the same dispatch loop as any
   // thread - running only its first function and stopping at the first handoff
   // drops the rest of the callback, including the code that releases what it took.
-  // Returns false if the callback trapped or crashed.
+  // Returns false if the callback trapped or crashed. `watch` records the
+  // callback for the stop report; `kind` (static storage) names it there and
+  // in the CallbackBegin/CallbackEnd diagnostic events.
   [[nodiscard]] bool run_guest_callback(cpu::CpuState& state, cpu::GuestAddress entry,
-                                        const std::shared_ptr<kernel::KernelThread>& thread);
+                                        const std::shared_ptr<kernel::KernelThread>& thread,
+                                        CallbackWatch& watch, const char* kind);
+  // Runs `routine` to completion on the calling guest thread, nested below
+  // `caller`'s stack pointer and with its KPCR, with `arguments` in r3
+  // onwards; `caller` is not modified. What exports reach through
+  // ExportCallContext::guest_call (user APCs, completion routines). Returns
+  // false if the routine trapped or crashed, or the caller is not a guest
+  // thread.
+  [[nodiscard]] bool call_guest_routine(cpu::CpuState& caller, cpu::GuestAddress routine,
+                                        std::span<const std::uint64_t> arguments);
   // Guest execution thread body: builds a CPU V2 ExecutionContext, binds the
   // native extension's compiled registry into it, looks up the entry point,
   // and invokes it via dispatch_guest_thread(), then applies main-thread-only
@@ -476,11 +504,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // docs/kernel/THREADING_V2.md. The exit code is the PPC ABI return value
   // (gpr[3]) on a natural return, matching real ExCreateThread/
   // ExTerminateThread semantics (returning from the thread function is an
-  // implicit ExTerminateThread(returnValue)).
+  // implicit ExTerminateThread(returnValue)). `second_argument` is passed
+  // in r4, for an XAPI startup routine called as (start, context).
   [[nodiscard]] std::uint32_t run_created_guest_thread(
       std::shared_ptr<kernel::KernelThread> thread, cpu::GuestAddress start_address,
       std::uint64_t start_context, memory::GuestAddress stack_base,
-      std::uint32_t stack_size, GuestThreadTlsContext tls);
+      std::uint32_t stack_size, GuestThreadTlsContext tls,
+      std::uint64_t second_argument = 0u);
   // ExCreateThread export handler: allocates a guest stack and KPCR/TLS
   // block, creates the KernelThread via kernel_process_->thread_manager()
   // (honoring ThreadCreationParams::create_suspended from the guest's
@@ -547,17 +577,35 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] bool start_gpu_pump_thread();
   // Entry point (kernel::ThreadEntry) for gpu_pump_thread_: registers itself
   // as the current KernelThread, then runs run_gpu_pump_thread()'s loop body
-  // until stop_gpu_pump_thread() clears gpu_pump_running_.
+  // until stop_gpu_pump_thread() clears gpu_pump_running_. The GPU worker:
+  // drains the ring, renders and presents, woken by gpu_wake_.
   [[nodiscard]] std::uint32_t run_gpu_pump_thread();
+  // XENON_FRAME_DUMP: writes sampled presented frames as BMPs (gpu_pump.cpp).
+  void dump_presented_frame(const gpu::PresentationFrame& frame);
+  std::uint64_t dumped_frame_candidates_{};  // GPU pump thread only.
+  // Entry point for gpu_vsync_thread_: at 60 Hz, asks the worker to present
+  // and delivers the vsync interrupt, whatever the worker is doing - as on
+  // hardware, vertical blank does not wait for the GPU.
+  [[nodiscard]] std::uint32_t run_gpu_vsync_thread();
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
   // reached).
   void stop_gpu_pump_thread() noexcept;
+  // Terminates every guest thread (KernelThread::terminate()), which ends
+  // any kernel wait or delay it is blocked in; the dispatch loop then stops
+  // it at its next block boundary. The GPU and audio pump threads are left
+  // running unless include_pumps.
+  void terminate_guest_threads(bool include_pumps) noexcept;
   void load_native_extension();
   void unload_native_extension() noexcept;
   void start_memory_watch_poll();
   void stop_memory_watch_poll() noexcept;
+  // XENON_GUEST_PROFILE=<file> (or 1 for guest_profile.log): samples every
+  // guest thread's position each millisecond from start() and writes the
+  // per-second profile when the session stops (diagnostics/guest_profile.cpp).
+  void start_guest_profile();
+  void stop_guest_profile() noexcept;
   // Text describing which guest threads were executing (outside a kernel call)
   // when the poll thread noticed a change; racy diagnostic read.
   [[nodiscard]] std::string describe_running_guest_threads() const;
@@ -568,11 +616,25 @@ class XenonSession final : public cpu::RuntimeServices {
   // Stall evidence logged by stop() when the guest is still executing
   // (src/core/session/diagnostics/stop_report.cpp).
   void report_stop_diagnostics();
+  // GPU and audio pump state, one line each: the guest callback each pump is
+  // in, vsync interrupt deliveries and each audio render client's credits.
+  // Logged by the stop report and whenever a guest thread crashes, so a run
+  // that ends in a fault still shows whether the pumps were still running.
+  [[nodiscard]] std::vector<std::string> describe_pump_state();
+  // " (N ok, M error, ...)" for the presents so far; empty before any.
+  [[nodiscard]] std::string describe_present_results();
+  void report_pump_state(std::string_view reason);
 
   SessionConfig config_{};
   GuestMemoryWatch memory_watch_{};
   std::thread memory_watch_thread_{};
   std::atomic<bool> memory_watch_poll_running_{false};
+  GuestProfiler guest_profiler_{};
+  std::thread guest_profile_thread_{};
+  std::atomic<bool> guest_profile_running_{false};
+  std::string guest_profile_path_{};
+  // Keeps the KeTimeStampBundle variable export ticking from session init.
+  kernel::TimeStampBundleClock time_stamp_clock_{};
   // Deep enough that a quiet thread's history survives a chatty polling thread.
   ExportTrace export_trace_{8192};
   // Kernel calls a guest thread has entered but not yet returned from. The
@@ -740,9 +802,39 @@ class XenonSession final : public cpu::RuntimeServices {
   std::shared_ptr<kernel::KernelThread> gpu_pump_thread_{};
   GuestThreadTlsContext gpu_pump_thread_tls_{};
   std::atomic<bool> gpu_pump_running_{false};
+  // Why the GPU worker woke; WakeSignal counts each reason for the report.
+  static constexpr std::uint32_t kGpuWakeRingWork = 1u << 0u;  // write pointer moved
+  static constexpr std::uint32_t kGpuWakePresent = 1u << 1u;   // vsync: present a frame
+  static constexpr std::uint32_t kGpuWakeStop = 1u << 2u;
+  WakeSignal gpu_wake_{};
+  std::atomic<std::uint64_t> gpu_presents_{0};
+  // Presents by gpu::PresentStatus: a window that stays black because
+  // every present fails looks the same as one showing a black frame.
+  std::array<std::atomic<std::uint64_t>, 8> gpu_present_results_{};
+  std::mutex gpu_present_error_mutex_{};
+  std::string gpu_present_error_{};  // the backend's error at the latest failed present
+  // The vsync thread: its own KernelThread, KPCR/static TLS and callback
+  // stack, so the title's vsync handler runs on its own guest context.
+  memory::GuestAddress gpu_vsync_callback_stack_base_{};
+  std::uint32_t gpu_vsync_callback_stack_size_{};
+  std::shared_ptr<kernel::KernelThread> gpu_vsync_thread_{};
+  GuestThreadTlsContext gpu_vsync_thread_tls_{};
+  CallbackWatch gpu_vsync_callback_watch_{};
+  // The title's graphics interrupt callback runs once at a time, whether a
+  // PM4_INTERRUPT (GPU worker) or vsync (vsync thread) raised it: on
+  // hardware both are the one GPU interrupt, taken on one processor, and
+  // xenia's ExecuteInterrupt serialises them the same way.
+  std::mutex gpu_interrupt_mutex_{};
   // Vsync interrupt deliveries into the title's registered callback (diagnostics).
   std::atomic<std::uint64_t> gpu_interrupts_delivered_{0};
   std::atomic<std::uint64_t> gpu_interrupts_failed_{0};
+  // The guest callback each pump is running and how long its callbacks take.
+  CallbackWatch gpu_callback_watch_{};
+  CallbackWatch audio_callback_watch_{};
+  const GuestCall guest_call_{[this](cpu::CpuState& caller, cpu::GuestAddress routine,
+                                     std::span<const std::uint64_t> arguments) {
+    return call_guest_routine(caller, routine, arguments);
+  }};
 
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> execution_active_{false};

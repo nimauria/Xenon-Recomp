@@ -86,6 +86,15 @@ void EdramOwnershipTracker::release(EdramOwnerId owner_id) noexcept {
     if (tile_owner == owner_id) tile_owner = kCanonicalEdramOwner;
 }
 
+void EdramOwnershipTracker::release_tiles(EdramOwnerId owner_id,
+                                          std::span<const std::uint16_t> tiles) noexcept {
+  if (owner_id == kCanonicalEdramOwner) return;
+  for (const auto tile : tiles) {
+    auto& tile_owner = owners_[tile % Edram::kTileCount];
+    if (tile_owner == owner_id) tile_owner = kCanonicalEdramOwner;
+  }
+}
+
 EdramOwnerId EdramOwnershipTracker::owner(std::uint32_t tile) const noexcept {
   return owners_[tile % Edram::kTileCount];
 }

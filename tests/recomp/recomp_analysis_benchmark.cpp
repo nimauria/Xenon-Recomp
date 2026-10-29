@@ -67,7 +67,9 @@ std::vector<std::byte> make_xex(const std::vector<std::uint32_t>& text_words) {
   constexpr std::size_t coff = pe + 4;
   constexpr std::size_t optional = coff + 20;
   constexpr std::size_t section = optional + 0xE0;
-  constexpr std::size_t text_raw = 0x600;
+  // The basefile is an image laid out by RVA: the loader copies a section
+  // from its RVA, not from PointerToRawData, so .text must sit at kTextRva.
+  constexpr std::size_t text_raw = kTextRva;
   const std::size_t file_size = header + text_raw + text_words.size() * 4u + 0x100u;
 
   std::vector<std::byte> bytes(file_size, std::byte{0});

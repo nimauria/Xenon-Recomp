@@ -86,6 +86,8 @@ int main() {
       "audioMuteUnfocused": true,
       "audioLatencyProfile": "Low",
       "logVerbose": true,
+      "diagnosticEvents": true,
+      "probeLogs": true,
       "titleUpdatePath": "C:/Games/Halo3/TU",
       "dlcRootPath": "C:/Games/Halo3/DLC",
       "dlc": [
@@ -132,6 +134,8 @@ int main() {
     assert(config.audio_mute_unfocused == true);
     assert(config.audio_latency_profile == "Low");
     assert(config.log_verbose == true);
+    assert(config.diagnostic_events == true);
+    assert(config.probe_logs == true);
     assert(config.title_update_path == "C:/Games/Halo3/TU");
     assert(config.dlc_root_path == "C:/Games/Halo3/DLC");
     assert(config.dlc.size() == 2);
@@ -281,6 +285,8 @@ int main() {
     assert(config.audio_mute_unfocused == false);
     assert(config.audio_latency_profile.empty());
     assert(config.log_verbose == false);
+    assert(config.diagnostic_events == false);
+    assert(config.probe_logs == false);
     assert(config.offline == true);
     assert(config.dlc.empty());
   }
@@ -319,6 +325,39 @@ int main() {
     assert(config.headless_mode == true);
   }
   std::cout << "  [PASS] Explicit headlessMode=true round-trips\n";
+
+  // displayResolution sizes the host window; it defaults to 1280x720, the
+  // Xbox 360's native HD output, and a
+  // malformed or out-of-range value is a launch error, not a silent default.
+  {
+    TempFile file("display_default.json");
+    file.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
+    LaunchConfig config{};
+    std::string error;
+    assert(LaunchConfig::load_from_file(file.string(), config, error));
+    assert(config.display_width == 1280u && config.display_height == 720u);
+  }
+  {
+    TempFile file("display_1440p.json");
+    file.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X",
+                       "displayResolution": "2560x1440"})json");
+    LaunchConfig config{};
+    std::string error;
+    assert(LaunchConfig::load_from_file(file.string(), config, error));
+    assert(config.display_width == 2560u && config.display_height == 1440u);
+  }
+  for (const char* bad : {"1920", "1920x", "x1080", "1920x1080p", "-1x720", "100x100",
+                          "99999x1080"}) {
+    TempFile file("display_bad.json");
+    file.write(std::string(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X",
+                                   "displayResolution": ")json") +
+               bad + "\"}");
+    LaunchConfig config{};
+    std::string error;
+    assert(!LaunchConfig::load_from_file(file.string(), config, error));
+    assert(error.find("displayResolution") != std::string::npos);
+  }
+  std::cout << "  [PASS] displayResolution defaults to 1280x720 and rejects bad values\n";
 
   // Test 13: memoryWatch accepts hex strings, decimal strings and numbers, and
   // defaults to disabled.

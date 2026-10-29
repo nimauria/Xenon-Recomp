@@ -94,6 +94,17 @@ Each user receives a unique offline XUID in the `0xE000000000000000` range.
 | 0x0210 | `XamUserGetSigninState` | ✅ Implemented | Get sign-in state |
 | 0x020E | `XamUserGetName` | ✅ Implemented | Get gamertag |
 | 0x0212 | `XamUserCheckPrivilege` | ✅ Stubbed | Check user privilege (grants all offline) |
+| 0x0219 | `XamUserReadProfileSettings` | Implemented | Read profile settings (`xam::ProfileSettings`) |
+| 0x021A | `XamUserWriteProfileSettings` | Partial | Write profile settings; no change notification |
+| 0x022A | `XamUserReadProfileSettingsEx` | Implemented | As 0x0219, buffer and overlapped on the stack |
+
+Profile settings start at the defaults xenia and rexglue-sdk give a new
+profile. Title-specific settings (ids `0x3F00`-`0x3FFF`, such as
+`XPROFILE_TITLE_SPECIFIC1` `0x63E83FFF`) start with no value, are kept per
+profile and title, and are saved under `<save root>/ProfileSettings/<XUID>/
+<title id>/<setting id>` when the session has a save root. A setting with no
+value reads back with source 0 (`XSOURCE_NO_VALUE`) instead of failing the
+call.
 
 ### Phase 2: Locale & Language ✅
 
@@ -108,25 +119,50 @@ Each user receives a unique offline XUID in the `0xE000000000000000` range.
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
 | 0x02CB | `XamShowDeviceSelectorUI` | ✅ Stubbed | Returns default HDD (real identity is part of the XamShow* UI family, not content storage) |
-| 0x025C | `XamContentCreateEnumerator` | ✅ Stubbed | Create content enumerator |
-| 0x025A | `XamContentClose` | ✅ Stubbed | Close content handle |
+| 0x025C | `XamContentCreateEnumerator` | Implemented | Lists the title's content packages (0x134-byte `XCONTENT_DATA` items) |
+| 0x0258 | `XamContentCreate` | Implemented | Create or open a package and mount it as `<root>:` |
+| 0x0259 | `XamContentCreateEx` | Implemented | As 0x0258, with cache and content sizes; overlapped on the stack |
+| 0x025A | `XamContentClose` | Implemented | Unmount a root; `ERROR_FILE_NOT_FOUND` if not open |
+| 0x025B | `XamContentDelete` | Implemented | Delete a package; refused while mounted |
+| 0x0267 | `XamContentFlush` | Implemented | Nothing to commit: package writes go straight to the host |
+| 0x0260 | `XamContentSetThumbnail` | Implemented | PNG stored as `__thumbnail.png` in the package |
+| 0x0261 | `XamContentGetThumbnail` | Implemented | Size query, copy, `ERROR_INSUFFICIENT_BUFFER` |
+| 0x0262 | `XamContentGetCreator` | Implemented | Saved games: the signed-in user is the creator |
 | 0x025E | `XamContentGetDeviceData` | ✅ Implemented | Storage device capacity data |
 | 0x025F | `XamContentGetDeviceName` | ✅ Implemented | Storage device name |
+
+Content packages are host directories laid out as xenia lays them out,
+`<root>/<title id>/<content type>/<file name>/`, with the display name in
+`<file name>.display` beside each. The root is `<save root>/Content` when
+the session has a save root, and its existing packages are listed at start;
+otherwise packages live in a scratch directory removed at shutdown. The
+creation disposition (`flags & 0xF`) follows xenia: CREATE_NEW, CREATE_ALWAYS,
+OPEN_EXISTING, OPEN_ALWAYS and TRUNCATE_EXISTING, with `*disposition` 1 for
+created and 2 for opened.
 
 ### Phase 5: Notifications ✅
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x028A | `XamNotifyCreateListener` | ✅ Stubbed | Create notification listener |
-| 0x028B | `XNotifyGetNext` | ✅ Stubbed | Get next notification (real identity has no "Xam" prefix) |
-| 0x028C | `XNotifyPositionUI` | ✅ Stubbed | Position notification UI (no-op; real identity has no "Xam" prefix) |
+| 0x028A | `XamNotifyCreateListener` | Implemented | Waitable listener handle with its own queue, area mask and version filter |
+| 0x0291 | `XamNotifyCreateListenerInternal` | Implemented | As 0x028A, with `is_system` |
+| 0x028B | `XNotifyGetNext` | Implemented | Next notification, or the next with `match_id` (real identity has no "Xam" prefix) |
+| 0x028C | `XNotifyPositionUI` | Implemented | No system UI to position (real identity has no "Xam" prefix) |
+| 0x028D | `XNotifyDelayUI` | Implemented | No system UI to delay |
+
+Notification ids are XAM's own (`XN_SYS_SIGNINCHANGED` 0x0A and so on). The
+first listener whose mask includes the system area receives the startup
+notifications xenia and rexglue-sdk send: `XN_SYS_UI` on then off,
+`XN_SYS_SIGNINCHANGED` twice, and `XN_SYS_INPUTDEVICESCHANGED` and
+`XN_SYS_INPUTDEVICECONFIGCHANGED` twice each. `XamUserWriteProfileSettings`
+sends `XN_SYS_PROFILESETTINGCHANGED`.
 
 ### Phase 6: Achievements ✅
 
 | Ordinal | Name | Status | Description |
 |---------|------|--------|-------------|
-| 0x02EE | `XamUserCreateAchievementEnumerator` | ✅ Stubbed | Create achievement enumerator |
-| 0x02F7 | `XamUserCreateStatsEnumerator` | ✅ Stubbed | Create stats enumerator |
+| 0x02EE | `XamUserCreateAchievementEnumerator` | Partial | Real, empty enumerator (no XDBF achievement table is read); handle and buffer size in r10/r9 |
+| 0x02F7 | `XamUserCreateStatsEnumerator` | Partial | Real, empty enumerator (leaderboards are online-only); buffer size 0 |
 
 `XamUserWriteAchievements`, `XamUserReadStats`, and `XamUserWriteStats`
 (previously listed at invented ordinals 0x0280-0x0282) have been removed:
@@ -148,6 +184,13 @@ For dashboard/system UI calls Xenon cannot meaningfully reproduce, provide:
 1. **Sensible Native Equivalents**: Where possible (e.g., file picker for storage selection)
 2. **Explicit Unsupported Behaviour**: Clear diagnostic logging with appropriate error codes
 3. **No Success Pretense**: Never return success if the game depends on returned state
+
+Dialogs a title cannot proceed without are answered without drawing
+anything, as xenia does when it runs headless: `XamShowMessageBoxUI`
+(0x02CA) returns the focused button and `XamShowKeyboardUI` (0x02C1) the
+default text, each with `XN_SYS_UI` broadcast on then off and its
+XOVERLAPPED completed. `XamIsUIActive` (0x02EC) is false because no dialog
+stays open. `XamUserGetGamerTag` (0x020C) returns the profile's gamertag.
 
 ## AC6 Requirements
 
@@ -228,5 +271,15 @@ AC6 and future offline titles can obtain normal Xbox user/profile/storage state 
 - [Filesystem V1](../filesystem/FILESYSTEM_V1.md)
 
 ## History
+
+**2026-10-29**: XMsg sync and async dispatch now share session-local XMP
+playback-controller state for messages `0x7001A` (set) and `0x7001B` (get).
+Queries write both controller and lock outputs; changes update subsequent
+queries and broadcast `XN_XMP_PLAYBACKCONTROLLERCHANGED`. Async requests use
+the existing XOVERLAPPED completion path. Unknown apps still report not found;
+other XMP messages explicitly report not implemented, and the exports remain
+marked partial. This does not implement system playlist playback. Regression
+coverage in `xenon_xam_overlapped_tests` checks sync/async state, notifications,
+validation and isolation between sessions.
 
 **2026-09-19**: Phase 1 foundation completed. User management, default offline user, and core user exports implemented.

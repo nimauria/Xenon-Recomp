@@ -1,8 +1,10 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -136,6 +138,10 @@ class KernelProcess final : public KernelObject {
   void set_gpu_ring_buffer_write_index(std::uint32_t write_index) noexcept;
   void set_gpu_ring_buffer_read_index(std::uint32_t read_index) noexcept;
   void set_gpu_ring_buffer_rptr_writeback(std::uint32_t address) noexcept;
+  // Called whenever the guest publishes ring work (a write-index change or a
+  // ring (re)configuration), outside the ring lock, so the GPU pump can wait
+  // for work instead of polling. Empty to stop.
+  void set_gpu_work_notifier(std::function<void()> notifier);
 
   // Guest graphics-interrupt callback registered via VdSetGraphicsInterruptCallback -
   // invoked by the GPU pump thread at vsync (via a bespoke invoke_gpu_interrupt_callback()
@@ -168,11 +174,19 @@ class KernelProcess final : public KernelObject {
     std::uint32_t pitch{0};
     std::uint8_t format{0};
     std::uint64_t generation{0};
+    // The texture fetch constant VdSwap was given for the front buffer
+    // (pitch, tiling, endianness, format), with its base address set to the
+    // front buffer: what the GPU scans out, as PM4_XE_SWAP carries it.
+    std::array<std::uint32_t, 6> fetch_constant{};
+    bool has_fetch_constant{false};
   };
   [[nodiscard]] GpuFrontBufferState gpu_front_buffer() const noexcept;
   void set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
                             std::uint32_t height, std::uint32_t pitch,
                             std::uint8_t format) noexcept;
+  void set_gpu_front_buffer(std::uint32_t base_address, std::uint32_t width,
+                            std::uint32_t height, std::uint32_t pitch, std::uint8_t format,
+                            const std::array<std::uint32_t, 6>& fetch_constant) noexcept;
 
  private:
   std::uint32_t process_id_;
@@ -200,6 +214,8 @@ class KernelProcess final : public KernelObject {
   GpuRingBufferState gpu_ring_buffer_{};
   GpuInterruptCallbackState gpu_interrupt_callback_{};
   GpuFrontBufferState gpu_front_buffer_{};
+  std::function<void()> gpu_work_notifier_{};
+  void notify_gpu_work();
 };
 
 }  // namespace xenon::kernel

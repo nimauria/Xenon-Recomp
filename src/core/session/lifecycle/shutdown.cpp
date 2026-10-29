@@ -28,11 +28,15 @@ void XenonSession::shutdown() {
   };
   shutdown_step("joining the main guest thread");
   stop_requested_.store(true);
+  // Ends the kernel waits guest threads are blocked in, so they can stop.
+  terminate_guest_threads(/*include_pumps=*/false);
   if (main_thread_) {
     static_cast<void>(main_thread_->join());
   }
   // The poll thread reads guest memory, so it must be gone before memory_ is.
   stop_memory_watch_poll();
+  stop_guest_profile();
+  time_stamp_clock_.stop();
   shutdown_step("stopping the GPU pump thread");
 
 #if defined(XENON_HAS_AUDIO)
@@ -49,6 +53,8 @@ void XenonSession::shutdown() {
     audio_->stop_guest_callback_pump();
   }
   if (audio_thread_) {
+    // Ends a wait a guest audio callback may be blocked in.
+    static_cast<void>(audio_thread_->terminate(0));
     static_cast<void>(audio_thread_->join());
     audio_thread_.reset();
   }
@@ -80,21 +86,45 @@ void XenonSession::shutdown() {
   stop_gpu_pump_thread();
   if (memory_) {
     release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
+    release_guest_thread_tls_context(*memory_, gpu_vsync_thread_tls_);
   }
   gpu_pump_thread_tls_ = {};
+  gpu_vsync_thread_tls_ = {};
   if (memory_ && gpu_pump_callback_stack_base_) {
     (void)memory_->release(gpu_pump_callback_stack_base_);
     gpu_pump_callback_stack_base_ = 0;
     gpu_pump_callback_stack_size_ = 0;
   }
+  if (memory_ && gpu_vsync_callback_stack_base_) {
+    (void)memory_->release(gpu_vsync_callback_stack_base_);
+    gpu_vsync_callback_stack_base_ = 0;
+    gpu_vsync_callback_stack_size_ = 0;
+  }
 
-  // KNOWN ISSUE: guest worker threads parked in unbounded kernel waits are still
-  // alive here, so unloading the extension can take the process down on stop.
-  // Terminating them first (ThreadManager::shutdown) currently hangs because such
-  // waits are not interruptible by terminate(); that needs its own fix.
-  shutdown_step("unloading the native extension");
-  unload_native_extension();
+  // Every guest thread must be gone before the code it runs is unloaded.
+  // Terminating ends any kernel wait one is blocked in; ThreadManager::
+  // shutdown() then joins each with a bound.
+  shutdown_step("terminating and joining guest threads");
+  std::vector<std::uint32_t> still_running;
+  if (kernel_process_) still_running = kernel_process_->thread_manager().shutdown();
+  if (still_running.empty()) {
+    shutdown_step("unloading the native extension");
+    unload_native_extension();
+  } else {
+    // A thread outside every safepoint is still executing the module's code,
+    // so unloading it would pull the code out from under that thread. Keep
+    // the module mapped for the rest of the process and say which threads.
+    if (config_.enable_logging) {
+      std::scoped_lock console_log_lock(console_log_mutex());
+      std::cout << "[XenonSession] shutdown: " << still_running.size()
+                << " guest thread(s) did not stop; keeping the native extension loaded:";
+      for (const auto id : still_running) std::cout << " t" << id;
+      std::cout << std::endl;
+    }
+    native_extension_handle_ = nullptr;
+  }
 
+  shutdown_step("releasing XAM, input and the GPU");
   // Shutdown in reverse order of initialization
   xam_.reset();
 
@@ -114,10 +144,10 @@ void XenonSession::shutdown() {
   dynamic_fallback_.reset();
   code_cache_.reset();
 
+  shutdown_step("releasing the guest process");
   // Tear down the guest process/thread model before the memory it lives in.
   // main_thread_ was already joined above; resetting kernel_process_ (and
   // with it its ThreadManager) is then safe/idempotent.
-  shutdown_step("terminating and joining guest threads");
   main_thread_.reset();
   if (kernel_io_) kernel_io_->share_handle_table(nullptr);
   kernel_process_.reset();
@@ -127,6 +157,7 @@ void XenonSession::shutdown() {
   }
   main_thread_tls_ = {};
 
+  shutdown_step("releasing guest I/O and memory");
   io_bridge_.reset();
   kernel_io_.reset();
   filesystem_.reset();

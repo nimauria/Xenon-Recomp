@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "xenon/kernel/thread.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
@@ -57,7 +58,7 @@ struct GuestKpcrLayout {
   // Byte holding the number (0..5) of the hardware thread the guest is running on
   // (X_KPCR.current_cpu). Kernel and title code read it via r13+0x10C; e.g. the
   // graphics interrupt handler clears this CPU's bit in the GPU fence word.
-  static constexpr std::uint32_t kCurrentCpuOffset = 0x10C;
+  static constexpr std::uint32_t kCurrentCpuOffset = kernel::kGuestKpcrCurrentCpuOffset;
 };
 
 // Field layout of the guest-visible KTHREAD block `current_thread` points

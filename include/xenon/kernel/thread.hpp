@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -36,6 +38,21 @@ enum class ThreadState : std::uint8_t {
   Terminated,
 };
 
+// Offset of X_KPCR.current_cpu: the byte holding the hardware thread (0..5)
+// the guest thread is running on. Kernel and title code read it as
+// r13+0x10C, for example to pick their own slot in a per-processor array.
+inline constexpr std::uint32_t kGuestKpcrCurrentCpuOffset = 0x10C;
+
+// The hardware thread a guest processor-affinity mask (bit n = hardware
+// thread n, 0..5) runs a thread on: its highest requested processor, as in
+// xenia-project/xenia (GetFakeCpuNumber); titles normally give exactly one
+// bit. A mask naming no hardware thread is processor 0.
+[[nodiscard]] constexpr std::uint8_t guest_processor_for_affinity(std::uint32_t mask) noexcept {
+  for (std::uint8_t cpu = 6; cpu-- > 0;)
+    if (mask & (1u << cpu)) return cpu;
+  return 0;
+}
+
 struct ThreadCreationParams {
   std::uint32_t stack_size{0};
   std::uint32_t creation_flags{0};
@@ -51,16 +68,23 @@ struct ThreadCreationParams {
 using ThreadEntry = std::function<std::uint32_t()>;
 
 class KernelThread final : public KernelObject {
+  friend struct detail::WaitAccess;
+
  public:
   explicit KernelThread(ThreadEntry entry, const ThreadCreationParams& params);
   ~KernelThread() override;
 
   [[nodiscard]] std::uint32_t thread_id() const noexcept { return thread_id_; }
+  // The KernelThread whose thread_main() is running on the calling host
+  // thread, or null on any other host thread.
+  [[nodiscard]] static KernelThread* current() noexcept;
   [[nodiscard]] ThreadState state() const noexcept;
   [[nodiscard]] ThreadPriority priority() const noexcept;
   [[nodiscard]] std::uint32_t exit_code() const noexcept;
   [[nodiscard]] std::uint32_t processor_affinity() const noexcept;
-  [[nodiscard]] const std::string& name() const noexcept { return name_; }
+  // A copy: the name can change while another thread reads it (a guest
+  // names its threads through RtlRaiseException).
+  [[nodiscard]] std::string name() const;
   // The real Xbox 360/Win32 NtSuspendThread/NtResumeThread contract returns
   // the PREVIOUS suspend count through an out parameter, which resume()'s
   // own bool return (suspended-or-not) cannot express - exported read-only
@@ -101,9 +125,52 @@ class KernelThread final : public KernelObject {
     return terminated_.load(std::memory_order_acquire);
   }
 
+  // True while the thread is suspended or terminated: the flag compiled
+  // loops poll (cpu::ExecutionContext::safepoint_flag), so a thread spinning
+  // in one compiled function still stops when asked.
+  [[nodiscard]] const std::atomic<bool>* safepoint_flag() const noexcept {
+    return &safepoint_requested_;
+  }
+
   // KeSetDisableBoostThread: whether scheduler priority boosts are disabled for
   // this thread. Returns the previous value. Xenon runs guest threads as host
   // threads and applies no dynamic boost, so the flag is pure guest-visible state.
+  // A user-mode APC: NormalRoutine(NormalContext, SystemArgument1,
+  // SystemArgument2), run on this thread when it next makes an alertable wait
+  // or delay (KeWaitFor*, NtWaitFor*Ex, KeDelayExecutionThread with
+  // Alertable set), which then returns STATUS_USER_APC.
+  struct UserApc {
+    std::uint32_t routine{};
+    std::uint32_t context{};
+    std::uint32_t arg1{};
+    std::uint32_t arg2{};
+    // For an APC the guest built in its own memory (KeInitializeApc and
+    // KeInsertQueueApc): the KAPC's guest address. Its routines, context and
+    // arguments are then read from the KAPC when it is delivered.
+    std::uint32_t guest_apc{};
+  };
+  // Queues `apc` and wakes an alertable wait this thread is in. APCs queued
+  // to a thread that never waits alertably again are never run, as on
+  // hardware.
+  void queue_user_apc(const UserApc& apc);
+  // Removes and returns the queued APCs, oldest first.
+  [[nodiscard]] std::vector<UserApc> take_user_apcs();
+  // Removes the queued APC for guest KAPC `guest_apc`; false if none is queued.
+  bool remove_user_apc(std::uint32_t guest_apc);
+  [[nodiscard]] bool user_apc_pending() const noexcept {
+    return user_apc_pending_.load(std::memory_order_acquire);
+  }
+
+  // Thread alerts (KeAlertThread, KeTestAlertThread): an alert ends this
+  // thread's next alertable wait or delay, which returns STATUS_ALERTED and
+  // clears it. NT keeps one flag per processor mode; Xenon has no distinct
+  // kernel and user mode, so there is one. alert() returns the previous
+  // state and wakes an alertable wait in progress.
+  bool alert();
+  // Returns whether the thread is alerted and clears the alert.
+  bool take_alert() noexcept { return alerted_.exchange(false, std::memory_order_acq_rel); }
+  [[nodiscard]] bool alerted() const noexcept { return alerted_.load(std::memory_order_acquire); }
+
   bool exchange_boost_disabled(bool disabled) noexcept {
     return boost_disabled_.exchange(disabled, std::memory_order_acq_rel);
   }
@@ -128,6 +195,9 @@ class KernelThread final : public KernelObject {
   // 0xFFFFFFFF waits forever, matching the existing INFINITE convention used
   // elsewhere in this codebase (see kernel::WaitResult/wait.cpp).
   [[nodiscard]] bool join(std::uint32_t timeout_ms = 0xFFFFFFFF);
+  // Whether start() created the host thread (join() is false for one that
+  // never started, which is not a thread still running).
+  [[nodiscard]] bool started() const noexcept { return host_thread_ != nullptr; }
 
   // TLS support
   [[nodiscard]] std::optional<std::uint64_t> get_tls(std::uint32_t slot) const;
@@ -157,6 +227,10 @@ class KernelThread final : public KernelObject {
   void set_guest_kthread_address(std::uint32_t address) noexcept {
     guest_kthread_address_ = address;
   }
+  // This thread's guest KPCR (each Xenon guest thread has its own), where
+  // KeSetAffinityThread records the processor it moves the thread to.
+  [[nodiscard]] std::uint32_t guest_kpcr_address() const noexcept { return guest_kpcr_address_; }
+  void set_guest_kpcr_address(std::uint32_t address) noexcept { guest_kpcr_address_ = address; }
 
  private:
   void thread_main();
@@ -168,6 +242,7 @@ class KernelThread final : public KernelObject {
   std::uint32_t creation_flags_;
   void* kernel_data_{nullptr};
   std::uint32_t guest_kthread_address_{0};
+  std::uint32_t guest_kpcr_address_{0};
 
   mutable std::mutex mutex_;
   // Guards the create_suspended entry-time park in thread_main(): resume()
@@ -186,7 +261,14 @@ class KernelThread final : public KernelObject {
   // alongside every state_ = ThreadState::Terminated transition (terminate()
   // and thread_main()'s natural-completion path).
   std::atomic<bool> terminated_{false};
+  std::atomic<bool> safepoint_requested_{false};
+  // Multi-object waits on this thread; woken when it terminates.
+  detail::MultiWaitList multi_waiters_;
   std::atomic<bool> boost_disabled_{false};
+  std::mutex apc_mutex_;
+  std::deque<UserApc> user_apcs_;
+  std::atomic<bool> user_apc_pending_{false};
+  std::atomic<bool> alerted_{false};
   const bool create_suspended_{false};
   // Set exactly once, on every thread_main() exit path (entry_() returned
   // naturally, or the thread was terminated before ever running entry_()),
@@ -249,7 +331,10 @@ class ThreadManager {
   // not immediate on join().
   std::size_t reap_finished_threads();
 
-  void shutdown();
+  // Terminates every thread and joins each with a bound. Returns the ids of
+  // threads still running afterwards (stuck outside any safepoint): their
+  // code and memory must not be released.
+  std::vector<std::uint32_t> shutdown();
 
   [[nodiscard]] std::vector<std::shared_ptr<KernelThread>> enumerate_threads() const;
   [[nodiscard]] std::size_t thread_count() const;

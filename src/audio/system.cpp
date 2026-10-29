@@ -1,12 +1,16 @@
 #include "xenon/audio/system.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
+#include "xenon/audio/downmix.hpp"
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::audio {
@@ -83,6 +87,7 @@ void AudioSystem::shutdown() noexcept {
   stop_guest_callback_pump();
 
   if (backend_) backend_->close();
+  recorder_.stop();
 
   {
     std::lock_guard lock(clients_mutex_);
@@ -120,6 +125,7 @@ std::optional<RenderClientHandle> AudioSystem::register_render_client(
       clients_[i].callback_argument_wrapper = wrapper;
       clients_[i].frame_offset = 0;
       clients_[i].callback_credits = kMaxQueuedRenderFrames;
+      clients_[i].counters = {};
       callback_cv_.notify_all();
       return 0x41550000u | static_cast<RenderClientHandle>(i);
     }
@@ -176,24 +182,50 @@ bool AudioSystem::translate_render_frame(cpu::GuestAddress samples,
   std::array<std::byte, kInputFloats * sizeof(float)> bytes{};
   memory_.read_bytes(samples, bytes);
 
+  float peak = 0.0f;
+  for (std::size_t i = 0; i < kInputFloats; ++i) {
+    const float value = std::abs(load_be_float(bytes.data() + i * sizeof(float)));
+    if (value > peak && std::isfinite(value)) peak = value;
+  }
+  // Probe trace: per-channel peaks of the first frames, then of every 64th.
+  if (logging::probe_logs_enabled()) {
+    const auto frame = traced_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (frame < 256u || frame % 64u == 0u) {
+      std::array<float, kXboxRenderChannels> channel_peak{};
+      for (std::size_t i = 0; i < kInputFloats; ++i) {
+        const float value = std::abs(load_be_float(bytes.data() + i * sizeof(float)));
+        auto& slot = channel_peak[i / kRenderFrameSamples];
+        if (std::isfinite(value) && value > slot) slot = value;
+      }
+      logging::append_probe_log(
+          "audio_trace_frames.log",
+          "%lld frame %llu at %08X peaks FL=%.6f FR=%.6f C=%.6f LFE=%.6f BL=%.6f BR=%.6f\n",
+          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count()),
+          static_cast<unsigned long long>(frame), samples,
+          static_cast<double>(channel_peak[0]), static_cast<double>(channel_peak[1]),
+          static_cast<double>(channel_peak[2]), static_cast<double>(channel_peak[3]),
+          static_cast<double>(channel_peak[4]), static_cast<double>(channel_peak[5]));
+    }
+  }
+  for (auto bits = submitted_peak_bits_.load(std::memory_order_relaxed);
+       std::bit_cast<float>(bits) < peak &&
+       !submitted_peak_bits_.compare_exchange_weak(bits, std::bit_cast<std::uint32_t>(peak),
+                                                   std::memory_order_relaxed);) {
+  }
+
   for (std::size_t sample = 0; sample < kRenderFrameSamples; ++sample) {
     const auto read_channel = [&](std::size_t channel) {
       const auto offset =
           (channel * kRenderFrameSamples + sample) * sizeof(float);
       return load_be_float(bytes.data() + offset);
     };
-    const float fl = read_channel(0);
-    const float fr = read_channel(1);
-    const float center = read_channel(2);
-    const float back_left = read_channel(4);
-    const float back_right = read_channel(5);
-    // Xbox default 5.1 order: FL, FR, C, LFE, BL, BR. LFE is intentionally
-    // omitted from stereo downmix; scaling keeps full-scale multichannel
-    // content from clipping under normal conditions.
-    out.stereo[sample * 2] =
-        (fl + back_left + center * 0.5f) * (1.0f / 2.5f);
-    out.stereo[sample * 2 + 1] =
-        (fr + back_right + center * 0.5f) * (1.0f / 2.5f);
+    // Xbox default 5.1 order: FL, FR, C, LFE, BL, BR.
+    const auto [left, right] = downmix_5_1_to_stereo(
+        read_channel(0), read_channel(1), read_channel(2), read_channel(4), read_channel(5));
+    out.stereo[sample * 2] = left;
+    out.stereo[sample * 2 + 1] = right;
   }
   return true;
 }
@@ -201,17 +233,33 @@ bool AudioSystem::translate_render_frame(cpu::GuestAddress samples,
 bool AudioSystem::submit_render_frame(RenderClientHandle handle,
                                       cpu::GuestAddress samples) {
   std::size_t index{};
-  if (!valid_client_handle(handle, index)) return false;
+  if (!valid_client_handle(handle, index)) {
+    rejected_unregistered_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   RenderFrame frame{};
-  if (!translate_render_frame(samples, frame)) return false;
+  const bool translated = translate_render_frame(samples, frame);
 
   std::lock_guard lock(clients_mutex_);
   auto& client = clients_[index];
-  if (!client.allocated || client.suspended ||
-      client.queue.size() >= kMaxQueuedRenderFrames) {
+  if (!client.allocated) {
+    rejected_unregistered_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (!translated) {
+    ++client.counters.rejected_untranslatable;
+    return false;
+  }
+  if (client.suspended) {
+    ++client.counters.rejected_suspended;
+    return false;
+  }
+  if (client.queue.size() >= kMaxQueuedRenderFrames) {
+    ++client.counters.rejected_queue_full;
     return false;
   }
   client.queue.push_back(std::move(frame));
+  ++client.counters.frames_submitted;
   return true;
 }
 
@@ -332,6 +380,7 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
         if (client.frame_offset == kRenderFrameSamples) {
           client.queue.pop_front();
           client.frame_offset = 0;
+          ++client.counters.frames_consumed;
           if (client.callback_credits < kMaxQueuedRenderFrames) {
             ++client.callback_credits;
           }
@@ -353,6 +402,9 @@ void AudioSystem::render(std::span<float> interleaved_stereo) {
   for (float& sample : interleaved_stereo) {
     sample = std::clamp(sample * host_gain, -1.0f, 1.0f);
   }
+
+  meter_.observe(interleaved_stereo);
+  recorder_.push(interleaved_stereo);
 
   // XAudioGetRenderDriverTic is a consumed-sample clock, not a count of
   // successfully submitted buffers. Advance even when we produced silence.
@@ -384,6 +436,7 @@ void AudioSystem::callback_pump() {
           }
           --client.callback_credits;
           ++client.callback_in_flight;
+          ++client.counters.callbacks_issued;
           pending.push_back(
               {i, client.callback, client.callback_argument_wrapper});
         }
@@ -391,8 +444,9 @@ void AudioSystem::callback_pump() {
     }
 
     for (const auto& item : pending) {
+      bool invoked = false;
       if (callback_running_.load()) {
-        (void)invoker(item.callback, item.wrapper);
+        invoked = invoker(item.callback, item.wrapper);
       }
 
       cpu::GuestAddress retired_wrapper{};
@@ -400,6 +454,8 @@ void AudioSystem::callback_pump() {
         std::lock_guard lock(clients_mutex_);
         auto& client = clients_[item.index];
         if (client.callback_in_flight) --client.callback_in_flight;
+        ++client.counters.callbacks_returned;
+        if (!invoked) ++client.counters.callbacks_failed;
         if (client.retiring && client.callback_in_flight == 0) {
           retired_wrapper = client.callback_argument_wrapper;
           client = {};
@@ -409,6 +465,60 @@ void AudioSystem::callback_pump() {
       if (retired_wrapper) (void)memory_.release(retired_wrapper);
     }
   }
+}
+
+std::vector<AudioSystem::RenderClientStats> AudioSystem::render_client_stats() const {
+  std::vector<RenderClientStats> stats;
+  std::lock_guard lock(clients_mutex_);
+  for (std::size_t i = 0; i < clients_.size(); ++i) {
+    const auto& client = clients_[i];
+    if (!client.allocated) continue;
+    auto entry = client.counters;
+    entry.handle = 0x41550000u | static_cast<RenderClientHandle>(i);
+    entry.suspended = client.suspended;
+    entry.callback_credits = client.callback_credits;
+    entry.queued_frames = client.queue.size();
+    entry.callbacks_in_flight = client.callback_in_flight;
+    stats.push_back(entry);
+  }
+  return stats;
+}
+
+std::string AudioSystem::describe(const RenderClientStats& stats) {
+  char text[384];
+  const auto rejected =
+      stats.rejected_untranslatable + stats.rejected_suspended + stats.rejected_queue_full;
+  std::snprintf(text, sizeof(text),
+                "render client 0x%08X: credits %zu, queued %zu, callbacks issued %llu returned "
+                "%llu, frames submitted %llu consumed %llu, rejected %llu: ",
+                static_cast<unsigned>(stats.handle), stats.callback_credits, stats.queued_frames,
+                static_cast<unsigned long long>(stats.callbacks_issued),
+                static_cast<unsigned long long>(stats.callbacks_returned),
+                static_cast<unsigned long long>(stats.frames_submitted),
+                static_cast<unsigned long long>(stats.frames_consumed),
+                static_cast<unsigned long long>(rejected));
+  std::string line = text;
+  if (stats.suspended) return line + "suspended";
+  if (stats.callbacks_in_flight != 0) {
+    return line + "a guest callback has not returned (blocked or still running)";
+  }
+  if (stats.callback_credits != 0) return line + "callbacks continue";
+  if (stats.queued_frames != 0) {
+    return line + "credits wait on queued frames the host mixer has not consumed";
+  }
+  if (rejected != 0) {
+    std::snprintf(text, sizeof(text),
+                  "no credits: submissions were rejected (untranslatable %llu, suspended %llu, "
+                  "queue full %llu)",
+                  static_cast<unsigned long long>(stats.rejected_untranslatable),
+                  static_cast<unsigned long long>(stats.rejected_suspended),
+                  static_cast<unsigned long long>(stats.rejected_queue_full));
+    return line + text;
+  }
+  if (stats.frames_submitted == 0) {
+    return line + "no credits: the guest's callbacks returned without submitting a frame";
+  }
+  return line + "no credits";
 }
 
 }  // namespace xenon::audio

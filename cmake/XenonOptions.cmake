@@ -3,7 +3,7 @@
 
 option(XENON_BUILD_TESTS "Build Xenon Recomp tests" ON)
 option(XENON_BUILD_BENCHMARKS "Build Xenon Memory V2 benchmarks" ON)
-option(XENON_BUILD_LAUNCHER "Build the Xenon launcher UI when Qt 6 is available" ON)
+option(XENON_BUILD_LAUNCHER "Build the locally retained legacy Qt launcher" OFF)
 option(XENON_BUILD_INSTALLER "Configure production installer/package generation" OFF)
 option(XENON_ENABLE_MEMORY "Build the production Xenon memory subsystem" ON)
 set(XENON_MEMORY_DIRECT_APERTURE_QUALIFIED_DEFAULT OFF)

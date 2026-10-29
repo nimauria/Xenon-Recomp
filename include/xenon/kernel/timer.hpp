@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 
+#include "xenon/kernel/multi_wait_list.hpp"
 #include "xenon/kernel/object.hpp"
 
 namespace xenon::kernel {
@@ -53,14 +54,21 @@ class KernelTimer final : public KernelObject {
   bool fire();
 
  private:
+  friend struct detail::WaitAccess;
+  // Caller holds mutex_. A satisfied wait resets a synchronization timer.
+  [[nodiscard]] bool can_satisfy_locked() const noexcept { return signaled_; }
+  void satisfy_locked() noexcept {
+    if (type_ == TimerType::SynchronizationTimer) signaled_ = false;
+  }
+
   TimerType type_;
-  mutable std::mutex mutex_;
-  std::condition_variable condition_;
+  std::mutex& mutex_ = detail::dispatcher_mutex();
   bool signaled_{false};
   bool active_{false};
   std::chrono::steady_clock::time_point due_time_;
   std::optional<std::chrono::milliseconds> period_;
   TimerCallback callback_;
+  detail::MultiWaitList multi_waiters_;
 };
 
 }  // namespace xenon::kernel

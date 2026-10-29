@@ -15,7 +15,8 @@ bool register_net_socket_setup_exports(core::ExportRegistry& registry,
   // Guest ABI: r3 = caller type, r4 = address family, r5 = socket type, r6 =
   // protocol -> r3 = guest socket handle, or -1 on failure (WSAGetLastError()
   // reports why). af/type/protocol are the same numeric values as host Winsock's
-  // (both are Berkeley-socket-derived), so they pass through unchanged. A real
+  // (both are Berkeley-socket-derived), except VDP (254), which is UDP on the
+  // host (XamSocketManager::host_socket_protocol). A real
   // host socket is created here (see XamSocketManager) - this is genuine local
   // resource allocation with no network dependency, exactly like real Xbox 360
   // hardware's socket() (only later connect()/send() calls can observe "no

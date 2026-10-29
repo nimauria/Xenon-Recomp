@@ -113,11 +113,11 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(sum(row["kind"] == "variable" for row in rows), 35)
         self.assertEqual((rows[0]["ordinal"], rows[-1]["ordinal"]), (1, 931))
         result = generate.reconcile_kernel_reference(rows, generate.kernel_registration_rows())
-        self.assertEqual(len(result["matched"]), 254)
-        self.assertEqual(len(result["missing"]), 668)
+        self.assertEqual(len(result["matched"]), 281)
+        self.assertEqual(len(result["missing"]), 641)
         report = generate.render_kernel_reference_report(provenance, rows, result)
         self.assertEqual(report, generate.render_kernel_reference_report(provenance, rows, result))
-        self.assertIn("254 exact Xenon source registrations (27.5%)", report)
+        self.assertIn("281 exact Xenon source registrations (30.5%)", report)
         self.assertIn("not implementation or game-compatibility percentages", report)
 
     def test_invalid_kernel_reference_rows(self):
@@ -272,7 +272,7 @@ class CoverageTests(unittest.TestCase):
         for workflow_file in ("windows.yml", "linux.yml", "ci.yml"):
             self.assertIn(f"actions/workflows/{workflow_file}/badge.svg?branch=development-restructure&amp;event=push".replace("&amp;", "&"), readme)
             self.assertTrue((generate.ROOT / ".github/workflows" / workflow_file).is_file())
-        self.assertIn("[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/dashboard.svg)", readme)
+        self.assertIn("[![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/README.md)", readme)
         self.assertIn("docs/coverage/REPORT.md", readme)
         self.assertEqual((generate.ROOT / "README.md").read_bytes().count(b"\r\n"),
                          (generate.ROOT / "README.md").read_bytes().count(b"\n"))

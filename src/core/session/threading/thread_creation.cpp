@@ -11,12 +11,18 @@ namespace xenon::core {
 
 // ExCreateThread (ordinal 0x0D)
 // Guest ABI: r3 = PHANDLE out, r4 = stack size (0 = default), r5 = LPDWORD
-// thread-id out (optional, nullable), r6 = XApiThreadStartup (ignored -
-// Xenon calls start_address directly; it has no XAPI bootstrap trampoline to
-// reproduce), r7 = start address, r8 = start context (the single argument
-// passed to the thread function, matching PPC ABI gpr[3]), r9 = creation
-// flags (bit 0 = suspended; bits 24..31 = processor affinity, informational)
-// -> r3 = NTSTATUS.
+// thread-id out (optional, nullable), r6 = XapiThreadStartup, r7 = start
+// address, r8 = start context, r9 = creation flags (bit 0 = suspended; bits
+// 24..31 = processor mask, which sets the thread's processor number in its
+// KPCR) -> r3 = NTSTATUS.
+//
+// XAPI's CreateThread passes its own startup routine (the title's statically
+// linked XapiThreadStartup) in r6. When it is set, the thread starts there
+// as XapiThreadStartup(start_address, start_context), which sets up the
+// thread's XAPI state, calls the start routine and exits the thread; when
+// it is 0 the thread starts at start_address with start_context in r3. As
+// in xenia and rexglue-sdk (XThread::Execute). Earlier Xenon ignored r6 and
+// always started at start_address, skipping XAPI's per-thread setup.
 bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   if (!kernel_process_ || !memory_ || !loaded_xex_) {
     // No title loaded - this export cannot possibly succeed; report a
@@ -28,6 +34,7 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   const auto handle_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[3]);
   auto stack_size = static_cast<std::uint32_t>(context.cpu.gpr[4]);
   const auto thread_id_out = static_cast<cpu::GuestAddress>(context.cpu.gpr[5]);
+  const auto xapi_thread_startup = static_cast<cpu::GuestAddress>(context.cpu.gpr[6]);
   const auto start_address = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
   const auto start_context = context.cpu.gpr[8];
   const auto creation_flags = static_cast<std::uint32_t>(context.cpu.gpr[9]);
@@ -40,10 +47,9 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
     return true;
   }
 
-  // 0 means "inherit the default stack size" on real Xbox 360, matching the
-  // same default create_guest_process() uses for the main thread.
-  constexpr std::uint32_t kDefaultStackSize = 1u * 1024u * 1024u;
-  if (stack_size == 0u) stack_size = kDefaultStackSize;
+  // 0 means "inherit the default stack size": the image's
+  // XEX_HEADER_DEFAULT_STACK_SIZE, the same size the main thread received.
+  if (stack_size == 0u) stack_size = default_guest_stack_size();
   constexpr std::uint32_t kMinimumStackSize = 4096u;
   if (stack_size < kMinimumStackSize) stack_size = kMinimumStackSize;
 
@@ -85,10 +91,14 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   // until start()).
   auto thread_id_slot = std::make_shared<std::atomic<std::uint32_t>>(0u);
   auto thread = kernel_process_->thread_manager().create_thread(
-      [this, start_address, start_context, stack_base, stack_size, tls,
+      [this, xapi_thread_startup, start_address, start_context, stack_base, stack_size, tls,
        thread_id_slot]() -> std::uint32_t {
         auto self = kernel_process_->thread_manager().get_thread(
             thread_id_slot->load(std::memory_order_acquire));
+        if (xapi_thread_startup != 0u) {
+          return run_created_guest_thread(std::move(self), xapi_thread_startup, start_address,
+                                          stack_base, stack_size, tls, start_context);
+        }
         return run_created_guest_thread(std::move(self), start_address, start_context,
                                         stack_base, stack_size, tls);
       },
@@ -102,6 +112,13 @@ bool XenonSession::export_ex_create_thread(ExportCallContext& context) {
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
   write_guest_thread_id(*memory_, tls, thread->thread_id());
   thread->set_guest_kthread_address(tls.kthread_address);
+  thread->set_guest_kpcr_address(tls.kpcr_address);
+  // The thread runs on the hardware thread its flags request, and its
+  // processor number (r13+0x10C) must say so: titles index per-processor
+  // state with it. AC6's audio threads rendezvous through a word with one
+  // byte per processor, which never completed while every thread read 0.
+  memory_->write8(tls.kpcr_address + GuestKpcrLayout::kCurrentCpuOffset,
+                  kernel::guest_processor_for_affinity(creation_flags >> 24));
   {
     logging::append_probe_log("thread_create_flags_diag.log", "ExCreateThread: thread_id=%u start_address=0x%08llX creation_flags=0x%08X create_suspended=%d\n",
                  thread->thread_id(), (unsigned long long)start_address, _diag_creation_flags,
@@ -202,6 +219,7 @@ bool XenonSession::export_xam_task_schedule(ExportCallContext& context) {
   thread_id_slot->store(thread->thread_id(), std::memory_order_release);
   write_guest_thread_id(*memory_, tls, thread->thread_id());
   thread->set_guest_kthread_address(tls.kthread_address);
+  thread->set_guest_kpcr_address(tls.kpcr_address);
 
   kernel::Handle handle{};
   const auto insert_code = kernel_process_->handle_table().insert(

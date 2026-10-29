@@ -1,40 +1,65 @@
 #include "xenon/kernel/mutant.hpp"
 
-#include "xenon/kernel/wait_util.hpp"
+#include <unordered_set>
+#include <vector>
+
+#include "xenon/kernel/wait.hpp"
 
 namespace xenon::kernel {
+namespace {
+
+// Every live mutant, so an exiting thread can find the ones it still owns.
+// Lock order: this list, then a mutant's own mutex. Only the constructor and
+// destructor take the list otherwise, and neither holds a mutant's mutex, so
+// a mutant found here stays alive until the list is unlocked.
+struct LiveMutants {
+  std::mutex mutex;
+  std::unordered_set<KernelMutant*> mutants;
+};
+
+// Never destroyed: guest threads may still exit during process teardown.
+LiveMutants& live_mutants() {
+  static auto* list = new LiveMutants();
+  return *list;
+}
+
+}  // namespace
 
 KernelMutant::KernelMutant(bool initial_owner, std::uint32_t owner_thread_id)
     : KernelObject(ObjectType::Mutant) {
   if (initial_owner) {
     owner_thread_id_ = owner_thread_id;
+    owner_host_thread_ = std::this_thread::get_id();
     recursion_count_ = 1;
   }
+  auto& live = live_mutants();
+  std::scoped_lock lock(live.mutex);
+  live.mutants.insert(this);
 }
 
-bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout) {
-  std::unique_lock lock(mutex_);
+KernelMutant::~KernelMutant() {
+  auto& live = live_mutants();
+  std::scoped_lock lock(live.mutex);
+  live.mutants.erase(this);
+}
 
-  // If already owned by this thread, increment recursion count
-  if (owner_thread_id_ == owner_thread_id && recursion_count_ > 0) {
-    ++recursion_count_;
-    return true;
-  }
-
-  // Wait for the mutant to become available
-  if (!wait_until_signaled(condition_, lock, timeout, [&] { return recursion_count_ == 0; })) {
-    return false;
-  }
-
-  owner_thread_id_ = owner_thread_id;
-  recursion_count_ = 1;
-  abandoned_ = false;
-  return true;
+bool KernelMutant::acquire(std::uint32_t owner_thread_id, std::chrono::milliseconds timeout,
+                           bool* abandoned) {
+  // Already owned by this thread: satisfied at once, deepening the recursion.
+  // Otherwise wait for the mutant to become available.
+  KernelObject* const self = this;
+  const auto result =
+      wait_for_objects(std::span(&self, 1), false, timeout, nullptr, owner_thread_id);
+  if (abandoned) *abandoned = result == WaitResult::Abandoned;
+  return result == WaitResult::Success || result == WaitResult::Abandoned;
 }
 
 bool KernelMutant::release(std::uint32_t owner_thread_id) {
   std::scoped_lock lock(mutex_);
+  return release_locked(owner_thread_id);
+}
 
+bool KernelMutant::release_locked(std::uint32_t owner_thread_id) {
   if (owner_thread_id_ != owner_thread_id || recursion_count_ == 0) {
     return false;  // Not owned by this thread
   }
@@ -42,7 +67,9 @@ bool KernelMutant::release(std::uint32_t owner_thread_id) {
   --recursion_count_;
   if (recursion_count_ == 0) {
     owner_thread_id_ = 0;
-    condition_.notify_one();
+    owner_host_thread_ = {};
+    // Ownership passes straight to the oldest waiter.
+    multi_waiters_.satisfy_waiters_locked();
   }
 
   return true;
@@ -64,13 +91,28 @@ std::int32_t KernelMutant::recursion_count() const {
 }
 
 void KernelMutant::abandon() {
-  {
-    std::scoped_lock lock(mutex_);
-    abandoned_ = true;
-    owner_thread_id_ = 0;
-    recursion_count_ = 0;
+  std::scoped_lock lock(mutex_);
+  abandon_locked();
+}
+
+void KernelMutant::abandon_locked() noexcept {
+  abandoned_ = true;
+  owner_thread_id_ = 0;
+  owner_host_thread_ = {};
+  recursion_count_ = 0;
+  multi_waiters_.satisfy_waiters_locked();
+}
+
+void abandon_mutants_owned_by_this_thread() noexcept {
+  const auto self = std::this_thread::get_id();
+  auto& live = live_mutants();
+  std::scoped_lock list_lock(live.mutex);
+  for (auto* mutant : live.mutants) {
+    std::scoped_lock lock(mutant->mutex_);
+    if (mutant->recursion_count_ > 0 && mutant->owner_host_thread_ == self) {
+      mutant->abandon_locked();
+    }
   }
-  condition_.notify_all();
 }
 
 }  // namespace xenon::kernel

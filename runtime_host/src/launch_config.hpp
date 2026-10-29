@@ -67,6 +67,11 @@ struct LaunchConfig {
   std::string renderer;
   bool shader_cache{true};
   std::string shader_cache_mode{"Persistent"};
+  // Host window client size, from "displayResolution" ("WIDTHxHEIGHT"). This
+  // is host output only: the guest still sees its own video mode, and the
+  // presenter scales the front buffer to this size.
+  std::uint32_t display_width{1280};
+  std::uint32_t display_height{720};
 
   std::string input_backend;
   std::string input_preferred_device{"Automatic"};
@@ -83,6 +88,12 @@ struct LaunchConfig {
 
   // Mirrors the launcher's live "developer/verboseLogging" preference.
   bool log_verbose{false};
+
+  // Opt-in diagnostics, equivalent to XENON_DIAG_EVENTS=1 and
+  // XENON_PROBE_LOGS=1 (docs/runtime/AC6_RUNTIME_INVESTIGATION.md). Either
+  // the field or the environment variable turns one on.
+  bool diagnostic_events{false};
+  bool probe_logs{false};
 
   // Diagnostic guest-word watch (SessionConfig::memory_watch_*). "memoryWatch" is
   // an array of guest addresses, each a JSON number or a "0x..." / decimal string.
