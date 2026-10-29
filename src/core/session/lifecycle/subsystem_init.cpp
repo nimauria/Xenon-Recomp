@@ -18,6 +18,10 @@ bool XenonSession::init_memory() {
     set_error("Memory subsystem initialization failed");
     return false;
   }
+  const char* strict = std::getenv("XENON_MEMORY_STRICT");
+  const bool strict_requested =
+      config_.strict_memory || (strict && *strict && *strict != '0');
+  memory_->set_native_access(!strict_requested);
   return true;
 }
 

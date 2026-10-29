@@ -33,7 +33,9 @@ namespace xenon::recomp {
 // exported entry points, or CPU V2's codegen would make an already-compiled
 // xenon_game_module unsafe to keep using even though nothing about the game
 // itself changed.
-inline constexpr std::uint32_t kArtifactAbiVersion = 5;
+// 6: FastMemoryView gained the native-access fields, moving every
+//    ExecutionContext member after memory_access.
+inline constexpr std::uint32_t kArtifactAbiVersion = 6;
 
 // Everything that determines whether a previously prepared native module can
 // still be used, or must be rebuilt. Two keys with identical field values are

@@ -22,6 +22,7 @@ if(XENON_ENABLE_MEMORY)
     guest/access/mmio_registration.cpp
     guest/reservations/reservations.cpp
     guest/coherency/memory_ordering.cpp
+    guest/coherency/write_buffer_flush.cpp
     guest/diagnostics/fault_reporting.cpp
     guest/diagnostics/invariants.cpp
     ${XENON_HOST_VM_SOURCE}

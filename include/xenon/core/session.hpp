@@ -93,6 +93,12 @@ struct SessionConfig {
   std::string audio_latency_profile{};
   bool enable_network{false};
   memory::GuestTranslationMode memory_mode{memory::GuestTranslationMode::Auto};
+  // Guest RAM uses native access (AddressSpace::set_native_access) unless
+  // this is set, or XENON_MEMORY_STRICT=1 is in the environment. Strict
+  // access keeps byte-exact write history and store-invalidated
+  // reservations at the cost of shared atomics on every guest access; it is
+  // for chasing accuracy bugs, not for play.
+  bool strict_memory{false};
   bool enable_dynamic_compilation{false};
   // Gen 7 correctness/discovery safety net. AOT remains primary; this only
   // executes a bounded PPC fragment after a compiled lookup genuinely misses.

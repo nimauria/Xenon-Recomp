@@ -2,13 +2,20 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "xenon/cpu/memory_ordering.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::memory {
+
+// Makes every store any thread of this process has issued globally visible
+// before it returns (Windows FlushProcessWriteBuffers, Linux membarrier).
+// Lets the side that runs rarely pay for ordering that hot stores skip.
+void flush_process_write_buffers() noexcept;
 
 struct DirtyPhysicalRange {
   std::uint32_t address{};
@@ -49,7 +56,10 @@ class GuestMemoryCoherency {
   // Returns an epoch boundary for which every writer at or below the returned
   // epoch has finished publishing its page epochs. Writers that begin after
   // this snapshot receive a newer epoch and are observed by the next consume.
+  // Pages dirtied by native-access stores are collected into page epochs
+  // first, so they are part of the boundary.
   [[nodiscard]] std::uint64_t current_epoch() const noexcept {
+    collect_cpu_dirty_pages();
     for (;;) {
       if (active_writers_.load(std::memory_order_acquire) != 0u) continue;
       const auto epoch = write_epoch_.load(std::memory_order_acquire);
@@ -77,6 +87,62 @@ class GuestMemoryCoherency {
   }
   [[nodiscard]] std::atomic<std::uint8_t>* write_journal_domains_data() noexcept {
     return write_journal_domains_.data();
+  }
+  [[nodiscard]] std::atomic<std::uint64_t>* cpu_dirty_page_bits_data() noexcept {
+    return cpu_dirty_page_bits_.data();
+  }
+  [[nodiscard]] std::atomic<std::uint64_t>* cpu_dirty_summary_bits_data() noexcept {
+    return cpu_dirty_summary_bits_.data();
+  }
+
+  // Moves the pages native-access stores marked dirty into page epochs under
+  // one new epoch. Those stores test a page's bit before setting it, so one
+  // that found it set may still be in its core's store buffer when the bit is
+  // cleared here; flush_process_write_buffers() drains every thread's
+  // pending stores before the epoch is published, so a consumer that sees
+  // the epoch also sees the data. The journal has no entry for this epoch:
+  // exact history over it is unavailable and consumers take the page-level
+  // path, the same path a journal overflow takes. Returns the epoch, or 0
+  // when nothing was dirty.
+  std::uint64_t collect_cpu_dirty_pages() const noexcept {
+    bool any = false;
+    for (const auto& summary : cpu_dirty_summary_bits_) {
+      if (summary.load(std::memory_order_acquire)) {
+        any = true;
+        break;
+      }
+    }
+    if (!any) return 0u;
+
+    std::lock_guard lock(collect_mutex_);
+    collected_pages_.clear();
+    for (std::size_t s = 0; s < cpu_dirty_summary_bits_.size(); ++s) {
+      auto words = cpu_dirty_summary_bits_[s].exchange(0u, std::memory_order_acq_rel);
+      while (words) {
+        const auto word_index = s * 64u + static_cast<std::size_t>(std::countr_zero(words));
+        words &= words - 1u;
+        auto pages = cpu_dirty_page_bits_[word_index].exchange(0u, std::memory_order_acq_rel);
+        while (pages) {
+          collected_pages_.push_back(static_cast<std::uint32_t>(
+              word_index * 64u + static_cast<std::size_t>(std::countr_zero(pages))));
+          pages &= pages - 1u;
+        }
+      }
+    }
+    if (collected_pages_.empty()) return 0u;
+
+    flush_process_write_buffers();
+    active_writers_.fetch_add(1u, std::memory_order_acq_rel);
+    auto epoch = write_epoch_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    if (epoch == 0u) {
+      write_epoch_.store(1u, std::memory_order_release);
+      epoch = 1u;
+    }
+    for (const auto page : collected_pages_) {
+      page_epochs_[page].store(epoch, std::memory_order_release);
+    }
+    active_writers_.fetch_sub(1u, std::memory_order_release);
+    return epoch;
   }
 
   std::uint64_t mark_write(
@@ -245,13 +311,23 @@ class GuestMemoryCoherency {
     write_journal_epochs_[index].store(epoch, std::memory_order_release);
   }
 
-  std::vector<std::atomic<std::uint64_t>> page_epochs_{};
+  mutable std::vector<std::atomic<std::uint64_t>> page_epochs_{};
   static_assert((kWriteJournalCapacity & (kWriteJournalCapacity - 1u)) == 0u);
   std::vector<std::atomic<std::uint64_t>> write_journal_epochs_{};
   std::vector<std::atomic<std::uint64_t>> write_journal_ranges_{};
   std::vector<std::atomic<std::uint8_t>> write_journal_domains_{};
-  std::atomic<std::uint64_t> write_epoch_{0};
-  std::atomic<std::uint32_t> active_writers_{0};
+  // Collection runs from const consumers (current_epoch), so the epoch and
+  // writer counters it advances are mutable like the dirty bits it clears.
+  mutable std::atomic<std::uint64_t> write_epoch_{0};
+  mutable std::atomic<std::uint32_t> active_writers_{0};
+  static constexpr std::size_t kDirtyWordCount = kPageCount / 64u;
+  static_assert(kPageCount % (64u * 64u) == 0u);
+  mutable std::vector<std::atomic<std::uint64_t>> cpu_dirty_page_bits_ =
+      std::vector<std::atomic<std::uint64_t>>(kDirtyWordCount);
+  mutable std::vector<std::atomic<std::uint64_t>> cpu_dirty_summary_bits_ =
+      std::vector<std::atomic<std::uint64_t>>(kDirtyWordCount / 64u);
+  mutable std::mutex collect_mutex_;
+  mutable std::vector<std::uint32_t> collected_pages_;
 };
 
 }  // namespace xenon::memory

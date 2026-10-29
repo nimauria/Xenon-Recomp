@@ -147,7 +147,7 @@ bool AddressSpace::write_physical_exclusive(
     return source.empty() && initialized_;
   }
 
-  auto view = make_fast_memory_view();
+  auto view = make_strict_fast_memory_view();
   // This window owns both gates, so it may become the sole active writer
   // without going through the normal gate-entry loop.
   view.active_coherency_writers->fetch_add(1u, std::memory_order_acq_rel);

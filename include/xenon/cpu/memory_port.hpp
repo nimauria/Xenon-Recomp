@@ -194,6 +194,20 @@ struct FastMemoryView {
   // accesses to finish - not whenever the guest's access pattern happens to
   // produce a natural lull. See AddressSpace::reclaim_retired_physical_pages().
   std::atomic<bool>* reclaim_pending{};
+
+  // Native guest access (AddressSpace::set_native_access). An access then
+  // pays no shared atomic: no read guard, no in-flight writer count, no
+  // global write epoch or journal entry, and lwarx/stwcx. become a host
+  // compare-and-swap against the reserved value, as in XenonRecomp/rexglue.
+  // A store only sets its physical page's bit in cpu_dirty_page_bits, and
+  // only when the bit is clear; GuestMemoryCoherency collects the bits into
+  // page epochs when a consumer asks for an epoch. The reservation, journal,
+  // coherency-writer and reader-guard pointers above are left null.
+  bool native_access{};
+  std::atomic<std::uint64_t>* cpu_dirty_page_bits{};
+  // One bit per cpu_dirty_page_bits word, set when that word stops being
+  // zero, so an idle collection scans 32 words instead of 2048.
+  std::atomic<std::uint64_t>* cpu_dirty_summary_bits{};
 };
 
 // Concrete, compiler-inlinable access facade used by generated PPC. Common RAM
@@ -353,6 +367,9 @@ class MemoryAccessContext {
   [[nodiscard]] T read_integer(GuestAddress address, bool little_endian);
   template <typename T>
   void write_integer(GuestAddress address, T value, bool little_endian);
+  template <typename T>
+  [[nodiscard]] bool native_store_conditional(GuestAddress address,
+                                              std::uint64_t token, T value);
 
   template <typename T>
   [[nodiscard]] static T byteswap_if(T value, bool swap) noexcept;
@@ -923,9 +940,41 @@ inline void cancel_reservation(const FastMemoryView& fast,
                                       std::memory_order_acquire);
 }
 
+// Native access: sets the dirty bit of every physical page in the range.
+// The bit is tested first so a page that is already dirty costs one load,
+// not a shared read-modify-write. A store whose test saw the bit set can
+// still sit in the store buffer when the collector clears the bit; the
+// collector's process-wide write-buffer flush (GuestMemoryCoherency::
+// collect_cpu_dirty_pages) makes it visible before any consumer reads.
+inline void mark_cpu_dirty_pages(const FastMemoryView& fast,
+                                 std::uint32_t physical_address,
+                                 std::uint32_t width) noexcept {
+  if (!fast.cpu_dirty_page_bits || !fast.physical_page_count || !width) return;
+  constexpr std::uint32_t kPhysicalPageShift = 12u;
+  const auto first = physical_address >> kPhysicalPageShift;
+  if (first >= fast.physical_page_count) return;
+  const auto last = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      (std::uint64_t{physical_address} + width - 1u) >> kPhysicalPageShift,
+      fast.physical_page_count - 1u));
+  for (auto page = first; page <= last; ++page) {
+    const auto word_index = page >> 6u;
+    auto& word = fast.cpu_dirty_page_bits[word_index];
+    const auto bit = std::uint64_t{1} << (page & 63u);
+    if ((word.load(std::memory_order_relaxed) & bit) != 0u) continue;
+    if (word.fetch_or(bit, std::memory_order_release) == 0u &&
+        fast.cpu_dirty_summary_bits) {
+      fast.cpu_dirty_summary_bits[word_index >> 6u].fetch_or(
+          std::uint64_t{1} << (word_index & 63u), std::memory_order_release);
+    }
+  }
+}
+
 [[nodiscard]] inline bool enter_write(const FastMemoryView& fast,
                                       std::uint32_t physical_address,
                                       std::uint32_t width) noexcept {
+  // Native access keeps no in-flight writer count and no reservation
+  // participants: lwarx/stwcx. compare values instead.
+  if (fast.native_access) return false;
   // Coherency tracks every writer. Reservation serialization is colder: only
   // granules that have ever hosted a reservation participate in the LR/SC
   // commit gate. The boolean return is carried to finish_write so a sticky-bit
@@ -982,6 +1031,7 @@ inline std::uint64_t publish_write_metadata(
     const FastMemoryView& fast, std::uint32_t physical_address,
     std::uint32_t width, MemoryOrderingDomain ordering_domain) noexcept {
   std::uint64_t published_epoch = 0u;
+  mark_cpu_dirty_pages(fast, physical_address, width);
   if (fast.global_write_epoch && fast.physical_page_epochs &&
       fast.physical_page_count) {
     auto epoch = fast.global_write_epoch->fetch_add(
@@ -1328,9 +1378,67 @@ inline void MemoryAccessContext::zero_cache_block(GuestAddress address,
   fill_bytes(address & ~(bytes - 1u), bytes, 0u);
 }
 
+namespace native_reservation_detail {
+
+// Native lwarx/ldarx keep the reserved word and the value they observed;
+// stwcx./stdcx. succeed when that word still holds the value, by one host
+// compare-and-swap. Each guest thread runs on its own host thread, so the
+// reservation is per host thread, as a hardware thread's is. Bit 63 marks a
+// native token; slot tokens from the strict monitor never set it.
+inline constexpr std::uint64_t kNativeTokenBit = 1ull << 63u;
+
+struct Reservation {
+  std::byte* ptr{};
+  std::uint64_t value{};
+  std::uint32_t width{};
+  std::uint64_t token{};
+};
+
+inline thread_local Reservation current{};
+inline thread_local std::uint64_t next_token{};
+
+[[nodiscard]] inline bool is_native(std::uint64_t token) noexcept {
+  return (token & kNativeTokenBit) != 0u;
+}
+
+[[nodiscard]] inline std::uint64_t reserve(std::byte* ptr, std::uint64_t value,
+                                           std::uint32_t width) noexcept {
+  next_token = (next_token + 1u) & ~kNativeTokenBit;
+  current = {ptr, value, width, next_token | kNativeTokenBit};
+  return current.token;
+}
+
+// Takes the reservation named by token if it is this thread's current one
+// for ptr and width. The reservation is cleared either way, as stwcx. clears
+// it whether or not it stores.
+[[nodiscard]] inline bool take(std::uint64_t token, std::byte* ptr,
+                               std::uint32_t width, std::uint64_t& value) noexcept {
+  const auto held = current;
+  current = {};
+  if (!token || held.token != token || held.ptr != ptr || held.width != width) {
+    return false;
+  }
+  value = held.value;
+  return true;
+}
+
+inline void cancel(std::uint64_t token) noexcept {
+  if (current.token == token) current = {};
+}
+
+}  // namespace native_reservation_detail
+
 inline std::uint64_t MemoryAccessContext::reserve32(
     GuestAddress address, std::uint32_t& value) {
   Resolved resolved{};
+  if (fast_.native_access) {
+    if (!resolve_fast(address, sizeof(value), false, alignof(std::uint32_t), resolved)) {
+      return slow_->reserve32(address, value);
+    }
+    const auto raw = detail::atomic_load_relaxed<std::uint32_t>(resolved.ptr);
+    value = byteswap_if(raw, std::endian::native == std::endian::little);
+    return native_reservation_detail::reserve(resolved.ptr, value, sizeof(value));
+  }
   {
     // Guard only the fallback-eligibility check; begin_reservation_operation()
     // below is an unbounded spin against other threads' reservation traffic,
@@ -1376,6 +1484,14 @@ inline std::uint64_t MemoryAccessContext::reserve32(
 inline std::uint64_t MemoryAccessContext::reserve64(
     GuestAddress address, std::uint64_t& value) {
   Resolved resolved{};
+  if (fast_.native_access) {
+    if (!resolve_fast(address, sizeof(value), false, alignof(std::uint64_t), resolved)) {
+      return slow_->reserve64(address, value);
+    }
+    const auto raw = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr);
+    value = byteswap_if(raw, std::endian::native == std::endian::little);
+    return native_reservation_detail::reserve(resolved.ptr, value, sizeof(value));
+  }
   {
     ScopedReadGuard guard(*this);
     if (!reservation_monitor_detail::reservation_fast_ready(fast_) ||
@@ -1410,6 +1526,10 @@ inline std::uint64_t MemoryAccessContext::reserve64(
 
 inline void MemoryAccessContext::cancel_reservation(std::uint64_t token) noexcept {
   if (!token) return;
+  if (native_reservation_detail::is_native(token)) {
+    native_reservation_detail::cancel(token);
+    return;
+  }
   if (reservation_monitor_detail::reservation_fast_ready(fast_)) {
     reservation_monitor_detail::cancel_reservation(fast_, token);
     return;
@@ -1417,8 +1537,37 @@ inline void MemoryAccessContext::cancel_reservation(std::uint64_t token) noexcep
   slow_->cancel_reservation(token);
 }
 
+template <typename T>
+inline bool MemoryAccessContext::native_store_conditional(GuestAddress address,
+                                                          std::uint64_t token,
+                                                          T value) {
+  Resolved resolved{};
+  if (!resolve_fast(address, sizeof(T), true, alignof(T), resolved)) {
+    native_reservation_detail::cancel(token);
+    return false;
+  }
+  std::uint64_t observed = 0u;
+  if (!native_reservation_detail::take(token, resolved.ptr, sizeof(T), observed)) {
+    return false;
+  }
+  const bool swap = std::endian::native == std::endian::little;
+  auto expected = byteswap_if(static_cast<T>(observed), swap);
+  std::atomic_ref<T> cell(*reinterpret_cast<T*>(resolved.ptr));
+  if (!cell.compare_exchange_strong(expected, byteswap_if(value, swap),
+                                    std::memory_order_acq_rel,
+                                    std::memory_order_relaxed)) {
+    return false;
+  }
+  reservation_monitor_detail::publish_write_metadata(
+      fast_, resolved.physical_address, sizeof(T), resolved.ordering_domain);
+  return true;
+}
+
 inline bool MemoryAccessContext::store_conditional32(
     GuestAddress address, std::uint64_t token, std::uint32_t value) {
+  if (native_reservation_detail::is_native(token)) {
+    return native_store_conditional<std::uint32_t>(address, token, value);
+  }
   Resolved resolved{};
   {
     ScopedReadGuard guard(*this);
@@ -1475,6 +1624,9 @@ inline bool MemoryAccessContext::store_conditional32(
 
 inline bool MemoryAccessContext::store_conditional64(
     GuestAddress address, std::uint64_t token, std::uint64_t value) {
+  if (native_reservation_detail::is_native(token)) {
+    return native_store_conditional<std::uint64_t>(address, token, value);
+  }
   Resolved resolved{};
   {
     ScopedReadGuard guard(*this);

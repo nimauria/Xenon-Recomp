@@ -124,6 +124,24 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void reset();
 
   [[nodiscard]] xenon::cpu::MemoryAccessContext access_context() noexcept override;
+
+  // Native access (the session's default; strict when a launch asks for it).
+  // Contexts made afterwards access guest RAM without shared atomics: no
+  // read-side reclaim guard, no in-flight writer count, no write epoch or
+  // journal entry per store, lwarx/stwcx. as a compare-and-swap of the
+  // reserved value, and CPU-written pages reported through the dirty bits
+  // GuestMemoryCoherency collects. What strict access guarantees and native
+  // access does not: a reservation is lost to any store to its granule
+  // (native: only to a store that changes the reserved value), consumers get
+  // byte-exact CPU write history (native: page granularity), and a physical
+  // page freed while another thread is mid-access is not recycled under it
+  // (native: a guest that races its own free may store into the recycled
+  // page, as on xenia/rexglue/XenonRecomp). Native contexts never use the
+  // direct aperture, whose remapping relies on the reader guard. Set it before
+  // any guest thread takes a context.
+  void set_native_access(bool enabled) noexcept { native_access_ = enabled; }
+  [[nodiscard]] bool native_access() const noexcept { return native_access_; }
+
   [[nodiscard]] GuestMemoryCoherency& coherency() noexcept { return coherency_; }
   [[nodiscard]] const GuestMemoryCoherency& coherency() const noexcept { return coherency_; }
   [[nodiscard]] bool direct_aperture_active() const noexcept;
@@ -395,6 +413,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
   void rebuild_hot_pages();
   [[nodiscard]] bool page_has_mmio(std::uint32_t page_index) const;
   [[nodiscard]] xenon::cpu::FastMemoryView make_fast_memory_view() noexcept;
+  [[nodiscard]] xenon::cpu::FastMemoryView make_strict_fast_memory_view() noexcept;
   void advance_executable_generation(std::uint32_t physical_page) noexcept;
   [[nodiscard]] bool begin_physical_write(std::uint32_t physical_address,
                                           std::uint32_t width) noexcept;
@@ -480,6 +499,7 @@ class AddressSpace final : public xenon::cpu::MemoryPort {
       invalidation_callbacks_{};
   std::uint64_t next_invalidation_callback_id_{1};
   bool direct_aperture_requested_{true};
+  bool native_access_{};
   bool initialized_{};
 };
 

@@ -84,7 +84,7 @@ void AddressSpace::cancel_reservation(std::uint64_t token) noexcept {
 
 void AddressSpace::invalidate_reservations(
     std::uint32_t physical_address, std::uint32_t width) noexcept {
-  auto view = make_fast_memory_view();
+  auto view = make_strict_fast_memory_view();
   xenon::cpu::reservation_monitor_detail::invalidate_range(
       view, physical_address, width);
 }
