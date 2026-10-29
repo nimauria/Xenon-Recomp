@@ -8,7 +8,9 @@
 #include <vulkan/vulkan.h>
 
 #include "xenon/gpu/edram_surface.hpp"
+#include "xenon/gpu/shader_translation.hpp"
 #include "xenon/gpu/vulkan/command_queue.hpp"
+#include "xenon/gpu/vulkan/depth_target.hpp"
 #include "xenon/gpu/vulkan/render_target.hpp"
 
 namespace xenon::gpu::vulkan {
@@ -40,6 +42,38 @@ class EdramColorTransfer {
   VkDescriptorSetLayout set_layout_{VK_NULL_HANDLE};
   VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
   std::unordered_map<std::uint64_t, VkPipeline> pipelines_{};
+  std::string error_{};
+};
+
+// The same direct transfer between two native depth images of one format.
+// Depth and stencil move together in one pass where VK_EXT_shader_stencil_
+// export is enabled; otherwise depth moves first (stencil replaced with
+// zero) and each stencil bit follows in its own pass, still with no CPU
+// round trip.
+class EdramDepthTransfer {
+ public:
+  EdramDepthTransfer() = default;
+  ~EdramDepthTransfer();
+  EdramDepthTransfer(const EdramDepthTransfer&) = delete;
+  EdramDepthTransfer& operator=(const EdramDepthTransfer&) = delete;
+
+  [[nodiscard]] bool transfer(VkDevice device, VkPhysicalDevice physical_device,
+                              CommandQueue& queue, DepthTargetImage& source,
+                              DepthTargetImage& destination,
+                              const EdramTransferConstants& constants,
+                              std::span<const EdramSurfaceRegion> regions);
+  [[nodiscard]] const std::string& error() const noexcept { return error_; }
+
+ private:
+  [[nodiscard]] bool create_layouts(VkDevice device);
+  [[nodiscard]] VkPipeline pipeline(VkDevice device, VkFormat format, MsaaSamples source_host,
+                                    MsaaSamples destination_host, EdramDepthTransferPass pass);
+
+  VkDevice device_{VK_NULL_HANDLE};
+  VkDescriptorSetLayout set_layout_{VK_NULL_HANDLE};
+  VkPipelineLayout pipeline_layout_{VK_NULL_HANDLE};
+  std::unordered_map<std::uint64_t, VkPipeline> pipelines_{};
+  int stencil_export_{-1};
   std::string error_{};
 };
 

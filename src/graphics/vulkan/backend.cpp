@@ -62,6 +62,7 @@ struct BackendApi {
   // VK_CULL_MODE_FRONT_AND_BACK is native.
   static constexpr bool kEmulatesFrontAndBackCull = false;
   static constexpr bool kSupportsDirectColorTransfer = true;
+  static constexpr bool kSupportsDirectDepthTransfer = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;
@@ -78,6 +79,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     (void)queue.wait_idle();
   }
   EdramColorTransfer edram_color_transfer{};
+  EdramDepthTransfer edram_depth_transfer{};
   GpuResolver gpu_resolver{};
 
   bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
@@ -119,6 +121,15 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                                       regions))
       return true;
     error = named(edram_color_transfer.error());
+    return false;
+  }
+  bool transfer_depth_tiles(DepthTargetImage& source, DepthTargetImage& destination,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (edram_depth_transfer.transfer(context.device(), context.physical_device(), queue,
+                                      source, destination, constants, regions))
+      return true;
+    error = named(edram_depth_transfer.error());
     return false;
   }
 

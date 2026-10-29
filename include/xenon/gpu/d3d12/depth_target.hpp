@@ -43,6 +43,10 @@ class DepthTargetImage {
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::span<const std::uint32_t> source, std::uint32_t row_pitch);
   void reset() noexcept;
+  // A shader-visible heap holding this image's depth plane (t0) and stencil
+  // plane (t1) SRVs, created on first use; a direct EDRAM transfer reads its
+  // source through it. Null on failure (error()).
+  [[nodiscard]] ID3D12DescriptorHeap* shader_resource_heap();
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE dsv() const noexcept { return dsv_; }
   [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
@@ -63,6 +67,7 @@ class DepthTargetImage {
  private:
   Microsoft::WRL::ComPtr<ID3D12Resource> resource_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsv_heap_{};
+  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srv_heap_{};
   D3D12_CPU_DESCRIPTOR_HANDLE dsv_{};
   DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
   DepthRenderTargetFormat guest_format_{DepthRenderTargetFormat::D24S8};

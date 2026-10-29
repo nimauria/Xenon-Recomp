@@ -78,6 +78,17 @@ class HlslShaderLowerer {
 // CPU reference is edram_transfer_source()). The constants are D3D12 root
 // constants at b0 or Vulkan push constants.
 [[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples);
+// The same transfer between two native depth images of one format. The
+// source depth plane is t0 and its stencil plane t1 (stencil in .y); the
+// constants are EdramDepthTransferConstants. Which output the pass writes:
+// depth and SV_StencilRef together where stencil export exists; otherwise
+// depth (the pipeline replaces stencil with 0), then one pass per stencil
+// bit that keeps only samples whose source stencil has the bit
+// EdramDepthTransferConstants::stencil[0] names (the pipeline writes that
+// bit alone).
+enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, StencilBit };
+[[nodiscard]] LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
+                                                             EdramDepthTransferPass pass);
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};

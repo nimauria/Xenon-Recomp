@@ -223,6 +223,14 @@ struct EdramTransferConstants {
   std::array<std::uint32_t, 4> extent{};
 };
 
+// The depth transfer's constants (make_edram_depth_transfer_shader): the
+// shared mapping, and in stencil[0] the stencil bit a StencilBit pass copies.
+struct EdramDepthTransferConstants {
+  EdramTransferConstants transfer{};
+  std::array<std::uint32_t, 4> stencil{};
+};
+static_assert(sizeof(EdramDepthTransferConstants) == 64u);
+
 [[nodiscard]] EdramTransferConstants make_edram_transfer_constants(
     const EdramSurfaceLayout& source, MsaaSamples source_host_samples,
     const EdramSurfaceLayout& destination,

@@ -527,6 +527,38 @@ void test_sample_transfer_shaders() {
     assert(compiler.compile(fallback, {}).succeeded);
     assert(compiler.compile(fallback, spirv).succeeded);
   }
+  // Direct EDRAM depth transfers: every pass at every source sample count.
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto pass : {EdramDepthTransferPass::DepthAndStencil, EdramDepthTransferPass::Depth,
+                            EdramDepthTransferPass::StencilBit}) {
+      const auto shader = make_edram_depth_transfer_shader(samples, pass);
+      assert(shader.complete);
+      assert(shader.hlsl.find("SV_SampleIndex") != std::string::npos);
+      assert((shader.hlsl.find("SV_StencilRef") != std::string::npos) ==
+             (pass == EdramDepthTransferPass::DepthAndStencil));
+      assert((shader.hlsl.find("SV_Depth") != std::string::npos) ==
+             (pass != EdramDepthTransferPass::StencilBit));
+      const auto dxil = compiler.compile(shader, {});
+      if (!dxil.succeeded) {
+        for (const auto& line : dxil.diagnostics) std::cerr << line << '\n';
+        assert(false);
+      }
+      auto options = spirv;
+      options.spirv_stencil_export = pass == EdramDepthTransferPass::DepthAndStencil;
+      assert(compiler.compile(shader, options).succeeded);
+    }
+  }
+  // It shares the color transfer's EDRAM mapping verbatim.
+  const auto color = make_edram_color_transfer_shader(MsaaSamples::X1).hlsl;
+  const auto depth =
+      make_edram_depth_transfer_shader(MsaaSamples::X1, EdramDepthTransferPass::Depth).hlsl;
+  const auto mapping_at = [](const std::string& hlsl) {
+    const auto begin = hlsl.find("  const uint x = uint(position.x);");
+    const auto end = hlsl.find(": source_guest);");
+    assert(begin != std::string::npos && end != std::string::npos);
+    return hlsl.substr(begin, end - begin);
+  };
+  assert(mapping_at(color) == mapping_at(depth));
 }
 
 

@@ -1393,27 +1393,13 @@ float main(float4 position : SV_Position,
   return result;
 }
 
-LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
-  const auto count = 1u << static_cast<unsigned>(source_host_samples);
-  LoweredShader result{};
-  result.stage = ShaderStage::Pixel;
-  result.entry_point = "main";
-  result.profile = "ps_6_0";
-  std::ostringstream out;
-  out << R"hlsl(struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };
-#ifdef __spirv__
-[[vk::push_constant]] TransferConstants transfer;
-#else
-ConstantBuffer<TransferConstants> transfer : register(b0);
-#endif
-)hlsl";
-  if (count == 1)
-    out << "Texture2D<float4> Source : register(t0);\n";
-  else
-    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
-  out << R"hlsl(float4 main(float4 position : SV_Position,
-            uint host_sample : SV_SampleIndex) : SV_Target0 {
-  const uint x = uint(position.x);
+namespace {
+
+// The body shared by the direct EDRAM transfer shaders: from the destination
+// host sample at SV_Position, the source sample holding the same EDRAM word
+// (source_x, source_y, source_host), discarding samples that hold none.
+// edram_transfer_source() is its CPU reference.
+constexpr std::string_view kEdramTransferMappingHlsl = R"hlsl(  const uint x = uint(position.x);
   const uint y = uint(position.y);
   const uint dst_base = transfer.destination.x, dst_pitch = transfer.destination.y;
   const uint dst_msaa = transfer.destination.z, dst_mode = transfer.destination.w;
@@ -1451,6 +1437,89 @@ ConstantBuffer<TransferConstants> transfer : register(b0);
   const uint source_host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
                          : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
 )hlsl";
+
+constexpr std::string_view kEdramTransferConstantsBinding = R"hlsl(#ifdef __spirv__
+[[vk::push_constant]] TransferConstants transfer;
+#else
+ConstantBuffer<TransferConstants> transfer : register(b0);
+#endif
+)hlsl";
+
+}  // namespace
+
+LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
+                                               EdramDepthTransferPass pass) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding;
+  if (count == 1) {
+    out << "Texture2D<float> SourceDepth : register(t0);\n"
+        << "Texture2D<uint4> SourceStencil : register(t1);\n";
+  } else {
+    out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
+        << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
+  }
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << kEdramTransferMappingHlsl;
+  const std::string at = count == 1 ? "int3(int2(source_x, source_y), 0)"
+                                    : "int2(source_x, source_y), source_host";
+  const std::string depth = "SourceDepth.Load(" + at + ")";
+  const std::string stencil = "SourceStencil.Load(" + at + ").y";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = " << stencil
+          << "; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((" << stencil << " & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.depth.v1") ^ count ^
+                       (std::uint64_t(pass) << 8u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = count == 1 || count == 2 || count == 4;
+  if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
+  return result;
+}
+
+LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  if (count == 1)
+    out << "Texture2D<float4> Source : register(t0);\n";
+  else
+    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
+  out << R"hlsl(float4 main(float4 position : SV_Position,
+            uint host_sample : SV_SampleIndex) : SV_Target0 {
+)hlsl" << kEdramTransferMappingHlsl;
   if (count == 1)
     out << "  return Source.Load(int3(int2(source_x, source_y), 0));\n}\n";
   else

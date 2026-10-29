@@ -494,7 +494,73 @@ bool DepthTargetImage::upload_sample(
 #endif
 }
 
+void DepthTargetImage::transition_to_sampled(VkCommandBuffer command) noexcept {
+  if (!command || !image_ || layout_ == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) return;
+  VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  barrier.srcStageMask = layout_ == VK_IMAGE_LAYOUT_UNDEFINED
+                             ? VK_PIPELINE_STAGE_2_NONE
+                             : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+  barrier.srcAccessMask = layout_ == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_2_MEMORY_WRITE_BIT;
+  barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  barrier.oldLayout = layout_;
+  barrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+  barrier.image = image_;
+  barrier.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0,
+                              1};
+  VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dependency.imageMemoryBarrierCount = 1;
+  dependency.pImageMemoryBarriers = &barrier;
+  vkCmdPipelineBarrier2(command, &dependency);
+  layout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+}
+
+VkDescriptorSet DepthTargetImage::sampled_descriptor_set(VkDescriptorSetLayout set_layout) {
+  if (sampled_set_) return sampled_set_;
+  if (!device_ || !depth_view_ || !stencil_view_ || !set_layout) {
+    error_ = "Vulkan depth target has no views to sample";
+    return VK_NULL_HANDLE;
+  }
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pool_info.maxSets = 1;
+  pool_info.poolSizeCount = 1;
+  pool_info.pPoolSizes = &pool_size;
+  if (vkCreateDescriptorPool(device_, &pool_info, nullptr, &sampled_pool_) != VK_SUCCESS) {
+    error_ = "Vulkan depth target descriptor pool creation failed";
+    sampled_pool_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  allocate.descriptorPool = sampled_pool_;
+  allocate.descriptorSetCount = 1;
+  allocate.pSetLayouts = &set_layout;
+  if (vkAllocateDescriptorSets(device_, &allocate, &sampled_set_) != VK_SUCCESS) {
+    error_ = "Vulkan depth target descriptor allocation failed";
+    vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+    sampled_pool_ = VK_NULL_HANDLE;
+    sampled_set_ = VK_NULL_HANDLE;
+    return VK_NULL_HANDLE;
+  }
+  VkDescriptorImageInfo depth_info{};
+  depth_info.imageView = depth_view_;
+  depth_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+  VkDescriptorImageInfo stencil_info = depth_info;
+  stencil_info.imageView = stencil_view_;
+  const std::array writes{
+      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_, 16, 0,
+                           1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &depth_info, nullptr, nullptr},
+      VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, sampled_set_, 17, 0,
+                           1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &stencil_info, nullptr, nullptr}};
+  vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
+                         nullptr);
+  return sampled_set_;
+}
+
 void DepthTargetImage::reset() noexcept {
+  if (device_ && sampled_pool_) vkDestroyDescriptorPool(device_, sampled_pool_, nullptr);
+  sampled_pool_ = VK_NULL_HANDLE;
+  sampled_set_ = VK_NULL_HANDLE;
   if (device_ && stencil_view_) vkDestroyImageView(device_, stencil_view_, nullptr);
   if (device_ && depth_view_) vkDestroyImageView(device_, depth_view_, nullptr);
   if (device_ && view_) vkDestroyImageView(device_, view_, nullptr);

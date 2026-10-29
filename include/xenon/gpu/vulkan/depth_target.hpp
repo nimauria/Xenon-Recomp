@@ -47,6 +47,14 @@ class DepthTargetImage {
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::span<const std::uint32_t> source, std::uint32_t row_pitch);
   void transition_to_depth_attachment(VkCommandBuffer command) noexcept;
+  // Makes the image readable by fragment shaders as a direct EDRAM transfer
+  // source (DEPTH_STENCIL_READ_ONLY_OPTIMAL); transition_to_depth_attachment
+  // returns it.
+  void transition_to_sampled(VkCommandBuffer command) noexcept;
+  // A descriptor set of `set_layout` (bindings 16 and 17 sampled images)
+  // holding this image's depth and stencil aspects for that layout, created
+  // on first use. Null on failure (error()).
+  [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
   void reset() noexcept;
   [[nodiscard]] VkImage image() const noexcept { return image_; }
   [[nodiscard]] VkImageView view() const noexcept { return view_; }
@@ -73,6 +81,8 @@ class DepthTargetImage {
   VkImageView view_{VK_NULL_HANDLE};
   VkImageView depth_view_{VK_NULL_HANDLE};
   VkImageView stencil_view_{VK_NULL_HANDLE};
+  VkDescriptorPool sampled_pool_{VK_NULL_HANDLE};
+  VkDescriptorSet sampled_set_{VK_NULL_HANDLE};
   VkFormat format_{VK_FORMAT_UNDEFINED};
   DepthRenderTargetFormat guest_format_{DepthRenderTargetFormat::D24S8};
   MsaaSamples host_msaa_{MsaaSamples::X1};

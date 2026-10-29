@@ -155,6 +155,9 @@ bool create_srv_heap(ID3D12Device* device, ID3D12Resource* depth,
   device->CreateShaderResourceView(depth, &srv, handle);
   handle.ptr += increment;
   srv.Format = stencil_format;
+  // A depth-stencil resource's stencil is its second plane, which a
+  // single-sample view must name; a multisample view selects it by format.
+  if (!multisampled && stencil == depth) srv.Texture2D.PlaneSlice = 1;
   device->CreateShaderResourceView(stencil, &srv, handle);
   return true;
 }
@@ -345,7 +348,8 @@ bool DepthTargetImage::readback_native_sample(
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srv_heap;
   if (!create_srv_heap(device.Get(), resource_.Get(), resource_.Get(),
                        depth_srv_format(guest_format_),
-                       stencil_srv_format(guest_format_), true, srv_heap)) {
+                       stencil_srv_format(guest_format_), host_msaa_ != MsaaSamples::X1,
+                       srv_heap)) {
     error_ = "D3D12 depth readback SRVs could not be created";
     return false;
   }
@@ -623,7 +627,27 @@ bool DepthTargetImage::upload_sample(
 #endif
 }
 
+ID3D12DescriptorHeap* DepthTargetImage::shader_resource_heap() {
+  if (srv_heap_) return srv_heap_.Get();
+#ifndef XENON_HAS_DXC
+  error_ = "D3D12 depth-target SRVs require DXC";
+  return nullptr;
+#else
+  Microsoft::WRL::ComPtr<ID3D12Device> device;
+  if (!resource_ || FAILED(resource_->GetDevice(IID_PPV_ARGS(&device))) ||
+      !create_srv_heap(device.Get(), resource_.Get(), resource_.Get(),
+                       depth_srv_format(guest_format_), stencil_srv_format(guest_format_),
+                       host_msaa_ != MsaaSamples::X1, srv_heap_)) {
+    error_ = "D3D12 depth-target SRV creation failed";
+    srv_heap_.Reset();
+    return nullptr;
+  }
+  return srv_heap_.Get();
+#endif
+}
+
 void DepthTargetImage::reset() noexcept {
+  srv_heap_.Reset();
   resource_.Reset();
   dsv_heap_.Reset();
   dsv_ = {};

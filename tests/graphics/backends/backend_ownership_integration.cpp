@@ -543,6 +543,89 @@ void run_direct_color_transfer(Backend& backend, std::string_view name) {
   std::cout << name << " direct EDRAM color transfer: ok\n";
 }
 
+// Regression (AC6's first cutscene ran at about 8 fps): a depth image taking
+// EDRAM tiles from another depth image went through a readback, a CPU repack
+// and an upload that drained the queue, several times a frame. The second
+// image now takes the tile on the GPU (EdramDepthTransfer), and resolving it
+// yields exactly the packed D24S8 words - depth and every stencil bit - the
+// first imported.
+template <typename Backend>
+void run_direct_depth_transfer(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kDestination = 0xE0000;
+  constexpr std::uint32_t kTileWide = 80;
+  constexpr std::uint32_t kTwoTilesWide = 160;
+  constexpr std::uint32_t kRows = 16;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  const std::array<float, 6> resolve_vertices{
+      -0.5f, -0.5f, 15.5f, -0.5f, -0.5f, 15.5f};
+  write_guest_bytes(memory, kResolveVertices, resolve_vertices.data(),
+                    sizeof(resolve_vertices));
+  Edram edram;
+  edram.reset();
+  const EdramSurfaceLayout wide{kSurfaceBaseTile, kTwoTilesWide, kRows,
+                                MsaaSamples::X1, false, true};
+  // Distinct depth per pixel; stencil runs through every bit pattern.
+  const auto seeded = [](std::uint32_t x, std::uint32_t y) {
+    const auto depth = 0x400000u + (y << 8u) + x;
+    const auto stencil = (x * 7u + y * 37u) & 0xFFu;
+    return (depth << 8u) | stencil;
+  };
+  for (std::uint32_t y = 0; y < kRows; ++y)
+    for (std::uint32_t x = 0; x < kTwoTilesWide; ++x)
+      assert(write_edram_sample(edram, wide, x, y, {seeded(x, y), 0u}));
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+
+  const auto set_surface = [&](std::uint32_t pitch) {
+    write_register(backend, 0x2000, pitch);
+    write_register(backend, 0x200E, 0u);
+    write_register(backend, 0x200F, pitch | (kRows << 16u));
+    write_register(backend, 0x2081, 1u << 31u);
+    write_register(backend, 0x2082, pitch | (kRows << 16u));
+    write_register(backend, 0x2002,
+                   kSurfaceBaseTile |
+                       (static_cast<std::uint32_t>(DepthRenderTargetFormat::D24S8) << 16u));
+  };
+  const auto draw_depth = [&](std::uint32_t pitch) {
+    set_surface(pitch);
+    write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::DepthOnly));
+    write_register(backend, 0x2104, 0u);
+    write_register(backend, 0x2200, (1u << 1u) | (1u << 2u));
+    issue_dummy_draw(backend);
+  };
+  draw_depth(kTileWide);
+  assert_backend_ok(backend, "one-tile depth owner");
+  const auto before = backend.performance_counters().direct_edram_transfers;
+  draw_depth(kTwoTilesWide);
+  assert_backend_ok(backend, "two-tile depth owner");
+  if (backend.performance_counters().direct_edram_transfers <= before) {
+    std::cerr << name << ": the depth tile went through canonical EDRAM, not a direct transfer\n";
+    assert(false);
+  }
+
+  set_surface(kTwoTilesWide);
+  set_resolve_fetch(backend);
+  write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::Copy));
+  write_register(backend, 0x2318, 4u | (static_cast<std::uint32_t>(CopyCommand::Raw) << 20u));
+  set_resolve_destination(backend, kDestination, 6);
+  issue_dummy_draw(backend);
+  assert_backend_ok(backend, "resolve of the transferred depth tile");
+  for (std::uint32_t y = 0; y < 16u; ++y) {
+    for (std::uint32_t x = 0; x < 16u; ++x) {
+      const auto word = resolved_word_at(memory, kDestination, x, y);
+      if (word != seeded(x, y)) {
+        std::cerr << name << " direct depth transfer resolved 0x" << std::hex << word
+                  << " at (" << std::dec << x << ',' << y << "), expected 0x" << std::hex
+                  << seeded(x, y) << std::dec << '\n';
+        assert(false);
+      }
+    }
+  }
+  backend.end_submission();
+  std::cout << name << " direct EDRAM depth transfer: ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -565,6 +648,9 @@ int main() {
     xenon::gpu::vulkan::Backend transfer;
     assert(transfer.initialize({.enable_validation = false}));
     run_direct_color_transfer(transfer, "Vulkan");
+    xenon::gpu::vulkan::Backend depth_transfer;
+    assert(depth_transfer.initialize({.enable_validation = false}));
+    run_direct_depth_transfer(depth_transfer, "Vulkan");
     xenon::gpu::vulkan::Backend alias;
     assert(alias.initialize({.enable_validation = false}));
     run_gpu_resolve_of_msaa_alias(alias, "Vulkan");
@@ -591,6 +677,9 @@ int main() {
     xenon::gpu::d3d12::Backend transfer;
     assert(transfer.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
     run_direct_color_transfer(transfer, "D3D12");
+    xenon::gpu::d3d12::Backend depth_transfer;
+    assert(depth_transfer.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+    run_direct_depth_transfer(depth_transfer, "D3D12");
     xenon::gpu::d3d12::Backend alias;
     assert(alias.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
     run_gpu_resolve_of_msaa_alias(alias, "D3D12");

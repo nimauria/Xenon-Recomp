@@ -628,12 +628,51 @@ class BackendCore {
       error = named("EDRAM depth surface has no ownership identity");
       return false;
     }
-    // Depth moves through canonical storage until it has a direct transfer.
     return acquire_ownership(
         owner_it->second, requested, ownership_surface, &BackendCore::canonical_to_depth,
         &BackendCore::flush_depth_owner, "depth EDRAM ownership plan became stale",
-        [](EdramOwnerId, std::span<const std::uint16_t>) { return false; },
-        [](EdramOwnerId, std::span<const std::uint16_t>) { return false; });
+        [&](EdramOwnerId previous, std::span<const std::uint16_t> tiles) {
+          return direct_depth_transfer_supported(previous, requested, tiles);
+        },
+        [&](EdramOwnerId previous, std::span<const std::uint16_t> tiles) {
+          return direct_depth_transfer(previous, requested, tiles);
+        });
+  }
+
+  // A depth image of the same format holding the tiles whole hands them over
+  // on the GPU, as color images do: a depth image changing hands went through
+  // a readback, a CPU repack and an upload with a queue drain each time,
+  // which held AC6's first cutscene to a few frames a second.
+  bool direct_depth_transfer_supported(EdramOwnerId previous, const DepthTargetImage& requested,
+                                       std::span<const std::uint16_t> tiles) const {
+    if constexpr (!Api::kSupportsDirectDepthTransfer) return false;
+    const auto found = owner_depth_targets.find(previous);
+    if (found == owner_depth_targets.end() || !found->second) return false;
+    const auto& source = *found->second;
+    return &source != &requested && source.guest_format() == requested.guest_format() &&
+           source.format() == requested.format() &&
+           edram_direct_transfer_supported(source.surface(), requested.surface(), tiles);
+  }
+
+  bool direct_depth_transfer(EdramOwnerId previous, DepthTargetImage& requested,
+                             std::span<const std::uint16_t> tiles) {
+    if constexpr (!Api::kSupportsDirectDepthTransfer) {
+      error = named("direct EDRAM depth transfer is unavailable on this backend");
+      return false;
+    } else {
+      auto& source = *owner_depth_targets.at(previous);
+      std::vector<EdramSurfaceRegion> regions;
+      if (!edram_tile_regions(requested.surface(), tiles, regions)) {
+        error = named("direct EDRAM depth transfer tiles are not whole pixels");
+        return false;
+      }
+      const auto constants = make_edram_transfer_constants(
+          source.surface(), source.host_msaa(), requested.surface(), requested.host_msaa());
+      if (!self().transfer_depth_tiles(source, requested, constants, regions)) return false;
+      edram_ownership.release_tiles(previous, tiles);
+      ++performance.direct_edram_transfers;
+      return true;
+    }
   }
 
   bool make_region_canonical(const EdramSurfaceLayout& surface,
