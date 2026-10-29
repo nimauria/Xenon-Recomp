@@ -227,6 +227,105 @@ void test_device_writers_keep_exact_history_in_native_mode() {
   assert(mixed > after);
 }
 
+// Regression (AC6 spent about two thirds of its startup CPU time in calls to
+// out-of-line memory accessors that MSVC would not inline into generated
+// functions): the native path translates inline. It must stay exactly the
+// checked path's semantics - values in both byte orders, unaligned and
+// page-crossing accesses, faults, dirty pages and executable generations.
+void test_native_inline_accessors_keep_the_checked_semantics() {
+  AddressSpace mem;
+  init_native(mem);
+  auto access = mem.access_context();
+  assert(access.native_inline());
+
+  access.write8(kPage + 1u, 0xA5u);
+  access.write16_be(kPage + 2u, 0x1234u);
+  access.write32_be(kPage + 4u, 0x89ABCDEFu);
+  access.write64_be(kPage + 8u, 0x0102030405060708ull);
+  assert(mem.read8(kPage + 1u) == 0xA5u);
+  assert(mem.read16_be(kPage + 2u) == 0x1234u);
+  assert(mem.read32_be(kPage + 4u) == 0x89ABCDEFu);
+  assert(mem.read64_be(kPage + 8u) == 0x0102030405060708ull);
+  assert(access.read8(kPage + 1u) == 0xA5u && access.read16_be(kPage + 2u) == 0x1234u &&
+         access.read32_be(kPage + 4u) == 0x89ABCDEFu &&
+         access.read64_be(kPage + 8u) == 0x0102030405060708ull);
+  // Big-endian in guest memory: the first byte is the most significant.
+  assert(mem.read8(kPage + 4u) == 0x89u && mem.read8(kPage + 15u) == 0x08u);
+
+  access.write16_le(kPage + 0x20u, 0x1234u);
+  access.write32_le(kPage + 0x24u, 0x89ABCDEFu);
+  access.write64_le(kPage + 0x28u, 0x0102030405060708ull);
+  assert(mem.read16_le(kPage + 0x20u) == 0x1234u && mem.read8(kPage + 0x20u) == 0x34u);
+  assert(access.read32_le(kPage + 0x24u) == 0x89ABCDEFu);
+  assert(access.read64_le(kPage + 0x28u) == 0x0102030405060708ull);
+
+  xenon::cpu::Vector128 vector{};
+  for (std::size_t i = 0; i < vector.bytes.size(); ++i)
+    vector.bytes[i] = static_cast<std::uint8_t>(0x10u + i);
+  access.write128(kPage + 0x40u, vector);
+  assert(mem.read8(kPage + 0x40u) == 0x10u && mem.read8(kPage + 0x4Fu) == 0x1Fu);
+  assert(access.read128(kPage + 0x40u).bytes == vector.bytes);
+
+  // Unaligned and page-crossing accesses take the checked path and agree.
+  access.write32_be(kPage + 0x61u, 0xCAFEBABEu);
+  assert(access.read32_be(kPage + 0x61u) == 0xCAFEBABEu && mem.read8(kPage + 0x61u) == 0xCAu);
+  access.write64_be(kPage + 0xFFCu, 0x1122334455667788ull);
+  assert(mem.read32_be(kPage + 0xFFCu) == 0x11223344u &&
+         mem.read32_be(kPage + 0x1000u) == 0x55667788u);
+  assert(access.read64_be(kPage + 0xFFCu) == 0x1122334455667788ull);
+  access.write128(kPage + 0xFF8u, vector);
+  assert(access.read128(kPage + 0xFF8u).bytes == vector.bytes);
+
+  // Faults come from the checked path exactly as before.
+  constexpr GuestAddress kUnmapped = 0x00400000u;
+  bool read_faulted = false, write_faulted = false;
+  try { (void)access.read32_be(kUnmapped); } catch (const MemoryFault&) { read_faulted = true; }
+  assert(read_faulted);
+  assert(mem.protect(kPage + 0x1000u, 0x1000u, Protect::Read));
+  try { access.write32_be(kPage + 0x1000u, 1u); } catch (const MemoryFault&) { write_faulted = true; }
+  // The page still holds bytes 8..11 of the page-crossing vector store above.
+  assert(write_faulted && mem.read32_be(kPage + 0x1000u) == 0x18191A1Bu);
+  assert(access.read32_be(kPage + 0x1000u) == 0x18191A1Bu);
+
+  // Every store width publishes its page.
+  const auto phys = mem.get_physical_address(kPage);
+  auto& coherency = mem.coherency();
+  const auto publishes = [&](auto&& store) {
+    const auto before = coherency.current_epoch();
+    store();
+    return coherency.current_epoch() > before &&
+           coherency.range_changed_since(phys, 0x1000u, before);
+  };
+  assert(publishes([&] { access.write8(kPage + 0x80u, 1u); }));
+  assert(publishes([&] { access.write16_be(kPage + 0x80u, 2u); }));
+  assert(publishes([&] { access.write32_le(kPage + 0x80u, 3u); }));
+  assert(publishes([&] { access.write64_be(kPage + 0x80u, 4u); }));
+  assert(publishes([&] { access.write128(kPage + 0x80u, vector); }));
+
+  // A store into executable code moves its page's generation, so translated
+  // code for that page is revalidated.
+  constexpr GuestAddress kCode = 0x00200000u;
+  assert(mem.commit_fixed(kCode, 0x1000u, kReadWriteExecute));
+  auto code_access = mem.access_context();
+  const auto stamp = code_access.executable_page_stamp(kCode);
+  assert(stamp.executable());
+  code_access.write32_be(kCode + 0x10u, 0x60000000u);
+  const auto after_word = code_access.executable_page_stamp(kCode);
+  assert(after_word.executable() && after_word.generation != stamp.generation);
+  code_access.write8(kCode + 0x20u, 0u);
+  assert(code_access.executable_page_stamp(kCode).generation != after_word.generation);
+}
+
+void test_strict_access_never_takes_the_native_inline_path() {
+  AddressSpace mem;
+  assert(mem.initialize());
+  assert(mem.commit_fixed(kPage, 0x1000u, kReadWrite));
+  auto access = mem.access_context();
+  assert(!access.native_inline());
+  access.write32_be(kPage, 0x01020304u);
+  assert(access.read32_be(kPage) == 0x01020304u);
+}
+
 void test_strict_access_stays_the_default() {
   AddressSpace mem;
   assert(mem.initialize());
@@ -248,6 +347,8 @@ int main() {
   test_native_reservation_is_a_compare_and_swap_of_the_reserved_value();
   test_native_reservations_make_an_atomic_increment();
   test_device_writers_keep_exact_history_in_native_mode();
+  test_native_inline_accessors_keep_the_checked_semantics();
+  test_strict_access_never_takes_the_native_inline_path();
   test_strict_access_stays_the_default();
   std::cout << "native access tests passed\n";
   return 0;
