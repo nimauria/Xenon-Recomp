@@ -41,6 +41,7 @@ if(XENON_ENABLE_KERNEL)
       memory/heap.cpp
       memory/pool.cpp
       process/process.cpp
+      timing/time_stamp_bundle.cpp
     )
     target_link_libraries(xenon_kernel PUBLIC xenon_memory)
   endif()

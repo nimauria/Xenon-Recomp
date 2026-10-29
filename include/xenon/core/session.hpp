@@ -39,6 +39,7 @@
 #include "xenon/kernel/exception.hpp"
 #include "xenon/kernel/io_manager.hpp"
 #include "xenon/kernel/process.hpp"
+#include "xenon/kernel/time_stamp_bundle.hpp"
 #include "xenon/kernel/xbox_io_guest.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -619,6 +620,8 @@ class XenonSession final : public cpu::RuntimeServices {
   GuestMemoryWatch memory_watch_{};
   std::thread memory_watch_thread_{};
   std::atomic<bool> memory_watch_poll_running_{false};
+  // Keeps the KeTimeStampBundle variable export ticking from session init.
+  kernel::TimeStampBundleClock time_stamp_clock_{};
   // Deep enough that a quiet thread's history survives a chatty polling thread.
   ExportTrace export_trace_{8192};
   // Kernel calls a guest thread has entered but not yet returned from. The
