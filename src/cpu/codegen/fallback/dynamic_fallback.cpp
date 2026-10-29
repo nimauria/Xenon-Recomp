@@ -173,7 +173,7 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
                                 GuestAddress expected_return,
                                 GuestAddress& next_pc) -> std::optional<ExecutionResult> {
     if (auto* native = context.lookup_compiled(call_target, CompiledLookupKind::Call)) {
-      const auto result = native(context);
+      const auto result = context.follow_tail_branches(native(context));
       return finish_call(result, expected_return, next_pc);
     }
     if (context.memory.executable_page_stamp(call_target).executable()) {
@@ -192,10 +192,12 @@ DynamicFallbackExecutor::RunResult DynamicFallbackExecutor::run(
               call_target, pc, nested.exit, CompiledLookupKind::Call,
               nested.reason, nested.instructions, nested.fingerprint});
         }
-        return finish_call(nested.public_result.result, expected_return, next_pc);
+        return finish_call(context.follow_tail_branches(nested.public_result.result),
+                           expected_return, next_pc);
       }
     }
-    const auto result = context.runtime.call(call_target, context.state, context.memory);
+    const auto result = context.follow_tail_branches(
+        context.runtime.call(call_target, context.state, context.memory));
     return finish_call(result, expected_return, next_pc);
   };
 

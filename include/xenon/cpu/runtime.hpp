@@ -207,6 +207,33 @@ struct ExecutionContext {
     return entry;
   }
 
+  // A callee that ends in a tail branch (`b target`, typically into the
+  // shared register-restore helper) hands back {Branch, target}; on hardware
+  // target then returns to the call site's own return address. A call site
+  // runs it here so the calling native frame survives: passing the Branch up
+  // unwound every caller to the dispatcher, which could only resume them
+  // mid-function in the interpreter. Targets with no compiled entry or
+  // import thunk still come back as Branch, for the dispatcher as before.
+  // Looks up without the miss observer: the dispatcher reports that miss.
+  [[nodiscard]] ExecutionResult follow_tail_branches(ExecutionResult result) {
+    while (result.reason == FlowReason::Branch) {
+      const auto target = result.next_address;
+      auto* native = compiled_lookup
+                         ? compiled_lookup(compiled_registry, *this, target,
+                                           CompiledLookupKind::Branch)
+                         : nullptr;
+      if (native) {
+        poll_safepoint();
+        result = native(*this);
+      } else if (runtime.is_recognized_import_thunk(target)) {
+        result = call_import_from_branch(runtime, target, state, memory);
+      } else {
+        break;
+      }
+    }
+    return result;
+  }
+
   [[nodiscard]] DynamicFallbackResult try_dynamic_fallback(
       GuestAddress target,
       CompiledLookupKind kind = CompiledLookupKind::Branch) {

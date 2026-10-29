@@ -117,9 +117,13 @@ void emit_longjump_dispatch(std::ostringstream& o, std::string_view rr,
     << "=" << rr << "; goto " << kLongJumpLabel << "; }\n";
 }
 
+// A callee ending in a tail branch returns Branch; following it here returns
+// to this call site natively (see ExecutionContext::follow_tail_branches).
 void emit_call_result_check(std::ostringstream& o, std::string_view rr,
                             GuestAddress expected_return,
                             std::string_view indent = "  ") {
+  o << indent << "if(" << rr << ".reason==FlowReason::Branch) " << rr
+    << "=context.follow_tail_branches(" << rr << ");\n";
   emit_longjump_dispatch(o, rr, indent);
   o << indent << "if(" << rr << ".reason==FlowReason::Return) { if("
     << rr << ".next_address!=" << expected_return << "u) return " << rr

@@ -253,9 +253,9 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
         o<<"const auto raw_target=static_cast<GuestAddress>("<<arg(i,1)<<"); "
          <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
          <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
-         <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+         <<"auto rr=context.follow_tail_branches(native(context)); if(rr.reason != FlowReason::Return || rr.next_address != "
          <<expected<<"u) return rr; } else { auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
-         <<"auto rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); "
+         <<"auto rr=context.follow_tail_branches(fallback.handled ? fallback.result : runtime.call(raw_target,state,memory)); "
          <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != "<<expected<<"u) return rr; } "
          <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; }";
       }else if(i.imm1==1){
@@ -272,10 +272,10 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
       o<<"  { const auto raw_target=static_cast<GuestAddress>("<<arg(i,0)<<"); "
        <<"const auto guest_target=static_cast<GuestAddress>(raw_target & ~3u); "
        <<"if(auto* native=context.lookup_compiled(guest_target,CompiledLookupKind::Call)) { "
-       <<"auto rr=native(context); if(rr.reason != FlowReason::Return || rr.next_address != "
+       <<"auto rr=context.follow_tail_branches(native(context)); if(rr.reason != FlowReason::Return || rr.next_address != "
        <<"static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } else { "
        <<"auto fallback=context.try_dynamic_fallback(guest_target,CompiledLookupKind::Call); "
-       <<"auto rr=fallback.handled ? fallback.result : runtime.call(raw_target,state,memory); "
+       <<"auto rr=context.follow_tail_branches(fallback.handled ? fallback.result : runtime.call(raw_target,state,memory)); "
        <<"if(rr.reason==FlowReason::Return) { if(rr.next_address != static_cast<GuestAddress>(state.lr & ~3ull)) return rr; } "
        <<"else if(rr.reason!=FlowReason::Fallthrough) return rr; } }\n";break;
     }
