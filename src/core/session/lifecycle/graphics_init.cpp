@@ -67,6 +67,20 @@ bool XenonSession::init_gpu() {
     }
   });
 
+  // VdSwap's flip takes effect where the command processor reaches it in the
+  // ring, after the frame's draws and resolve (gpu/front_buffer_swap.hpp); the
+  // next vsync presents it.
+  graphics_system_->set_swap_callback([this](const gpu::FrontBufferSwap& swap) {
+    if (!kernel_process_) return;
+    if (swap.has_fetch_constant) {
+      kernel_process_->set_gpu_front_buffer(swap.base_address, swap.width, swap.height,
+                                            swap.pitch, swap.format, swap.fetch_constant);
+    } else {
+      kernel_process_->set_gpu_front_buffer(swap.base_address, swap.width, swap.height,
+                                            swap.pitch, swap.format);
+    }
+  });
+
   // The GPU pump thread's vsync-driven guest interrupt callback executes on
   // its own dedicated PPC stack, exactly like the audio callback thread's
   // audio_callback_stack_base_ (see init_audio()) - allocated once here,

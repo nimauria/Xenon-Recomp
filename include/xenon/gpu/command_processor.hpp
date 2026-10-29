@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenon/gpu/front_buffer_swap.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/register_file.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -72,6 +73,8 @@ class CommandProcessor {
     std::uint64_t viz_query_visible_results{};
     std::uint64_t interrupt_packets{};
     std::uint64_t interrupt_dispatches{};
+    // VdSwap front-buffer flips executed in stream order.
+    std::uint64_t front_buffer_swaps{};
     // Type-3 packets with no executor (NOP excepted), emitted as unlowered
     // ir::Type3Packet. Nonzero is a real gap in the command processor.
     std::uint64_t unexecuted_packets{};
@@ -118,6 +121,11 @@ class CommandProcessor {
   void set_interrupt_callback(
       std::function<void(std::uint32_t cpu_index)> callback) {
     interrupt_callback_ = std::move(callback);
+  }
+  // A front-buffer flip VdSwap placed in the stream (front_buffer_swap.hpp),
+  // run when the command processor reaches it, after the work queued before it.
+  void set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
+    swap_callback_ = std::move(callback);
   }
   // Called before every effect of the command stream a guest can observe:
   // a write to guest memory (fences, MEM_WRITE, REG_TO_MEM, scratch
@@ -244,6 +252,7 @@ class CommandProcessor {
   std::uint64_t viz_query_draws_{};
   std::uint32_t swap_counter_{};
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
+  std::function<void(const FrontBufferSwap&)> swap_callback_{};
   std::function<void()> guest_visible_barrier_{};
   void before_guest_visible_effect() {
     if (guest_visible_barrier_) guest_visible_barrier_();

@@ -620,7 +620,8 @@ bool GraphicsSystem::make_edram_canonical(Backend& backend) {
 
 PresentStatus GraphicsSystem::present(Backend& backend,
                                       const PresentationFrame& frame) {
-  command_processor_.notify_present();
+  // The guest-visible swap counter advances when the command processor
+  // executes a flip (CommandProcessor::set_swap_callback), not per host present.
   return backend.present(frame);
 }
 

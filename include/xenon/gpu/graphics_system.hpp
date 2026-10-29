@@ -78,6 +78,9 @@ class GraphicsSystem {
       std::function<void(std::uint32_t cpu_index)> callback) {
     command_processor_.set_interrupt_callback(std::move(callback));
   }
+  void set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
+    command_processor_.set_swap_callback(std::move(callback));
+  }
 
   [[nodiscard]] RegisterFile& registers() noexcept { return registers_; }
   [[nodiscard]] const RegisterFile& registers() const noexcept { return registers_; }

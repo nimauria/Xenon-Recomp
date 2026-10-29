@@ -1151,6 +1151,15 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
   }
 
   if (header.opcode == Type3Opcode::Nop) {
+    if (const auto swap = decode_front_buffer_swap(payload)) {
+      // The flip shows what the work before it rendered and resolved, so that
+      // work executes first.
+      before_guest_visible_effect();
+      ++swap_counter_;
+      ++stats_.front_buffer_swaps;
+      if (swap_callback_) swap_callback_(*swap);
+      return;
+    }
     // NOP payloads often carry debug strings/markers. Preserve them in the IR
     // rather than treating the bytes as semantic state.
     stream_.emit(ir::Type3Packet{header.opcode, header.predicate, std::move(payload)});

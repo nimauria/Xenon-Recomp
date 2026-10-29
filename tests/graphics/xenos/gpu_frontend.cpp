@@ -642,6 +642,51 @@ void test_ring_effects_follow_the_work_before_them() {
   assert(graphics.stream().commands().empty());
 }
 
+// Regression (Ace Combat 6 intro movie presented repeated and stale frames):
+// the front-buffer flip took effect when VdSwap was called, ahead of the
+// frame's queued draws and resolve. A swap record in the stream flips only when
+// the command processor reaches it, after the work before it has executed, and
+// advances the swap counter EVENT_WRITE_SHD reports; any other NOP stays a NOP.
+void test_front_buffer_swap_follows_the_work_before_it() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100A000;
+  constexpr std::uint32_t fence = 0x0121A000;
+  store_be32(memory, fence, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  std::vector<int> draws_at_swap;
+  std::vector<xenon::gpu::FrontBufferSwap> swaps;
+  graphics.set_swap_callback([&](const xenon::gpu::FrontBufferSwap& swap) {
+    draws_at_swap.push_back(backend.draws_executed);
+    swaps.push_back(swap);
+  });
+  xenon::gpu::FrontBufferSwap flip{};
+  flip.base_address = 0x1F000000u;
+  flip.width = 1280u;
+  flip.height = 720u;
+  flip.pitch = 1280u * 4u;
+  flip.format = 6u;
+  flip.has_fetch_constant = true;
+  flip.fetch_constant = {0x8A000002u, 0x1F000086u, 0x059E04FFu, 0u, 0u, 0x200u};
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  std::vector<std::uint32_t> words{make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator};
+  for (const auto word : xenon::gpu::encode_front_buffer_swap(flip)) words.push_back(word);
+  words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+                             make_packet_type3(Type3Opcode::Nop, 2), 0x44424721u, 0u});
+  for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+  const auto counter_before = graphics.command_processor().swap_counter();
+  const auto words_count = static_cast<std::uint32_t>(words.size());
+  assert(graphics.submit_ring(backend, ring, 64, 0, words_count) == words_count);
+  assert((draws_at_swap == std::vector<int>{1}));
+  assert(swaps.size() == 1u && swaps[0] == flip);
+  assert(graphics.command_processor().swap_counter() == counter_before + 1u);
+  assert(graphics.command_processor().statistics().front_buffer_swaps == 1u);
+  assert(backend.draws_executed == 2);
+  graphics.set_swap_callback({});
+}
+
 // Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
 // drain at startup): the write pointer can sit inside a packet the guest is
 // still writing. The drain must stop before that packet, with everything
@@ -1498,6 +1543,7 @@ int main() {
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
   test_ring_effects_follow_the_work_before_them();
+  test_front_buffer_swap_follows_the_work_before_it();
   test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);

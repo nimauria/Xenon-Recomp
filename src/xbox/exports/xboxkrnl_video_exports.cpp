@@ -25,8 +25,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/gpu/front_buffer_swap.hpp"
 #include "xenon/gpu/types.hpp"
 #include "xenon/kernel/process.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -366,13 +368,15 @@ bool vd_shutdown_engines_export(kernel::KernelProcess& /*process*/,
 // PM4_XE_SWAP packet (with its own magic "kSwapSignature", the translated
 // physical front-buffer address, and width/height) directly into ring-buffer
 // bytes at buffer_ptr for the real Xenos command processor to later parse.
-// Xenon does not need byte-exact PM4 here: nothing round-trips through the
-// literal PM4 bytes this call would produce for the swap signal itself. So
-// this implementation does the genuinely guest-observable parts of VdSwap's
-// contract in full - decoding the real front-buffer address/format/
-// dimensions the game passed and publishing them via
-// KernelProcess::set_gpu_front_buffer() for the pump thread to present - and
-// fills the reserved ring region with NOPs. It never moves the ring's write
+// What is guest-observable is the flip's position in the stream: scan-out
+// changes once the command processor has executed everything queued before
+// the swap. This implementation decodes the real front-buffer address/
+// format/dimensions the game passed and writes them into the reserved region
+// as a front-buffer swap record (gpu/front_buffer_swap.hpp - a NOP packet to
+// any other PM4 reader), padded with NOPs; the command processor publishes it
+// via KernelProcess::set_gpu_front_buffer() when it reaches it, for the next
+// vsync to present. Publishing at the call instead let a vsync show a front
+// buffer whose resolve was still queued. It never moves the ring's write
 // pointer: as on hardware, the title publishes the swap region and
 // everything before it with its own CP_RB_WPTR store once VdSwap returns.
 // Advancing it here as well raced that store - a swap landing after the
@@ -416,25 +420,38 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
   if (width_ptr != 0u) width = context.memory.read32_be(width_ptr);
   if (height_ptr != 0u) height = context.memory.read32_be(height_ptr);
 
+  std::optional<gpu::FrontBufferSwap> swap;
   if (front_buffer_virtual != 0u && address_space != nullptr) {
     const auto front_buffer_physical = address_space->get_physical_address(front_buffer_virtual);
     if (front_buffer_physical != 0xFFFFFFFFu) {
-      const auto pitch = width * kFrontBufferBytesPerPixel;
+      swap.emplace();
+      swap->base_address = front_buffer_physical;
+      swap->width = width;
+      swap->height = height;
+      swap->pitch = width * kFrontBufferBytesPerPixel;
+      swap->format = static_cast<std::uint8_t>(format);
       if (fetch_ptr != 0u) {
         // Scan-out reads the front buffer as this fetch constant describes
         // it (tiled, endian-swapped, its own pitch). As xenia does, the base
         // address is the front buffer the title passed, which the header
         // need not carry yet.
-        std::array<std::uint32_t, 6> fetch{};
-        for (std::uint32_t i = 0; i < fetch.size(); ++i)
-          fetch[i] = context.memory.read32_be(fetch_ptr + i * 4u);
-        fetch[1] = (fetch[1] & 0xFFFu) | (front_buffer_physical & ~0xFFFu);
-        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
-                                     static_cast<std::uint8_t>(format), fetch);
-      } else {
-        process.set_gpu_front_buffer(front_buffer_physical, width, height, pitch,
-                                     static_cast<std::uint8_t>(format));
+        for (std::uint32_t i = 0; i < swap->fetch_constant.size(); ++i)
+          swap->fetch_constant[i] = context.memory.read32_be(fetch_ptr + i * 4u);
+        swap->fetch_constant[1] =
+            (swap->fetch_constant[1] & 0xFFFu) | (front_buffer_physical & ~0xFFFu);
+        swap->has_fetch_constant = true;
       }
+    }
+  }
+  // Without a ring region there is no command stream to order the flip
+  // against, so it takes effect now.
+  if (swap && buffer_ptr == 0u) {
+    if (swap->has_fetch_constant) {
+      process.set_gpu_front_buffer(swap->base_address, swap->width, swap->height, swap->pitch,
+                                   swap->format, swap->fetch_constant);
+    } else {
+      process.set_gpu_front_buffer(swap->base_address, swap->width, swap->height, swap->pitch,
+                                   swap->format);
     }
   }
 
@@ -453,8 +470,15 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
   // ring's "valid" window.
   if (buffer_ptr != 0u) {
     constexpr std::uint32_t kReservedDwords = 64u;
+    static_assert(gpu::kFrontBufferSwapPacketDwords <= kReservedDwords);
     constexpr std::uint32_t kNopPacket = gpu::make_packet_type2();
-    for (std::uint32_t i = 0; i < kReservedDwords; ++i) {
+    std::uint32_t i = 0;
+    // The flip itself, executed in stream order (gpu/front_buffer_swap.hpp).
+    if (swap) {
+      for (const auto word : gpu::encode_front_buffer_swap(*swap))
+        context.memory.write32_be(buffer_ptr + i++ * 4u, word);
+    }
+    for (; i < kReservedDwords; ++i) {
       context.memory.write32_be(buffer_ptr + i * 4u, kNopPacket);
     }
   }

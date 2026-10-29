@@ -11,8 +11,10 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <span>
 
 #include "xenon/core/export_registry.hpp"
+#include "xenon/gpu/front_buffer_swap.hpp"
 #include "xenon/gpu/types.hpp"
 #include "xenon/kernel/memory.hpp"
 #include "xenon/kernel/process.hpp"
@@ -383,6 +385,70 @@ void test_swap_leaves_ring_write_index_to_the_title() {
            gpu::make_packet_type2());
 }
 
+// Regression (Ace Combat 6 intro movie): VdSwap published the new front buffer
+// when the CPU called it, before the title had even submitted the frame's
+// resolve. The next vsync presented a buffer still holding an older frame and
+// the real one was never shown - about a third of the movie's presents
+// repeated a frame (choppy, out-of-order looking playback). With a ring region
+// the flip is a swap record the command processor executes in stream order;
+// the front buffer changes only then.
+void test_swap_takes_effect_in_command_stream_order() {
+  Fixture fixture;
+  constexpr std::uint32_t kCapacityDwords = 256u;
+  const auto ring_va = fixture.alloc(kCapacityDwords * 4u, 0x1000u);
+  const auto front_buffer_va = fixture.alloc(0x4000u, 0x1000u);
+  const auto physical = fixture.address_space->get_physical_address(front_buffer_va);
+  assert(physical != 0xFFFFFFFFu);
+  const auto frontbuffer_cell = fixture.alloc(4u);
+  const auto format_cell = fixture.alloc(4u);
+  const auto width_cell = fixture.alloc(4u);
+  const auto height_cell = fixture.alloc(4u);
+  fixture.address_space->write32_be(frontbuffer_cell, front_buffer_va);
+  fixture.address_space->write32_be(format_cell, 6u);
+  fixture.address_space->write32_be(width_cell, 1280u);
+  fixture.address_space->write32_be(height_cell, 720u);
+  const std::array<std::uint32_t, 6> header{
+      0x80000002u | (1280u / 32u) << 22, 0x12345000u | 2u << 6 | 6u,
+      (1279u) | (719u << 13), 0x00000000u, 0x00000000u, 0x00000200u};
+  const auto fetch = fixture.alloc(24u, 16u);
+  for (std::uint32_t i = 0; i < 6u; ++i) fixture.address_space->write32_be(fetch + i * 4u, header[i]);
+  const auto stack = fixture.alloc(0x80u, 16u);
+  fixture.address_space->write32_be(stack + 0x54u, width_cell);
+  fixture.address_space->write32_be(stack + 0x5Cu, height_cell);
+
+  cpu::CpuState cpu{};
+  cpu.gpr[1] = stack;
+  cpu.gpr[3] = ring_va + 10u * 4u;
+  cpu.gpr[4] = fetch;
+  cpu.gpr[8] = frontbuffer_cell;
+  cpu.gpr[9] = format_cell;
+  assert(fixture.invoke(kOrdSwap, cpu).success);
+
+  // Nothing is scanned out until the command processor reaches the swap.
+  assert(fixture.process->gpu_front_buffer().generation == 0u);
+
+  // The region starts with the swap record, then NOPs to its end.
+  std::array<std::uint32_t, gpu::kFrontBufferSwapPacketDwords> packet{};
+  for (std::uint32_t i = 0; i < packet.size(); ++i)
+    packet[i] = fixture.address_space->read32_be(ring_va + (10u + i) * 4u);
+  const auto decoded_header = gpu::decode_packet_header(packet[0]);
+  assert(decoded_header.type == gpu::PacketType::Type3);
+  assert(decoded_header.opcode == gpu::Type3Opcode::Nop);
+  assert(decoded_header.count == gpu::kFrontBufferSwapPayloadDwords);
+  const auto swap = gpu::decode_front_buffer_swap(std::span(packet).subspan(1));
+  assert(swap.has_value());
+  assert(swap->base_address == physical);
+  assert(swap->width == 1280u && swap->height == 720u && swap->pitch == 1280u * 4u);
+  assert(swap->format == 6u);
+  assert(swap->has_fetch_constant);
+  auto expected = header;
+  expected[1] = (header[1] & 0xFFFu) | physical;
+  assert(swap->fetch_constant == expected);
+  for (std::uint32_t i = gpu::kFrontBufferSwapPacketDwords; i < 64u; ++i)
+    assert(fixture.address_space->read32_be(ring_va + (10u + i) * 4u) ==
+           gpu::make_packet_type2());
+}
+
 }  // namespace
 
 int main() {
@@ -399,6 +465,7 @@ int main() {
   test_swap_populates_front_buffer();
   test_swap_keeps_the_front_buffer_fetch_constant();
   test_swap_leaves_ring_write_index_to_the_title();
+  test_swap_takes_effect_in_command_stream_order();
 
   std::cout << "All xboxkrnl Vd* GPU control-plane export tests passed!\n";
   return 0;
