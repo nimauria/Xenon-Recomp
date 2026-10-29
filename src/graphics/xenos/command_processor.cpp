@@ -629,9 +629,13 @@ void CommandProcessor::execute_wait_reg_mem(
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
-  // wait is satisfied. Xenon's GPU reads guest RAM directly through the shared
-  // physical mapping, so there is no separate cached copy to flush here; the
-  // state transition (pending -> clear) is what the title observes.
+  // wait is satisfied. It is not a sync point: what the CPU wrote before
+  // queueing the request was written before the ring work carrying it was
+  // published, and the sync point that work started from already covers it.
+  // The hardware completes the request microseconds after the preceding
+  // sync point; taking "now" instead would expose writes the CPU made since,
+  // which the hardware never sees. The state transition (pending -> clear)
+  // is what the title observes.
   if (!memory_source && payload[1] == kCoherStatusHostRegister) {
     if ((registers_.read(kCoherStatusHostRegister) & kCoherStatusPending) != 0u) {
       static_cast<void>(registers_.write(kCoherStatusHostRegister, 0u));
@@ -659,6 +663,7 @@ void CommandProcessor::execute_wait_reg_mem(
         stats_.parked_ns += parked;
         stats_.longest_park_ns = (std::max)(stats_.longest_park_ns, parked);
       }
+      sync_point();
       return;
     }
 
@@ -719,6 +724,7 @@ void CommandProcessor::execute_wait_register(
     const std::uint32_t value = registers_.read(register_index) & payload[2];
     ++stats_.wait_register_polls;
     if (greater_or_equal ? value >= payload[1] : value == payload[1]) {
+      sync_point();
       return;
     }
     if ((poll & 0x3Fu) == 0x3Fu) std::this_thread::yield();
@@ -964,6 +970,9 @@ void CommandProcessor::execute_interrupt(
   ++stats_.interrupt_packets;
   if (!interrupt_callback_) return;
   before_guest_visible_effect();
+  // Code the handler wakes may rewrite what the commands after the interrupt
+  // read; the hardware reads it before that code can run.
+  sync_point();
   for (std::uint32_t cpu = 0; cpu < 6u; ++cpu) {
     if ((payload[0] & (UINT32_C(1) << cpu)) == 0u) continue;
     interrupt_callback_(cpu);

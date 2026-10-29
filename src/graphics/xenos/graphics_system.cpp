@@ -463,10 +463,20 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
   command_processor_.set_guest_visible_barrier([this, &backend] {
     if (command_processor_.statistics().draws != draws_at_last_execute_) execute_ir(backend);
   });
+  command_processor_.set_sync_point_callback([&backend] { backend.sync_guest_reads(); });
   struct ClearBarrier {
     CommandProcessor& processor;
-    ~ClearBarrier() { processor.set_guest_visible_barrier({}); }
-  } clear{command_processor_};
+    Backend& backend;
+    ~ClearBarrier() {
+      processor.set_guest_visible_barrier({});
+      processor.set_sync_point_callback({});
+      backend.end_guest_read_sync();
+    }
+  } clear{command_processor_, backend};
+  // Work the guest just published starts from guest memory as it stands now;
+  // a drain resuming a parked wait continues from the sync point that wait
+  // reaches when it is satisfied.
+  if (!command_processor_.parked_on_wait()) backend.sync_guest_reads();
   const auto next_read_index =
       command_processor_.execute_ring(physical_address, capacity_dwords, read_index, write_index);
   execute_ir(backend);

@@ -252,6 +252,7 @@ void BackendCore<Derived, Api>::consume_resolve(
       error = written.error;
       return;
     }
+    guest_reads.backend_wrote(written.modified_address, written.modified_size);
     if (!clear_depth_resolve_region(state, rectangle, samples))
       return;
     return;
@@ -313,6 +314,7 @@ void BackendCore<Derived, Api>::consume_resolve(
       }
       if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
       mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+      guest_reads.backend_wrote(gpu.range_address, gpu.range_size);
       if (state.copy.color_clear_enabled && !self().gpu_color_clear(*owner, clear)) return;
       // Guest code may read what it resolved, and it reads CPU memory.
       if (!mirror.make_cpu_visible(gpu.range_address, gpu.range_size,
@@ -439,6 +441,7 @@ void BackendCore<Derived, Api>::consume_resolve(
     error = written.error;
     return;
   }
+  guest_reads.backend_wrote(written.modified_address, written.modified_size);
   // Keep resolve correctness failures separate from presentation failures.
   // When probe logging is explicitly enabled, sample the first few resolves
   // on both sides of the native-readback -> guest-memory boundary. This is

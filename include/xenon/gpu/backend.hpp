@@ -31,6 +31,9 @@ struct GpuPerformanceCounters {
   // path, not a first-time texture creation (which is not a re-validation
   // and is not counted here).
   std::uint64_t texture_cache_invalidations{};
+  // Texture refreshes decoded from the copy taken at a GPU/CPU sync point
+  // (Backend::sync_guest_reads()) because the CPU rewrote the texture after it.
+  std::uint64_t texture_sync_captures{};
   // Draws and resolves the backend could not carry out (each sets the
   // backend's last_error()); a resolve that fails leaves its destination,
   // possibly the front buffer, unwritten.
@@ -152,6 +155,19 @@ class Backend {
   [[nodiscard]] virtual GpuShaderCoverage shader_coverage() const noexcept {
     return {};
   }
+
+  // GPU/CPU synchronisation points of a ring drain (GraphicsSystem::
+  // submit_ring): the command processor began work the guest published, or
+  // passed a wait, or raised an interrupt. Hardware reads the guest memory the
+  // following commands sample within microseconds of such a point, before
+  // CPU code it released can write there; titles rely on it (AC6's movie
+  // decoder refills the planes the next draw samples as soon as the interrupt
+  // before that draw wakes it). Until end_guest_read_sync(), a backend reads
+  // guest memory for the commands it consumes as it stood at the latest
+  // sync_guest_reads(). A backend that keeps no copies of guest memory reads
+  // it nowhere else, so has nothing to capture.
+  virtual void sync_guest_reads() {}
+  virtual void end_guest_read_sync() {}
 };
 
 class NullBackend final : public Backend {

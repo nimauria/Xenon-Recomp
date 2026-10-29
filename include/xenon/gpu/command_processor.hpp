@@ -75,6 +75,8 @@ class CommandProcessor {
     std::uint64_t interrupt_dispatches{};
     // VdSwap front-buffer flips executed in stream order.
     std::uint64_t front_buffer_swaps{};
+    // GPU/CPU synchronisation points (set_sync_point_callback()).
+    std::uint64_t sync_points{};
     // Type-3 packets with no executor (NOP excepted), emitted as unlowered
     // ir::Type3Packet. Nonzero is a real gap in the command processor.
     std::uint64_t unexecuted_packets{};
@@ -136,6 +138,13 @@ class CommandProcessor {
   // (GraphicsSystem::submit_ring(Backend&, ...)). Empty: decode only.
   void set_guest_visible_barrier(std::function<void()> barrier) {
     guest_visible_barrier_ = std::move(barrier);
+  }
+  // Called where the command processor synchronises with the CPU: a wait is
+  // satisfied (WAIT_REG_MEM, WAIT_REG_EQ/GTE), and an interrupt is about to run
+  // the title's handler. What follows reads guest memory as it stands at that
+  // point (gpu::Backend::sync_guest_reads()).
+  void set_sync_point_callback(std::function<void()> callback) {
+    sync_point_callback_ = std::move(callback);
   }
 
   // The WAIT_REG_MEM the most recent stalled drain is parked on (diagnostics: a
@@ -254,8 +263,13 @@ class CommandProcessor {
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
   std::function<void(const FrontBufferSwap&)> swap_callback_{};
   std::function<void()> guest_visible_barrier_{};
+  std::function<void()> sync_point_callback_{};
   void before_guest_visible_effect() {
     if (guest_visible_barrier_) guest_visible_barrier_();
+  }
+  void sync_point() {
+    ++stats_.sync_points;
+    if (sync_point_callback_) sync_point_callback_();
   }
   std::uint64_t submission_dwords_{};
   std::uint32_t max_indirect_depth_{};

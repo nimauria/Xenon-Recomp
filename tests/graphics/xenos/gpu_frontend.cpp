@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -517,6 +518,34 @@ void test_interrupt_dispatch(AddressSpace& memory, CommandProcessor& cp) {
   assert((dispatched == std::vector<std::uint32_t>{1u, 4u}));
   assert(cp.statistics().interrupt_packets == packets_before + 1u);
   assert(cp.statistics().interrupt_dispatches == dispatch_before + 2u);
+  cp.set_interrupt_callback({});
+}
+
+// Sync points mark where the command processor hands off with the CPU: a
+// satisfied wait, and an interrupt before its handler runs (code the handler
+// wakes may rewrite what the following commands read). A host-coherency
+// request is not one: its CPU writes predate the ring work that carries it.
+void test_sync_points_mark_cpu_handoffs(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t commands = 0x01002E00;
+  constexpr std::uint32_t flag = 0x01212000;
+  constexpr std::uint32_t kCoherStatusHost = 0x0A31u;
+  store_be32(memory, flag, 7u);
+  std::vector<std::string> events;
+  cp.set_sync_point_callback([&] { events.push_back("sync"); });
+  cp.set_interrupt_callback([&](std::uint32_t) { events.push_back("interrupt"); });
+  const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
+  write_words(memory, commands,
+              {make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u, flag | swap, 7u,
+               0xFFFFFFFFu, 0u,
+               make_packet_type0(kCoherStatusHost, 1), 0u,
+               make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x03u, kCoherStatusHost, 0u,
+               0x80000000u, 0u,
+               make_packet_type3(Type3Opcode::Interrupt, 1), 1u << 2u});
+  const auto before = cp.statistics().sync_points;
+  cp.execute_buffer(commands, 6 + 2 + 6 + 2);
+  assert((events == std::vector<std::string>{"sync", "sync", "interrupt"}));
+  assert(cp.statistics().sync_points == before + 2u);
+  cp.set_sync_point_callback({});
   cp.set_interrupt_callback({});
 }
 
@@ -1538,6 +1567,7 @@ int main() {
   test_event_extent(memory, cp, regs);
   test_visibility_queries(memory, cp, regs);
   test_interrupt_dispatch(memory, cp);
+  test_sync_points_mark_cpu_handoffs(memory, cp);
   test_mem_write(memory, cp);
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);

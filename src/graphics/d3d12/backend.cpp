@@ -352,6 +352,9 @@ bool Backend::invalidate_edram_native_state() {
   return impl_->invalidate_edram_native_state();
 }
 
+void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
+void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
+
 bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
                               std::uint32_t height, PreparedPresentationFrame& output) {
   return impl_->capture_scanout(frame, width, height, output);

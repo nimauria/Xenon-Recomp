@@ -244,7 +244,27 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   mark_used(draw->vertex_shader);
   mark_used(draw->pixel_shader);
   if (memory) {
-    const auto dirty_epoch = memory->coherency().current_epoch();
+    // Textures are read as guest memory stood at the latest GPU/CPU sync point
+    // (sync_guest_reads()): the hardware samples them microseconds after it,
+    // while this draw may run milliseconds later. AC6's movie decoder refills
+    // the planes this draw samples as soon as the interrupt before it wakes
+    // the decoder; reading them when the draw ran showed the top of the
+    // picture a frame ahead, in the wrong colours. Changes after the sync
+    // point are not visible yet and are picked up by a later draw.
+    const auto dirty_epoch = guest_reads.read_epoch(*memory);
+    // Every texture the draw samples is copied first and only then decoded and
+    // uploaded, so one slow decode does not delay the next texture's copy.
+    struct PendingTexture {
+      std::uint32_t slot{};
+      const TextureDescriptor* descriptor{};
+      std::uint64_t key{};
+      std::vector<std::byte> snapshot{};
+      std::uint32_t snapshot_base{};
+      // Another slot samples the same texture: it is bound to the image
+      // decoded for the slot that took the snapshot.
+      bool shares_snapshot{false};
+    };
+    std::vector<PendingTexture> pending_textures;
     for (std::uint32_t slot = 0; slot < used.size(); ++slot) {
       if (!used[slot] || !state.textures[slot]) continue;
       const auto& descriptor = *state.textures[slot];
@@ -273,11 +293,18 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
             descriptor.pitch, int(descriptor.tiled), descriptor.base_address,
             int(descriptor.exp_adjust));
       }
+      if (std::any_of(pending_textures.begin(), pending_textures.end(),
+                      [&](const PendingTexture& pending) { return pending.key == key; })) {
+        pending_textures.push_back({slot, &descriptor, key, {}, 0u, true});
+        continue;
+      }
       auto existing = textures.find(key);
       const bool already_cached = existing != textures.end();
-      const bool dirty = already_cached &&
-                        texture_dirty.consume_dirty(
-                            key, memory->coherency(), dirty_epoch);
+      bool dirty = already_cached &&
+                   texture_dirty.consume_dirty(key, memory->coherency(), dirty_epoch);
+      // A recent texture the latest sync point found unchanged was written, if
+      // at all, after it: not visible yet.
+      if (dirty && guest_reads.unchanged_at_sync(key)) dirty = false;
       const bool refresh = !already_cached || dirty;
       if (dirty) ++performance.texture_cache_invalidations;
       if (refresh) {
@@ -317,38 +344,66 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
           error = named("texture snapshot range is invalid");
           return;
         }
-        std::vector<std::byte> texture_snapshot(
-            static_cast<std::size_t>(texture_snapshot_end -
-                                     texture_snapshot_base));
-        if (!memory->copy_physical_range(texture_snapshot_base,
-                                         texture_snapshot)) {
-          error = named("texture snapshot failed");
+        const auto texture_snapshot_size =
+            static_cast<std::uint32_t>(texture_snapshot_end - texture_snapshot_base);
+        // The copy the latest sync point holds, whatever the CPU wrote since.
+        // (Page epochs cannot say whether a write came before or after it: a
+        // page records only its newest write.)
+        std::vector<std::byte> texture_snapshot;
+        if (auto capture =
+                guest_reads.take_capture(key, texture_snapshot_base, texture_snapshot_size)) {
+          texture_snapshot = std::move(*capture);
+          ++performance.texture_sync_captures;
+        }
+        if (texture_snapshot.empty()) {
+          texture_snapshot.resize(texture_snapshot_size);
+          if (!memory->copy_physical_range(texture_snapshot_base, texture_snapshot)) {
+            error = named("texture snapshot failed");
+            return;
+          }
+        }
+        guest_reads.refreshed(key, texture_snapshot_base, texture_snapshot_size, dirty_epoch);
+        pending_textures.push_back(
+            {slot, &descriptor, key, std::move(texture_snapshot), texture_snapshot_base, false});
+      } else {
+        guest_reads.reused(key);
+        if (!self().bind_texture(slot, descriptor, *existing->second)) {
+          error = resources.error();
           return;
         }
-        const auto decoded =
-            decode_texture(descriptor, texture_snapshot, texture_snapshot_base);
-        if (!decoded.valid) {
-          error = decoded.error;
+      }
+    }
+    for (auto& pending : pending_textures) {
+      const auto& descriptor = *pending.descriptor;
+      if (pending.shares_snapshot) {
+        const auto image = textures.find(pending.key);
+        if (image == textures.end() ||
+            !self().bind_texture(pending.slot, descriptor, *image->second)) {
+          error = resources.error();
           return;
         }
-        auto image = std::make_unique<TextureImage>();
-        if (!self().create_texture(*image, decoded) ||
-            !self().bind_texture(slot, descriptor, *image)) {
-          error = image->error().empty() ? resources.error() : image->error();
-          if (image->unsupported_format()) ++unsupported.unsupported_texture_formats;
-          return;
-        }
-        texture_dirty.track_clean(key, decoded.layout, dirty_epoch);
-        if (existing != textures.end()) {
-          auto retired = std::move(existing->second);
-          existing->second = std::move(image);
-          retire_resource(std::move(retired));
-        } else {
-          textures.emplace(key, std::move(image));
-        }
-      } else if (!self().bind_texture(slot, descriptor, *existing->second)) {
-        error = resources.error();
+        continue;
+      }
+      const auto decoded = decode_texture(descriptor, pending.snapshot, pending.snapshot_base);
+      if (!decoded.valid) {
+        error = decoded.error;
         return;
+      }
+      auto image = std::make_unique<TextureImage>();
+      if (!self().create_texture(*image, decoded) ||
+          !self().bind_texture(pending.slot, descriptor, *image)) {
+        error = image->error().empty() ? resources.error() : image->error();
+        if (image->unsupported_format()) ++unsupported.unsupported_texture_formats;
+        return;
+      }
+      texture_dirty.track_clean(pending.key, decoded.layout, dirty_epoch);
+      auto existing = textures.find(pending.key);
+      if (existing != textures.end()) {
+        auto retired = std::move(existing->second);
+        existing->second = std::move(image);
+        retire_resource(std::move(retired));
+      } else {
+        textures.emplace(pending.key, std::move(image));
       }
     }
   }
@@ -695,11 +750,13 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         // stale CPU upload over an unknown export.
         mirror.mark_gpu_write(0, memory::kPhysicalMemorySize);
         texture_dirty.mark_dirty(0, memory::kPhysicalMemorySize);
+        guest_reads.backend_wrote(0, memory::kPhysicalMemorySize);
       } else {
         for (const auto& range : memexport_ranges) {
           const auto address = range.base_address_dwords << 2u;
           mirror.mark_gpu_write(address, range.size_bytes);
           texture_dirty.mark_dirty(address, range.size_bytes);
+          guest_reads.backend_wrote(address, range.size_bytes);
         }
       }
     }

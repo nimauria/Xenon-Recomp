@@ -147,6 +147,8 @@ JsonValue XenonSession::capability_report() const {
     gpu_section.set("resolveOperations", static_cast<std::int64_t>(performance.resolve_operations));
     gpu_section.set("textureCacheInvalidations",
                     static_cast<std::int64_t>(performance.texture_cache_invalidations));
+    gpu_section.set("textureSyncCaptures",
+                    static_cast<std::int64_t>(performance.texture_sync_captures));
 
     report.set_section("gpu", std::move(gpu_section));
 

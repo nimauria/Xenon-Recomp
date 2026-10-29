@@ -40,6 +40,7 @@ void BackendCore<Derived, Api>::begin_submission(
   if (memory != &new_memory) {
     textures.clear();
     texture_dirty.clear();
+    guest_reads.clear();
     if (!self().initialize_mirror(new_memory)) {
       error = mirror.error();
       ready = false;
@@ -64,6 +65,18 @@ void BackendCore<Derived, Api>::end_submission() {
     error = queue.error();
     ready = false;
   }
+}
+
+template <typename Derived, typename Api>
+void BackendCore<Derived, Api>::sync_guest_reads() {
+  if (!ready || !memory) return;
+  guest_reads.sync(*memory, [this](std::uint64_t key, std::uint32_t base, std::uint32_t size) {
+    if (!textures.contains(key)) return GuestReadSync::Tracking::Forget;
+    // GPU-authored bytes are current in the mirror, not in guest memory; the
+    // draw makes them visible and reads them itself.
+    return mirror.has_gpu_dirty(base, size) ? GuestReadSync::Tracking::GpuAuthored
+                                            : GuestReadSync::Tracking::Track;
+  });
 }
 
 template <typename Derived, typename Api>

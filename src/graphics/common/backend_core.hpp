@@ -57,6 +57,7 @@
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
+#include "xenon/gpu/guest_read_sync.hpp"
 #include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/logging/logger.hpp"
@@ -146,6 +147,9 @@ class BackendCore {
   GpuPerformanceCounters performance_counters() const noexcept;
   GpuUnsupportedCounters unsupported_counters() const noexcept;
   GpuShaderCoverage shader_coverage() const noexcept;
+  // See gpu::Backend::sync_guest_reads().
+  void sync_guest_reads();
+  void end_guest_read_sync() noexcept { guest_reads.end(); }
 
   static std::string named(std::string_view message) {
     std::string result(Api::kName);
@@ -176,6 +180,8 @@ class BackendCore {
   std::unordered_map<std::uint64_t, std::unique_ptr<GraphicsPipeline>> pipelines{};
   std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> shader_textures{};
   TextureDirtyTracker texture_dirty{};
+  // Texture reads as of GPU/CPU sync points (sync_guest_reads()).
+  GuestReadSync guest_reads{};
   memory::AddressSpace* memory{};
   Edram* edram{};
   EdramOwnershipTracker edram_ownership{};
