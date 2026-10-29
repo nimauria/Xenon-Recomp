@@ -72,7 +72,7 @@ if(XENON_ENABLE_AUDIO)
     PRIVATE "${XENON_SOURCE_DIR}/src")
   target_link_libraries(xenon_audio
     PUBLIC xenon_memory
-    PRIVATE ${XENON_AUDIO_SDL_TARGET} ${XENON_AUDIO_FFMPEG_TARGET})
+    PRIVATE xenon_logging ${XENON_AUDIO_SDL_TARGET} ${XENON_AUDIO_FFMPEG_TARGET})
   target_compile_features(xenon_audio PUBLIC cxx_std_20)
   if(XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT)
     target_compile_definitions(xenon_audio PRIVATE XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT=1)

@@ -214,6 +214,7 @@ class AudioSystem final {
   std::atomic<std::uint32_t> underrun_count_{0};
   std::atomic<std::uint64_t> rejected_unregistered_{0};
   std::atomic<std::uint32_t> submitted_peak_bits_{0};
+  std::atomic<std::uint64_t> traced_frames_{0};  // Frames seen by the probe trace.
   // Xbox render-driver clock, in 48 kHz samples consumed by the host. This
   // advances through underrun silence as well as submitted audio so guest AV
   // synchronization follows real playback time rather than queue occupancy.

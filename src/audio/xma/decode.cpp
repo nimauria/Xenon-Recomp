@@ -14,8 +14,18 @@
 #include <utility>
 #include <vector>
 
+#include "xenon/logging/probe_log.hpp"
+
 namespace xenon::audio {
 namespace {
+
+// Probe-trace timestamps: steady-clock milliseconds, comparable across the
+// audio_trace_*.log files.
+[[nodiscard]] std::int64_t trace_milliseconds() noexcept {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 constexpr std::uint32_t kBitsPerPacket = kXmaPacketBytes * 8u;
 constexpr std::uint32_t kMaxFrameBits = 0x7FFFu;
@@ -243,6 +253,14 @@ bool XmaDecoder::decode_one(std::size_t index) {
       return false;
     }
 
+    logging::append_probe_log(
+        "audio_trace_xma.log",
+        "%lld write ctx=%zu out=%08X blocks=%u read=%u write=%zu->%zu bytes=%zu valid_in=%d%d\n",
+        static_cast<long long>(trace_milliseconds()), index, data.output_buffer_ptr,
+        data.output_buffer_block_count, data.output_buffer_read_offset,
+        write_offset / kXmaOutputBlockBytes,
+        ((write_offset + bytes_to_write) % capacity) / kXmaOutputBlockBytes, bytes_to_write,
+        data.input_buffer_0_valid ? 1 : 0, data.input_buffer_1_valid ? 1 : 0);
     runtime.pending_offset += bytes_to_write;
     if (runtime.pending_offset == runtime.pending_bytes) {
       runtime.pending_offset = 0;
@@ -486,6 +504,10 @@ bool XmaDecoder::decode_one(std::size_t index) {
     }
   }
   frames_decoded_.fetch_add(1, std::memory_order_relaxed);
+  logging::append_probe_log(
+      "audio_trace_xma.log", "%lld frame ctx=%zu in=%08X bit=%zu rate=%d ch=%d peak=%.5f loop=%u\n",
+      static_cast<long long>(trace_milliseconds()), index, input_physical, start_bit, sample_rate,
+      channels, static_cast<double>(frame_peak), data.loop_count);
   for (auto bits = peak_bits_.load(std::memory_order_relaxed);
        std::bit_cast<float>(bits) < frame_peak &&
        !peak_bits_.compare_exchange_weak(bits, std::bit_cast<std::uint32_t>(frame_peak),

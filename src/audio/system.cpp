@@ -1,6 +1,7 @@
 #include "xenon/audio/system.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <cstring>
 #include <vector>
 
+#include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
 namespace xenon::audio {
@@ -183,6 +185,28 @@ bool AudioSystem::translate_render_frame(cpu::GuestAddress samples,
   for (std::size_t i = 0; i < kInputFloats; ++i) {
     const float value = std::abs(load_be_float(bytes.data() + i * sizeof(float)));
     if (value > peak && std::isfinite(value)) peak = value;
+  }
+  // Probe trace: per-channel peaks of the first frames, then of every 64th.
+  if (logging::probe_logs_enabled()) {
+    const auto frame = traced_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (frame < 256u || frame % 64u == 0u) {
+      std::array<float, kXboxRenderChannels> channel_peak{};
+      for (std::size_t i = 0; i < kInputFloats; ++i) {
+        const float value = std::abs(load_be_float(bytes.data() + i * sizeof(float)));
+        auto& slot = channel_peak[i / kRenderFrameSamples];
+        if (std::isfinite(value) && value > slot) slot = value;
+      }
+      logging::append_probe_log(
+          "audio_trace_frames.log",
+          "%lld frame %llu at %08X peaks FL=%.6f FR=%.6f C=%.6f LFE=%.6f BL=%.6f BR=%.6f\n",
+          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count()),
+          static_cast<unsigned long long>(frame), samples,
+          static_cast<double>(channel_peak[0]), static_cast<double>(channel_peak[1]),
+          static_cast<double>(channel_peak[2]), static_cast<double>(channel_peak[3]),
+          static_cast<double>(channel_peak[4]), static_cast<double>(channel_peak[5]));
+    }
   }
   for (auto bits = submitted_peak_bits_.load(std::memory_order_relaxed);
        std::bit_cast<float>(bits) < peak &&
