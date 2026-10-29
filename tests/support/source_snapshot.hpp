@@ -7,7 +7,11 @@
 //
 // The copy leaves out build output, .git and the managed .xenon dependencies:
 // generated projects build Xenon with SYSTEM dependencies and without
-// graphics, audio or input, so they never read .xenon/deps.
+// graphics, audio or input, so they never read .xenon/deps. It also leaves out
+// trees the Xenon build never adds: launcher-next (a separate project whose
+// toolchain downloads and build output run to tens of gigabytes - copying it
+// made every snapshotting test run out of time or abort part-way) and .claude
+// (development tooling).
 
 #include <filesystem>
 #include <string>
@@ -28,7 +32,8 @@ inline std::filesystem::path snapshot_source_tree(std::string_view name) {
   for (const auto& entry : std::filesystem::directory_iterator(source)) {
     const auto entry_name = entry.path().filename().string();
     if (entry_name == ".git" || entry_name == ".xenon" || entry_name == "out" ||
-        entry_name == "generated" || entry_name.starts_with("build"))
+        entry_name == "generated" || entry_name == "launcher-next" || entry_name == ".claude" ||
+        entry_name.starts_with("build"))
       continue;
     std::filesystem::copy(entry.path(), destination / entry_name,
                           std::filesystem::copy_options::recursive);
