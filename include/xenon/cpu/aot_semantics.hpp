@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cfenv>
+#include <cstdlib>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -408,7 +409,34 @@ inline void finish_fp_operation() noexcept {
 }
 #endif
 
+// Native floating point is the default. The arithmetic helpers below then
+// run as plain host operations whenever the guest rounds to nearest (the
+// result is the same value strict mode computes), and the status fields of
+// FPSCR - the sticky exception bits, FX/FEX/VX, FR/FI and FPRF - are not
+// updated by arithmetic, as on xenia/rexglue/XenonRecomp. FPSCR's control
+// fields (rounding mode, enables, NI) stay exactly what the guest wrote, and
+// any other rounding mode takes the exact path. XENON_FP_STRICT=1 restores
+// full status tracking for every operation. The flag is read when each module
+// loads, so the runtime and a game module always agree; a test may assign
+// it before running guest code to pin one mode.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)  // getenv: read once, never written
+#endif
+inline bool fp_strict_mode = [] {
+  const char* value = std::getenv("XENON_FP_STRICT");
+  return value && *value && *value != '0';
+}();
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+[[nodiscard]] inline bool fp_native(const CpuState& state) noexcept {
+  return !fp_strict_mode && state.fp_rounding_mode() == FpRoundingMode::Nearest;
+}
+
 [[nodiscard]] inline double fp_add(CpuState& state, double a, double b) noexcept {
+  if (fp_native(state)) return a + b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = a + b;
@@ -417,6 +445,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_sub(CpuState& state, double a, double b) noexcept {
+  if (fp_native(state)) return a - b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = a - b;
@@ -425,6 +454,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_mul(CpuState& state, double a, double b) noexcept {
+  if (fp_native(state)) return a * b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = a * b;
@@ -433,6 +463,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_div(CpuState& state, double a, double b) noexcept {
+  if (fp_native(state)) return a / b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = a / b;
@@ -445,6 +476,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_sqrt(CpuState& state, double a) noexcept {
+  if (fp_native(state)) return std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = std::sqrt(a);
@@ -453,6 +485,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_fma(CpuState& state, double a, double b, double c) noexcept {
+  if (fp_native(state)) return std::fma(a, b, c);
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b) || is_signaling_nan(c)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double r = std::fma(a,b,c);
@@ -467,6 +500,7 @@ inline void finish_fp_operation() noexcept {
   return fp_div(state, 1.0, a);
 }
 [[nodiscard]] inline double fp_rsqrt(CpuState& state, double a) noexcept {
+  if (fp_native(state)) return 1.0 / std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
   volatile double root = std::sqrt(a);
@@ -478,6 +512,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_round_single(CpuState& state, double a) noexcept {
+  if (fp_native(state)) return static_cast<double>(static_cast<float>(a));
   // This helper is used both by frsp and as the final rounding step of the
   // single-precision arithmetic instructions. Preserve status captured by a
   // preceding arithmetic helper in the same guest instruction and merge the
@@ -502,6 +537,7 @@ inline void finish_fp_operation() noexcept {
   return r;
 }
 [[nodiscard]] inline double fp_from_i64(CpuState& state, std::uint64_t bits) noexcept {
+  if (fp_native(state)) return static_cast<double>(static_cast<std::int64_t>(bits));
   begin_fp_operation(state);
   volatile double r = static_cast<double>(static_cast<std::int64_t>(bits));
   finish_fp_operation();
@@ -521,6 +557,7 @@ inline std::uint8_t fprf_for(double v) noexcept {
 }
 
 inline void update_fpscr(CpuState& state, double result) noexcept {
+  if (!fp_strict_mode) return;
   state.fpscr = (state.fpscr & ~fpscr_bits::FPRF_MASK) |
                 (std::uint32_t(fprf_for(result)&0x1Fu) << 12);
   state.fpscr &= ~(fpscr_bits::FR | fpscr_bits::FI);
@@ -606,11 +643,20 @@ inline bool trap_condition(std::uint32_t to, std::uint64_t a, std::uint64_t b,
     return width == 32 ? 0xFFFFFFFF80000000ull : 0x8000000000000000ull;
   }
 
-  const int old_round = std::fegetround();
-  std::fesetround(toward_zero ? FE_TOWARDZERO : host_rounding(state.fp_rounding_mode()));
   const long double input = static_cast<long double>(value);
-  const long double rounded = toward_zero ? std::trunc(input) : std::nearbyint(input);
-  std::fesetround(old_round);
+  long double rounded{};
+  if (toward_zero) {
+    // Truncation does not depend on the rounding mode.
+    rounded = std::trunc(input);
+  } else if (fp_native(state)) {
+    // The host already rounds to nearest, as the guest asked.
+    rounded = std::nearbyint(input);
+  } else {
+    const int old_round = std::fegetround();
+    std::fesetround(host_rounding(state.fp_rounding_mode()));
+    rounded = std::nearbyint(input);
+    std::fesetround(old_round);
+  }
 
   if (rounded != input) {
     last_fp_exceptions |= FE_INEXACT;
@@ -632,6 +678,7 @@ inline bool trap_condition(std::uint32_t to, std::uint64_t a, std::uint64_t b,
 // ordered comparisons (QNaN always; SNaN when invalid exceptions are masked).
 inline void update_fp_compare_status(CpuState& state, double a, double b,
                                      bool ordered) noexcept {
+  if (!fp_strict_mode) return;
   const auto fpcc = fp_compare_field(a, b);
   state.fpscr = (state.fpscr & ~fpscr_bits::FPRF_MASK) |
                 (std::uint32_t(fpcc & 0xFu) << 12);
@@ -656,6 +703,7 @@ inline void update_fp_compare_status(CpuState& state, double a, double b,
 // manufacturing a classification from the source operand. fctiw likewise has
 // undefined class bits; the sticky/rounding status is the observable contract.
 inline void update_fp_conversion_status(CpuState& state) noexcept {
+  if (!fp_strict_mode) return;
   state.fpscr &= ~(fpscr_bits::FR | fpscr_bits::FI);
   if (last_fp_invalid_detail) {
     state.fpscr |= last_fp_invalid_detail | fpscr_bits::FX;
