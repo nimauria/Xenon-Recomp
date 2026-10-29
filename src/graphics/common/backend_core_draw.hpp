@@ -235,62 +235,6 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     ready = false;
     return;
   }
-  // Diagnostic: every draw sampling a full-screen logo texture.
-  if (xenon::logging::probe_logs_enabled()) {
-    for (std::uint32_t slot = 0; slot < state.textures.size(); ++slot) {
-      if (!state.textures[slot]) continue;
-      const auto base = state.textures[slot]->base_address;
-      if (base < 0x18900000u || base >= 0x18E00000u) continue;
-      const auto f = [&](std::size_t index) {
-        float value;
-        std::memcpy(&value, constants.data() + index * 4u, 4u);
-        return value;
-      };
-      std::string vertex_text;
-      char draw_text[64];
-      std::snprintf(draw_text, sizeof(draw_text), " n=%u prim=%u src=%u", draw->index_count,
-                    unsigned(draw->primitive_type), unsigned(draw->source));
-      vertex_text += draw_text;
-      std::vector<std::uint32_t> reflected;
-      for (const auto* shader : {&draw->vertex_shader, &draw->pixel_shader}) {
-        const auto decoded = decoded_shaders.find(shader->hash);
-        if (shader->valid && decoded != decoded_shaders.end())
-          for (const auto index : decoded->second.reflection.vertex_fetches)
-            reflected.push_back(index);
-      }
-      for (const auto index : reflected) {
-        if (index >= 96u || !memory) continue;
-        const auto& fetch = state.vertex_buffers[index / 3u][index % 3u];
-        if (!fetch || !fetch->valid || !fetch->size_dwords) continue;
-        std::vector<std::byte> bytes(std::min<std::size_t>(std::size_t(fetch->size_dwords) * 4u, 96u));
-        if (!memory->copy_physical_range(fetch->physical_address, bytes)) continue;
-        char head[64];
-        std::snprintf(head, sizeof(head), " f%u@%08X/%u:", index, fetch->physical_address,
-                      fetch->size_dwords);
-        vertex_text += head;
-        for (std::size_t i = 0; i < bytes.size(); i += 4) {
-          char word[12];
-          std::snprintf(word, sizeof(word), " %02X%02X%02X%02X", unsigned(bytes[i]),
-                        unsigned(bytes[i + 1]), unsigned(bytes[i + 2]), unsigned(bytes[i + 3]));
-          vertex_text += word;
-        }
-      }
-      const auto& blend = state.color_targets[0].blend;
-      xenon::logging::append_probe_log(
-          "logo_draw_diag.log",
-          "%lld vs=%016llX ps=%016llX tex%u=%08X blend=%d %d/%d/%d mask=%X "
-          "c256=%g,%g,%g,%g c257=%g,%g,%g,%g c0=%g,%g,%g,%g c4=%g,%g,%g,%g%s\n",
-          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::steady_clock::now().time_since_epoch())
-                                     .count()),
-          static_cast<unsigned long long>(draw->vertex_shader.hash),
-          static_cast<unsigned long long>(draw->pixel_shader.hash), slot, base,
-          int(blend.enabled), int(blend.color_source), int(blend.color_destination),
-          int(blend.color_operation), unsigned(state.color_targets[0].write_mask),
-          f(1024), f(1025), f(1026), f(1027), f(1028), f(1029), f(1030), f(1031),
-          f(0), f(1), f(2), f(3), f(16), f(17), f(18), f(19), vertex_text.c_str());
-    }
-  }
   std::array<bool, 32> used{};
   const auto mark_used = [&](const ir::ShaderReference& shader) {
     const auto found = shader_textures.find(shader.hash);
