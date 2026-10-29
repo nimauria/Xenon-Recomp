@@ -59,7 +59,7 @@ bool create_sample_transfer_pipeline(
     bool write, Microsoft::WRL::ComPtr<ID3D12RootSignature>& root_signature,
     Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline,
     std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   const auto ps = compiler.compile(write ? make_color_sample_write_shader()
                                          : make_color_sample_read_shader(source_samples));

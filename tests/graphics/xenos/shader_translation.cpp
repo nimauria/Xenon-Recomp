@@ -593,6 +593,44 @@ void test_scalar_source_and_export_constants_compile() {
     assert(compiler.compile(lowered, spirv).succeeded);
   }
 }
+// Regression (AC6's first cutscene ran at about 5 fps): backends build their
+// transfer pipelines per depth readback and upload, and each build ran DXC.
+// A utility shader is compiled once per process; later requests are served
+// from memory with the same result, and distinct inputs never share one.
+void test_utility_shaders_compile_once() {
+  using namespace xenon::gpu;
+  UtilityShaderCompiler compiler;
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  const auto vertex = make_transfer_fullscreen_vertex_shader();
+  const auto first = compiler.compile(vertex);
+  const auto after_first = UtilityShaderCompiler::compiles();
+  assert(first.succeeded);
+  for (int i = 0; i < 8; ++i) {
+    const auto again = compiler.compile(vertex);
+    assert(again.succeeded && again.binary == first.binary);
+  }
+  assert(UtilityShaderCompiler::compiles() == after_first);
+
+  // Same shader, other target: a separate entry.
+  const auto spirv_vertex = compiler.compile(vertex, spirv);
+  assert(spirv_vertex.succeeded && spirv_vertex.format == ShaderBinaryFormat::Spirv);
+  assert(UtilityShaderCompiler::compiles() == after_first + 1u);
+  // Other shaders: separate entries with their own binaries.
+  const auto read2 = compiler.compile(make_depth_sample_read_shader(MsaaSamples::X2));
+  const auto read4 = compiler.compile(make_depth_sample_read_shader(MsaaSamples::X4));
+  assert(read2.succeeded && read4.succeeded && read2.binary != read4.binary);
+  assert(UtilityShaderCompiler::compiles() == after_first + 3u);
+  assert(compiler.compile(make_depth_sample_read_shader(MsaaSamples::X2)).binary ==
+         read2.binary);
+  assert(UtilityShaderCompiler::compiles() == after_first + 3u);
+
+  // An incomplete shader is refused the same way every time.
+  LoweredShader incomplete = vertex;
+  incomplete.complete = false;
+  assert(!compiler.compile(incomplete).succeeded);
+  assert(!compiler.compile(incomplete).succeeded);
+}
 
 int main() {
   test_lowering_is_deterministic();
@@ -606,6 +644,7 @@ int main() {
   test_vertex_shader_texture_fetch_uses_explicit_lod();
   test_rectangle_list_geometry_shader();
   test_sample_transfer_shaders();
+  test_utility_shaders_compile_once();
   test_memexport_translation_targets();
   test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";

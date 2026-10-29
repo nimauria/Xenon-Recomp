@@ -64,7 +64,7 @@ VkPipeline EdramColorTransfer::pipeline(VkDevice device, VkFormat format,
                    (std::uint64_t(destination_host) << 40u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end()) return found->second;
   if (!create_layouts(device)) return VK_NULL_HANDLE;
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);

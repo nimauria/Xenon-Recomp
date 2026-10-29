@@ -21,7 +21,7 @@ VkSampleCountFlagBits sample_count_bits(MsaaSamples samples) {
 #ifdef XENON_HAS_DXC
 bool create_module(VkDevice device, const LoweredShader& shader, VkShaderModule& module,
                    std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto compiled = compiler.compile(shader, options);

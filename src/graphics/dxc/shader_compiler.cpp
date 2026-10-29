@@ -169,6 +169,63 @@ CompiledShader DxcShaderCompiler::compile(const LoweredShader& shader,
   return output;
 }
 
+namespace {
+struct UtilityShaderStore {
+  std::mutex mutex;
+  std::unique_ptr<DxcShaderCompiler> compiler;
+  // Keyed by everything compile() reads, HLSL text included, so two shaders
+  // can never share an entry.
+  std::unordered_map<std::string, CompiledShader> entries;
+  std::size_t compiles{};
+};
+
+UtilityShaderStore& utility_shader_store() {
+  static UtilityShaderStore store;
+  return store;
+}
+
+std::string utility_shader_key(const LoweredShader& shader,
+                               const ShaderCompileOptions& options) {
+  std::string key;
+  key.reserve(shader.hlsl.size() + shader.entry_point.size() + shader.profile.size() +
+              options.spirv_environment.size() + 16u);
+  key.push_back(static_cast<char>(shader.stage));
+  key.push_back(static_cast<char>(options.format));
+  key.push_back(static_cast<char>((options.debug ? 1 : 0) | (options.optimize ? 2 : 0) |
+                                  (options.warnings_as_errors ? 4 : 0) |
+                                  (options.spirv_stencil_export ? 8 : 0) |
+                                  (shader.complete ? 16 : 0)));
+  for (const auto* part : {&options.spirv_environment, &shader.profile, &shader.entry_point}) {
+    key.append(*part);
+    key.push_back('\0');
+  }
+  key.append(shader.hlsl);
+  return key;
+}
+}  // namespace
+
+CompiledShader UtilityShaderCompiler::compile(const LoweredShader& shader,
+                                              const ShaderCompileOptions& options) const {
+  auto key = utility_shader_key(shader, options);
+  auto& store = utility_shader_store();
+  std::scoped_lock lock(store.mutex);
+  if (const auto found = store.entries.find(key); found != store.entries.end())
+    return found->second;
+  if (!store.compiler) store.compiler = std::make_unique<DxcShaderCompiler>();
+  auto compiled = store.compiler->compile(shader, options);
+  ++store.compiles;
+  // A failure is cached as well: the same input fails the same way, and the
+  // caller reports its diagnostics.
+  store.entries.emplace(std::move(key), compiled);
+  return compiled;
+}
+
+std::size_t UtilityShaderCompiler::compiles() noexcept {
+  auto& store = utility_shader_store();
+  std::scoped_lock lock(store.mutex);
+  return store.compiles;
+}
+
 ShaderCache::ShaderCache(std::shared_ptr<DxcShaderCompiler> compiler)
     : compiler_(std::move(compiler)) {
   if (!compiler_) throw std::invalid_argument("ShaderCache requires a compiler");

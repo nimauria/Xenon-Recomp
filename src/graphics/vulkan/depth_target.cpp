@@ -302,7 +302,7 @@ bool DepthTargetImage::readback_native_sample(
 #else
   const auto copy_width = right - left, copy_height = bottom - top;
   row_pitch = copy_width * 4u;
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{}; options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);
   const auto ps = compiler.compile(make_depth_sample_read_shader(host_msaa_), options);
@@ -441,7 +441,7 @@ bool DepthTargetImage::upload_sample(
 #ifndef XENON_HAS_DXC
   error_="Vulkan selected depth-sample upload requires DXC";return false;
 #else
-  DxcShaderCompiler compiler;ShaderCompileOptions options{};
+  UtilityShaderCompiler compiler;ShaderCompileOptions options{};
   options.format=ShaderBinaryFormat::Spirv;
   const auto vs=compiler.compile(make_transfer_fullscreen_vertex_shader(),options);
   const auto ps=compiler.compile(make_depth_only_sample_write_shader(),options);

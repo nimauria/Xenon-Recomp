@@ -28,6 +28,20 @@ class DxcShaderCompiler {
   std::unique_ptr<Impl> impl_;
 };
 
+// Compiles the fixed helper shaders backends build their transfer, resolve,
+// clear and scanout pipelines from. Each depends only on its HLSL and
+// options, so it is compiled once per process and served from memory after
+// that: backends build those pipelines per transfer, and compiling there put
+// DXC on every depth readback and upload (AC6's first cutscene ran at about
+// 5 fps). Thread-safe; one DXC instance compiles under a lock.
+class UtilityShaderCompiler {
+ public:
+  [[nodiscard]] CompiledShader compile(
+      const LoweredShader& shader, const ShaderCompileOptions& options = {}) const;
+  // Number of DXC compiles performed so far (cache misses), for tests.
+  [[nodiscard]] static std::size_t compiles() noexcept;
+};
+
 class ShaderCache {
  public:
   explicit ShaderCache(std::shared_ptr<DxcShaderCompiler> compiler);

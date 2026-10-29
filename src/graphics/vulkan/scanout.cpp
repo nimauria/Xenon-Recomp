@@ -110,7 +110,7 @@ bool ScanoutRenderer::prepare(VkDevice device, VkFormat format, GuestMemoryMirro
     set_buffer_ = mirror.buffer();
   }
   if (pipelines_.contains(format)) return true;
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);

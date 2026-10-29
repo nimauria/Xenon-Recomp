@@ -45,7 +45,7 @@ bool create_depth_transfer_pipeline(
     Microsoft::WRL::ComPtr<ID3D12RootSignature>& root_signature,
     Microsoft::WRL::ComPtr<ID3D12PipelineState>& pipeline,
     std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   LoweredShader pixel;
   switch (mode) {

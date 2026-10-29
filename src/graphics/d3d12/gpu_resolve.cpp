@@ -55,7 +55,7 @@ ID3D12PipelineState* GpuResolver::resolve_pipeline(ID3D12Device* device, MsaaSam
       return nullptr;
     }
   }
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto cs = compiler.compile(make_gpu_resolve_shader(samples));
   if (!cs.succeeded) {
     error_ = cs.diagnostics.empty() ? "D3D12 GPU resolve shader compilation failed"
@@ -96,7 +96,7 @@ ID3D12PipelineState* GpuResolver::clear_pipeline(ID3D12Device* device, DXGI_FORM
       return nullptr;
     }
   }
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   const auto ps = compiler.compile(make_edram_clear_shader());
   if (!vs.succeeded || !ps.succeeded) {

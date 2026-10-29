@@ -47,7 +47,7 @@ bool read_msaa_sample(VkPhysicalDevice physical_device, VkDevice device,
                       std::uint32_t height, std::uint32_t bytes_per_pixel,
                       std::vector<std::byte>& destination,
                       std::uint32_t& row_pitch, std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);
@@ -292,7 +292,7 @@ bool write_msaa_sample(VkPhysicalDevice physical_device, VkDevice device,
                        std::uint32_t height, std::uint32_t bytes_per_pixel,
                        std::span<const std::byte> source,
                        std::uint32_t row_pitch, std::string& error) {
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   ShaderCompileOptions options{};
   options.format = ShaderBinaryFormat::Spirv;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader(), options);

@@ -48,7 +48,7 @@ ID3D12PipelineState* EdramColorTransfer::pipeline(ID3D12Device* device, DXGI_FOR
       return nullptr;
     }
   }
-  DxcShaderCompiler compiler;
+  UtilityShaderCompiler compiler;
   const auto vs = compiler.compile(make_transfer_fullscreen_vertex_shader());
   const auto ps = compiler.compile(make_edram_color_transfer_shader(source_host));
   if (!vs.succeeded || !ps.succeeded) {
