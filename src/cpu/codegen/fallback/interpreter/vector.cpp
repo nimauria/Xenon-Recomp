@@ -173,7 +173,7 @@ namespace xenon::cpu::fallback {
     const auto reg = vector_vd(i);
     const auto b = state.vr[vector_vb(i)];
     state.vr[reg] =
-        aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+        aot::execute_vector(*semantic, i.word, state, b, Vector128{}, Vector128{}, Vector128{});
     return true;
   }
 
@@ -189,7 +189,7 @@ namespace xenon::cpu::fallback {
     } else {
       const auto b = state.vr[vector_vb(i)];
       state.vr[reg] =
-          aot::execute_vector(*semantic, i.word, state, Vector128{}, b, Vector128{}, Vector128{});
+          aot::execute_vector(*semantic, i.word, state, b, Vector128{}, Vector128{}, Vector128{});
     }
     return true;
   }
@@ -202,6 +202,21 @@ namespace xenon::cpu::fallback {
     const auto b = state.vr[vector_vb(i)];
     state.vr[reg] =
         aot::execute_vector(*semantic, i.word, state, old, b, Vector128{}, Vector128{});
+    return true;
+  }
+
+  // Unary vector semantics take their source in the first argument, just as
+  // the lifter's unary() does. VA is an immediate/reserved field for these
+  // instructions, so passing vA silently reads an unrelated register.
+  if (m.starts_with("vsplt") || m.starts_with("vupk") || m.starts_with("vcfs") || m.starts_with("vcfu") ||
+      m.starts_with("vcts") || m.starts_with("vctu") || m.starts_with("vcfps") ||
+      m.starts_with("vcfpu") || m.starts_with("vcsx") || m.starts_with("vcux") ||
+      m.starts_with("vrfi") || m.starts_with("vrefp") || m.starts_with("vrsqrtefp") ||
+      m.starts_with("vexptefp") || m.starts_with("vlogefp")) {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    state.vr[vector_vd(i)] = aot::execute_vector(
+        *semantic, i.word, state, state.vr[vector_vb(i)], {}, {}, {});
     return true;
   }
 

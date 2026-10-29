@@ -368,8 +368,9 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
     case VectorSemantic::vmaddfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state)),state);return r;}
     case VectorSemantic::vmaddfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state)),state);return r;}
     case VectorSemantic::vmaddcfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(a,i,state),read_vmx_f32(c,i,state)),state);return r;}
-    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-(read_vmx_f32(a,i,state)*read_vmx_f32(c,i,state)-read_vmx_f32(b,i,state)),state);return r;}
-    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-(read_vmx_f32(b,i,state)*read_vmx_f32(a,i,state)-read_vmx_f32(c,i,state)),state);return r;}
+    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(b,i,state)),state);return r;}
+    // VMX128 inputs are (old vD, vA, vB): vD = -(vA * vB - old vD).
+    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(a,i,state)),state);return r;}
     case VectorSemantic::vmsum3fp128:{float z=0;for(unsigned i=0;i<3;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
     case VectorSemantic::vmsum4fp128:{float z=0;for(unsigned i=0;i<4;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
 
