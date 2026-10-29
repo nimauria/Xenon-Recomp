@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "recomp/analysis/analysis_internal.hpp"
+#include "xenon/recomp/ppc_value_analysis.hpp"
 
 namespace xenon::recomp::detail {
 
@@ -76,6 +77,12 @@ struct CandidateScan {
   [[nodiscard]] bool independently_proven_function_start(GuestAddress target) const;
   [[nodiscard]] bool has_prologue_evidence(GuestAddress target) const;
   [[nodiscard]] bool has_independent_discovery_evidence(GuestAddress target) const;
+
+  // Records `target` as AddressTakenCode evidence when `instruction` just
+  // built it as a constant (lis + addi/ori) and it starts after a function
+  // boundary. Called with the value state after the instruction.
+  void note_address_taken_code(const cpu::DecodedInstruction& instruction,
+                               const value_analysis::PpcValueTracker& values);
 };
 
 void scan_primary_range(CandidateScan& scan);

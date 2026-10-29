@@ -233,6 +233,8 @@ void close_local_control_flow(CandidateScan& scan) {
               ++result.resolved_indirect_via_backward_slice;
             if (resolution.kind == value_analysis::IndirectResolverKind::ReadOnlyTable)
               ++result.resolved_indirect_via_readonly_table;
+            if (resolution.kind == value_analysis::IndirectResolverKind::JumpTable)
+              ++result.resolved_indirect_via_jump_table;
             for (const auto target : resolution.targets) {
               if (instruction.lk()) {
                 function.calls.push_back(target);
@@ -265,6 +267,7 @@ void close_local_control_flow(CandidateScan& scan) {
         inferred_value_history.erase(inferred_value_history.begin(),
                                      inferred_value_history.begin() + 32);
       inferred_value_tracker.step(instruction);
+      scan.note_address_taken_code(instruction, inferred_value_tracker);
 
       if (inferred_local_word_count >= kMaxInferredLocalWords) break;
     }

@@ -62,6 +62,9 @@ enum class IndirectResolverKind : std::uint8_t {
   FastValue,
   ReadOnlyTable,
   BackwardSlice,
+  // A compiler switch dispatch: CTR computed from a static table indexed by
+  // a register an unsigned bound check limits on the way to the bcctr.
+  JumpTable,
 };
 
 struct IndirectResolution {

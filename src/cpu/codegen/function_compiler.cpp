@@ -90,7 +90,8 @@ FunctionCompileResult StaticFunctionCompiler::compile(
 }
 
 FunctionCompileResult StaticFunctionCompiler::compile_ranges(
-    GuestAddress entry, std::span<const FunctionCodeRange> ranges) const {
+    GuestAddress entry, std::span<const FunctionCodeRange> ranges,
+    std::span<const GuestAddress> extra_leaders) const {
   FunctionCompileResult out{};
   out.function.guest_address = entry;
   if (ranges.empty()) {
@@ -162,6 +163,8 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
   std::map<GuestAddress, bool> leader;
   leader[entry] = true;
   for (const auto start : range_starts) leader[start] = true;
+  for (const auto target : extra_leaders)
+    if (decoded.contains(target)) leader[target] = true;
 
   for (const auto& [address, instruction] : decoded) {
     if (is_direct_branch(instruction)) {

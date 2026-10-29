@@ -204,9 +204,12 @@ bool deserialize_ir(std::string_view bytes,cpu::ir::Function& fn) {
     fn=std::move(out);return true;
   }catch(...){return false;}
 }
-RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddress entry,std::span<const cpu::FunctionCodeRange> ranges){
+RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddress entry,std::span<const cpu::FunctionCodeRange> ranges,
+                            std::span<const cpu::GuestAddress> extra_leaders){
   std::string raw;number(raw,entry);number(raw,ranges.size());
   for(auto r:ranges){number(raw,r.base);number(raw,r.words.size());for(auto w:r.words)number(raw,w);}
+  // Leaders change the block structure; regions without any keep their keys.
+  if(!extra_leaders.empty()){number(raw,extra_leaders.size());for(auto l:extra_leaders)number(raw,l);}
   RegionResult result;
   Node decoded{"decoded-region",v.decoder,{{"guest_ranges_sha256",digest(raw)}},{}};
   // The range boundary is the analysis output contract: title/DB identity is
@@ -215,7 +218,7 @@ RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddre
   Node ir{"ir",v.ir,{{"cpu_semantics",v.semantics},{"producer_build",producer_identity("ir")}},{analysis.key()}};
   result.nodes={decoded,analysis,ir};
   if(auto cached=store.lookup(ir);cached && deserialize_ir(cached->bytes,result.compiled.function)) {result.compiled.ok=true;result.ir_hit=true;return result;}
-  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges);
+  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges,extra_leaders);
   if(result.compiled.ok){
     (void)store.publish(decoded,raw);(void)store.publish(analysis,raw);
     (void)store.publish(ir,serialize_ir(result.compiled.function));

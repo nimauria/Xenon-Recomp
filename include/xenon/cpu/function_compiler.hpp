@@ -36,8 +36,11 @@ class StaticFunctionCompiler {
 
   // Sparse whole-function path used by FunctionChunk metadata. All supplied
   // ranges participate in one CFG and retain their original guest addresses.
+  // `extra_leaders` are block starts no direct branch reveals - resolved
+  // switch-table cases - so each is a dispatchable block of this function.
   [[nodiscard]] FunctionCompileResult compile_ranges(
-      GuestAddress entry, std::span<const FunctionCodeRange> ranges) const;
+      GuestAddress entry, std::span<const FunctionCodeRange> ranges,
+      std::span<const GuestAddress> extra_leaders = {}) const;
 
  private:
   Decoder decoder_{};

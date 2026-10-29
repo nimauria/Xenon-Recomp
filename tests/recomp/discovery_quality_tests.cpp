@@ -1448,6 +1448,82 @@ int main() {
   }
   std::cout << "  [PASS] Jump-table cases of a weakly evidenced dispatcher are absorbed into it\n";
 
+  // Regression (Ace Combat 6 startup): MSVC switch dispatch - a cmplwi/bgt
+  // bound, the table address, the scaled index, lwzx, mtctr, bctr - was never
+  // resolved, so its case blocks were not compiled and every dispatch ran in
+  // the interpreter. A qsort comparator whose address is only ever built as
+  // a constant (lis + addi into r6) was never discovered at all and ran
+  // interpreted for seconds. Both are found statically now; the switch table
+  // after the bctr, whose address is also built with lis + addi, is data.
+  {
+    const auto dispatcher = base + 0x10u;
+    const auto table = base + 0x30u;
+    const auto case0 = base + 0x3Cu;
+    const auto case1 = base + 0x40u;
+    const auto case2 = base + 0x44u;
+    const auto comparator = base + 0x4Cu;
+    const auto rlwinm = [](std::uint32_t ra, std::uint32_t rs, std::uint32_t sh, std::uint32_t mb,
+                           std::uint32_t me) {
+      return (21u << 26) | (rs << 21) | (ra << 16) | (sh << 11) | (mb << 6) | (me << 1);
+    };
+    const std::uint32_t cmplwi_cr6_r3_2 = (10u << 26) | (6u << 23) | (3u << 16) | 2u;
+    const std::uint32_t lwzx_r0_r12_r0 = (31u << 26) | (0u << 21) | (12u << 16) | (0u << 11) | (23u << 1);
+    const std::vector<std::uint32_t> text = {
+        bl_word(base, dispatcher),                                     // +0x00 entry point
+        lis_word(11u, static_cast<std::uint16_t>(comparator >> 16)),   // +0x04
+        addi_word(6u, 11u, static_cast<std::uint16_t>(comparator)),    // +0x08 qsort(..., cmp)
+        kBlr,                                                          // +0x0C
+        cmplwi_cr6_r3_2,                                               // +0x10 dispatcher
+        bc_word(base + 0x14u, case2, 12u, 25u),                        // +0x14 bgt cr6, default
+        lis_word(12u, static_cast<std::uint16_t>(table >> 16)),        // +0x18
+        addi_word(12u, 12u, static_cast<std::uint16_t>(table)),        // +0x1C
+        rlwinm(0u, 3u, 2u, 0u, 29u),                                   // +0x20 index * 4
+        lwzx_r0_r12_r0,                                                // +0x24
+        mtctr_word(0u),                                                // +0x28
+        kBctr,                                                         // +0x2C
+        case0, case1, case2,                                           // +0x30 jump table
+        addi_word(3u, 3u, 1u),                                         // +0x3C case 0
+        addi_word(3u, 3u, 2u),                                         // +0x40 case 1
+        kBlr,                                                          // +0x44 case 2 / default
+        0u,                                                            // +0x48 alignment padding
+        lwz_word(11u, 3u, 0),                                          // +0x4C comparator
+        kBlr,                                                          // +0x50
+    };
+    AnalysisReport report;
+    const auto test_root = root / "switch_and_address_taken";
+    assert(run(make_xex(text), std::nullopt, report, test_root, std::nullopt, 1u));
+    const auto* owner = find_function(report, dispatcher);
+    assert(owner != nullptr && owner->compiled);
+    for (const auto case_start : {case0, case1, case2}) {
+      assert(owns_address(*owner, case_start) && "switch cases are blocks of their dispatcher");
+      assert(find_function(report, case_start) == nullptr);
+      const auto* entry = find_entry(report, case_start);
+      assert(entry != nullptr && entry->owner_function == dispatcher &&
+             "every case, fall-through ones included, is a dispatchable block");
+    }
+    assert(report.diagnostics.resolved_indirect_via_jump_table >= 1u);
+    assert(std::none_of(report.unresolved.begin(), report.unresolved.end(),
+                        [&](const auto& site) { return site.address == base + 0x2Cu; }));
+    const auto* callback = find_function(report, comparator);
+    assert(callback != nullptr && callback->compiled);
+    assert(has_source(*callback, DiscoverySource::AddressTakenCode));
+    assert(find_function(report, table) == nullptr && "a switch table after bctr is data");
+
+    DriverOptions options{};
+    options.input = test_root / "fixture.xex";
+    options.output = test_root / "generated";
+    remove_all_tolerant(test_root);
+    std::filesystem::create_directories(test_root);
+    const auto xex_bytes = make_xex(text);
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+    std::string error;
+    assert(generate_project(options, report, error) && error.empty());
+    remove_all_tolerant(test_root);
+  }
+  std::cout << "  [PASS] Switch tables and address-taken callbacks are compiled, not interpreted\n";
+
   std::cout << "All Recomp Analysis V3 + Gen 6 discovery quality tests passed!\n";
   return 0;
 }
