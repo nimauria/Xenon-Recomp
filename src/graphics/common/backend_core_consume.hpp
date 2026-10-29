@@ -154,6 +154,22 @@ void BackendCore<Derived, Api>::consume_resolve(
     return;
   }
   const auto& rectangle = resolve_plan.rectangle;
+  // Every resolve: where the guest asked EDRAM to be copied, on the probe
+  // logs' clock, so a screen that samples a stale copy can be traced back.
+  xenon::logging::append_probe_log(
+      "resolve_diag.log",
+      "%lld resolve dest=0x%08X pitch=%u height=%u fmt=%u cmd=%u depth=%u samples=%u "
+      "rect=(%d,%d)-(%d,%d) surface_pitch=%u color_tile=%u clear=%u\n",
+      static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count()),
+      resolve_plan.copy.destination_base, unsigned(resolve_plan.copy.destination_pitch),
+      unsigned(resolve_plan.copy.destination_height),
+      unsigned(resolve_plan.copy.destination_format), unsigned(resolve_plan.copy.command),
+      resolve_plan.depth ? 1u : 0u, unsigned(resolve_plan.samples), rectangle.left,
+      rectangle.top, rectangle.right, rectangle.bottom, unsigned(state.raster.surface_pitch),
+      unsigned(state.color_targets[resolve_plan.source_color_slot].base_tile),
+      resolve_plan.copy.color_clear_enabled ? 1u : 0u);
   if (rectangle.empty()) return;
   if (state.copy.command != CopyCommand::Raw &&
       state.copy.command != CopyCommand::Convert) {

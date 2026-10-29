@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
