@@ -214,9 +214,8 @@ constexpr std::uint32_t XamTaskShouldExit = 0x01B3;
 // ---------------------------------------------------------------------------
 // XMsg* app-message IPC (xam_table.inc 0x1F4/0x1F7/0x1F8/0x1FC) - routes
 // through a registered in-process "XAM app" dispatcher (dashboard blades,
-// content apps). Xenon has no such app registry, so every call resolves to
-// the real "app undefined" outcome real hardware itself reports for an
-// unregistered app id - not a fabricated success.
+// content apps). XMP playback-controller queries and changes have a shared
+// stateful dispatcher. Other app ids report the "app undefined" outcome.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t XMsgInProcessCall = 0x01F4;
 constexpr std::uint32_t XMsgStartIORequest = 0x01F7;

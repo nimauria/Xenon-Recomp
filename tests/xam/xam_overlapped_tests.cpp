@@ -25,6 +25,7 @@
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xam/content_manager.hpp"
 #include "xenon/xam/types.hpp"
+#include "xenon/xam/xam_session.hpp"
 
 namespace xenon::xam {
 bool register_content_exports(core::ExportRegistry& registry, ContentManager& content_manager,
@@ -35,6 +36,10 @@ bool register_msg_exports(core::ExportRegistry& registry, core::XenonSession& se
 
 namespace xenon::core {
 struct SessionExecutionTestAccess {
+  static void configure_xam(XenonSession& session) {
+    session.xam_ = std::make_unique<xenon::xam::XamSession>();
+    assert(session.xam_->initialize());
+  }
   static void configure(XenonSession& session,
                         std::shared_ptr<xenon::memory::AddressSpace> memory) {
     session.config_.enable_logging = false;
@@ -261,6 +266,79 @@ void test_a_stack_passed_overlapped_is_honoured() {
   f.address_space->write32_be(f.stack_top + 0x54u, 0u);
 }
 
+void test_xmp_controller_messages_share_sync_and_async_state() {
+  Fixture f;
+  core::SessionExecutionTestAccess::configure_xam(f.session);
+  auto& notifications = f.session.xam()->notifications();
+  const auto listener = notifications.create_listener(1u << 5u, 0u);
+  const auto args = f.alloc(12);
+  const auto output = f.alloc(8);
+  const auto query = [&] {
+    f.address_space->write32_be(args, 2u);
+    f.address_space->write32_be(args + 4u, output);
+    f.address_space->write32_be(args + 8u, output + 4u);
+    f.address_space->write32_be(output, 0xDEADBEEFu);
+    f.address_space->write32_be(output + 4u, 0xDEADBEEFu);
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = 0xFAu;
+    cpu.gpr[4] = 0x7001Bu;
+    cpu.gpr[5] = args;
+    // Sync wrappers pass zero as the length for this fixed-size message.
+    assert(f.call(0x1F4u, cpu) == 0u);
+    assert(f.address_space->read32_be(output + 4u) == 0u);
+    return f.address_space->read32_be(output);
+  };
+  assert(query() == 0u);
+
+  const auto [event_handle, event] = f.event();
+  const auto o = f.overlapped(event_handle);
+  f.address_space->write32_be(args, 0u);
+  f.address_space->write32_be(args + 4u, 1u);
+  f.address_space->write32_be(args + 8u, 0u);
+  cpu::CpuState cpu{};
+  cpu.gpr[3] = 0xFAu;
+  cpu.gpr[4] = 0x7001Au;
+  cpu.gpr[5] = o;
+  cpu.gpr[6] = args;
+  cpu.gpr[7] = 12u;
+  assert(f.call(0x1FCu, cpu) == kErrorIoPending);
+  assert(f.result_of(o) == 0u && f.extended_of(o) == 0u);
+  std::uint32_t notification_id{}, notification_param{};
+  assert(notifications.dequeue(listener.get(), 0u, notification_id, notification_param));
+  assert(notification_id == 0x0A000003u && notification_param == 1u);
+  assert(query() == 1u);
+  assert(!notifications.dequeue(listener.get(), 0u, notification_id, notification_param));
+
+  // Invalid changes leave the previous controller intact.
+  f.address_space->write32_be(args, 2u);
+  f.address_space->write32_be(args + 4u, 7u);
+  f.address_space->write32_be(args + 8u, 1u);
+  cpu = {};
+  cpu.gpr[3] = 0xFAu;
+  cpu.gpr[4] = 0x7001Au;
+  cpu.gpr[6] = args;
+  cpu.gpr[7] = 12u;
+  assert(f.call(0x1F7u, cpu) == 0x80070057u);
+  assert(query() == 1u);
+
+  // State belongs to the registration/session, not a process-wide singleton.
+  Fixture other;
+  const auto other_args = other.alloc(12);
+  const auto other_output = other.alloc(8);
+  other.address_space->write32_be(other_args, 2u);
+  other.address_space->write32_be(other_args + 4u, other_output);
+  other.address_space->write32_be(other_args + 8u, other_output + 4u);
+  cpu = {};
+  cpu.gpr[3] = 0xFAu;
+  cpu.gpr[4] = 0x7001Bu;
+  cpu.gpr[5] = other_args;
+  assert(other.call(0x1F4u, cpu) == 0u);
+  assert(other.address_space->read32_be(other_output) == 0u);
+  cpu = {};
+  cpu.gpr[3] = 0xFEu;
+  assert(other.call(0x1F4u, cpu) == 0x490u);
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +349,7 @@ int main() {
   test_get_overlapped_result_reads_back_a_completed_call();
   test_enumerate_reports_the_item_count_through_the_overlapped();
   test_a_stack_passed_overlapped_is_honoured();
+  test_xmp_controller_messages_share_sync_and_async_state();
   std::cout << "All XAM XOVERLAPPED tests passed!\n";
   return 0;
 }

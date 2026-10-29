@@ -272,4 +272,14 @@ AC6 and future offline titles can obtain normal Xbox user/profile/storage state 
 
 ## History
 
+**2026-10-29**: XMsg sync and async dispatch now share session-local XMP
+playback-controller state for messages `0x7001A` (set) and `0x7001B` (get).
+Queries write both controller and lock outputs; changes update subsequent
+queries and broadcast `XN_XMP_PLAYBACKCONTROLLERCHANGED`. Async requests use
+the existing XOVERLAPPED completion path. Unknown apps still report not found;
+other XMP messages explicitly report not implemented, and the exports remain
+marked partial. This does not implement system playlist playback. Regression
+coverage in `xenon_xam_overlapped_tests` checks sync/async state, notifications,
+validation and isolation between sessions.
+
 **2026-09-19**: Phase 1 foundation completed. User management, default offline user, and core user exports implemented.
