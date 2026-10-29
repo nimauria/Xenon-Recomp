@@ -168,6 +168,7 @@ void XenonSession::shutdown() {
   }
 
   loaded_xex_.reset();
+  import_thunks_.clear();
   effective_identity_.reset();
   content_graph_.reset();
   main_cpu_state_.reset();

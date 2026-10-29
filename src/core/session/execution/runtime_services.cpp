@@ -24,46 +24,46 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
     return {cpu::FlowReason::Trap, state.cia, 0};
   }
 
-  // Look up compiled code
-  auto result = code_cache_->execute(target, state, memory, *this);
-  if (result) {
-    return *result;
-  }
-
   // This is the real "recompiled PPC -> import -> ExportRegistry" boundary.
   // Native XEX function imports have two records: a type-0 address record and
   // a type-1 callable thunk. Only type-1 is a callable import. Standalone
   // type-0 records are imported variables and are bound to guest-backed
-  // system variables during load_game().
-  if (loaded_xex_) {
-    for (const auto& import : loaded_xex_->image.imports) {
-      if (!import.callable() || import.guest_thunk != target) continue;
-      const bool handled = external_call(import.module, import.ordinal, state, memory);
-      if (handled) {
-        // Fallthrough (non-terminal) matches normal call/return semantics:
-        // execution continues at the instruction after the `bl`.
-        return {cpu::FlowReason::Fallthrough, state.cia, 0u};
-      }
-      // A recognized import call site whose specific export this build does
-      // not implement is still a genuine, unrecoverable call failure from
-      // the guest program's point of view. Returning a non-terminal result
-      // here would be silently swallowed by Op::Call/CallIndirect's
-      // `if(rr.terminal()) return rr;` check, letting execution fall through
-      // to the next instruction with a stale, unspecified r3 as though the
-      // call had quietly succeeded - exactly the "silent ignore"/"return
-      // zero and continue" pattern the completion contract forbids. Trap is
-      // terminal, so it propagates all the way out to run_execution(),
-      // which already turns a terminal Trap into a dispatched guest
-      // exception instead of pretending nothing happened.
-      if (config_.enable_export_diagnostics) {
-        std::scoped_lock console_log_lock(console_log_mutex());
-        std::cout << "[XenonSession] Unresolved import call: " << import.module << "!"
-                  << (import.symbol.empty() ? std::to_string(import.ordinal) : import.symbol)
-                  << " at 0x" << std::hex << target << std::dec << std::endl;
-      }
-      return {cpu::FlowReason::Trap, target,
-              static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
+  // system variables during load_game(). A thunk is loader metadata, never
+  // compiled code, so it is resolved before the code cache.
+  if (const auto thunk = import_thunks_.find(target); thunk != import_thunks_.end()) {
+    const auto& import = thunk->second;
+    const bool handled =
+        dispatch_export(import.module, import.ordinal,
+                        export_registry_.resolve_key(import.export_key), state, memory);
+    if (handled) {
+      // Fallthrough (non-terminal) matches normal call/return semantics:
+      // execution continues at the instruction after the `bl`.
+      return {cpu::FlowReason::Fallthrough, state.cia, 0u};
     }
+    // A recognized import call site whose specific export this build does
+    // not implement is still a genuine, unrecoverable call failure from
+    // the guest program's point of view. Returning a non-terminal result
+    // here would be silently swallowed by Op::Call/CallIndirect's
+    // `if(rr.terminal()) return rr;` check, letting execution fall through
+    // to the next instruction with a stale, unspecified r3 as though the
+    // call had quietly succeeded - exactly the "silent ignore"/"return
+    // zero and continue" pattern the completion contract forbids. Trap is
+    // terminal, so it propagates all the way out to run_execution(),
+    // which already turns a terminal Trap into a dispatched guest
+    // exception instead of pretending nothing happened.
+    if (config_.enable_export_diagnostics) {
+      std::scoped_lock console_log_lock(console_log_mutex());
+      std::cout << "[XenonSession] Unresolved import call: " << import.module << "!"
+                << import.ordinal << " at 0x" << std::hex << target << std::dec << std::endl;
+    }
+    return {cpu::FlowReason::Trap, target,
+            static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
+  }
+
+  // Look up compiled code
+  auto result = code_cache_->execute(target, state, memory, *this);
+  if (result) {
+    return *result;
   }
 
   // A thunk minted by XexGetProcedureAddress for a system export: dispatch it
@@ -99,13 +99,22 @@ cpu::ExecutionResult XenonSession::call(cpu::GuestAddress target,
           static_cast<std::uint32_t>(kernel::ExceptionCode::ProcedureNotFound)};
 }
 
-bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
-  if (module_registry_ && module_registry_->is_thunk(target)) return true;
-  if (!loaded_xex_) return false;
+void XenonSession::index_import_thunks() {
+  import_thunks_.clear();
+  if (!loaded_xex_) return;
   for (const auto& import : loaded_xex_->image.imports) {
-    if (import.callable() && import.guest_thunk == target) return true;
+    if (!import.callable()) continue;
+    // First record wins, as the linear import scan this index replaces did.
+    import_thunks_.try_emplace(
+        import.guest_thunk,
+        ImportThunkBinding{import.module, import.ordinal,
+                           ExportRegistry::ordinal_key(import.module, import.ordinal)});
   }
-  return false;
+}
+
+bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
+  if (import_thunks_.contains(target)) return true;
+  return module_registry_ && module_registry_->is_thunk(target);
 }
 
 cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,
@@ -175,6 +184,13 @@ bool XenonSession::external_call(std::string_view module,
                                  std::uint32_t ordinal,
                                  cpu::CpuState& state,
                                  cpu::MemoryPort& memory) {
+  return dispatch_export(module, ordinal, export_registry_.resolve(module, ordinal), state,
+                         memory);
+}
+
+bool XenonSession::dispatch_export(std::string_view module, std::uint32_t ordinal,
+                                   const ExportDescriptor* descriptor, cpu::CpuState& state,
+                                   cpu::MemoryPort& memory) {
   // Resolves to the real calling guest thread's id via
   // kernel::ThreadManager's thread_local current-thread slot, which every
   // guest-executing host thread registers itself into once at the start of
@@ -222,7 +238,6 @@ bool XenonSession::external_call(std::string_view module,
   const auto call_address = context.call_address;
   const auto call_lr = state.lr;
   const auto call_ctr = state.ctr;
-  const auto* descriptor = export_registry_.resolve(module, ordinal);
   const bool track_in_flight = export_trace_.enabled() && calling_thread_id != 0u;
   if (track_in_flight) {
     std::scoped_lock lock(in_flight_exports_mutex_);
@@ -246,7 +261,11 @@ bool XenonSession::external_call(std::string_view module,
     return observer;
   };
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::BeforeKernelCall));
-  auto result = export_registry_.invoke(module, ordinal, context);
+  ExportCallResult result{};
+  if (descriptor) {
+    const bool handled = descriptor->handler(context);
+    result = {handled, handled, {}};
+  }
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::AfterKernelCall));
   if (track_in_flight) {
     std::scoped_lock lock(in_flight_exports_mutex_);
@@ -257,7 +276,7 @@ bool XenonSession::external_call(std::string_view module,
                        ordinal, call_address, call_lr, call_ctr, arguments,
                        state.gpr[3], descriptor != nullptr, result.handled, result.success);
 
-  {
+  if (logging::probe_logs_enabled()) {
     static std::mutex _seen_exports_mutex;
     static std::set<std::string> _seen_exports;
     const std::string _name = descriptor ? std::string(descriptor->name)

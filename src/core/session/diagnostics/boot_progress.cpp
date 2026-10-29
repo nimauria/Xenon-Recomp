@@ -23,6 +23,12 @@ void XenonSession::reach_boot_checkpoint(BootCheckpoint checkpoint) {
 // comment at each case) - never guessed.
 void XenonSession::observe_boot_checkpoint_from_export_call(
     std::string_view module, std::uint32_t ordinal, const cpu::CpuState& state) {
+  // Runs after every export call: leave before any string work unless the
+  // ordinal is one of the checkpoint exports below.
+  switch (ordinal) {
+    case 0x00D2u: case 0x00DFu: case 0x01F3u: case 0x0191u: case 0x0210u: case 0x025Cu: break;
+    default: return;
+  }
   // Real XEX import tables spell library names "xboxkrnl.exe"/"xam.xex" -
   // ExportRegistry::normalize_library() does the same lowercase+strip
   // internally but is private, so this matches its exact behavior locally

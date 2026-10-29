@@ -56,6 +56,7 @@ struct SessionExecutionTestAccess {
     import.guest_thunk = thunk;
     import.kind = xenon::xbox::XexImportKind::FunctionThunk;
     session.loaded_xex_->image.imports.push_back(import);
+    session.index_import_thunks();
     ExportDescriptor descriptor{};
     descriptor.library = std::move(library);
     descriptor.ordinal = ordinal;

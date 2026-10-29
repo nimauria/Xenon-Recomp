@@ -12,6 +12,10 @@ void XenonSession::record_compiled_lookup_miss(
     cpu::CompiledLookupKind kind) {
   auto* session = static_cast<XenonSession*>(observer);
   if (!session) return;
+  // Every call through an import thunk misses the compiled registry. A thunk
+  // is loader metadata, never a compile candidate (preparation rejects such
+  // observations), and recording it would take this lock on every kernel call.
+  if (session->is_recognized_import_thunk(target)) return;
   std::lock_guard<std::mutex> observation_lock(session->adaptive_observation_mutex_);
   // Runtime learning is evidence, not an unbounded telemetry sink. A hostile
   // or badly-corrupted target stream must not grow process memory forever.

@@ -96,6 +96,12 @@ const ExportDescriptor* ExportRegistry::resolve(std::string_view library,
   return it != ordinal_map_.end() ? &it->second : nullptr;
 }
 
+const ExportDescriptor* ExportRegistry::resolve_key(const std::string& ordinal_key) const {
+  std::shared_lock lock(mutex_);
+  auto it = ordinal_map_.find(ordinal_key);
+  return it != ordinal_map_.end() ? &it->second : nullptr;
+}
+
 const ExportDescriptor* ExportRegistry::resolve(std::string_view library,
                                                std::string_view name) const {
   std::shared_lock lock(mutex_);

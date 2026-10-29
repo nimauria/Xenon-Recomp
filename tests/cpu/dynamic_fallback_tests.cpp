@@ -213,6 +213,12 @@ int main() {
     const auto from_call = branch_context.try_dynamic_fallback(kThunk, CompiledLookupKind::Call);
     assert(from_call.handled && from_call.result.reason == FlowReason::Fallthrough);
     assert(session_runtime.call_count == 2);
+    // Regression (AC6 startup): every kernel call reaches the fallback this
+    // way, and its per-execution statistics and observations took two locks
+    // per call. An import is the runtime's dispatch, not interpreted guest code.
+    assert(branch_fallback.executed_blocks() == 0u &&
+           branch_fallback.fallback_unique_pc_count() == 0u &&
+           "import calls are not fallback executions");
   }
 
   // Guest self-modifying code invalidates the active fallback source snapshot.

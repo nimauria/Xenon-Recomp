@@ -114,6 +114,15 @@ class ExportRegistry {
   [[nodiscard]] const ExportDescriptor* resolve(std::string_view library,
                                                 std::string_view name) const;
 
+  // The lookup key resolve(library, ordinal) builds on every call. A caller
+  // that dispatches the same import repeatedly (an import thunk) builds it
+  // once and resolves with resolve_key(), which allocates nothing.
+  [[nodiscard]] static std::string ordinal_key(std::string_view library,
+                                               std::uint32_t ordinal) {
+    return make_ordinal_key(library, ordinal);
+  }
+  [[nodiscard]] const ExportDescriptor* resolve_key(const std::string& ordinal_key) const;
+
   // Invoke an export by library and ordinal
   [[nodiscard]] ExportCallResult invoke(std::string_view library,
                                        std::uint32_t ordinal,

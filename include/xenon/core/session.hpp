@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "xenon/core/boot_checkpoints.hpp"
@@ -709,6 +710,21 @@ class XenonSession final : public cpu::RuntimeServices {
   ExportRegistry export_registry_{};
   cpu::ExternalCallRegistry legacy_call_registry_{};
   std::optional<xbox::LoadedXex> loaded_xex_{};
+  // The loaded XEX's callable import thunks by guest address, each with its
+  // export lookup key built once: a title calls kernel exports (TLS, waits,
+  // critical sections) constantly, and per-call key building and a linear
+  // import scan made every one cost several allocations. Rebuilt by
+  // index_import_thunks() whenever loaded_xex_ is set.
+  struct ImportThunkBinding {
+    std::string module;
+    std::uint32_t ordinal{};
+    std::string export_key;
+  };
+  std::unordered_map<cpu::GuestAddress, ImportThunkBinding> import_thunks_{};
+  void index_import_thunks();
+  bool dispatch_export(std::string_view module, std::uint32_t ordinal,
+                       const ExportDescriptor* descriptor, cpu::CpuState& state,
+                       cpu::MemoryPort& memory);
   // Guest module records (XexGetModuleHandle) and dynamic export thunks
   // (XexGetProcedureAddress); consulted by call()/is_recognized_import_thunk()
   // alongside the loaded XEX's own import thunks. Created by init_exports().

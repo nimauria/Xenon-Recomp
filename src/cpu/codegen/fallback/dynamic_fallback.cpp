@@ -42,6 +42,15 @@ DynamicFallbackResult DynamicFallbackExecutor::callback(
 
 DynamicFallbackResult DynamicFallbackExecutor::try_execute(
     ExecutionContext& context, GuestAddress target, CompiledLookupKind kind) {
+  // An import call reaches the runtime's own export dispatch, not guest code
+  // this executor interprets: it carries no fallback statistics or
+  // observations, whose locks every kernel call would otherwise take.
+  if ((target & 3u) == 0u && context.runtime.is_recognized_import_thunk(target)) {
+    return {true, kind == CompiledLookupKind::Branch
+                      ? call_import_from_branch(context.runtime, target, context.state,
+                                                context.memory)
+                      : context.runtime.call(target, context.state, context.memory)};
+  }
   const auto site = context.state.cia;
   auto run_result = run(context, target, kind, 0u);
   if (run_result.public_result.handled) {

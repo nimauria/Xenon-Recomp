@@ -59,6 +59,7 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   }
 
   loaded_xex_ = std::move(loaded);
+  index_import_thunks();
   effective_identity_ =
       xbox::compute_effective_identity(base_image, has_title_update ? &patched_image : nullptr);
   if (config_.enable_logging) {
