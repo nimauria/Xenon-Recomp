@@ -188,6 +188,42 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
   build << "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
            "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
            "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
+           // A module is prepared on the machine that plays it, so generated
+           // code may use that machine's x86-64-v3 features (AVX2, FMA, BMI2,
+           // MOVBE): wider vector code and fewer instructions per byte-swapped
+           // guest access. The probe runs on the build machine; a CPU without
+           // them keeps the baseline. FP contraction stays off either way.
+           "option(XENON_GAME_X86_64_V3 \"Compile generated code for x86-64-v3 when this CPU supports it\" ON)\n"
+           "if(XENON_GAME_X86_64_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES \"AMD64|x86_64|amd64\")\n"
+           "  include(CheckCXXSourceRuns)\n"
+           "  check_cxx_source_runs([=[\n"
+           "#if defined(_MSC_VER)\n"
+           "#include <intrin.h>\n"
+           "static void cpuid(int r[4], int leaf, int sub) { __cpuidex(r, leaf, sub); }\n"
+           "static unsigned long long xgetbv0() { return _xgetbv(0); }\n"
+           "#else\n"
+           "#include <cpuid.h>\n"
+           "static void cpuid(int r[4], int leaf, int sub) { unsigned a, b, c, d; __cpuid_count(leaf, sub, a, b, c, d); r[0] = int(a); r[1] = int(b); r[2] = int(c); r[3] = int(d); }\n"
+           "static unsigned long long xgetbv0() { unsigned lo, hi; __asm__(\"xgetbv\" : \"=a\"(lo), \"=d\"(hi) : \"c\"(0)); return (unsigned long long)hi << 32 | lo; }\n"
+           "#endif\n"
+           "int main() {\n"
+           "  int r[4];\n"
+           "  cpuid(r, 1, 0);\n"
+           "  const bool fma = (r[2] >> 12) & 1, movbe = (r[2] >> 22) & 1, osxsave = (r[2] >> 27) & 1, avx = (r[2] >> 28) & 1;\n"
+           "  if (!fma || !movbe || !osxsave || !avx || (xgetbv0() & 6) != 6) return 1;\n"
+           "  cpuid(r, 7, 0);\n"
+           "  const bool avx2 = (r[1] >> 5) & 1, bmi1 = (r[1] >> 3) & 1, bmi2 = (r[1] >> 8) & 1;\n"
+           "  return avx2 && bmi1 && bmi2 ? 0 : 1;\n"
+           "}\n"
+           "]=] XENON_GAME_HOST_HAS_X86_64_V3)\n"
+           "  if(XENON_GAME_HOST_HAS_X86_64_V3)\n"
+           "    if(MSVC)\n"
+           "      target_compile_options(xenon_game PRIVATE /arch:AVX2)\n"
+           "    else()\n"
+           "      target_compile_options(xenon_game PRIVATE -march=x86-64-v3 -ffp-contract=off)\n"
+           "    endif()\n"
+           "  endif()\n"
+           "endif()\n"
            "set_property(TARGET xenon_game PROPERTY CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n";
   build.close();
   return static_cast<bool>(build);
