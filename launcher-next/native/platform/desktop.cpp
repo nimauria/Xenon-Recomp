@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #ifdef __APPLE__
 #include <libproc.h>
 #endif
@@ -99,6 +100,30 @@ bool process_running(ProcessIdentity identity) {
   CloseHandle(process);
   return running;
 }
+ProcessIdentity current_process_identity() {
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+    throw std::runtime_error("Cannot identify the launcher process");
+  return {GetCurrentProcessId(),
+          (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime};
+}
+bool stop_process(ProcessIdentity identity) {
+  const auto process =
+      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE,
+                  static_cast<DWORD>(identity.pid));
+  if (!process)
+    return !process_running(identity);
+  FILETIME created{}, exited{}, kernel{}, user{};
+  const bool matches = GetProcessTimes(process, &created, &exited, &kernel, &user) &&
+                       ((static_cast<std::uint64_t>(created.dwHighDateTime) << 32) |
+                        created.dwLowDateTime) == identity.created;
+  const bool stopped =
+      matches &&
+      (WaitForSingleObject(process, 0) != WAIT_TIMEOUT ||
+       (TerminateProcess(process, 1) && WaitForSingleObject(process, 5000) == WAIT_OBJECT_0));
+  CloseHandle(process);
+  return stopped;
+}
 #else
 namespace {
 std::uint64_t creation_token(pid_t pid) {
@@ -161,6 +186,22 @@ bool process_running(ProcessIdentity identity) {
   if (waitpid(pid, &status, WNOHANG) == pid)
     return false;
   return kill(pid, 0) == 0 && creation_token(pid) == identity.created;
+}
+ProcessIdentity current_process_identity() {
+  const auto pid = getpid();
+  return {static_cast<std::uint64_t>(pid), creation_token(pid)};
+}
+bool stop_process(ProcessIdentity identity) {
+  if (!process_running(identity))
+    return true;
+  if (kill(static_cast<pid_t>(identity.pid), SIGTERM) != 0)
+    return false;
+  for (unsigned i = 0; i < 50; ++i) {
+    if (!process_running(identity))
+      return true;
+    usleep(100000);
+  }
+  return false;
 }
 void open_desktop_target(const std::string &target) {
 #ifdef __APPLE__

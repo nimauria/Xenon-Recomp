@@ -1,0 +1,1027 @@
+{
+  "schema": "xenon.module-entry",
+  "version": 1,
+  "id": "org.nimauria.project-gracemeria",
+  "name": "Project Gracemeria",
+  "type": "game",
+  "description": "Xenon game module for Ace Combat 6: Fires of Liberation. The module provides revision-scoped AC6 recompilation metadata and compatibility data while Xenon supplies the shared Xbox 360 runtime.",
+  "publisher": {
+    "name": "Nimauria",
+    "github": "nimauria",
+    "verified": true
+  },
+  "license": "MIT",
+  "repository": {
+    "provider": "github",
+    "owner": "nimauria",
+    "name": "Project-Gracemeria",
+    "defaultBranch": "main"
+  },
+  "releaseAssets": {
+    "windows-x64": "project-gracemeria-windows-x64.xenonmod.zip"
+  },
+  "tags": [
+    "game",
+    "ace-combat-6",
+    "flight",
+    "combat",
+    "static-recompilation",
+    "project-gracemeria"
+  ],
+  "launcher": {
+    "gameTitle": "Ace Combat 6: Fires of Liberation",
+    "moduleName": "Project Gracemeria",
+    "tileArt": "assets/org.nimauria.project-gracemeria/game-art.webp",
+    "heroArt": "assets/org.nimauria.project-gracemeria/background.webp",
+    "description": "Take to the skies of Strangereal in Ace Combat 6: Fires of Liberation through Project Gracemeria and the Xenon native recompilation runtime.",
+    "renderer": "Automatic",
+    "mode": "Offline",
+    "regions": [
+      "NTSC-U"
+    ],
+    "contentStateLabel": "User-provided Xbox 360 content required",
+    "showDlcCatalog": true,
+    "compatibility": {
+      "status": "development",
+      "label": "Source migration complete",
+      "summary": "The Xenon module/source migration is complete for the US retail TU0 profile. Real Ace Combat 6 boot validation, effective title-update profiles and PAL fixed-address profiles require legally supplied game content."
+    }
+  },
+  "game": {
+    "title": "Ace Combat 6: Fires of Liberation",
+    "titleId": "4E4D07D1",
+    "developer": "Project Aces",
+    "publisher": "Bandai Namco Games",
+    "platform": "Xbox 360",
+    "releaseYear": 2007,
+    "genres": [
+      "combat flight simulation",
+      "action"
+    ],
+    "supportedRegions": [
+      "NTSC-U"
+    ]
+  },
+  "content": {
+    "identities": [
+      {
+        "titleId": "4E4D07D1",
+        "mediaIds": [
+          "531C30BE"
+        ],
+        "discNumber": 1
+      }
+    ],
+    "identityPolicy": "Fixed-address analysis metadata is enabled only for the US retail base/TU0 profile identified by Media ID 531C30BE. PAL and effective title-update revisions require their own verified module profiles before addresses are enabled."
+  },
+  "capabilities": [
+    "game-identification",
+    "dlc-catalog",
+    "save-data",
+    "offline-launch",
+    "module-settings",
+    "native-recompilation"
+  ],
+  "dlc": [
+    {
+      "id": "ac6-ace-of-aces-mission-01",
+      "name": "ACE OF ACES MISSION 01",
+      "category": "mission",
+      "description": "Ace of Aces variant of campaign mission: Invasion of Gracemeria.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 350
+      },
+      "group": "ACE OF ACES"
+    },
+    {
+      "id": "ac6-ace-of-aces-mission-02",
+      "name": "ACE OF ACES MISSION 02",
+      "category": "mission",
+      "description": "Ace of Aces variant of campaign mission: Vitoze Aerial Defense.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "ACE OF ACES"
+    },
+    {
+      "id": "ac6-ace-of-aces-mission-03",
+      "name": "ACE OF ACES MISSION 03",
+      "category": "mission",
+      "description": "Ace of Aces variant of campaign mission: Sipli Field.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 350
+      },
+      "group": "ACE OF ACES"
+    },
+    {
+      "id": "ac6-ace-of-aces-mission-04",
+      "name": "ACE OF ACES MISSION 04",
+      "category": "mission",
+      "description": "Ace of Aces variant of campaign mission: Bartolomeo Fortress.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 350
+      },
+      "group": "ACE OF ACES"
+    },
+    {
+      "id": "ac6-ace-of-aces-mission-09",
+      "name": "ACE OF ACES MISSION 09",
+      "category": "mission",
+      "description": "Ace of Aces variant of campaign mission: Heavy Command Cruiser.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 350
+      },
+      "group": "ACE OF ACES"
+    },
+    {
+      "id": "ac6-team-battle-dl1",
+      "name": "TEAM BATTLE DL1",
+      "category": "multiplayer",
+      "description": "Additional Team Battle multiplayer content.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 100,
+        "laterFree": true
+      },
+      "group": "MULTIPLAYER"
+    },
+    {
+      "id": "ac6-battle-royale-dl1",
+      "name": "BATTLE ROYALE DL1",
+      "category": "multiplayer",
+      "description": "Additional Battle Royale multiplayer content.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 100,
+        "laterFree": true
+      },
+      "group": "MULTIPLAYER"
+    },
+    {
+      "id": "ac6-co-op-battle-dl1",
+      "name": "CO-OP BATTLE DL1",
+      "category": "multiplayer",
+      "description": "Additional cooperative multiplayer battle content.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300,
+        "laterFree": true
+      },
+      "group": "MULTIPLAYER"
+    },
+    {
+      "id": "ac6-siege-battle-dl1",
+      "name": "SIEGE BATTLE DL1",
+      "category": "multiplayer",
+      "description": "Additional Siege Battle multiplayer content.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300,
+        "laterFree": true
+      },
+      "group": "MULTIPLAYER"
+    },
+    {
+      "id": "ac6-co-op-battle-dl2",
+      "name": "CO-OP BATTLE DL2",
+      "category": "multiplayer",
+      "description": "Additional cooperative multiplayer battle content.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300,
+        "laterFree": true
+      },
+      "group": "MULTIPLAYER"
+    },
+    {
+      "id": "ac6-f-15e-mobius",
+      "name": "F-15E -MOBIUS-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK00.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "preorder"
+      },
+      "group": "AIRCRAFT PACK00"
+    },
+    {
+      "id": "ac6-f-15e-yellow-squadron",
+      "name": "F-15E -YELLOW SQUADRON-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK00.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "preorder"
+      },
+      "group": "AIRCRAFT PACK00"
+    },
+    {
+      "id": "ac6-f-14d-halloween",
+      "name": "F-14D -HALLOWEEN-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK01.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200,
+        "laterFree": true
+      },
+      "group": "AIRCRAFT PACK01"
+    },
+    {
+      "id": "ac6-f-15e-active-stripes",
+      "name": "F-15E -ACTIVE STRIPES-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK01.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK01"
+    },
+    {
+      "id": "ac6-f-16c-type-ace2",
+      "name": "F-16C -TYPE ACE2-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK01.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK01"
+    },
+    {
+      "id": "ac6-f-16c-scarface-emblem",
+      "name": "F-16C -SCARFACE EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK01.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0,
+        "removedBeforeFinalDelisting": true
+      },
+      "group": "AIRCRAFT PACK01"
+    },
+    {
+      "id": "ac6-su-33-the-idolmaster-miki",
+      "name": "Su-33 -THE IDOLMASTER MIKI-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK02.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK02"
+    },
+    {
+      "id": "ac6-f-16c-historic-windhover",
+      "name": "F-16C -HISTORIC WINDHOVER-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK02.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK02"
+    },
+    {
+      "id": "ac6-mirage-2000-5-experimental",
+      "name": "Mirage 2000-5 -EXPERIMENTAL-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK02.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK02"
+    },
+    {
+      "id": "ac6-a-10a-thunder-shark",
+      "name": "A-10A -THUNDER SHARK-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK02.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK02"
+    },
+    {
+      "id": "ac6-f-a-18f-scarface-emblem",
+      "name": "F/A-18F -SCARFACE EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK02.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK02"
+    },
+    {
+      "id": "ac6-mirage-2000-5-scarface-emblem",
+      "name": "Mirage 2000-5 -SCARFACE EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-f-22a-mobius",
+      "name": "F-22A -MOBIUS-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-f-15e-cipher",
+      "name": "F-15E -CIPHER-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-f-15e-pixy",
+      "name": "F-15E -PIXY-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-a-10a-xmas",
+      "name": "A-10A -XMAS-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200,
+        "laterFree": true
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-f-117a-the-idolmaster-yukiho",
+      "name": "F-117A -THE IDOLMASTER YUKIHO-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK03.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK03"
+    },
+    {
+      "id": "ac6-cfa-44-prototype",
+      "name": "CFA-44 -PROTOTYPE-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-su-47-the-idolmaster-miki-ex",
+      "name": "Su-47 -THE IDOLMASTER MIKI-EX-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-tornado-gr-4-raging-shark",
+      "name": "Tornado GR.4 -RAGING SHARK-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-f-14d-razgriz",
+      "name": "F-14D -RAZGRIZ-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-su-33-yellow-squadron",
+      "name": "Su-33 -YELLOW SQUADRON-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-typhoon-upeo-emblem",
+      "name": "Typhoon -UPEO EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK04.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK04"
+    },
+    {
+      "id": "ac6-f-117a-general-emblem",
+      "name": "F-117A -GENERAL EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK05.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0,
+        "removedBeforeFinalDelisting": true
+      },
+      "group": "AIRCRAFT PACK05"
+    },
+    {
+      "id": "ac6-razgriz-set-01",
+      "name": "RAZGRIZ SET 01",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK05.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK05"
+    },
+    {
+      "id": "ac6-mirage-2000-5-advanced",
+      "name": "Mirage 2000-5 -ADVANCED-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK05.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200,
+        "laterFree": true
+      },
+      "group": "AIRCRAFT PACK05"
+    },
+    {
+      "id": "ac6-su-33-crimson-wing",
+      "name": "Su-33 -CRIMSON WING-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK05.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK05"
+    },
+    {
+      "id": "ac6-f-15e-the-idolmaster-chihaya",
+      "name": "F-15E -THE IDOLMASTER CHIHAYA-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK05.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK05"
+    },
+    {
+      "id": "ac6-f-22a-gryphus-emblem",
+      "name": "F-22A -GRYPHUS EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0,
+        "removedBeforeFinalDelisting": true
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-razgriz-set-02",
+      "name": "RAZGRIZ SET 02",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-f-22a-indigo-wing",
+      "name": "F-22A -INDIGO WING-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-f-14d-zipang",
+      "name": "F-14D -ZIPANG-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200,
+        "laterFree": true
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-f-22a-the-idolmaster-haruka",
+      "name": "F-22A -THE IDOLMASTER HARUKA-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-mirage-2000-5-the-idolmaster-yayoi",
+      "name": "Mirage 2000-5 -THE IDOLMASTER YAYOI-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK06.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK06"
+    },
+    {
+      "id": "ac6-orange-violet-set",
+      "name": "ORANGE, VIOLET SET",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK07.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "AIRCRAFT PACK07"
+    },
+    {
+      "id": "ac6-typhoon-rot",
+      "name": "Typhoon -ROT-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK07.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200,
+        "laterFree": true
+      },
+      "group": "AIRCRAFT PACK07"
+    },
+    {
+      "id": "ac6-f-16c-pj",
+      "name": "F-16C -PJ-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK07.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0,
+        "removedBeforeFinalDelisting": true
+      },
+      "group": "AIRCRAFT PACK07"
+    },
+    {
+      "id": "ac6-razgriz-set-03",
+      "name": "RAZGRIZ SET 03",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK07.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK07"
+    },
+    {
+      "id": "ac6-rafale-m-the-idolmaster-iori",
+      "name": "Rafale M -THE IDOLMASTER IORI-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK07.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK07"
+    },
+    {
+      "id": "ac6-su-33-type-ace2",
+      "name": "Su-33 -TYPE ACE2-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK08.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK08"
+    },
+    {
+      "id": "ac6-su-47-grabacr-emblem",
+      "name": "Su-47 -GRABACR EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK08.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK08"
+    },
+    {
+      "id": "ac6-razgriz-set-04",
+      "name": "RAZGRIZ SET 04",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK08.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "AIRCRAFT PACK08"
+    },
+    {
+      "id": "ac6-jungle-flamingo-set",
+      "name": "JUNGLE, FLAMINGO SET",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK08.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "AIRCRAFT PACK08"
+    },
+    {
+      "id": "ac6-the-idolmaster-ami-mami-set",
+      "name": "THE IDOLMASTER AMI, MAMI SET",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK08.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK08"
+    },
+    {
+      "id": "ac6-a-10a-distant-thunder",
+      "name": "A-10A -DISTANT THUNDER-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-typhoon-type-ace3",
+      "name": "Typhoon -TYPE ACE3-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-f-14d-the-idolmaster-azusa",
+      "name": "F-14D -THE IDOLMASTER AZUSA-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-su-47-gault",
+      "name": "Su-47 -GAULT-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-f-14d-wardog-emblem",
+      "name": "F-14D -WARDOG EMBLEM-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-f-a-18f-the-idolmaster-ritsuko",
+      "name": "F/A-18F -THE IDOLMASTER RITSUKO-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-dark-shining-set",
+      "name": "DARK, SHINING SET",
+      "category": "aircraft-set",
+      "description": "Aircraft set associated with Ace Combat 6 Aircraft PACK09.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 300
+      },
+      "group": "AIRCRAFT PACK09"
+    },
+    {
+      "id": "ac6-cfa-44-aces",
+      "name": "CFA-44 -ACES-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK10.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 200
+      },
+      "group": "AIRCRAFT PACK10"
+    },
+    {
+      "id": "ac6-rafale-m-espada",
+      "name": "Rafale M -ESPADA-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK10.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 0
+      },
+      "group": "AIRCRAFT PACK10"
+    },
+    {
+      "id": "ac6-a-10a-the-idolmaster-sp",
+      "name": "A-10A -THE IDOLMASTER SP-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK10.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 100
+      },
+      "group": "AIRCRAFT PACK10"
+    },
+    {
+      "id": "ac6-typhoon-the-idolmaster-makoto",
+      "name": "Typhoon -THE IDOLMASTER MAKOTO-",
+      "category": "aircraft-skin",
+      "description": "Aircraft skin/add-on associated with Ace Combat 6 Aircraft PACK10.",
+      "optional": true,
+      "contentIds": [],
+      "identityStatus": "pending-stfs-header-verification",
+      "historical": {
+        "marketplaceStatus": "released",
+        "priceMsp": 400
+      },
+      "group": "AIRCRAFT PACK10"
+    }
+  ],
+  "historicalUnreleased": [
+    {
+      "name": "BATTLE ROYALE DL2",
+      "category": "multiplayer",
+      "status": "cancelled",
+      "installable": false
+    }
+  ],
+  "sources": [
+    {
+      "name": "Xbox Store - Ace Combat 6: Fires of Liberation",
+      "url": "https://www.xbox.com/en-GB/games/store/ace-combat-6-fires-of-liberation/BXBTDPZSVFT4/0001"
+    },
+    {
+      "name": "Ace Combat Wiki - Ace Combat 6 DLC",
+      "url": "https://acecombat.wiki.gg/wiki/Ace_Combat_6:_Fires_of_Liberation/DLC"
+    }
+  ]
+}

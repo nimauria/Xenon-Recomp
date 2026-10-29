@@ -29,7 +29,13 @@ set_target_properties(xenon_launcher_next PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$
 add_custom_target(xenon_launcher_next_assets ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/dist" "$<TARGET_FILE_DIR:xenon_launcher_next>/web"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/settings.json" "$<TARGET_FILE_DIR:xenon_launcher_next>/settings-schema.json")
-add_dependencies(xenon_launcher_next xenon_launcher_next_assets)
+add_dependencies(xenon_launcher_next xenon_launcher_next_assets xenon_launcher_updater)
+add_custom_command(TARGET xenon_launcher_next_assets POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/module-catalog-fallback.json" "$<TARGET_FILE_DIR:xenon_launcher_next>/module-catalog-fallback.json"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/picosha2/LICENSE" "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses/PicoSHA2-LICENSE.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/miniz/LICENSE" "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses/miniz-LICENSE.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/nlohmann/LICENSE.MIT" "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses/nlohmann-JSON-LICENSE.txt")
 foreach(asset IN LISTS CEF_BINARY_FILES)
   add_custom_command(TARGET xenon_launcher_next POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_BINARY_DIR}/${asset}" "$<TARGET_FILE_DIR:xenon_launcher_next>/${asset}")
 endforeach()

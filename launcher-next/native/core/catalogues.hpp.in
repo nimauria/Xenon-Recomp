@@ -1,0 +1,7 @@
+#pragma once
+#include "core/state_file.hpp"
+namespace xenon::launcher_next {
+inline const Json& settings_definitions(){static const auto value=Json::parse(R"XENON_SETTINGS(@XENON_SETTINGS_JSON@)XENON_SETTINGS");return value;}
+inline const Json& profile_runtime_definitions(){static const auto value=Json::parse(R"XENON_PROFILE(@XENON_PROFILE_JSON@)XENON_PROFILE");return value;}
+inline const Json& profile_definitions(){static const auto value=Json::parse(R"XENON_PROFILES(@XENON_PROFILES_JSON@)XENON_PROFILES");return value;}
+}

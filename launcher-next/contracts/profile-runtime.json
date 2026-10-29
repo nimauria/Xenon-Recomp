@@ -1,0 +1,189 @@
+[
+  {
+    "key": "runtime/graphicsBackend",
+    "category": "runtime",
+    "type": "enum",
+    "label": "Renderer",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Vulkan",
+        "value": "Vulkan"
+      },
+      {
+        "label": "Direct3D 12",
+        "value": "Direct3D 12"
+      }
+    ],
+    "description": "Override the launcher renderer for games started with this profile."
+  },
+  {
+    "key": "graphics/shaderCache",
+    "category": "graphics",
+    "type": "bool",
+    "label": "Shader cache",
+    "default": true,
+    "options": [],
+    "description": "Enable or disable shader caching for this profile."
+  },
+  {
+    "key": "graphics/shaderCacheMode",
+    "category": "graphics",
+    "type": "enum",
+    "label": "Shader cache policy",
+    "default": "Persistent",
+    "options": [
+      {
+        "label": "Persistent",
+        "value": "Persistent"
+      },
+      {
+        "label": "Session only",
+        "value": "Session only"
+      }
+    ],
+    "description": "Choose whether this profile keeps shader caches between sessions."
+  },
+  {
+    "key": "input/preferredDevice",
+    "category": "input",
+    "type": "enum",
+    "label": "Preferred input",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Controller",
+        "value": "Controller"
+      },
+      {
+        "label": "Keyboard & Mouse",
+        "value": "Keyboard & Mouse"
+      },
+      {
+        "label": "Flight Stick / HOTAS",
+        "value": "Flight Stick / HOTAS"
+      },
+      {
+        "label": "Multiple Sources",
+        "value": "Multiple Sources"
+      }
+    ],
+    "description": "Request a controller or keyboard and mouse instead of the launcher default."
+  },
+  {
+    "key": "input/deadzone",
+    "category": "input",
+    "type": "number",
+    "label": "Controller deadzone",
+    "default": 0.1,
+    "options": [
+      {
+        "label": "5%",
+        "value": 0.05
+      },
+      {
+        "label": "10%",
+        "value": 0.1
+      },
+      {
+        "label": "15%",
+        "value": 0.15
+      },
+      {
+        "label": "20%",
+        "value": 0.2
+      },
+      {
+        "label": "25%",
+        "value": 0.25
+      },
+      {
+        "label": "30%",
+        "value": 0.3
+      }
+    ],
+    "minimum": 0,
+    "maximum": 0.5,
+    "description": "Override the default analogue-stick deadzone."
+  },
+  {
+    "key": "input/rumble",
+    "category": "input",
+    "type": "bool",
+    "label": "Controller rumble",
+    "default": true,
+    "options": [],
+    "description": "Enable or disable vibration for this profile."
+  },
+  {
+    "key": "audio/masterVolume",
+    "category": "audio",
+    "type": "number",
+    "label": "Master volume",
+    "default": 1,
+    "options": [
+      {
+        "label": "25%",
+        "value": 0.25
+      },
+      {
+        "label": "50%",
+        "value": 0.5
+      },
+      {
+        "label": "75%",
+        "value": 0.75
+      },
+      {
+        "label": "100%",
+        "value": 1
+      }
+    ],
+    "minimum": 0,
+    "maximum": 1,
+    "description": "Set a profile-specific game audio level."
+  },
+  {
+    "key": "audio/muteUnfocused",
+    "category": "audio",
+    "type": "bool",
+    "label": "Mute when unfocused",
+    "default": false,
+    "options": [],
+    "description": "Mute game audio when the Xenon game window is not focused."
+  },
+  {
+    "key": "audio/latencyProfile",
+    "category": "audio",
+    "type": "enum",
+    "label": "Audio latency",
+    "default": "Automatic",
+    "options": [
+      {
+        "label": "Automatic",
+        "value": "Automatic"
+      },
+      {
+        "label": "Low latency",
+        "value": "Low latency"
+      },
+      {
+        "label": "Balanced",
+        "value": "Balanced"
+      },
+      {
+        "label": "Stable",
+        "value": "Stable"
+      }
+    ],
+    "description": "Choose a latency/stability preference for this profile."
+  }
+]

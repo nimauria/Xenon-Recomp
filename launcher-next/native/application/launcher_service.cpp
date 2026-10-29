@@ -1,11 +1,21 @@
 #include "launcher_service.hpp"
 #include "core/archive.hpp"
+#include "core/module_settings.hpp"
+#include "core/releases.hpp"
+#include "core/settings.hpp"
+#include "core/support_bundle.hpp"
+#include "core/dlc_catalog.hpp"
+#include "core/game_media.hpp"
+#include "core/game_activity.hpp"
+#include "catalogues.hpp"
 #include "platform/desktop.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <random>
+#include <map>
 #include <set>
 #include <sstream>
 #ifdef _WIN32
@@ -100,19 +110,19 @@ std::string name_prefix(const std::string &name, std::size_t maximum) {
   return name.substr(0, offset);
 }
 std::string unique_profile_name(const Json &profiles, const std::string &base) {
-  auto candidate = name_prefix(base, 40);
+  auto candidate = name_prefix(base, 48);
   for (unsigned suffix = 2; std::any_of(
            profiles.begin(), profiles.end(),
            [&](const auto &row) { return lower(row.value("name", "")) == lower(candidate); });
        ++suffix) {
     const auto ending = " (" + std::to_string(suffix) + ")";
-    candidate = name_prefix(base, 40 - ending.size()) + ending;
+    candidate = name_prefix(base, 48 - ending.size()) + ending;
   }
   return candidate;
 }
 void validate_name(const Json &profiles, const std::string &name, const std::string &exclude = "") {
-  if (name.empty() || name_prefix(name, 40) != name)
-    throw std::runtime_error("Enter a profile name of at most 40 characters");
+  if (name.empty() || name_prefix(name, 48) != name)
+    throw std::runtime_error("Enter a profile name of at most 48 characters");
   for (const auto &profile : profiles)
     if (profile.at("id") != exclude && lower(profile.at("name")) == lower(name))
       throw std::runtime_error("That profile name is already in use");
@@ -137,15 +147,63 @@ fs::path default_storage() {
 #endif
   throw std::runtime_error("Cannot locate the user application data folder");
 }
-LauncherService::LauncherService(fs::path storage, bool safe_mode, fs::path fixture_host)
-    : storage_(std::move(storage)), safe_mode_(safe_mode) {
+LauncherService::LauncherService(
+    fs::path storage, bool safe_mode, fs::path fixture_host,
+    std::function<void(const std::string &, const std::string &)> install_observer,
+    std::shared_ptr<IHttpClient> http)
+    : storage_(fs::absolute(std::move(storage)).lexically_normal()), storage_lock_(storage_),
+      safe_mode_(safe_mode), install_observer_(std::move(install_observer)),
+      http_(std::move(http)) {
+  storage_ = fs::weakly_canonical(storage_);
   load();
+  if (state_["settings"].value("community/discordRichPresence", false)) {
+    state_["settings"]["community/discordRichPresence"] = false;
+    state_["revision"] = state_["revision"].get<std::int64_t>() + 1;
+    persist(state_);
+  }
+  bool media_changed = false;
+  for (auto &game : state_["games"])
+    if (game.value("mediaModelVersion", 0) != 1 || game.value("activityModelVersion", 0) != 1) {
+      normalize_game_media(game);
+      normalize_game_activity(game);
+      media_changed = true;
+    }
+  if (media_changed) {
+    const auto backup = storage_ / "state.before-media-v1.json";
+    if (!fs::exists(backup))
+      fs::copy_file(storage_ / "state.json", backup);
+    state_["revision"] = state_["revision"].get<std::int64_t>() + 1;
+    persist(state_);
+  }
+  load_online_state();
   recovery_needed_ = fs::exists(storage_ / "running.json");
   atomic_json(storage_ / "running.json", {{"startedAt", now()}});
-  if (!safe_mode_ && !fixture_host.empty())
+  if (!safe_mode_ && !fixture_host.empty()) {
     runtime_ = fixture_runtime(std::move(fixture_host), storage_);
+    host_services_ = fixture_host_services(storage_);
+  } else
+    host_services_ = unavailable_host_services();
+  recover_install_jobs();
+  recover_migrations();
+  job_worker_ = std::thread([this] { jobs_worker(); });
 }
 LauncherService::~LauncherService() {
+  {
+    std::lock_guard lock(mutex_);
+    jobs_stopping_ = true;
+    if (cancel_job_)
+      cancel_job_->store(true);
+  }
+  jobs_changed_.notify_all();
+  if (job_worker_.joinable())
+    job_worker_.join();
+  try {
+    std::lock_guard lock(mutex_);
+    recover_install_jobs();
+  } catch (const std::exception &error) {
+    std::ofstream(storage_ / "renderer.log", std::ios::app)
+        << "Operation shutdown: " << error.what() << '\n';
+  }
   std::error_code ignored;
   fs::remove(storage_ / "running.json", ignored);
 }
@@ -154,6 +212,11 @@ void LauncherService::load() {
   if (fs::exists(file)) {
     state_ = read_json(file);
     validate(state_);
+    for (auto &module : state_["modules"]) {
+      module["schema"] = module_settings_schema(module.at("manifest"));
+      module["settings"] =
+          module_settings_values(module.at("schema"), module.value("settings", Json::object()));
+    }
   } else {
     state_ = {
         {"schemaVersion", 1},
@@ -182,6 +245,8 @@ void LauncherService::validate(const Json &state) const {
   for (const auto *key : {"profiles", "games", "modules", "notifications", "history", "jobs"})
     if (!state.at(key).is_array())
       throw std::runtime_error("Invalid launcher state collection");
+  for (const auto &game : state.at("games"))
+    validate_game_media(game);
   std::set<std::string> ids;
   bool active = false;
   for (const auto &p : state.at("profiles")) {
@@ -192,6 +257,27 @@ void LauncherService::validate(const Json &state) const {
   }
   if (!active)
     throw std::runtime_error("Active profile is missing");
+  ids.clear();
+  for (const auto &job : state.at("jobs")) {
+    if (!job.is_object() || !job.contains("id") || !job.at("id").is_string() ||
+        job.at("id").get<std::string>().empty() ||
+        !ids.insert(job.at("id").get<std::string>()).second || !job.at("title").is_string() ||
+        !job.at("state").is_string() || !job.at("progress").is_number() ||
+        !std::isfinite(job.at("progress").get<double>()) || job.at("progress").get<double>() < 0 ||
+        job.at("progress").get<double>() > 100)
+      throw std::runtime_error("Invalid saved operation record");
+    if (job.contains("_cleanup") && !job.at("_cleanup").is_boolean())
+      throw std::runtime_error("Invalid saved operation cleanup flag");
+    if (job.value("kind", "") == "module.install") {
+      for (const auto *key : {"_source", "_root", "_modified"})
+        if (!job.contains(key) || !job.at(key).is_string() ||
+            job.at(key).get<std::string>().empty())
+          throw std::runtime_error("Invalid saved installation source");
+      if (!job.at("_size").is_number_integer() || job.at("_size").get<std::int64_t>() < 0 ||
+          job.at("_size").get<std::uint64_t>() > 512ull * 1024 * 1024)
+        throw std::runtime_error("Invalid saved installation size");
+    }
+  }
   const auto &prefs = state.at("preferences");
   if (prefs.at("theme") != "dark" && prefs.at("theme") != "light")
     throw std::runtime_error("Invalid theme");
@@ -204,11 +290,54 @@ void LauncherService::persist(const Json &next) {
   if (next.dump().size() > 16 * 1024 * 1024)
     throw std::runtime_error("Launcher state exceeds the supported size; no data was replaced");
   atomic_json(storage_ / "state.json", next);
+  if (state_observer_)
+    try {
+      state_observer_(next.at("revision").get<std::int64_t>());
+    } catch (...) { /* Presentation failure cannot undo an already committed state file. */
+    }
 }
-void LauncherService::notify(Json &next, const std::string &title, const std::string &message) {
-  next["notifications"].push_back(
-      {{"id", uuid()}, {"title", title}, {"message", message}, {"read", false}, {"time", now()}});
-  if (next["notifications"].size() > 200)
+void LauncherService::observe_changes(std::function<void(std::int64_t)> observer) {
+  std::lock_guard lock(mutex_);
+  state_observer_ = std::move(observer);
+}
+void LauncherService::notify(Json &next, const std::string &title, const std::string &message,
+                             const std::string &severity, Json action) {
+  if (trim(message).empty())
+    return;
+  if (action.empty()) {
+    const auto prefix = lower(title);
+    const auto page = prefix.find("module") != std::string::npos    ? "Modules"
+                      : prefix.find("profile") != std::string::npos ? "Profiles"
+                      : prefix.find("support") != std::string::npos ? "Support"
+                                                                    : "Downloads";
+    action = {{"type", "navigate"}, {"page", page}};
+  }
+  const auto time = now();
+  if (!next["notifications"].empty()) {
+    auto &previous = next["notifications"].back();
+    std::int64_t elapsed = 30001;
+    try {
+      elapsed = std::stoll(time) - std::stoll(previous.value("time", "0"));
+    } catch (const std::exception &) {
+    }
+    if (previous.value("title", "") == title && previous.value("message", "") == message &&
+        previous.value("severity", "info") == severity &&
+        previous.value("action", Json::object()) == action && elapsed >= 0 && elapsed <= 30000) {
+      previous["time"] = time;
+      previous["read"] = false;
+      previous["repeatCount"] = previous.value("repeatCount", 1) + 1;
+      return;
+    }
+  }
+  next["notifications"].push_back({{"id", uuid()},
+                                   {"title", title},
+                                   {"message", message},
+                                   {"severity", severity},
+                                   {"action", action},
+                                   {"read", false},
+                                   {"time", time},
+                                   {"repeatCount", 1}});
+  if (next["notifications"].size() > 120)
     next["notifications"].erase(next["notifications"].begin());
 }
 Json LauncherService::snapshot() {
@@ -222,62 +351,89 @@ Json LauncherService::presentation_settings() const {
 }
 Json LauncherService::project() const {
   auto result = state_;
+  result["dlcCatalog"] = launcher_dlc_catalog(state_);
+  result["activitySummary"] = game_activity_summary(state_);
+  for (auto &game : result["games"])
+    if (game.contains("managedCopies"))
+      for (auto &copy : game["managedCopies"])
+        copy = {{"root", copy.at("root")},
+                {"entryId", copy.at("entryId")},
+                {"locationId", copy.at("_ownerId")},
+                {"type", copy.at("_type")},
+                {"previous", copy.value("previous", false)},
+                {"originalPath", copy.at("originalPath")},
+                {"originalRetained", copy.value("originalRetained", true)}};
+  for (auto &job : result["jobs"]) {
+    job["cleaningUp"] = job.value("_cleanup", false);
+    for (auto field = job.begin(); field != job.end();)
+      if (!field.key().empty() && field.key().front() == '_')
+        field = job.erase(field);
+      else
+        ++field;
+    const auto status = job.value("state", "");
+    const auto kind = job.value("kind", "");
+    const bool supported = supported_job_kind(kind);
+    job["canCancel"] = supported && (status == "queued" || status == "running");
+    job["canRetry"] =
+        supported && (status == "failed" || status == "cancelled" || status == "interrupted");
+  }
   result["mode"] = "native";
   result["capabilities"] = {{"runtime", runtime_ && runtime_->available()},
                             {"importContent", true},
                             {"modules", true},
-                            {"captures", true}};
+                            {"captures", true},
+                            {"online", http_ != nullptr},
+                            {"networkFixture", http_ && http_->fixture()}};
+  project_online(result);
   if (!runtime_)
     result["session"] = {{"state", "unavailable"}, {"fixture", false}};
   else if (result.contains("session") &&
            result["session"].value("sessionId", "") == dismissed_session_)
     result["session"] = {{"state", "idle"}, {"fixture", true}};
+  for (auto &profile : result["profiles"])
+    profile["effectiveRuntimeSettings"] = profile_runtime_values(
+        Json::object(), effective_profile_settings(profile, state_["settings"]), true);
+  const auto &active = item(result["profiles"], state_.at("activeProfileId"));
+  const auto startup = active.value("startupPage", "Launcher default");
+  if (state_["settings"].value("general/restoreLastPage", false) && state_.contains("lastPage"))
+    result["preferences"]["startPage"] = state_.at("lastPage");
+  else if (startup != "Launcher default" && !startup.empty())
+    result["preferences"]["startPage"] = startup;
+  if (safe_mode_)
+    result["preferences"]["startPage"] = "Settings";
+  result["runtimeServices"] = host_services_->snapshot();
   result["storagePath"] = path_string(storage_);
   result["recovery"] = {{"previousUncleanExit", recovery_needed_}, {"safeMode", safe_mode_}};
-  result["captures"] = Json::array();
-  const auto capture_path =
-      fs::u8path(state_["settings"].value("paths/screenshots", path_string(storage_ / "captures")));
-  if (fs::is_directory(capture_path)) {
-    std::error_code error;
-    for (const auto &entry : fs::directory_iterator(capture_path, error)) {
-      const auto ext = lower(path_string(entry.path().extension()));
-      if (entry.is_regular_file(error) &&
-          (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp"))
-        result["captures"].push_back({{"id", path_string(entry.path().filename())},
-                                      {"name", path_string(entry.path().filename())},
-                                      {"size", entry.file_size(error)}});
-      if (result["captures"].size() >= 10000)
-        break;
-    }
-  }
+  captures_.folder(fs::u8path(
+      state_["settings"].value("paths/screenshots", path_string(storage_ / "captures"))));
+  const auto captures = captures_.snapshot();
+  result["captures"] = captures.at("entries");
+  result["captureFolderPath"] =
+      state_["settings"].value("paths/screenshots", path_string(storage_ / "captures"));
+  result["captureScan"] = captures;
+  result["captureScan"].erase("entries");
   return result;
 }
 void LauncherService::poll_runtime() {
   if (!runtime_)
     return;
-  auto report = runtime_->status();
+  const auto report = runtime_->status();
   const auto previous = state_.value("session", Json::object());
-  state_["session"] = report;
-  const auto current = report.value("state", "");
-  const auto id = report.value("sessionId", "");
-  bool changed = previous.value("state", "") != current || previous.value("sessionId", "") != id;
-  if ((current == "stopped" || current == "failed") && !id.empty() &&
-      std::none_of(state_["history"].begin(), state_["history"].end(),
-                   [&](const auto &h) { return h.value("id", "") == id; })) {
-    state_["history"].push_back(
-        {{"id", id},
-         {"title", report.value("title", "Test session")},
-         {"time", std::to_string(report.value("endedAtEpochMs", std::int64_t{}))},
-         {"state", current},
-         {"fixture", true}});
-    changed = true;
-    if (current == "failed")
-      notify(state_, "Fixture session failed", report.value("lastError", "Unknown failure"));
-  }
+  auto next = state_;
+  next["session"] = report;
+  const bool activity_changed = apply_session_activity(next, report);
+  const bool changed = activity_changed ||
+                       previous.value("state", "") != report.value("state", "") ||
+                       previous.value("sessionId", "") != report.value("sessionId", "");
   if (changed) {
-    state_["revision"] = state_["revision"].get<std::int64_t>() + 1;
-    persist(state_);
-  }
+    if (previous.value("state", "") != "failed" && report.value("state", "") == "failed")
+      notify(next, report.value("fixture", true) ? "Test session failed" : "Session failed",
+             report.value("lastError", "Unknown failure"));
+    next["revision"] = state_["revision"].get<std::int64_t>() + 1;
+    persist(next);
+    state_ = std::move(next);
+  } else
+    state_["session"] = report;
 }
 Json LauncherService::launch_configuration(const Json &state, const std::string &game_id) const {
   auto games = state.at("games"), profiles = state.at("profiles");
@@ -286,10 +442,18 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
   const auto source = game.value("contentPath", "");
   if (!fs::exists(fs::u8path(source)))
     throw std::runtime_error("Game source is missing");
-  const auto &settings = state.at("settings");
+  const auto settings = effective_profile_settings(profile, state.at("settings"));
   Json config = {{"gameId", game_id},
                  {"title", game.at("title")},
                  {"contentPath", source},
+                 {"primaryMediaId",
+                  [&] {
+                    for (const auto &m : game.at("media"))
+                      if (m.value("isPrimary", false))
+                        return m.at("id").get<std::string>();
+                    return std::string{};
+                  }()},
+                 {"media", game.at("media")},
                  {"moduleId", game.value("moduleId", "")},
                  {"profileId", profile.at("id")},
                  {"profileName", profile.at("name")},
@@ -312,8 +476,19 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
                  {"runtimeApiRequirements", Json::object()},
                  {"fixture", true}};
   for (const auto &pair : {std::pair{"gamePath", "gameRoot"}, std::pair{"savePath", "savePath"},
-                           std::pair{"screenshotPath", "screenshotsPath"}})
-    config[pair.second] = profile.value(pair.first, "");
+                           std::pair{"screenshotPath", "screenshotsPath"}}) {
+    const auto override_path = profile.value(pair.first, "");
+    const auto key = std::string(pair.first) == "gamePath"   ? "paths/games"
+                     : std::string(pair.first) == "savePath" ? "paths/saves"
+                                                             : "paths/screenshots";
+    const auto fallback = storage_ / (std::string(pair.first) == "gamePath"   ? "games"
+                                      : std::string(pair.first) == "savePath" ? "saves"
+                                                                              : "captures");
+    const auto global = settings.value(key, "");
+    config[pair.second] = !override_path.empty() ? override_path
+                          : global.empty()       ? path_string(fallback)
+                                                 : global;
+  }
   const auto module_id = game.value("moduleId", "");
   if (!module_id.empty()) {
     auto modules = state.at("modules");
@@ -323,9 +498,10 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
     config["moduleName"] = module.at("name");
     config["modulePath"] = module.at("path");
     config["moduleVersion"] = module.at("version");
-    config["moduleSettings"] = module.at("settings");
+    config["moduleSettings"] = module_settings_values(module.at("schema"), module.at("settings"));
     config["runtimeApiRequirements"] = module.at("manifest").value("runtimeApis", Json::object());
   }
+  config["inputRouting"] = host_services_->snapshot().at("input").at("users");
   config["dlc"] = game.value("dlc", Json::array());
   return config;
 }
@@ -338,7 +514,16 @@ std::optional<fs::path> LauncherService::asset_path(const std::string &category,
   fs::path root;
   fs::path file;
   bool nested = false;
-  if (category == "captures") {
+  if (category == "catalog-tile" || category == "catalog-hero") {
+    const auto &entry = item(state_.at("catalog").at("entries"), id);
+    const auto key = category == "catalog-tile" ? "_tileFile" : "_heroFile";
+    const auto filename = entry.at("launcher").value(key, "");
+    const auto relative = fs::u8path(filename);
+    if (filename.empty() || relative.filename() != relative)
+      return {};
+    root = fs::weakly_canonical(storage_ / "catalog-art");
+    file = root / relative;
+  } else if (category == "captures") {
     root = fs::weakly_canonical(fs::u8path(
         state_["settings"].value("paths/screenshots", path_string(storage_ / "captures"))));
     file = root / fs::u8path(id);
@@ -362,7 +547,7 @@ std::optional<fs::path> LauncherService::asset_path(const std::string &category,
   } else
     return {};
   const auto ext = lower(path_string(file.extension()));
-  if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp")
+  if (!capture_extension(file))
     return {};
   std::error_code error;
   const auto canonical = fs::weakly_canonical(file, error);
@@ -395,27 +580,106 @@ Json LauncherService::request(const Json &request) {
             {"error", {{"code", "COMMAND_FAILED"}, {"message", e.what()}}}};
   }
 }
+void LauncherService::register_installed_module(Json &next, const Json &definition,
+                                                const fs::path &module_path) {
+  (void)normalize_dlc_definitions(definition);
+  const auto id = definition.value("id", definition.value("moduleId", ""));
+  const auto alpha = [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+  };
+  if (id.empty() || id.size() > 128 || !alpha(id.front()) || id.find("..") != std::string::npos ||
+      std::any_of(id.begin(), id.end(),
+                  [&](char c) { return !alpha(c) && c != '.' && c != '_' && c != '-'; }))
+    throw std::runtime_error("Invalid module package identifier");
+  const auto schema = module_settings_schema(definition);
+  Json replacement = {{"id", id},
+                      {"name", definition.value("name", id)},
+                      {"version", definition.value("version", "Unknown")},
+                      {"path", path_string(module_path)},
+                      {"enabled", true},
+                      {"schema", schema},
+                      {"settings", module_settings_values(schema, Json::object())},
+                      {"manifest", definition},
+                      {"managed", true},
+                      {"previousVersions", Json::array()}};
+  auto previous = std::find_if(next["modules"].begin(), next["modules"].end(),
+                               [&](const auto &module) { return module.at("id") == id; });
+  const auto previous_version =
+      previous == next["modules"].end() ? "" : previous->value("version", "");
+  if (previous != next["modules"].end()) {
+    auto history = previous->value("previousVersions", Json::array());
+    auto backup = *previous;
+    backup.erase("previousVersions");
+    history.push_back(backup);
+    if (history.size() > 5)
+      history.erase(history.begin());
+    replacement["previousVersions"] = history;
+    replacement["settings"] =
+        module_settings_values(schema, previous->value("settings", Json::object()));
+    replacement["enabled"] = previous->value("enabled", true);
+    *previous = replacement;
+  } else
+    next["modules"].push_back(replacement);
+  notify(next, "Module package installed",
+         definition.value("name", id) + " " + definition.value("version", "Unknown"));
+  next["updateHistory"].push_back({{"id", uuid()},
+                                   {"moduleId", id},
+                                   {"action", "install"},
+                                   {"outcome", "success"},
+                                   {"fromVersion", previous_version},
+                                   {"toVersion", definition.value("version", "")},
+                                   {"message", "Module package installed"},
+                                   {"time", now()}});
+  while (next["updateHistory"].size() > 200)
+    next["updateHistory"].erase(next["updateHistory"].begin());
+  for (auto &game : next["games"])
+    if (game.value("moduleId", "") == id) {
+      game["module"] = replacement.at("name");
+      module_metadata(game, replacement, next["revision"].get<std::int64_t>() + 1);
+    }
+}
+void LauncherService::refresh_module_presentations(Json &next) {
+  std::map<std::string, const Json *> modules;
+  for (const auto &module : next["modules"])
+    modules[module.at("id").get<std::string>()] = &module;
+  for (auto &game : next["games"]) {
+    const auto found = modules.find(game.value("moduleId", ""));
+    if (found != modules.end()) {
+      game["module"] = found->second->at("name");
+      module_metadata(game, *found->second, next["revision"].get<std::int64_t>() + 1);
+    }
+  }
+}
 Json LauncherService::execute(const std::string &command, const Json &payload) {
   auto next = state_;
+  std::string cancel_requested;
   const auto action =
       command == "launcher.action" ? payload.at("action").get<std::string>() : command;
   const auto data = command == "launcher.action" ? payload.value("data", Json::object()) : payload;
+  if (update_preparing_ && action != "application.ready")
+    throw std::runtime_error("Wait for launcher replacement preparation to finish");
   if (action == "profiles.create" || action == "profiles.update" ||
       action == "profiles.duplicate") {
     const auto id = data.value("id", "");
-    Json profile = action == "profiles.create" ? Json{{"id", uuid()},
-                                                      {"description", ""},
-                                                      {"region", "Auto (Global)"},
-                                                      {"offline", true},
-                                                      {"paths", Json::object()}}
-                                               : item(next["profiles"], id);
+    Json profile = action == "profiles.create"
+                       ? Json{{"id", uuid()},
+                              {"description", ""},
+                              {"region", "Auto (Global)"},
+                              {"offline", next["settings"].value("runtime/offline", true)},
+                              {"paths", Json::object()}}
+                       : item(next["profiles"], id);
     auto name = trim(data.value("name", profile.value("name", "")));
     if (action == "profiles.duplicate") {
-      name = unique_profile_name(next["profiles"], name_prefix(name, 35) + " copy");
+      name = unique_profile_name(next["profiles"], name_prefix(name, 43) + " copy");
       profile["id"] = uuid();
     }
     validate_name(next["profiles"], name, action == "profiles.update" ? id : "");
     profile["name"] = name;
+    if (data.contains("description") && data.at("description").is_string()) {
+      const auto value = data.at("description").get<std::string>();
+      if (value != profile.value("description", "") && name_prefix(value, 180) != value)
+        throw std::runtime_error("Use a profile description of at most 180 characters");
+    }
     for (const auto *key :
          {"description", "region", "startupPage", "gamePath", "savePath", "screenshotPath"})
       if (data.contains(key)) {
@@ -426,8 +690,8 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     for (const auto *key : {"avatarFocalX", "avatarFocalY", "avatarZoom"})
       if (data.contains(key)) {
         const auto value = data[key].get<double>();
-        if (value < (std::string(key) == "avatarZoom" ? 1.0 : 0.0) ||
-            value > (std::string(key) == "avatarZoom" ? 4.0 : 1.0))
+        if (!std::isfinite(value) || value < (std::string(key) == "avatarZoom" ? 1.0 : 0.0) ||
+            value > (std::string(key) == "avatarZoom" ? 3.0 : 1.0))
           throw std::runtime_error("Invalid avatar crop");
         profile[key] = value;
       }
@@ -437,10 +701,15 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
           throw std::runtime_error("Invalid profile flag");
         profile[key] = data[key];
       }
+    if (data.contains("runtimeOverrides"))
+      profile["runtimeOverrides"] = data.at("runtimeOverrides");
+    normalize_profile_preferences(profile, next["settings"]);
     if (action == "profiles.update")
       item(next["profiles"], id) = profile;
     else
       next["profiles"].push_back(profile);
+    notify(next, action == "profiles.update" ? "Profile saved" : "Profile created", name, "success",
+           {{"type", "navigate"}, {"page", "Profiles"}, {"targetId", profile.at("id")}});
   } else if (action == "profiles.activate") {
     (void)item(next["profiles"], data.at("id"));
     next["activeProfileId"] = data.at("id");
@@ -488,7 +757,14 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
                     {"region", source.value("region", "Auto (Global)")},
                     {"offline", source.value("offline", true)},
                     {"isolatedSettings", source.value("isolatedSettings", false)},
+                    {"runtimeOverrides",
+                     source.value("isolatedSettings", false)
+                         ? profile_runtime_values(source.value("runtimeOverrides", Json::object()),
+                                                  next["settings"], true)
+                         : Json::object()},
+                    {"startupPage", source.value("startupPage", "Launcher default")},
                     {"paths", Json::object()}};
+    normalize_profile_preferences(profile, next["settings"]);
     next["profiles"].push_back(profile);
   } else if (action == "settings.update") {
     for (const auto &[key, value] : data.items()) {
@@ -498,43 +774,31 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     }
   } else if (action == "settings.set") {
     const auto key = data.at("key").get<std::string>();
-    auto schema = read_json(storage_ / "settings-schema.json");
-    const auto found = std::find_if(schema.begin(), schema.end(),
-                                    [&](const auto &entry) { return entry.at("key") == key; });
-    if (found == schema.end() && key.rfind("paths/", 0) != 0)
-      throw std::runtime_error("Unknown setting");
     const auto &value = data.at("value");
-    if (found != schema.end()) {
-      const auto type = found->at("type");
-      if ((type == "bool" && !value.is_boolean()) || (type == "number" && !value.is_number()) ||
-          ((type == "enum" || type == "string") && !value.is_string()))
-        throw std::runtime_error("Invalid setting type");
-      if (type == "enum" && std::none_of((*found)["options"].begin(), (*found)["options"].end(),
-                                         [&](const auto &o) { return o.at("value") == value; }))
-        throw std::runtime_error("Invalid setting option");
-      if (found->contains("minimum") &&
-          (value < found->at("minimum") || value > found->at("maximum")))
-        throw std::runtime_error("Setting outside permitted range");
-    } else if (!value.is_string())
-      throw std::runtime_error("Invalid path");
-    if (key == "ui/customAccent") {
-      const auto color = value.get<std::string>();
-      if (color.size() != 7 || color[0] != '#' ||
-          color.find_first_not_of("0123456789abcdefABCDEF", 1) != std::string::npos)
-        throw std::runtime_error("Use a six-digit hexadecimal accent colour");
-    }
+    validate_setting(key, value);
     next["settings"][key] = value;
     if (key == "general/startupPage")
       next["preferences"]["startPage"] = value;
     if (key == "accessibility/reduceMotion")
       next["preferences"]["reducedMotion"] = value;
+  } else if (action == "settings.resetKey") {
+    const auto key = data.at("key").get<std::string>();
+    const auto &definitions = settings_definitions();
+    const auto definition = std::find_if(definitions.begin(), definitions.end(),
+                                         [&](const auto &value) { return value.at("key") == key; });
+    if (definition == definitions.end())
+      validate_setting(key, "");
+    next["settings"].erase(key);
+    if (key == "general/startupPage")
+      next["preferences"]["startPage"] = definition->at("default");
+    if (key == "accessibility/reduceMotion")
+      next["preferences"]["reducedMotion"] = definition->at("default");
   } else if (action == "settings.reset") {
     const auto category = data.value("category", "");
     std::set<std::string> keys;
-    if (fs::exists(storage_ / "settings-schema.json"))
-      for (const auto &definition : read_json(storage_ / "settings-schema.json"))
-        if (definition.value("category", "") == category)
-          keys.insert(definition.at("key"));
+    for (const auto &definition : settings_definitions())
+      if (definition.value("category", "") == category)
+        keys.insert(definition.at("key"));
     for (auto it = next["settings"].begin(); it != next["settings"].end();)
       if (category.empty() || keys.contains(it.key()) || it.key().rfind(category + "/", 0) == 0)
         it = next["settings"].erase(it);
@@ -546,39 +810,65 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
       next["preferences"]["theme"] = "dark";
     if (category.empty() || category == "accessibility")
       next["preferences"]["reducedMotion"] = false;
+  } else if (action.starts_with("library.media.")) {
+    execute_media(next, action, data);
+  } else if (library_job_kind(action)) {
+    enqueue_library(next, action, data);
   } else if (action == "library.import") {
-    for (const auto &source : data.at("paths")) {
-      const auto path = fs::weakly_canonical(fs::u8path(source.get<std::string>()));
-      if (!fs::exists(path))
-        throw std::runtime_error("Game source does not exist");
-      const auto text = path_string(path);
-      if (std::any_of(next["games"].begin(), next["games"].end(),
-                      [&](const auto &g) { return g.value("contentPath", "") == text; }))
-        continue;
-      if (!fs::is_directory(path)) {
-        const auto ext = lower(path_string(path.extension()));
-        if (ext != ".xex" && ext != ".iso" && ext != ".xgd" && ext != ".dvd")
-          throw std::runtime_error("Choose a game folder, XEX or disc image");
+    if (data.value("mode", "keep") == "move") {
+      for (const auto &source : data.at("paths")) {
+        Json options = {{"path", source}, {"mode", "move"}, {"type", "game"}};
+        const auto path = path_string(fs::canonical(fs::u8path(source.get<std::string>())));
+        for (const auto &game : next["games"])
+          for (const auto &medium : game.at("media"))
+            if (same_media_source(medium.at("sourcePath"), path)) {
+              options["id"] = game.at("id");
+              options["mediaId"] = medium.at("id");
+            }
+        enqueue_library(next, "library.transfer", options);
       }
-      next["games"].push_back(
-          {{"id", uuid()},
-           {"title", path_string(path.stem())},
-           {"module", "No compatible module selected"},
-           {"moduleId", ""},
-           {"description", "Local source registered. Content identification and compatibility "
-                           "require the Xenon content adapter."},
-           {"contentPath", text},
-           {"favorite", false},
-           {"lastPlayed", nullptr},
-           {"addedAt", now()},
-           {"dlc", Json::array()},
-           {"verified", false}});
+    } else {
+      for (const auto &source : data.at("paths")) {
+        const auto path = fs::weakly_canonical(fs::u8path(source.get<std::string>()));
+        if (!fs::exists(path))
+          throw std::runtime_error("Game source does not exist");
+        const auto text = path_string(path);
+        if (std::any_of(next["games"].begin(), next["games"].end(), [&](const auto &g) {
+              return std::any_of(g.at("media").begin(), g.at("media").end(), [&](const auto &m) {
+                return same_media_source(m.at("sourcePath"), text);
+              });
+            }))
+          continue;
+        if (!fs::is_directory(path)) {
+          const auto ext = lower(path_string(path.extension()));
+          if (ext != ".xex" && ext != ".iso" && ext != ".xgd" && ext != ".dvd")
+            throw std::runtime_error("Choose a game folder, XEX or disc image");
+        }
+        next["games"].push_back(
+            {{"id", uuid()},
+             {"title", path_string(path.stem())},
+             {"module", "No compatible module selected"},
+             {"moduleId", ""},
+             {"description", "Local source registered. Content identification and compatibility "
+                             "require the Xenon content adapter."},
+             {"contentPath", text},
+             {"favorite", false},
+             {"lastPlayed", nullptr},
+             {"addedAt", now()},
+             {"dlc", Json::array()},
+             {"verified", false}});
+        normalize_game_media(next["games"].back());
+        normalize_game_activity(next["games"].back());
+      }
+      notify(next, "Library updated",
+             "Local sources registered; compatibility has not been verified.");
     }
-    notify(next, "Library updated",
-           "Local sources registered; compatibility has not been verified.");
   } else if (action == "library.favorite") {
     item(next["games"], data.at("id"))["favorite"] = data.at("favorite").get<bool>();
   } else if (action == "library.remove") {
+    require_library_idle(next, data.at("id"));
+    if (!item(next["games"], data.at("id")).value("managedCopies", Json::array()).empty())
+      throw std::runtime_error("Delete managed files before removing this library entry");
     remove_item(next["games"], data.at("id"));
   } else if (action == "library.update") {
     auto &game = item(next["games"], data.at("id"));
@@ -614,121 +904,211 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
            "The source path exists. Game integrity and compatibility are not "
            "validated without the content adapter.");
   } else if (action == "dlc.import") {
-    auto &game = item(next["games"], data.at("id"));
-    for (const auto &source : data.at("paths")) {
-      const auto path = fs::u8path(source.get<std::string>());
-      if (!fs::exists(path))
-        throw std::runtime_error("DLC source is missing");
-      game["dlc"].push_back({{"id", uuid()},
-                             {"name", path_string(path.filename())},
-                             {"path", path_string(path)},
-                             {"verified", false}});
+    if (data.contains("catalogId")) {
+      const auto &paths = data.at("paths");
+      if (!paths.is_array() || paths.empty() || paths.size() > 128)
+        throw std::runtime_error("Choose between one and 128 add-on sources");
+      enqueue_library(next, "library.transfer",
+                      {{"id", data.at("id")},
+                       {"path", paths.front()},
+                       {"paths", paths},
+                       {"catalogId", data.at("catalogId")},
+                       {"type", "dlc"},
+                       {"mode", "copy"}});
+    } else {
+      for (const auto &source : data.at("paths"))
+        enqueue_library(
+            next, "library.transfer",
+            {{"id", data.at("id")}, {"path", source}, {"type", "dlc"}, {"mode", "copy"}});
+    }
+  } else if (action == "dlc.verify") {
+    auto &dlc = item(item(next["games"], data.at("id"))["dlc"], data.at("dlcId"));
+    dlc["receiptVerified"] = false;
+    if (dlc.value("managed", false))
+      enqueue_library(next, "library.verifyManaged",
+                      {{"id", data.at("id")}, {"dlcId", data.at("dlcId")}});
+    else {
+      if (!fs::exists(fs::u8path(dlc.at("path").get<std::string>())))
+        throw std::runtime_error("The add-on source is missing");
+      dlc["lastCheckedAt"] = now();
+      notify(next, "Add-on source exists",
+             "Source path exists. Content integrity requires the Xenon adapter.");
     }
   } else if (action == "dlc.remove") {
-    remove_item(item(next["games"], data.at("id"))["dlc"], data.at("dlcId"));
+    require_library_idle(next, data.at("id"));
+    auto &game = item(next["games"], data.at("id"));
+    if (item(game["dlc"], data.at("dlcId")).value("managed", false))
+      enqueue_library(next, "library.deleteManaged",
+                      {{"id", data.at("id")}, {"dlcId", data.at("dlcId")}});
+    else
+      remove_item(game["dlc"], data.at("dlcId"));
   } else if (action == "modules.import") {
     const auto folder = fs::weakly_canonical(fs::u8path(data.at("path").get<std::string>()));
     const auto definition = manifest(folder);
+    (void)normalize_dlc_definitions(definition);
     const auto id = definition.value("id", definition.value("moduleId", ""));
     if (id.empty())
       throw std::runtime_error("Module manifest has no ID");
     if (std::any_of(next["modules"].begin(), next["modules"].end(),
                     [&](const auto &m) { return m.at("id") == id; }))
       throw std::runtime_error("This module is already registered");
-    next["modules"].push_back({{"id", id},
-                               {"name", definition.value("name", id)},
-                               {"version", definition.value("version", "Unknown")},
-                               {"path", path_string(folder)},
-                               {"enabled", true},
-                               {"schema", definition.value("settings", Json::array())},
-                               {"settings", Json::object()},
-                               {"manifest", definition}});
+    next["modules"].push_back(
+        {{"id", id},
+         {"name", definition.value("name", id)},
+         {"version", definition.value("version", "Unknown")},
+         {"path", path_string(folder)},
+         {"enabled", true},
+         {"schema", module_settings_schema(definition)},
+         {"settings", module_settings_values(module_settings_schema(definition), Json::object())},
+         {"manifest", definition}});
     notify(next, "Module registered", definition.value("name", id));
   } else if (action == "modules.installPackage") {
-    const auto source = fs::u8path(data.at("path").get<std::string>());
-    const auto stage = storage_ / "staging" / uuid();
-    fs::path package_root;
-    try {
-      extract_package(source, stage);
-      std::vector<fs::path> candidates;
-      for (const auto &entry : fs::recursive_directory_iterator(stage)) {
-        const auto name = path_string(entry.path().filename());
-        if (entry.is_regular_file() &&
-            (name == "xenon-module.json" || name == "module.json" || name == "manifest.json")) {
-          if (std::find(candidates.begin(), candidates.end(), entry.path().parent_path()) ==
-              candidates.end())
-            candidates.push_back(entry.path().parent_path());
-        }
+    enqueue_install(next, fs::u8path(data.at("path").get<std::string>()));
+  } else if (action == "catalog.refresh") {
+    enqueue_network(next, "catalog.refresh");
+  } else if (action == "modules.checkUpdate" || action == "modules.downloadUpdate") {
+    enqueue_network(next, action == "modules.checkUpdate" ? "module.check" : "module.download",
+                    data.at("id"));
+  } else if (action == "modules.checkAllUpdates") {
+    enqueue_network(next, "module.checkAll");
+  } else if (action == "updates.check" || action == "updates.download") {
+    enqueue_network(next, action == "updates.check" ? "launcher.check" : "launcher.download",
+                    "launcher");
+  } else if (action == "modules.installDownloaded") {
+    const auto id = data.at("id").get<std::string>();
+    const auto &value = next.at("moduleUpdates").at(id);
+    const auto &release = value.at("release");
+    if (value.value("downloadVersion", "") != release.value("version", "") ||
+        value.value("downloadDigest", "") != release.at("asset").value("sha256", ""))
+      throw std::runtime_error("Download and verify the selected release before installing");
+    enqueue_install(next, fs::u8path(value.at("_packagePath").get<std::string>()));
+    auto &job = next["jobs"].back();
+    job["_sha256"] = value.at("downloadDigest");
+    job["_expectedModuleId"] = id;
+    job["moduleId"] = id;
+    job["_expectedVersion"] = release.at("version");
+  } else if (action == "updates.clearHistory") {
+    const auto id = data.value("id", "");
+    auto &rows = next["updateHistory"];
+    rows.erase(std::remove_if(rows.begin(), rows.end(),
+                              [&](const auto &value) {
+                                return id.empty() || value.value("moduleId", "") == id;
+                              }),
+               rows.end());
+  } else if (action == "updates.initialize") {
+    if (online_initialized_)
+      return project();
+    online_initialized_ = true;
+    if (http_ && !safe_mode_ && next["settings"].value("updates/automaticChecks", true)) {
+      const auto interval = next["settings"].value("updates/checkInterval", "Daily");
+      std::int64_t last = 0;
+      try {
+        last = std::stoll(next.value("lastAutomaticCheck", "0"));
+      } catch (...) {
       }
-      if (candidates.size() != 1)
-        throw std::runtime_error("Package must contain exactly one module root");
-      package_root = candidates.front();
-      const auto definition = manifest(package_root);
-      const auto id = definition.value("id", definition.value("moduleId", ""));
-      if (id.empty())
-        throw std::runtime_error("Module package manifest has no ID");
-      if (definition.contains("settings") && !definition.at("settings").is_array())
-        throw std::runtime_error("Invalid module settings schema");
-      const auto installed =
-          fs::u8path(next["settings"].value("paths/modules", path_string(storage_ / "modules"))) /
-          uuid();
-      fs::create_directories(installed.parent_path());
-      const auto relative = package_root.lexically_relative(stage);
-      fs::rename(stage, installed);
-      Json replacement = {{"id", id},
-                          {"name", definition.value("name", id)},
-                          {"version", definition.value("version", "Unknown")},
-                          {"path", path_string(installed / relative)},
-                          {"enabled", true},
-                          {"schema", definition.value("settings", Json::array())},
-                          {"settings", Json::object()},
-                          {"manifest", definition},
-                          {"managed", true},
-                          {"previousVersions", Json::array()}};
-      auto previous = std::find_if(next["modules"].begin(), next["modules"].end(),
-                                   [&](const auto &module) { return module.at("id") == id; });
-      if (previous != next["modules"].end()) {
-        auto history = previous->value("previousVersions", Json::array());
-        auto backup = *previous;
-        backup.erase("previousVersions");
-        history.push_back(backup);
-        if (history.size() > 5)
-          history.erase(history.begin());
-        replacement["previousVersions"] = history;
-        replacement["settings"] = previous->value("settings", Json::object());
-        replacement["enabled"] = previous->value("enabled", true);
-        *previous = replacement;
-      } else
-        next["modules"].push_back(replacement);
-      next["jobs"].push_back({{"id", uuid()},
-                              {"title", "Install " + definition.value("name", id)},
-                              {"state", "completed"},
-                              {"progress", 100}});
-      notify(next, "Module package installed",
-             definition.value("name", id) + " " + definition.value("version", "Unknown"));
-      for (auto &game : next["games"])
-        if (game.value("moduleId", "") == id) {
-          game["module"] = replacement.at("name");
-          module_metadata(game, replacement, next["revision"].get<std::int64_t>() + 1);
+      const auto current = std::stoll(now());
+      const auto delay = interval == "Weekly" ? 7ll * 24 * 3600 * 1000 : 24ll * 3600 * 1000;
+      if (interval != "Manual" && (interval == "At startup" || current - last >= delay)) {
+        if (next["settings"].value("updates/modules", true)) {
+          enqueue_network(next, "catalog.refresh");
+          next["jobs"].back()["_checkInstalled"] = true;
         }
-    } catch (...) {
-      // Stage is generated below our private staging root, never a user source.
-      if (stage.parent_path() == storage_ / "staging") {
-        std::error_code ignored;
-        fs::remove_all(stage, ignored);
+        enqueue_network(next, "launcher.check", "launcher");
+        next["lastAutomaticCheck"] = now();
       }
-      throw;
     }
+  } else if (migration_job_kind(action)) {
+    enqueue_migration(next, action, data);
+  } else if (host_service_command(action) || action == "modules.rescan") {
+    enqueue_service(next, action, data);
+  } else if (action == "jobs.cancel") {
+    auto &job = item(next["jobs"], data.at("id"));
+    if (!supported_job_kind(job.value("kind", "")))
+      throw std::runtime_error("This operation cannot be cancelled");
+    const auto status = job.value("state", "");
+    if (status == "queued") {
+      job["state"] = "cancelled";
+      job["phase"] = "Cancelled";
+      job["endedAt"] = now();
+      apply_online_error(next, job, "Online operation cancelled");
+    } else if (status == "running") {
+      job["state"] = "cancelling";
+      job["phase"] = "Cancelling";
+      cancel_requested = data.at("id");
+    } else
+      throw std::runtime_error("This operation can no longer be cancelled");
+  } else if (action == "jobs.retry") {
+    const auto job = item(next["jobs"], data.at("id"));
+    const auto status = job.value("state", "");
+    if (!supported_job_kind(job.value("kind", "")) ||
+        (status != "failed" && status != "cancelled" && status != "interrupted"))
+      throw std::runtime_error("This operation cannot be retried");
+    if (job.value("kind", "") == "module.install") {
+      enqueue_install(next, fs::u8path(job.at("_source").get<std::string>()));
+      for (const auto *key : {"_sha256", "_expectedModuleId", "_expectedVersion"})
+        if (job.contains(key))
+          next["jobs"].back()[key] = job.at(key);
+    } else if (migration_job_kind(job.value("kind", "")))
+      enqueue_migration(next, job.at("kind"), job.at("_options"));
+    else if (library_job_kind(job.value("kind", ""))) {
+      if (job.value("_committed", false)) {
+        require_library_idle(next, job.at("_gameId"));
+        unsigned active = 0;
+        for (const auto &value : next["jobs"])
+          if (value.value("state", "") == "queued" || value.value("state", "") == "running" ||
+              value.value("state", "") == "cancelling" || value.value("state", "") == "committing")
+            ++active;
+        if (active >= 32)
+          throw std::runtime_error("The operation queue is full");
+        auto retry = job;
+        retry["id"] = make_id();
+        retry["state"] = "queued";
+        retry["phase"] = "Waiting";
+        retry["_cleanup"] = false;
+        retry.erase("error");
+        retry.erase("endedAt");
+        next["jobs"].push_back(retry);
+      } else
+        enqueue_library(next, job.at("kind"), job.at("_options"));
+    } else if (job.value("kind", "") == "service.operation")
+      enqueue_service(next, job.at("_command"), job.at("_data"));
+    else
+      enqueue_network(next, job.at("kind"), job.value("moduleId", ""));
+    next["jobs"].back()["retryOf"] = job.at("id");
+  } else if (action == "jobs.clearFinished") {
+    auto &jobs = next["jobs"];
+    jobs.erase(std::remove_if(jobs.begin(), jobs.end(),
+                              [](const auto &job) {
+                                const auto state = job.value("state", "");
+                                return state != "queued" && state != "running" &&
+                                       state != "cancelling" && state != "committing" &&
+                                       !job.value("_cleanup", false);
+                              }),
+               jobs.end());
   } else if (action == "modules.rollback") {
     auto &module = item(next["modules"], data.at("id"));
+    const auto previous_version = module.value("version", "");
     auto history = module.value("previousVersions", Json::array());
     if (history.empty())
       throw std::runtime_error("No previous module version is available");
     auto previous = history.back();
+    previous["schema"] = module_settings_schema(previous.at("manifest"));
+    previous["settings"] =
+        module_settings_values(previous.at("schema"), previous.value("settings", Json::object()));
     history.erase(history.end() - 1);
     (void)manifest(fs::u8path(previous.at("path").get<std::string>()));
     previous["previousVersions"] = history;
     module = previous;
+    next["updateHistory"].push_back({{"id", uuid()},
+                                     {"moduleId", module.at("id")},
+                                     {"action", "rollback"},
+                                     {"outcome", "success"},
+                                     {"fromVersion", previous_version},
+                                     {"toVersion", module.value("version", "")},
+                                     {"message", "Previous module version restored"},
+                                     {"time", now()}});
+    while (next["updateHistory"].size() > 200)
+      next["updateHistory"].erase(next["updateHistory"].begin());
     for (auto &game : next["games"])
       if (game.value("moduleId", "") == module.at("id").get<std::string>()) {
         game["module"] = module.at("name");
@@ -738,6 +1118,16 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
            module.at("name").get<std::string>() + " " + module.at("version").get<std::string>());
   } else if (action == "modules.enable") {
     item(next["modules"], data.at("id"))["enabled"] = data.at("enabled").get<bool>();
+  } else if (action == "modules.unlinkGames") {
+    (void)item(next["modules"], data.at("id"));
+    for (auto &game : next["games"])
+      if (game.value("moduleId", "") == data.at("id").get<std::string>()) {
+        game["moduleId"] = "";
+        game["module"] = "No compatible module selected";
+        game.erase("tileArt");
+        game.erase("heroArt");
+      }
+    notify(next, "Module game links cleared", "The installed module and game sources were kept.");
   } else if (action == "modules.remove") {
     remove_item(next["modules"], data.at("id"));
     for (auto &game : next["games"])
@@ -759,13 +1149,33 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
                                     [&](const auto &d) { return d.value("id", "") == key; });
     if (found == schema.end())
       throw std::runtime_error("Unknown module setting");
-    const auto type = found->value("type", "string");
     const auto &value = data.at("value");
-    if ((type == "bool" || type == "boolean")
-            ? !value.is_boolean()
-            : (type == "number" ? !value.is_number() : !value.is_string()))
-      throw std::runtime_error("Invalid module setting type");
+    validate_module_setting(*found, value);
     module["settings"][key] = value;
+  } else if (action == "modules.resetSettings") {
+    auto &module = item(next["modules"], data.at("id"));
+    module["settings"] = module_settings_values(module.at("schema"), Json::object());
+  } else if (action == "navigation.remember") {
+    const auto page = data.at("page").get<std::string>();
+    static const std::set<std::string> pages{"Home",     "Library",    "Modules",  "Profiles",
+                                             "Settings", "Support",    "Captures", "Downloads",
+                                             "Network",  "Filesystem", "Developer"};
+    if (!pages.contains(page))
+      throw std::runtime_error("Unknown navigation destination");
+    if (next.value("lastPage", "") == page)
+      return project();
+    next["lastPage"] = page;
+  } else if (action == "notifications.push") {
+    const auto title = data.at("title").get<std::string>(),
+               message = data.at("message").get<std::string>();
+    if (title.size() > 200 || message.size() > 2000)
+      throw std::runtime_error("Notification text is too long");
+    notify(next, title, message);
+  } else if (action == "notifications.readAll") {
+    for (auto &notification : next["notifications"])
+      notification["read"] = true;
+  } else if (action == "notifications.dismiss") {
+    remove_item(next["notifications"], data.at("id"));
   } else if (action == "notifications.read") {
     item(next["notifications"], data.at("id"))["read"] = data.value("read", true);
   } else if (action == "notifications.clear") {
@@ -786,9 +1196,35 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
           next["settings"].value("paths/screenshots", path_string(storage_ / "captures")));
     else if (target == "game")
       path = fs::u8path(item(next["games"], data.at("id")).at("contentPath").get<std::string>());
-    else if (target == "module")
+    else if (target == "media") {
+      auto &game = item(next["games"], data.at("id"));
+      path = fs::u8path(game_media(game, data.at("mediaId")).at("sourcePath").get<std::string>());
+    } else if (target == "managed") {
+      const auto &game = item(next["games"], data.at("id"));
+      const auto copies = game.value("managedCopies", Json::array());
+      if (copies.empty())
+        throw std::runtime_error("This game has no launcher-managed storage");
+      const auto location_id = data.value("locationId", "");
+      const auto copy_id = data.value("copyId", copies.front().at("entryId").get<std::string>());
+      const auto copy = std::find_if(copies.begin(), copies.end(), [&](const auto &value) {
+        return location_id.empty() ? value.at("entryId") == copy_id
+                                   : value.at("_ownerId") == location_id;
+      });
+      if (copy == copies.end())
+        throw std::runtime_error("The managed location no longer exists");
+      path = fs::u8path(copy->at("root").get<std::string>());
+    } else if (target == "dlc") {
+      const auto &dlc = item(item(next["games"], data.at("id"))["dlc"], data.at("dlcId"));
+      path = fs::u8path(dlc.at("path").get<std::string>());
+    } else if (target == "module")
       path = fs::u8path(item(next["modules"], data.at("id")).at("path").get<std::string>());
-    else
+    else if (target == "profile") {
+      const auto &profile = item(next["profiles"], data.at("id"));
+      const auto configured = next["settings"].value("paths/profiles", "");
+      const auto root = configured.empty() ? storage_ / "profiles" : fs::u8path(configured);
+      path = root / fs::u8path(profile.at("id").get<std::string>());
+      fs::create_directories(path);
+    } else
       throw std::runtime_error("Unknown launcher location");
     if (target == "support" || target == "captures")
       fs::create_directories(path);
@@ -802,6 +1238,20 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     if (url.rfind("https://", 0) != 0 || url.find_first_of("\r\n\t") != std::string::npos)
       throw std::runtime_error("Only HTTPS community links are supported");
     open_desktop_target(url);
+  } else if (action == "captures.open") {
+    const auto id = data.at("id").get<std::string>();
+    if (id.empty() || fs::u8path(id).filename() != fs::u8path(id) ||
+        id.find('\\') != std::string::npos)
+      throw std::runtime_error("Invalid capture identity");
+    const auto root = fs::weakly_canonical(fs::u8path(
+        next["settings"].value("paths/screenshots", path_string(storage_ / "captures"))));
+    const auto path = root / fs::u8path(id);
+    if (!capture_extension(path) || fs::is_symlink(path) ||
+        fs::weakly_canonical(path).parent_path() != root || !fs::is_regular_file(path))
+      throw std::runtime_error("Capture is missing or outside the screenshots folder");
+    open_desktop_target(path_string(path));
+  } else if (action == "captures.refresh") {
+    captures_.refresh();
   } else if (action == "captures.delete") {
     const auto id = data.at("id").get<std::string>();
     if (id.empty() || id.find('/') != std::string::npos || id.find('\\') != std::string::npos ||
@@ -811,30 +1261,27 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
         next["settings"].value("paths/screenshots", path_string(storage_ / "captures"))));
     const auto path = root / fs::u8path(id);
     const auto ext = lower(path_string(path.extension()));
-    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".webp")
+    if (!capture_extension(path))
       throw std::runtime_error("Only capture images can be deleted");
     if (fs::is_symlink(path) || fs::weakly_canonical(path).parent_path() != root ||
         !fs::is_regular_file(path))
       throw std::runtime_error("Capture is missing or outside the screenshots folder");
     if (!fs::remove(path))
       throw std::runtime_error("Capture could not be deleted");
+    captures_.refresh();
   } else if (action == "support.bundle") {
-    const auto folder = storage_ / "support" / now();
-    Json report = {{"launcher", "Xenon Launcher Next"},       {"protocolVersion", 1},
-                   {"profileCount", next["profiles"].size()}, {"gameCount", next["games"].size()},
-                   {"moduleCount", next["modules"].size()},   {"runtimeConnected", false}};
-    atomic_json(folder / "diagnostics.json", report);
-    write_zip(folder / "xenon-support.zip",
-              {{"diagnostics.json", report.dump(2)},
-               {"README.txt", "Xenon Launcher Next support summary. No profile "
-                              "names, local paths, game files, saves or logs are "
-                              "included. Nothing was uploaded automatically.\n"}});
+    const auto file = create_support_bundle(storage_, next);
     notify(next, "Support bundle created",
-           "A local support ZIP was created under the launcher support "
-           "directory. No files were uploaded.");
+           "A sanitized local support ZIP was created. No files were uploaded.", "success",
+           {{"type", "navigate"}, {"page", "Support"}});
+  } else if (action == "application.ready") {
+    atomic_json(storage_ / "running.json", {{"startedAt", now()}, {"phase", "interface-ready"}});
+    std::ofstream(storage_ / "startup.log", std::ios::app)
+        << "Launcher interface ready; bridge protocol 1\n";
   } else if (action == "session.launch") {
     if (!runtime_ || !runtime_->available())
       throw std::runtime_error("The Xenon runtime adapter is not connected");
+    require_library_idle(next, data.at("gameId"));
     next["session"] = runtime_->launch(launch_configuration(next, data.at("gameId")));
     dismissed_session_.clear();
   } else if (action == "session.stop") {
@@ -855,6 +1302,9 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
   next["revision"] = state_["revision"].get<int64_t>() + 1;
   persist(next);
   state_ = std::move(next);
+  if (!cancel_requested.empty() && running_job_ == cancel_requested && cancel_job_)
+    cancel_job_->store(true);
+  jobs_changed_.notify_one();
   if (command == "session.launch")
     return {{"jobId", state_.at("session").at("sessionId")}};
   return project();

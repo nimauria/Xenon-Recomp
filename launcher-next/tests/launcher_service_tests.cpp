@@ -3,14 +3,32 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <chrono>
+#include <thread>
 using namespace xenon::launcher_next;
 void check(bool ok, const char *message) {
   if (!ok)
     throw std::runtime_error(message);
 }
 Json call(LauncherService &service, const std::string &command, Json payload = Json::object()) {
-  return service.request(
-      {{"id", "test"}, {"version", 1}, {"command", command}, {"payload", payload}});
+  const auto result =
+      service.request({{"id", "test"}, {"version", 1}, {"command", command}, {"payload", payload}});
+  if (payload.value("action", "") == "modules.installPackage" && !result.at("ok"))
+    throw std::runtime_error(result.at("error").at("message").get<std::string>());
+  return result;
+}
+void await_install(LauncherService &service) {
+  for (unsigned i = 0; i < 1000; ++i) {
+    const auto snapshot = service.snapshot();
+    const auto &job = snapshot["jobs"].back();
+    const auto state = job.at("state").get<std::string>();
+    if (state == "completed")
+      return;
+    if (state == "failed" || state == "interrupted" || state == "cancelled")
+      throw std::runtime_error(job.value("error", "Installation failed"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  throw std::runtime_error("Background installation timed out");
 }
 int main() {
   const auto folder = std::filesystem::temp_directory_path() /
@@ -19,6 +37,15 @@ int main() {
     std::filesystem::create_directories(folder);
     {
       LauncherService service(folder);
+      bool locked = false;
+      try {
+        LauncherService second(folder);
+      } catch (const std::exception &) {
+        locked = true;
+      }
+      check(locked, "Two services must not write the same launcher data folder");
+      // A presentation subscriber must never turn a durable write into a failed command.
+      service.observe_changes([](std::int64_t) { throw std::runtime_error("Observer failure"); });
       check(service.snapshot()["games"].empty(), "Production must start empty");
       check(!service.request(Json::array()).at("ok"), "Malformed request should fail safely");
       check(!call(service, "profiles.remove", {{"id", "local"}}).at("ok"),
@@ -29,6 +56,10 @@ int main() {
           call(service, "profiles.create",
                {{"name", "Pilot"}, {"description", "Saved description"}, {"region", "Europe"}});
       check(result.at("ok"), "Profile creation should succeed");
+      check(read_document(folder / "state.json").at("revision") ==
+                service.snapshot().at("revision"),
+            "Observer failures must not split disk and in-memory revisions");
+      service.observe_changes({});
       const auto profile = result.at("data").at("profiles").back();
       check(profile.at("description") == "Saved description", "Profile metadata must persist");
       check(!call(service, "profiles.create", {{"name", "pilot"}}).at("ok"),
@@ -63,6 +94,7 @@ int main() {
                  {{"action", "modules.installPackage"}, {"data", {{"path", path_string(package)}}}})
                 .at("ok"),
             "Valid module ZIP should install");
+      await_install(service);
       const auto content = folder / "content";
       std::filesystem::create_directories(content);
       check(call(service, "launcher.action",
@@ -88,6 +120,7 @@ int main() {
                  {{"action", "modules.installPackage"}, {"data", {{"path", path_string(package)}}}})
                 .at("ok"),
             "New module version should stage and install");
+      await_install(service);
       check(service.snapshot()["modules"][0]["version"] == "2", "Installed version should update");
       std::ofstream(folder / "outside.png") << "outside";
       check(!service.asset_path("game-tile", gameId).has_value(),
@@ -104,8 +137,21 @@ int main() {
                 .at("ok"),
             "Empty module selection should unlink the game");
       check(!service.snapshot()["games"][0].contains("tileArt") &&
-                !service.snapshot()["games"][0].contains("moduleId"),
+                service.snapshot()["games"][0].value("moduleId", "").empty(),
             "Unlinked games must not retain old module artwork");
+      check(call(service, "launcher.action",
+                 {{"action", "library.update"},
+                  {"data", {{"id", gameId}, {"moduleId", "test.module"}}}})
+                .at("ok"),
+            "Reassociation should succeed");
+      check(call(service, "launcher.action",
+                 {{"action", "modules.unlinkGames"}, {"data", {{"id", "test.module"}}}})
+                .at("ok"),
+            "Module-side unlink should succeed");
+      check(service.snapshot().at("modules").size() == 1 &&
+                service.snapshot()["games"][0].value("moduleId", "").empty() &&
+                !service.snapshot()["games"][0].contains("tileArt"),
+            "Module-side unlink must clear all links and artwork while retaining the module");
       check(
           call(service, "launcher.action", {{"action", "support.bundle"}, {"data", Json::object()}})
               .at("ok"),

@@ -1,4 +1,5 @@
 #include "application/launcher_service.hpp"
+#include "core/launcher_update.hpp"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
@@ -20,6 +21,7 @@
 #include <memory>
 #include <queue>
 #include <thread>
+#include <chrono>
 #ifdef _WIN32
 #include "include/cef_sandbox_win.h"
 #endif
@@ -30,8 +32,45 @@ using xenon::launcher_next::LauncherService;
 namespace fs = std::filesystem;
 bool restart_requested = false;
 bool restart_safe = false;
+fs::path update_receipt;
+std::string update_token;
 bool trusted(CefRefPtr<CefFrame> frame) {
   return frame && frame->IsMain() && frame->GetURL().ToString() == "xenon://app/";
+}
+class StateSignal : public std::enable_shared_from_this<StateSignal> {
+public:
+  CefRefPtr<CefBrowser> browser; // UI thread only; cleared before closing the browser.
+  void notify(std::int64_t revision);
+  void deliver() {
+    scheduled_.store(false);
+    if (!browser || !browser->IsValid())
+      return;
+    const auto frame = browser->GetMainFrame();
+    if (trusted(frame))
+      frame->ExecuteJavaScript(
+          "window.dispatchEvent(new CustomEvent('xenon:revision',{detail:{version:1,revision:" +
+              std::to_string(revision_.load()) + "}}));",
+          "xenon://app/", 0);
+  }
+
+private:
+  std::atomic_bool scheduled_{false};
+  std::atomic<std::int64_t> revision_{0};
+};
+class StateSignalTask : public CefTask {
+public:
+  explicit StateSignalTask(std::shared_ptr<StateSignal> signal) : signal_(std::move(signal)) {}
+  void Execute() override { signal_->deliver(); }
+
+private:
+  std::shared_ptr<StateSignal> signal_;
+  IMPLEMENT_REFCOUNTING(StateSignalTask);
+};
+void StateSignal::notify(std::int64_t revision) {
+  revision_.store(revision);
+  if (!scheduled_.exchange(true) &&
+      !CefPostDelayedTask(TID_UI, new StateSignalTask(shared_from_this()), 100))
+    scheduled_.store(false);
 }
 fs::path executable_directory() {
   CefString path;
@@ -51,15 +90,31 @@ private:
 };
 class CloseTask : public CefTask {
 public:
-  explicit CloseTask(CefRefPtr<CefBrowser> browser) : browser_(browser) {}
+  explicit CloseTask(CefRefPtr<CefBrowser> browser, bool force = false)
+      : browser_(browser), force_(force) {}
   void Execute() override {
     if (browser_->IsValid())
-      browser_->GetHost()->CloseBrowser(false);
+      browser_->GetHost()->CloseBrowser(force_);
   }
 
 private:
   CefRefPtr<CefBrowser> browser_;
+  bool force_;
   IMPLEMENT_REFCOUNTING(CloseTask);
+};
+class NavigateTask : public CefTask {
+public:
+  NavigateTask(CefRefPtr<CefBrowser> browser, std::string url)
+      : browser_(browser), url_(std::move(url)) {}
+  void Execute() override {
+    if (browser_->IsValid())
+      browser_->GetMainFrame()->LoadURL(url_);
+  }
+
+private:
+  CefRefPtr<CefBrowser> browser_;
+  std::string url_;
+  IMPLEMENT_REFCOUNTING(NavigateTask);
 };
 class Assets : public CefSchemeHandlerFactory {
 public:
@@ -85,7 +140,8 @@ public:
     std::error_code error;
     auto file = fs::weakly_canonical(web_ / relative, error);
     bool image_asset = false;
-    for (const auto *category : {"captures", "avatars", "game-tile", "game-hero"}) {
+    for (const auto *category :
+         {"captures", "avatars", "game-tile", "game-hero", "catalog-tile", "catalog-hero"}) {
       const auto prefix = std::string("/") + category + "/";
       if (path.rfind(prefix, 0) == 0) {
         try {
@@ -117,6 +173,7 @@ public:
                        : ext == ".png"                     ? "image/png"
                        : (ext == ".jpg" || ext == ".jpeg") ? "image/jpeg"
                        : ext == ".webp"                    ? "image/webp"
+                       : ext == ".bmp"                     ? "image/bmp"
                        : ext == ".json"                    ? "application/json"
                                                            : "application/octet-stream";
     CefResponse::HeaderMap headers;
@@ -203,29 +260,55 @@ public:
   explicit Client(std::shared_ptr<LauncherService> service) : service_(std::move(service)) {
     router_ = CefMessageRouterBrowserSide::Create({});
     router_->AddHandler(this, false);
+    const auto weak = std::weak_ptr<StateSignal>(state_signal_);
+    service_->observe_changes([weak](std::int64_t revision) {
+      if (const auto signal = weak.lock())
+        signal->notify(revision);
+    });
   }
   ~Client() override { router_->RemoveHandler(this); }
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override { state_signal_->browser = browser; }
+  void show_failure(CefRefPtr<CefFrame> frame, const std::string &description) {
+    fallback_ =
+        "data:text/html;charset=utf-8," +
+        CefURIEncode(
+            "<!doctype html><html><body style='background:#07131d;color:#f4f8fa;font:16px "
+            "system-ui;padding:48px'><h1>Xenon could not load the interface</h1><p>" +
+                description +
+                "</p><p>Your launcher data has been preserved. Check renderer.log in the launcher "
+                "data directory.</p><p><a style='color:#35d7ea' "
+                "href='xenon://app/'>Retry</a></p><p><a style='color:#35d7ea' "
+                "href='xenon://recovery/restart-safe'>Restart in safe mode</a></p></body></html>",
+            false)
+            .ToString();
+    frame->LoadURL(fallback_);
+  }
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser, TerminationStatus status, int code,
+                                 const CefString &) override {
+    router_->OnRenderProcessTerminated(browser);
+    std::ofstream(service_->storage() / "renderer.log", std::ios::app)
+        << "Renderer terminated: " << status << " (" << code << ")\n";
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_crash_ > std::chrono::seconds(60))
+      crashes_ = 0;
+    last_crash_ = now;
+    if (++crashes_ <= 1)
+      CefPostDelayedTask(TID_UI, new NavigateTask(browser, "xenon://app/"), 250);
+    else
+      show_failure(browser->GetMainFrame(),
+                   "The interface stopped repeatedly. Try safe mode or restart the launcher.");
+  }
   void OnLoadError(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, ErrorCode code,
                    const CefString &text, const CefString &) override {
     if (!frame->IsMain() || code == ERR_ABORTED)
       return;
     std::ofstream(service_->storage() / "renderer.log", std::ios::app)
         << "Main page load failed: " << code << ": " << text.ToString() << '\n';
-    fallback_ = "data:text/html;charset=utf-8," +
-                CefURIEncode("<!doctype html><html><body "
-                             "style='background:#07131d;color:#f4f8fa;font:16px "
-                             "system-ui;padding:48px'><h1>Xenon could not load the "
-                             "interface</h1><p>The packaged web assets could not be opened. "
-                             "Your launcher data has been preserved.</p><p>Check renderer.log "
-                             "in the launcher data directory.</p><a style='color:#35d7ea' "
-                             "href='xenon://app/'>Retry</a></body></html>",
-                             false)
-                    .ToString();
-    frame->LoadURL(fallback_);
+    show_failure(frame, "The packaged web assets could not be opened.");
   }
   bool OnConsoleMessage(CefRefPtr<CefBrowser>, cef_log_severity_t level, const CefString &message,
                         const CefString &, int) override {
@@ -235,13 +318,29 @@ public:
     return false;
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    state_signal_->browser = nullptr;
+    service_->observe_changes({});
     router_->OnBeforeClose(browser);
     CefQuitMessageLoop();
   }
   bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                       CefRefPtr<CefRequest> request, bool, bool) override {
+    if (!fallback_.empty() && frame->IsMain() && frame->GetURL().ToString() == fallback_ &&
+        request->GetURL() == "xenon://recovery/restart-safe") {
+      restart_requested = true;
+      restart_safe = true;
+      CefPostTask(TID_UI, new CloseTask(browser));
+      return true;
+    }
+    const bool allowed =
+        request->GetURL() == "xenon://app/" || request->GetURL().ToString() == fallback_;
+    if (!allowed)
+      return true;
+    if (!fallback_.empty() && frame->GetURL().ToString() == fallback_ &&
+        request->GetURL() == "xenon://app/")
+      crashes_ = 0;
     router_->OnBeforeBrowse(browser, frame);
-    return request->GetURL() != "xenon://app/" && request->GetURL().ToString() != fallback_;
+    return false;
   }
   bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString &,
                      const CefString &, CefLifeSpanHandler::WindowOpenDisposition, bool,
@@ -273,6 +372,34 @@ public:
             {"version", 1}, {"id", request.at("id")}, {"ok", true}, {"data", service_->snapshot()}}
                               .dump());
         CefPostDelayedTask(TID_UI, new CloseTask(browser), 100);
+      } else if (request.at("command") == "launcher.action" &&
+                 request.at("payload").value("action", "") == "updates.install") {
+        const auto service = service_;
+        const auto parent = xenon::launcher_next::current_process_identity();
+        if (!worker_.submit([service, request, callback, browser, parent] {
+              try {
+                const auto plan = service->prepare_update_installation(parent);
+                if (!xenon::launcher_next::launch_detached(
+                        plan.parent_path() / "updater.exe",
+                        {xenon::launcher_next::path_string(plan)})) {
+                  service->update_handoff_failed("Could not start the launcher update helper");
+                  throw std::runtime_error("Could not start the launcher update helper");
+                }
+                const auto reply = Json{{"version", 1},
+                                        {"id", request.at("id")},
+                                        {"ok", true},
+                                        {"data", service->snapshot()}};
+                CefPostTask(TID_UI, new ReplyTask(callback, reply.dump()));
+                CefPostDelayedTask(TID_UI, new CloseTask(browser, true), 250);
+              } catch (const std::exception &error) {
+                const auto reply = Json{{"version", 1},
+                                        {"id", request.at("id")},
+                                        {"ok", false},
+                                        {"error", {{"message", error.what()}}}};
+                CefPostTask(TID_UI, new ReplyTask(callback, reply.dump()));
+              }
+            }))
+          callback->Failure(429, "Launcher command queue is full");
       } else if (request.at("command") == "native.dialog") {
         const auto mode = request.at("payload").value("mode", "open");
         const auto dialog_mode = mode == "folder"     ? FILE_DIALOG_OPEN_FOLDER
@@ -284,8 +411,21 @@ public:
       } else {
         const auto service = service_;
         if (!worker_.submit([service, request, callback] {
-              const auto result = service->request(request).dump();
-              CefPostTask(TID_UI, new ReplyTask(callback, result));
+              auto result = service->request(request);
+              if (result.value("ok", false) && !update_receipt.empty() &&
+                  request.at("command") == "launcher.action" &&
+                  request.at("payload").value("action", "") == "application.ready") {
+                try {
+                  xenon::launcher_next::acknowledge_launcher_update(update_receipt, update_token);
+                  update_receipt.clear();
+                } catch (const std::exception &error) {
+                  result = {{"version", 1},
+                            {"id", request.at("id")},
+                            {"ok", false},
+                            {"error", {{"message", error.what()}}}};
+                }
+              }
+              CefPostTask(TID_UI, new ReplyTask(callback, result.dump()));
             }))
           callback->Failure(429, "Launcher command queue is full");
       }
@@ -299,13 +439,18 @@ private:
   std::shared_ptr<LauncherService> service_;
   CefRefPtr<CefMessageRouterBrowserSide> router_;
   Worker worker_;
+  std::shared_ptr<StateSignal> state_signal_ = std::make_shared<StateSignal>();
   std::string fallback_;
+  std::chrono::steady_clock::time_point last_crash_{};
+  unsigned crashes_ = 0;
   IMPLEMENT_REFCOUNTING(Client);
 };
 class Window : public CefWindowDelegate {
 public:
   Window(CefRefPtr<CefBrowserView> view, std::shared_ptr<LauncherService> service)
       : view_(view), service_(std::move(service)) {
+    if (!service_)
+      return;
     try {
       if (fs::exists(service_->storage() / "window.json"))
         saved_ = xenon::launcher_next::read_document(service_->storage() / "window.json", 4096);
@@ -322,6 +467,10 @@ public:
     window->Show();
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
+    if (!service_) {
+      view_ = nullptr;
+      return;
+    }
     try {
       if (service_->presentation_settings().value("system/rememberWindowGeometry", true) &&
           normal_.width > 0)
@@ -342,7 +491,7 @@ public:
       normal_ = bounds;
   }
   CefRect GetInitialBounds(CefRefPtr<CefWindow>) override {
-    const auto settings = service_->presentation_settings();
+    const auto settings = service_ ? service_->presentation_settings() : Json::object();
     CefRect bounds(0, 0, 1280, 800);
     if (settings.value("system/rememberWindowGeometry", true) && saved_.contains("width")) {
       try {
@@ -366,7 +515,7 @@ public:
     return bounds;
   }
   cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow>) override {
-    const auto settings = service_->presentation_settings();
+    const auto settings = service_ ? service_->presentation_settings() : Json::object();
     if (settings.value("system/startMinimized", false))
       return CEF_SHOW_STATE_MINIMIZED;
     if (settings.value("system/rememberWindowGeometry", true) &&
@@ -390,6 +539,75 @@ private:
   bool maximized_ = false;
   IMPLEMENT_REFCOUNTING(Window);
 };
+std::string html_text(const std::string &value) {
+  std::string result;
+  for (const auto c : value) {
+    switch (c) {
+    case '&':
+      result += "&amp;";
+      break;
+    case '<':
+      result += "&lt;";
+      break;
+    case '>':
+      result += "&gt;";
+      break;
+    case '"':
+      result += "&quot;";
+      break;
+    default:
+      result += c;
+    }
+  }
+  return result;
+}
+class StartupFailure : public CefClient, public CefLifeSpanHandler, public CefRequestHandler {
+public:
+  explicit StartupFailure(std::string url) : url_(std::move(url)) {}
+  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  void OnBeforeClose(CefRefPtr<CefBrowser>) override { CefQuitMessageLoop(); }
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request, bool, bool) override {
+    if (frame->IsMain() && frame->GetURL().ToString() == url_ &&
+        (request->GetURL() == "xenon://startup/retry" ||
+         request->GetURL() == "xenon://startup/retry-safe")) {
+      restart_requested = true;
+      restart_safe = request->GetURL() == "xenon://startup/retry-safe";
+      CefPostTask(TID_UI, new CloseTask(browser));
+      return true;
+    }
+    return request->GetURL().ToString() != url_;
+  }
+
+private:
+  std::string url_;
+  IMPLEMENT_REFCOUNTING(StartupFailure);
+};
+void show_startup_failure(const std::string &message, const fs::path &storage) {
+  const auto document =
+      std::string("<!doctype html><html><head><meta charset='utf-8'>") +
+      "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src "
+      "'unsafe-inline'\">" +
+      "<title>Xenon Launcher startup problem</title></head>" +
+      "<body style='background:#0d1114;color:#eef4f8;font:17px "
+      "system-ui;padding:36px;line-height:1.6'>" +
+      "<h1>The launcher could not start</h1><p>Saved data has been kept. Close another launcher "
+      "using this data folder, or review the startup log and any saved-data backup before trying "
+      "again.</p>" +
+      "<pre style='white-space:pre-wrap;overflow-wrap:anywhere'>" + html_text(message) + "</pre>" +
+      "<p>Data folder: <code>" + html_text(xenon::launcher_next::path_string(storage)) +
+      "</code></p>" +
+      "<p><a style='color:#19d2c0' href='xenon://startup/retry'>Retry startup</a> &nbsp; " +
+      "<a style='color:#19d2c0' href='xenon://startup/retry-safe'>Restart in safe mode</a></p>" +
+      "<p>Safe mode does not reset or replace saved data.</p></body></html>";
+  const auto url = "data:text/html;charset=utf-8," + CefURIEncode(document, false).ToString();
+  CefBrowserSettings settings;
+  settings.background_color = CefColorSetARGB(255, 13, 17, 20);
+  auto view = CefBrowserView::CreateBrowserView(new StartupFailure(url), url, settings, nullptr,
+                                                nullptr, nullptr);
+  CefWindow::CreateTopLevelWindow(new Window(view, nullptr));
+}
 class App : public CefApp, public CefBrowserProcessHandler, public CefRenderProcessHandler {
 public:
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
@@ -414,20 +632,31 @@ public:
     return renderer_ && renderer_->OnProcessMessageReceived(browser, frame, source, message);
   }
   void OnContextInitialized() override {
+    fs::path startup_storage;
     try {
       auto directory = executable_directory();
       auto storage = xenon::launcher_next::default_storage();
       auto args = CefCommandLine::GetGlobalCommandLine();
       if (args->HasSwitch("data-dir"))
         storage = fs::u8path(args->GetSwitchValue("data-dir").ToString());
+      startup_storage = storage;
       fs::create_directories(storage);
       fs::copy_file(directory / "settings-schema.json", storage / "settings-schema.json",
                     fs::copy_options::overwrite_existing);
+      fs::copy_file(directory / "module-catalog-fallback.json",
+                    storage / "module-catalog-fallback.json", fs::copy_options::overwrite_existing);
       auto service = std::make_shared<LauncherService>(
           storage, args->HasSwitch("safe-mode"),
           args->HasSwitch("fixture-host")
               ? fs::u8path(args->GetSwitchValue("fixture-host").ToString())
-              : fs::path{});
+              : fs::path{},
+          std::function<void(const std::string &, const std::string &)>{},
+          args->HasSwitch("offline") ? nullptr
+          : args->HasSwitch("fixture-network")
+              ? xenon::launcher_next::fixture_http(
+                    fs::u8path(args->GetSwitchValue("fixture-network").ToString()))
+              : xenon::launcher_next::platform_http());
+      service->configure_update_installation(directory);
       CefRegisterSchemeHandlerFactory("xenon", "app", new Assets(directory / "web", service));
       auto client = CefRefPtr<Client>(new Client(service));
       CefBrowserSettings browser_settings;
@@ -436,8 +665,12 @@ public:
                                                     nullptr, nullptr, nullptr);
       CefWindow::CreateTopLevelWindow(new Window(view, service));
     } catch (const std::exception &error) {
-      std::ofstream(executable_directory() / "startup-error.txt") << error.what();
-      CefQuitMessageLoop();
+      if (!startup_storage.empty())
+        std::ofstream(startup_storage / "startup.log", std::ios::app)
+            << "Startup failed: " << error.what() << '\n';
+      else
+        std::ofstream(executable_directory() / "startup-error.txt") << error.what();
+      show_startup_failure(error.what(), startup_storage);
     }
   }
 
@@ -461,11 +694,28 @@ int run(CefMainArgs args, void *sandbox) {
   if (args_line->HasSwitch("data-dir"))
     storage = fs::u8path(args_line->GetSwitchValue("data-dir").ToString());
   const auto remote_port = args_line->GetSwitchValue("remote-debugging-port").ToString();
+  if (args_line->HasSwitch("update-receipt") && args_line->HasSwitch("update-token")) {
+    update_receipt = fs::u8path(args_line->GetSwitchValue("update-receipt").ToString());
+    update_token = args_line->GetSwitchValue("update-token").ToString();
+  }
+  const bool offline = args_line->HasSwitch("offline");
+  const auto network_fixture = args_line->GetSwitchValue("fixture-network").ToString();
+  const auto runtime_fixture = args_line->GetSwitchValue("fixture-host").ToString();
   const auto cache = storage / "cef-cache";
   CefString(&settings.root_cache_path) = xenon::launcher_next::path_string(cache);
   settings.log_severity = LOGSEVERITY_WARNING;
-  if (!CefInitialize(args, settings, app, sandbox))
+  CefString(&settings.log_file) = xenon::launcher_next::path_string(storage / "cef.log");
+  if (!CefInitialize(args, settings, app, sandbox)) {
+#ifdef _WIN32
+    const auto message =
+        fs::u8path("The launcher browser runtime could not initialize. Check cef.log in " +
+                   xenon::launcher_next::path_string(storage) +
+                   ". Exit code: " + std::to_string(CefGetExitCode()))
+            .wstring();
+    MessageBoxW(nullptr, message.c_str(), L"Xenon Launcher startup problem", MB_OK | MB_ICONERROR);
+#endif
     return CefGetExitCode();
+  }
   CefRunMessageLoop();
   CefString executable_path;
   CefGetPath(PK_FILE_EXE, executable_path);
@@ -479,6 +729,12 @@ int run(CefMainArgs args, void *sandbox) {
       arguments.push_back("--safe-mode");
     if (!remote_port.empty())
       arguments.push_back("--remote-debugging-port=" + remote_port);
+    if (offline)
+      arguments.push_back("--offline");
+    if (!network_fixture.empty())
+      arguments.push_back("--fixture-network=" + network_fixture);
+    if (!runtime_fixture.empty())
+      arguments.push_back("--fixture-host=" + runtime_fixture);
     if (!xenon::launcher_next::launch_detached(fs::u8path(executable_path.ToString()), arguments))
       return 1;
   }
@@ -488,7 +744,13 @@ int run(CefMainArgs args, void *sandbox) {
 #ifdef _WIN32
 CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE instance, LPWSTR, int, void *sandbox,
                                     cef_version_info_t *) {
-  return run(CefMainArgs(instance), sandbox);
+  try {
+    return run(CefMainArgs(instance), sandbox);
+  } catch (const std::exception &error) {
+    const auto message = fs::u8path(error.what()).wstring();
+    MessageBoxW(nullptr, message.c_str(), L"Xenon Launcher startup problem", MB_OK | MB_ICONERROR);
+    return 1;
+  }
 }
 #else
 int main(int argc, char **argv) { return run(CefMainArgs(argc, argv), nullptr); }

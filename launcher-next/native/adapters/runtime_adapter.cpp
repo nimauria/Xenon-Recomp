@@ -43,6 +43,21 @@ public:
             state = reported;
             session_["state"] = state;
             session_["lastError"] = report.value("lastError", "");
+            if (!session_.contains("runningAtEpochMs")) {
+              const auto reported_start = report.contains("runningAtEpochMs") &&
+                                                  report.at("runningAtEpochMs").is_number_integer()
+                                              ? report.at("runningAtEpochMs").get<std::int64_t>()
+                                              : 0;
+              const auto now = epoch();
+              if (reported_start >= session_.value("startedAtEpochMs", std::int64_t{}) &&
+                  reported_start > 0 && reported_start <= now) {
+                session_["runningAtEpochMs"] = reported_start;
+                metadata_pending_ = true;
+              } else if (reported == "running") {
+                session_["runningAtEpochMs"] = now;
+                metadata_pending_ = true;
+              }
+            }
           }
         }
       }
@@ -64,7 +79,11 @@ public:
     }
     if (terminal(session_.value("state", "")) && !session_.contains("endedAtEpochMs")) {
       session_["endedAtEpochMs"] = epoch();
+      metadata_pending_ = true;
+    }
+    if (metadata_pending_) {
       write_document(storage_ / "active-session.json", session_);
+      metadata_pending_ = false;
     }
     const auto log = directory / "log.txt";
     if (fs::is_regular_file(log)) {
@@ -96,6 +115,7 @@ public:
     session_ = {{"sessionId", id},
                 {"sessionDir", configuration.at("sessionDir")},
                 {"gameId", configuration.value("gameId", "")},
+                {"primaryMediaId", configuration.value("primaryMediaId", "")},
                 {"title", configuration.value("title", "")},
                 {"state", "starting"},
                 {"fixture", true},
@@ -126,6 +146,7 @@ public:
 private:
   fs::path executable_, storage_;
   Json session_ = Json::object();
+  bool metadata_pending_ = false;
 };
 } // namespace
 std::unique_ptr<IRuntimeAdapter> fixture_runtime(fs::path executable, fs::path storage) {

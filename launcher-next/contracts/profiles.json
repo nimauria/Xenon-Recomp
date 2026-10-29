@@ -1,0 +1,24 @@
+{
+  "nameLimit": 48,
+  "descriptionLimit": 180,
+  "avatarZoomMin": 1,
+  "avatarZoomMax": 3,
+  "regions": [
+    "Auto (Global)",
+    "NTSC-U",
+    "PAL",
+    "NTSC-J"
+  ],
+  "startupPages": [
+    "Launcher default",
+    "Home",
+    "Library",
+    "Downloads",
+    "Modules",
+    "Profiles",
+    "Captures",
+    "Network",
+    "Support",
+    "Settings"
+  ]
+}

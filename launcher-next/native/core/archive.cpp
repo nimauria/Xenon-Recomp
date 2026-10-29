@@ -4,6 +4,7 @@
 #include <set>
 #include <stdexcept>
 #include <vector>
+#include <exception>
 
 namespace xenon::launcher_next {
 namespace fs = std::filesystem;
@@ -27,8 +28,34 @@ size_t write_at(void *opaque, mz_uint64 offset, const void *buffer, size_t size)
   output.write(static_cast<const char *>(buffer), static_cast<std::streamsize>(size));
   return output ? size : 0;
 }
+struct ExtractOutput {
+  std::ofstream &file;
+  const ExtractionControl &control;
+  std::uint64_t completed, total;
+  std::exception_ptr error;
+};
+size_t extract_at(void *opaque, mz_uint64 offset, const void *buffer, size_t size) noexcept {
+  auto &output = *static_cast<ExtractOutput *>(opaque);
+  try {
+    if (output.control.cancelled && output.control.cancelled())
+      throw OperationCancelled();
+    const auto written = write_at(&output.file, offset, buffer, size);
+    if (output.control.progress)
+      output.control.progress(output.completed + offset + written, output.total);
+    return written;
+  } catch (...) {
+    output.error = std::current_exception();
+    return 0;
+  }
+}
 } // namespace
-void extract_package(const fs::path &source, const fs::path &destination) {
+void extract_package(const fs::path &source, const fs::path &destination,
+                     const ExtractionControl &control) {
+  const auto check_cancel = [&] {
+    if (control.cancelled && control.cancelled())
+      throw OperationCancelled();
+  };
+  check_cancel();
   if (!fs::is_regular_file(source) || fs::file_size(source) > 512ull * 1024 * 1024)
     throw std::runtime_error("Choose a module ZIP smaller than 512 MiB");
   if (fs::exists(destination) && !fs::is_empty(destination))
@@ -48,6 +75,7 @@ void extract_package(const fs::path &source, const fs::path &destination) {
     mz_uint64 total = 0;
     // Validate the entire directory before writing any package member.
     for (mz_uint i = 0; i < count; ++i) {
+      check_cancel();
       mz_zip_archive_file_stat stat{};
       if (!mz_zip_reader_file_stat(&zip, i, &stat))
         throw std::runtime_error("Unreadable ZIP directory");
@@ -85,7 +113,11 @@ void extract_package(const fs::path &source, const fs::path &destination) {
     }
     if (fs::space(destination).available < total + 64ull * 1024 * 1024)
       throw std::runtime_error("Not enough disk space to unpack the module package");
+    std::uint64_t completed = 0;
+    if (control.progress)
+      control.progress(0, total);
     for (mz_uint i = 0; i < count; ++i) {
+      check_cancel();
       mz_zip_archive_file_stat stat{};
       mz_zip_reader_file_stat(&zip, i, &stat);
       std::vector<char> name(mz_zip_reader_get_filename(&zip, i, nullptr, 0));
@@ -97,9 +129,19 @@ void extract_package(const fs::path &source, const fs::path &destination) {
       }
       fs::create_directories(target.parent_path());
       std::ofstream output(target, std::ios::binary);
-      if (!output || !mz_zip_reader_extract_to_callback(&zip, i, write_at, &output, 0))
+      ExtractOutput destination_output{output, control, completed, total, {}};
+      const auto extracted =
+          output && mz_zip_reader_extract_to_callback(&zip, i, extract_at, &destination_output, 0);
+      if (destination_output.error)
+        std::rethrow_exception(destination_output.error);
+      if (!extracted)
         throw std::runtime_error("Package extraction or CRC verification failed");
+      output.flush();
+      if (!output)
+        throw std::runtime_error("Could not flush an extracted package file");
+      completed += stat.m_uncomp_size;
     }
+    check_cancel();
     mz_zip_reader_end(&zip);
   } catch (...) {
     mz_zip_reader_end(&zip);

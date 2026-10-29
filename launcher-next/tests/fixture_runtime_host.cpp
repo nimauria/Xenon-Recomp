@@ -10,15 +10,20 @@ int main(int argc, char **argv) {
     if (argc != 3 || std::string(argv[1]) != "--launch-config")
       return 2;
     const auto config = read_document(fs::u8path(argv[2]));
-    const auto directory =
-        fs::u8path(config.at("sessionDir").get<std::string>());
+    const auto directory = fs::u8path(config.at("sessionDir").get<std::string>());
     const auto id = config.at("sessionId");
     const auto scenario = config.value("gameId", "");
+    std::int64_t running_at = 0;
     auto state = [&](const std::string &value, const std::string &error = "") {
+      if (value == "running" && running_at == 0)
+        running_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
       write_document(directory / "status.json", {{"sessionId", id},
                                                  {"stateName", value},
                                                  {"lastError", error},
-                                                 {"fixture", true}});
+                                                 {"fixture", true},
+                                                 {"runningAtEpochMs", running_at}});
       std::ofstream(directory / "log.txt", std::ios::app) << value << '\n';
     };
     state("initializing");
