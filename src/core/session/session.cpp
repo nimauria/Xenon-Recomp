@@ -15,6 +15,7 @@ XenonSession::XenonSession() = default;
 XenonSession::~XenonSession() {
   shutdown();
   stop_memory_watch_poll();
+  stop_guest_profile();
 }
 
 SessionState XenonSession::state() const noexcept {

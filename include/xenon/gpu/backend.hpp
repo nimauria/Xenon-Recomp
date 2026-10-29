@@ -120,6 +120,18 @@ class Backend {
   // Presents an explicit runtime-provided scanout resource. Native window /
   // surface attachment is backend-specific, while frame semantics stay common.
   [[nodiscard]] virtual PresentStatus present(const PresentationFrame& frame) = 0;
+  // Draws scan-out of `frame` into an offscreen width x height RGBA8 image and
+  // reads it back, as presentation would show it. False where the backend
+  // cannot capture.
+  [[nodiscard]] virtual bool capture_scanout(const PresentationFrame& frame, std::uint32_t width,
+                                             std::uint32_t height,
+                                             PreparedPresentationFrame& output) {
+    static_cast<void>(frame);
+    static_cast<void>(width);
+    static_cast<void>(height);
+    output.error = "this backend cannot capture scan-out";
+    return false;
+  }
   [[nodiscard]] virtual bool resize_presentation(std::uint32_t width,
                                                  std::uint32_t height) = 0;
   [[nodiscard]] virtual bool presentation_ready() const noexcept = 0;

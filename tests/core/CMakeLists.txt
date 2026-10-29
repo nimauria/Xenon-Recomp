@@ -137,4 +137,8 @@ if(XENON_BUILD_TESTS)
     export_trace_tests.cpp xenon_core)
   xenon_add_standalone_test(xenon_guest_memory_watch_tests
     guest_memory_watch_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_guest_profiler_tests
+    guest_profiler_tests.cpp xenon_core)
+  xenon_add_standalone_test(xenon_frame_dump_tests
+    frame_dump_tests.cpp xenon_core)
 endif()

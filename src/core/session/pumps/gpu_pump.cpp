@@ -1,11 +1,14 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <thread>
 
 #include "core/session/session_internal.hpp"
+#include "xenon/core/frame_dump.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/logging/probe_log.hpp"
 
@@ -125,6 +128,35 @@ void XenonSession::stop_gpu_pump_thread() noexcept {
     static_cast<void>(gpu_pump_thread_->join());
     gpu_pump_thread_.reset();
   }
+}
+
+// XENON_FRAME_DUMP=<directory>: every XENON_FRAME_DUMP_EVERY-th presented
+// frame (default 10) is captured at 640x360 and written as
+// frame_<steady ms>_<index>.bmp, on the probe logs' clock. Runs on the GPU pump
+// thread right after the present, so it sees exactly what was shown.
+void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
+  static const std::filesystem::path directory = [] {
+    const char* value = std::getenv("XENON_FRAME_DUMP");
+    return value && *value ? std::filesystem::path(value) : std::filesystem::path{};
+  }();
+  if (directory.empty() || !gpu_) return;
+  static const std::uint64_t every = [] {
+    const char* value = std::getenv("XENON_FRAME_DUMP_EVERY");
+    const auto parsed = value ? std::strtoull(value, nullptr, 10) : 0ull;
+    return parsed ? parsed : 10ull;
+  }();
+  const auto index = dumped_frame_candidates_++;
+  if (index % every != 0u) return;
+  gpu::PreparedPresentationFrame image{};
+  if (!gpu_->capture_scanout(frame, 640u, 360u, image)) return;
+  const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  static_cast<void>(write_frame_bmp(
+      directory / ("frame_" + std::to_string(now_ms) + "_" + std::to_string(index) + ".bmp"),
+      image));
 }
 
 std::uint32_t XenonSession::run_gpu_pump_thread() {
@@ -248,8 +280,10 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       frame.visible_height = front_buffer.height ? front_buffer.height : texture->height;
       const auto _present_start = Clock::now();
       const auto status = graphics_system_->present(*gpu_, frame);
-      if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal)
+      if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal) {
         last_presented_generation = front_buffer.generation;
+        dump_presented_frame(frame);
+      }
       gpu_presents_.fetch_add(1u, std::memory_order_relaxed);
       const auto status_index = static_cast<std::size_t>(status);
       if (status_index < gpu_present_results_.size())

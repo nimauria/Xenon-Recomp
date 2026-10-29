@@ -36,6 +36,9 @@ add_library(xenon_core STATIC
   session/diagnostics/adaptive_observations.cpp
   session/diagnostics/boot_progress.cpp
   session/diagnostics/fault_report.cpp
+  session/diagnostics/frame_dump.cpp
+  session/diagnostics/guest_profile.cpp
+  session/diagnostics/guest_profiler.cpp
   session/diagnostics/memory_watch.cpp
   session/diagnostics/runtime_probes.cpp
   session/diagnostics/session_capability_report.cpp

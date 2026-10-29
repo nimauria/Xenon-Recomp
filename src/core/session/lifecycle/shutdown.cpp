@@ -35,6 +35,7 @@ void XenonSession::shutdown() {
   }
   // The poll thread reads guest memory, so it must be gone before memory_ is.
   stop_memory_watch_poll();
+  stop_guest_profile();
   time_stamp_clock_.stop();
   shutdown_step("stopping the GPU pump thread");
 

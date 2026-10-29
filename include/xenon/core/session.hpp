@@ -23,6 +23,7 @@
 #include "xenon/core/export_registry.hpp"
 #include "xenon/core/export_trace.hpp"
 #include "xenon/core/guest_memory_watch.hpp"
+#include "xenon/core/guest_profiler.hpp"
 #include "xenon/core/guest_thread_context.hpp"
 #include "xenon/core/wake_signal.hpp"
 #include "xenon/cpu/dynamic_fallback.hpp"
@@ -579,6 +580,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // until stop_gpu_pump_thread() clears gpu_pump_running_. The GPU worker:
   // drains the ring, renders and presents, woken by gpu_wake_.
   [[nodiscard]] std::uint32_t run_gpu_pump_thread();
+  // XENON_FRAME_DUMP: writes sampled presented frames as BMPs (gpu_pump.cpp).
+  void dump_presented_frame(const gpu::PresentationFrame& frame);
+  std::uint64_t dumped_frame_candidates_{};  // GPU pump thread only.
   // Entry point for gpu_vsync_thread_: at 60 Hz, asks the worker to present
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
@@ -597,6 +601,11 @@ class XenonSession final : public cpu::RuntimeServices {
   void unload_native_extension() noexcept;
   void start_memory_watch_poll();
   void stop_memory_watch_poll() noexcept;
+  // XENON_GUEST_PROFILE=<file> (or 1 for guest_profile.log): samples every
+  // guest thread's position each millisecond from start() and writes the
+  // per-second profile when the session stops (diagnostics/guest_profile.cpp).
+  void start_guest_profile();
+  void stop_guest_profile() noexcept;
   // Text describing which guest threads were executing (outside a kernel call)
   // when the poll thread noticed a change; racy diagnostic read.
   [[nodiscard]] std::string describe_running_guest_threads() const;
@@ -620,6 +629,10 @@ class XenonSession final : public cpu::RuntimeServices {
   GuestMemoryWatch memory_watch_{};
   std::thread memory_watch_thread_{};
   std::atomic<bool> memory_watch_poll_running_{false};
+  GuestProfiler guest_profiler_{};
+  std::thread guest_profile_thread_{};
+  std::atomic<bool> guest_profile_running_{false};
+  std::string guest_profile_path_{};
   // Keeps the KeTimeStampBundle variable export ticking from session init.
   kernel::TimeStampBundleClock time_stamp_clock_{};
   // Deep enough that a quiet thread's history survives a chatty polling thread.

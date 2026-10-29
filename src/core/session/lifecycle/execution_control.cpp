@@ -54,6 +54,7 @@ SessionResult XenonSession::start() {
                             main_thread_->thread_id());
   // Take the watch baseline before any guest code runs.
   start_memory_watch_poll();
+  start_guest_profile();
   if (!main_thread_->start()) {
     set_error("Failed to start main KernelThread");
     return SessionResult::failure(last_error_);
