@@ -6,6 +6,11 @@ import {
   type Transport,
 } from "../contracts/launcher";
 import definitions from "../contracts/settings.json";
+import {
+  normalizeProfile,
+  duplicateProfileName,
+  projectProfiles,
+} from "./profile";
 
 export function initialState(): Snapshot {
   return {
@@ -107,13 +112,13 @@ export class PreviewTransport implements Transport {
     const next = structuredClone(this.state);
     switch (command) {
       case "application.snapshot":
-        return structuredClone(this.state) as Commands[K]["output"];
+        return projectProfiles(this.state) as Commands[K]["output"];
       case "profiles.create": {
         const name = (
           input as Commands["profiles.create"]["input"]
         ).name.trim();
-        if (!name || name.length > 40)
-          throw new Error("Use a profile name between 1 and 40 characters.");
+        if (!name || name.length > 48)
+          throw new Error("Use a profile name between 1 and 48 characters.");
         if (
           next.profiles.some(
             (p) => p.name.toLocaleLowerCase() === name.toLocaleLowerCase(),
@@ -121,12 +126,17 @@ export class PreviewTransport implements Transport {
         )
           throw new Error("That profile name is already in use.");
         const data = input as Commands["profiles.create"]["input"];
-        next.profiles.push({
-          ...data,
-          id: crypto.randomUUID(),
-          name,
-          description: data.description ?? "",
-        });
+        next.profiles.push(
+          normalizeProfile(
+            {
+              ...data,
+              id: crypto.randomUUID(),
+              name,
+              description: data.description ?? "",
+            },
+            next.settings ?? {},
+          ),
+        );
         break;
       }
       case "profiles.activate": {
@@ -161,6 +171,11 @@ export class PreviewTransport implements Transport {
         next.notifications ??= [];
         next.history ??= [];
         if (action === "settings.set") {
+          if (
+            data.key === "community/discordRichPresence" &&
+            data.value !== false
+          )
+            throw new Error("Discord Rich Presence provider is unavailable");
           if (typeof data.key !== "string")
             throw new Error("Invalid setting key");
           const definition = definitions.find((d) => d.key === data.key);
@@ -195,6 +210,15 @@ export class PreviewTransport implements Transport {
               data.value as Snapshot["preferences"]["startPage"];
           if (data.key === "accessibility/reduceMotion")
             next.preferences.reducedMotion = Boolean(data.value);
+        } else if (action === "settings.resetKey") {
+          const definition = definitions.find((d) => d.key === data.key);
+          if (!definition) throw new Error("Unknown setting");
+          delete next.settings[String(data.key)];
+          if (data.key === "general/startupPage")
+            next.preferences.startPage =
+              definition.default as Snapshot["preferences"]["startPage"];
+          if (data.key === "accessibility/reduceMotion")
+            next.preferences.reducedMotion = Boolean(definition.default);
         } else if (action === "settings.reset") {
           for (const key of Object.keys(next.settings))
             if (
@@ -217,12 +241,12 @@ export class PreviewTransport implements Transport {
           if (!profile) throw new Error("Profile no longer exists.");
           const name = String(
             action === "profiles.duplicate"
-              ? `${profile.name} copy`
+              ? duplicateProfileName(next.profiles, profile.name)
               : data.name,
           ).trim();
           if (
             !name ||
-            name.length > 40 ||
+            name.length > 48 ||
             next.profiles.some(
               (p) =>
                 (action === "profiles.duplicate" || p.id !== profile.id) &&
@@ -230,13 +254,27 @@ export class PreviewTransport implements Transport {
             )
           )
             throw new Error(
-              "Choose a unique profile name, up to 40 characters.",
+              "Choose a unique profile name, up to 48 characters.",
             );
-          const edited = { ...profile, ...data, name, id: profile.id };
+          const edited = normalizeProfile(
+            { ...profile, ...data, name, id: profile.id },
+            next.settings ?? {},
+            profile,
+          );
           if (action === "profiles.duplicate")
-            next.profiles.push({ ...profile, id: crypto.randomUUID(), name });
+            next.profiles.push({ ...edited, id: crypto.randomUUID(), name });
           else Object.assign(profile, edited);
-        } else if (action === "notifications.clear") next.notifications = [];
+        } else if (action === "navigation.remember") {
+          if (!pages.includes(String(data.page)))
+            throw new Error("Unknown navigation destination");
+          next.lastPage = data.page as Snapshot["lastPage"];
+        } else if (action === "notifications.readAll")
+          next.notifications.forEach((n) => (n.read = true));
+        else if (action === "notifications.dismiss")
+          next.notifications = next.notifications.filter(
+            (n) => n.id !== data.id,
+          );
+        else if (action === "notifications.clear") next.notifications = [];
         else if (action === "notifications.read") {
           const notification = next.notifications.find((n) => n.id === data.id);
           if (notification) notification.read = Boolean(data.read);
@@ -260,7 +298,7 @@ export class PreviewTransport implements Transport {
     validateState(next);
     this.persist(next); // Commit memory only after durable storage succeeds.
     this.state = next;
-    return structuredClone(next) as Commands[K]["output"];
+    return projectProfiles(next) as Commands[K]["output"];
   }
 }
 declare global {
@@ -273,6 +311,19 @@ declare global {
   }
 }
 class CefTransport implements Transport {
+  subscribe(listener: (revision: number) => void) {
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (
+        detail?.version === 1 &&
+        Number.isSafeInteger(detail.revision) &&
+        detail.revision >= 0
+      )
+        listener(detail.revision);
+    };
+    window.addEventListener("xenon:revision", receive);
+    return () => window.removeEventListener("xenon:revision", receive);
+  }
   request<K extends Command>(
     command: K,
     payload: Commands[K]["input"],
@@ -281,7 +332,11 @@ class CefTransport implements Transport {
     return new Promise((resolve, reject) => {
       const timeout = window.setTimeout(
         () => reject(new Error("The launcher service did not respond.")),
-        15000,
+        command === "native.dialog" ||
+          (command === "launcher.action" &&
+            (payload as { action?: string }).action === "updates.install")
+          ? 300000
+          : 15000,
       );
       window.cefQuery!({
         request: JSON.stringify({

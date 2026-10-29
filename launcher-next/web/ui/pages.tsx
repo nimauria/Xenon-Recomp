@@ -1,24 +1,63 @@
-import { useMemo, useState } from "react";
-import type { Game, Module, Page, Profile } from "../../contracts/launcher";
+import { useEffect, useMemo, useState } from "react";
+import type { Game, Module, Profile } from "../../contracts/launcher";
+import { playtime, activityTime } from "../activity";
+import { GameMedia } from "./GameMedia";
+import { GameAddons } from "./GameAddons";
 import { GameCollection } from "./GameCollection";
 import { GameCarousel } from "./GameCarousel";
 import { CoverImage } from "./CoverImage";
 import { AppearanceSettings } from "./AppearanceSettings";
+import { LegacyMigration } from "./LegacyMigration";
+import { InputSettings } from "./RuntimeServices";
 import definitions from "../../contracts/settings.json";
+import profileRuntime from "../../contracts/profile-runtime.json";
+import profileDefinitions from "../../contracts/profiles.json";
+import { isActiveJob } from "../jobs";
+import {
+  ModuleCatalogue,
+  UpdateControls,
+  UpdatesPanel,
+  UpdateHistory,
+} from "./ModuleCatalogue";
 import { Empty, Modal, downloadJson, useLauncher } from "./context";
 
 export function Library() {
-  const { state, busy, query, action, pick } = useLauncher();
-  const [selected, select] = useState(
-    String(state.settings?.["library/lastSelectedGameId"] ?? ""),
-  );
-  const [filter, setFilter] = useState("All games");
-  const [sort, setSort] = useState("A–Z");
+  const { state, busy, query, action, pick, libraryBrowse, setLibraryBrowse } =
+    useLauncher();
+  const { selected, filter, sort, scroll } = libraryBrowse;
+  const select = (id: string) =>
+    setLibraryBrowse((previous) => ({ ...previous, selected: id }));
+  const setFilter = (filter: string) =>
+    setLibraryBrowse((previous) => ({ ...previous, filter, scroll: 0 }));
+  const setSort = (sort: string) =>
+    setLibraryBrowse((previous) => ({ ...previous, sort, scroll: 0 }));
   const [properties, setProperties] = useState<Game>();
+  const [importPaths, setImportPaths] = useState<string[]>([]);
   const [moduleSettings, setModuleSettings] = useState<Module>();
-  const [view, setView] = useState(
-    String(state.settings?.["library/viewMode"] ?? "Focused"),
-  );
+  const view = String(state.settings?.["library/viewMode"] ?? "Focused");
+  useEffect(() => {
+    if (
+      busy ||
+      !selected ||
+      state.settings?.["library/rememberSelection"] === false ||
+      state.settings?.["library/lastSelectedGameId"] === selected
+    )
+      return;
+    const timer = window.setTimeout(
+      () =>
+        void action("settings.set", {
+          key: "library/lastSelectedGameId",
+          value: selected,
+        }),
+      400,
+    );
+    return () => window.clearTimeout(timer);
+  }, [
+    selected,
+    busy,
+    state.settings?.["library/rememberSelection"],
+    state.settings?.["library/lastSelectedGameId"],
+  ]);
   const games = useMemo(
     () =>
       state.games
@@ -32,7 +71,11 @@ export function Library() {
             ? a.title.localeCompare(b.title)
             : sort === "Z–A"
               ? b.title.localeCompare(a.title)
-              : Number(b.addedAt ?? 0) - Number(a.addedAt ?? 0),
+              : sort === "Recently played"
+                ? activityTime(b.lastPlayed) - activityTime(a.lastPlayed)
+                : sort === "Most played"
+                  ? (b.playCount ?? 0) - (a.playCount ?? 0)
+                  : activityTime(b.addedAt) - activityTime(a.addedAt),
         ),
     [state.games, query, filter, sort],
   );
@@ -43,7 +86,7 @@ export function Library() {
   );
   async function add(folder: boolean) {
     const paths = await pick(folder ? "folder" : "multiple");
-    if (paths.length) await action("library.import", { paths });
+    if (paths.length) setImportPaths(paths);
   }
   return (
     <>
@@ -74,6 +117,8 @@ export function Library() {
             <option>A–Z</option>
             <option>Z–A</option>
             <option>Recently added</option>
+            <option>Recently played</option>
+            <option>Most played</option>
           </select>
         </label>
         <label>
@@ -81,7 +126,6 @@ export function Library() {
           <select
             value={view}
             onChange={(e) => {
-              setView(e.target.value);
               void action("settings.set", {
                 key: "library/viewMode",
                 value: e.target.value,
@@ -121,6 +165,10 @@ export function Library() {
             />
           ) : (
             <GameCollection
+              scroll={scroll}
+              setScroll={(scroll) =>
+                setLibraryBrowse((previous) => ({ ...previous, scroll }))
+              }
               density={String(
                 state.settings?.["library/gridDensity"] ?? "Auto",
               )}
@@ -196,47 +244,56 @@ export function Library() {
                 <dt>Module</dt>
                 <dd>{game.module}</dd>
               </dl>
-              <h3>Add-ons</h3>
-              <div className="dlc-list">
-                {!game.dlc?.length && <p>No add-ons registered.</p>}
-                {game.dlc?.map((d) => (
-                  <div className="row" key={d.id}>
-                    <span>
-                      {d.name}
-                      <small>{d.verified ? "Verified" : "Not verified"}</small>
-                    </span>
-                    <button
-                      disabled={busy}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Remove add-on reference “${d.name}”? Original files are kept.`,
-                          )
-                        )
-                          void action("dlc.remove", {
-                            id: game.id,
-                            dlcId: d.id,
-                          });
-                      }}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <button
-                disabled={busy || state.mode !== "native"}
-                onClick={async () => {
-                  const paths = await pick("multiple");
-                  if (paths.length)
-                    await action("dlc.import", { id: game.id, paths });
-                }}
-              >
-                Add local DLC
-              </button>
+              <GameAddons game={game} />
             </article>
           )}
         </div>
+      )}
+      {importPaths.length > 0 && (
+        <Modal
+          title="Add games to the library"
+          close={() => setImportPaths([])}
+        >
+          <p>
+            {importPaths.length} source{importPaths.length === 1 ? "" : "s"}{" "}
+            selected.
+          </p>
+          <p>
+            Keep the current location, or move the files into your configured
+            Games folder. Moves run in Downloads and verify the copy before
+            removing unchanged originals.
+          </p>
+          <div className="actions">
+            <button
+              disabled={busy}
+              onClick={async () => {
+                if (
+                  await action("library.import", {
+                    paths: importPaths,
+                    mode: "keep",
+                  })
+                )
+                  setImportPaths([]);
+              }}
+            >
+              Keep current location
+            </button>
+            <button
+              disabled={busy || state.mode !== "native"}
+              onClick={async () => {
+                if (
+                  await action("library.import", {
+                    paths: importPaths,
+                    mode: "move",
+                  })
+                )
+                  setImportPaths([]);
+              }}
+            >
+              Move into Xenon Library
+            </button>
+          </div>
+        </Modal>
       )}
       {properties && (
         <GameProperties
@@ -258,18 +315,22 @@ export function Library() {
 }
 function GameProperties({ game, close }: { game: Game; close: () => void }) {
   const { state, busy, action } = useLauncher();
+  const [mediaDirty, setMediaDirty] = useState(false);
   const [title, setTitle] = useState(game.title);
   const [moduleId, setModule] = useState(game.moduleId ?? "");
   return (
     <Modal
       title="Game properties"
       close={close}
-      dirty={title !== game.title || moduleId !== (game.moduleId ?? "")}
+      dirty={
+        mediaDirty || title !== game.title || moduleId !== (game.moduleId ?? "")
+      }
     >
       <form
         className="form"
         onSubmit={async (e) => {
           e.preventDefault();
+          if (mediaDirty) return;
           if (
             await action("library.update", {
               id: game.id,
@@ -299,11 +360,39 @@ function GameProperties({ game, close }: { game: Game; close: () => void }) {
             ))}
           </select>
         </label>
+        <p>
+          Recorded playtime: {playtime(game.totalPlayTimeMs)} ·{" "}
+          {game.playCount ?? 0} plays
+        </p>
+        <GameMedia game={game} reportDirty={setMediaDirty} />
         <p className="path">{game.contentPath}</p>
+        <p>
+          {game.managedCopies?.length
+            ? `${game.managedCopies.length} managed content location(s).`
+            : "Files are kept at their original location."}
+        </p>
+        {game.managedCopies?.map((copy) => (
+          <button
+            key={copy.root}
+            type="button"
+            disabled={busy || state.mode !== "native"}
+            onClick={() =>
+              void action("system.openPath", {
+                target: "managed",
+                id: game.id,
+                copyId: copy.entryId,
+                locationId: copy.locationId,
+              })
+            }
+          >
+            Open {copy.previous ? "previous" : "managed"}{" "}
+            {copy.type === "game" ? "game" : "DLC"} folder
+          </button>
+        ))}
         <div className="actions">
           <button
             className="primary"
-            disabled={busy || state.mode !== "native"}
+            disabled={busy || state.mode !== "native" || mediaDirty}
           >
             Save
           </button>
@@ -326,7 +415,21 @@ function GameProperties({ game, close }: { game: Game; close: () => void }) {
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || !state.runtimeServices?.capabilities.content}
+            onClick={() => void action("content.identify", { gameId: game.id })}
+          >
+            Identify with content adapter
+          </button>
+          <button
+            type="button"
+            disabled={busy || !state.runtimeServices?.capabilities.content}
+            onClick={() => void action("content.verify", { gameId: game.id })}
+          >
+            Verify with content adapter
+          </button>
+          <button
+            type="button"
+            disabled={busy || Boolean(game.managedCopies?.length)}
             onClick={async () => {
               if (
                 window.confirm(
@@ -339,7 +442,53 @@ function GameProperties({ game, close }: { game: Game; close: () => void }) {
           >
             Remove reference
           </button>
+          {!game.managedCopies?.some((copy) => copy.type === "game") &&
+            game.contentPath && (
+              <button
+                type="button"
+                disabled={busy || state.mode !== "native"}
+                onClick={async () => {
+                  if (
+                    window.confirm(
+                      `Move the files for “${game.title}” into your configured Games folder? Unchanged original files will be removed after verification.`,
+                    ) &&
+                    (await action("library.transfer", {
+                      id: game.id,
+                      path: game.contentPath,
+                      type: "game",
+                      mode: "move",
+                    }))
+                  )
+                    close();
+                }}
+              >
+                Move into Xenon Library
+              </button>
+            )}
+          {Boolean(game.managedCopies?.length) && (
+            <button
+              type="button"
+              disabled={busy || state.mode !== "native"}
+              onClick={async () => {
+                if (
+                  window.confirm(
+                    `Permanently delete launcher-managed files for “${game.title}”? Original sources outside the managed library are kept. The library entry will remain.`,
+                  ) &&
+                  (await action("library.deleteManaged", { id: game.id }))
+                )
+                  close();
+              }}
+            >
+              Delete managed files
+            </button>
+          )}
         </div>
+        {game.contentReport && (
+          <p role="status">
+            {game.contentReport.fixture ? "Fixture: " : ""}
+            {game.contentReport.message}
+          </p>
+        )}
       </form>
     </Modal>
   );
@@ -373,8 +522,28 @@ function Avatar({
   );
 }
 export function Profiles() {
-  const { state, query, busy, action, pick } = useLauncher();
+  const {
+    state,
+    query,
+    busy,
+    action,
+    pick,
+    navigationIntent,
+    clearNavigationIntent,
+  } = useLauncher();
   const [editor, setEditor] = useState<Profile | "new">();
+  useEffect(() => {
+    if (navigationIntent?.page !== "Profiles") return;
+    if (navigationIntent.section === "create") setEditor("new");
+    if (navigationIntent.targetId) {
+      const card = document.getElementById(
+        `profile-${navigationIntent.targetId}`,
+      );
+      card?.scrollIntoView({ block: "center" });
+      card?.focus();
+    }
+    clearNavigationIntent();
+  }, [navigationIntent]);
   return (
     <>
       <div className="actions">
@@ -395,7 +564,12 @@ export function Profiles() {
         {state.profiles
           .filter((p) => p.name.toLowerCase().includes(query.toLowerCase()))
           .map((p) => (
-            <article className="card" key={p.id}>
+            <article
+              className="card"
+              key={p.id}
+              id={`profile-${p.id}`}
+              tabIndex={-1}
+            >
               <Avatar profile={p} />
               <h2>{p.name}</h2>
               <p>{p.description || "Local launcher profile"}</p>
@@ -432,6 +606,17 @@ export function Profiles() {
                   Activate
                 </button>
                 <button onClick={() => setEditor(p)}>Edit</button>
+                <button
+                  disabled={busy || state.mode !== "native"}
+                  onClick={() =>
+                    void action("system.openPath", {
+                      target: "profile",
+                      id: p.id,
+                    })
+                  }
+                >
+                  Open profile storage
+                </button>
                 <button
                   disabled={busy}
                   onClick={() =>
@@ -476,7 +661,7 @@ function ProfileEditor({
   profile: Profile | "new";
   close: () => void;
 }) {
-  const { busy, action } = useLauncher();
+  const { state, busy, action, pick } = useLauncher();
   const original: Profile =
     profile === "new"
       ? {
@@ -514,7 +699,7 @@ function ProfileEditor({
           Name
           <input
             required
-            maxLength={40}
+            maxLength={profileDefinitions.nameLimit}
             value={draft.name}
             onChange={(e) => field("name", e.target.value)}
           />
@@ -522,7 +707,7 @@ function ProfileEditor({
         <label>
           Description
           <textarea
-            maxLength={500}
+            maxLength={profileDefinitions.descriptionLimit}
             value={draft.description}
             onChange={(e) => field("description", e.target.value)}
           />
@@ -541,7 +726,11 @@ function ProfileEditor({
                   <input
                     type="range"
                     min={key === "avatarZoom" ? 1 : 0}
-                    max={key === "avatarZoom" ? 4 : 1}
+                    max={
+                      key === "avatarZoom"
+                        ? profileDefinitions.avatarZoomMax
+                        : 1
+                    }
                     step=".01"
                     value={draft[key] ?? (key === "avatarZoom" ? 1 : 0.5)}
                     onChange={(e) => field(key, Number(e.target.value))}
@@ -557,11 +746,9 @@ function ProfileEditor({
             value={draft.region ?? "Auto (Global)"}
             onChange={(e) => field("region", e.target.value)}
           >
-            {["Auto (Global)", "North America", "Europe", "Japan", "Asia"].map(
-              (r) => (
-                <option key={r}>{r}</option>
-              ),
-            )}
+            {profileDefinitions.regions.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
           </select>
         </label>
         <label className="row">
@@ -577,9 +764,101 @@ function ProfileEditor({
           <input
             type="checkbox"
             checked={draft.isolatedSettings ?? false}
-            onChange={(e) => field("isolatedSettings", e.target.checked)}
+            onChange={(e) => {
+              const isolated = e.target.checked;
+              setDraft({
+                ...draft,
+                isolatedSettings: isolated,
+                runtimeOverrides:
+                  isolated && !Object.keys(draft.runtimeOverrides ?? {}).length
+                    ? Object.fromEntries(
+                        profileRuntime.map((definition) => [
+                          definition.key,
+                          state.settings?.[definition.key] ??
+                            definition.default,
+                        ]),
+                      )
+                    : (draft.runtimeOverrides ?? {}),
+              });
+              change(true);
+            }}
           />
         </label>
+        <label>
+          Startup page
+          <select
+            value={draft.startupPage ?? "Launcher default"}
+            onChange={(event) => field("startupPage", event.target.value)}
+          >
+            {profileDefinitions.startupPages.map((page) => (
+              <option key={page}>{page}</option>
+            ))}
+          </select>
+        </label>
+        <fieldset
+          className="profile-runtime"
+          disabled={busy || !draft.isolatedSettings}
+        >
+          <legend>Profile runtime settings</legend>
+          {profileRuntime.map((definition) => {
+            const value =
+              draft.runtimeOverrides?.[definition.key] ??
+              state.settings?.[definition.key] ??
+              definition.default;
+            const update = (value: unknown) => {
+              setDraft({
+                ...draft,
+                runtimeOverrides: {
+                  ...draft.runtimeOverrides,
+                  [definition.key]: value,
+                },
+              });
+              change(true);
+            };
+            const range = definition as { minimum?: number; maximum?: number };
+            return (
+              <label key={definition.key}>
+                <span>
+                  {definition.label}
+                  <small>{definition.description}</small>
+                </span>
+                {definition.type === "bool" ? (
+                  <input
+                    aria-label={definition.label}
+                    type="checkbox"
+                    checked={Boolean(value)}
+                    onChange={(event) => update(event.target.checked)}
+                  />
+                ) : definition.type === "enum" ? (
+                  <select
+                    aria-label={definition.label}
+                    value={String(value)}
+                    onChange={(event) => update(event.target.value)}
+                  >
+                    {definition.options.map((option) => (
+                      <option key={String(option.value)} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <input
+                      aria-label={definition.label}
+                      type="range"
+                      min={range.minimum ?? 0}
+                      max={range.maximum ?? 1}
+                      step=".01"
+                      value={Number(value)}
+                      onChange={(event) => update(Number(event.target.value))}
+                    />
+                    <output>{Math.round(Number(value) * 100)}%</output>
+                  </>
+                )}
+              </label>
+            );
+          })}
+        </fieldset>
         <details>
           <summary>Content path overrides</summary>
           {(["gamePath", "savePath", "screenshotPath"] as const).map((key) => (
@@ -590,6 +869,16 @@ function ProfileEditor({
                 placeholder="Use launcher default"
                 onChange={(e) => field(key, e.target.value)}
               />
+              <button
+                type="button"
+                disabled={busy || state.mode !== "native"}
+                onClick={async () => {
+                  const [path] = await pick("folder");
+                  if (path) field(key, path);
+                }}
+              >
+                Browse {key.replace("Path", " folder")}
+              </button>
             </label>
           ))}
         </details>
@@ -602,9 +891,30 @@ function ProfileEditor({
 }
 
 export function Modules() {
-  const { state, busy, query, action, pick } = useLauncher();
+  const {
+    state,
+    busy,
+    query,
+    action,
+    pick,
+    navigationIntent,
+    clearNavigationIntent,
+  } = useLauncher();
   const [settings, setSettings] = useState<Module>();
   const [catalog, setCatalog] = useState(false);
+  const [updateHistory, setUpdateHistory] = useState<string>();
+  useEffect(() => {
+    if (navigationIntent?.page !== "Modules") return;
+    if (navigationIntent.section === "catalog") setCatalog(true);
+    if (navigationIntent.targetId) {
+      const card = document.getElementById(
+        `module-${navigationIntent.targetId}`,
+      );
+      card?.scrollIntoView({ block: "center" });
+      card?.focus();
+    }
+    clearNavigationIntent();
+  }, [navigationIntent]);
   const modules =
     state.modules?.filter((m) =>
       m.name.toLowerCase().includes(query.toLowerCase()),
@@ -632,6 +942,12 @@ export function Modules() {
           Install module ZIP
         </button>
         <button onClick={() => setCatalog(true)}>Module catalogue</button>
+        <button
+          disabled={busy || !state.capabilities.modules}
+          onClick={() => void action("modules.rescan")}
+        >
+          Rescan installed modules
+        </button>
       </div>
       {!modules.length && (
         <Empty title="No modules registered">
@@ -641,7 +957,12 @@ export function Modules() {
       )}
       <div className="cards">
         {modules.map((m) => (
-          <article key={m.id} className="card">
+          <article
+            key={m.id}
+            className="card"
+            id={`module-${m.id}`}
+            tabIndex={-1}
+          >
             <p className="eyebrow">{m.enabled ? "ENABLED" : "DISABLED"}</p>
             <h2>{m.name}</h2>
             <p>Version {m.version}</p>
@@ -659,6 +980,24 @@ export function Modules() {
                 {m.enabled ? "Disable" : "Enable"}
               </button>
               <button onClick={() => setSettings(m)}>Settings</button>
+              <button
+                disabled={
+                  busy || !state.games.some((game) => game.moduleId === m.id)
+                }
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Unlink games from ${m.name}? The module and all game files will be kept.`,
+                    )
+                  )
+                    void action("modules.unlinkGames", { id: m.id });
+                }}
+              >
+                Unlink games
+              </button>
+              <button onClick={() => setUpdateHistory(m.id)}>
+                Update history
+              </button>
               <button
                 disabled={busy || !m.previousVersions?.length}
                 onClick={() => {
@@ -700,6 +1039,7 @@ export function Modules() {
                 Unregister
               </button>
             </div>
+            <UpdateControls id={m.id} name={m.name} />
           </article>
         ))}
       </div>
@@ -709,14 +1049,12 @@ export function Modules() {
           close={() => setSettings(undefined)}
         />
       )}{" "}
-      {catalog && (
-        <Modal title="Module catalogue" close={() => setCatalog(false)}>
-          <Empty title="Catalogue provider not connected">
-            Online module discovery and downloads are not connected yet. Local
-            module ZIP installation and rollback are available from the Modules
-            page.
-          </Empty>
-        </Modal>
+      {catalog && <ModuleCatalogue close={() => setCatalog(false)} />}
+      {updateHistory && (
+        <UpdateHistory
+          id={updateHistory}
+          close={() => setUpdateHistory(undefined)}
+        />
       )}
     </>
   );
@@ -735,6 +1073,11 @@ function ModuleSettings({
       <div className="settings">
         {module.schema.map((d) => {
           const value = module.settings[d.id] ?? d.default ?? "";
+          const options = d.options?.map((option) =>
+            typeof option === "object"
+              ? option
+              : { label: String(option), value: option },
+          );
           return (
             <label key={d.id}>
               <span>
@@ -754,42 +1097,54 @@ function ModuleSettings({
                     })
                   }
                 />
-              ) : d.options?.length ? (
+              ) : options?.length ? (
                 <select
                   disabled={busy}
-                  value={String(value)}
+                  value={options.findIndex((option) => option.value === value)}
                   onChange={(e) =>
                     void action("modules.setting", {
                       id: module.id,
                       key: d.id,
-                      value: e.target.value,
+                      value: options[Number(e.target.value)].value,
                     })
                   }
                 >
-                  {d.options.map((o) => (
-                    <option
-                      key={typeof o === "string" ? o : o.value}
-                      value={typeof o === "string" ? o : o.value}
-                    >
-                      {typeof o === "string" ? o : o.label}
+                  {options.map((option, index) => (
+                    <option key={index} value={index}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
               ) : (
                 <input
+                  key={JSON.stringify(value)}
                   disabled={busy}
                   defaultValue={String(value)}
                   type={d.type === "number" ? "number" : "text"}
-                  onBlur={(e) => {
-                    if (String(value) !== e.target.value)
-                      void action("modules.setting", {
+                  min={d.minimum}
+                  max={d.maximum}
+                  step="any"
+                  onBlur={async (e) => {
+                    const input = e.currentTarget;
+                    if (
+                      d.type === "number" &&
+                      (!input.value.trim() || !input.checkValidity())
+                    ) {
+                      input.reportValidity();
+                      input.value = String(value);
+                      return;
+                    }
+                    if (String(value) !== input.value) {
+                      const saved = await action("modules.setting", {
                         id: module.id,
                         key: d.id,
                         value:
                           d.type === "number"
-                            ? Number(e.target.value)
-                            : e.target.value,
+                            ? Number(input.value)
+                            : input.value,
                       });
+                      if (!saved) input.value = String(value);
+                    }
                   }}
                 />
               )}
@@ -797,6 +1152,15 @@ function ModuleSettings({
           );
         })}
       </div>
+      <button
+        disabled={busy || !module.schema.length}
+        onClick={() => {
+          if (window.confirm("Reset this module to its declared defaults?"))
+            void action("modules.resetSettings", { id: module.id });
+        }}
+      >
+        Reset module settings
+      </button>
     </Modal>
   );
 }
@@ -820,8 +1184,25 @@ const categories = [
   "about",
 ];
 export function Settings() {
-  const { state, busy, query, action, pick } = useLauncher();
+  const {
+    state,
+    busy,
+    query,
+    action,
+    pick,
+    navigationIntent,
+    clearNavigationIntent,
+  } = useLauncher();
   const [category, setCategory] = useState("general");
+  useEffect(() => {
+    if (navigationIntent?.page !== "Settings") return;
+    if (
+      navigationIntent.targetId &&
+      categories.includes(navigationIntent.targetId)
+    )
+      setCategory(navigationIntent.targetId);
+    clearNavigationIntent();
+  }, [navigationIntent]);
   const visible = definitions.filter(
     (d) =>
       d.category !== "internal" &&
@@ -875,6 +1256,8 @@ export function Settings() {
           </button>
         </div>
         {category === "appearance" && !query && <AppearanceSettings />}
+        {category === "general" && !query && <LegacyMigration />}
+        {category === "input" && !query && <InputSettings />}
         {visible.map((d) => {
           const value = state.settings?.[d.key] ?? d.default;
           const definition = d as typeof d & {
@@ -882,66 +1265,76 @@ export function Settings() {
             maximum?: number;
           };
           return (
-            <label key={d.key}>
-              <span>
-                {d.label}
-                <small>{d.key}</small>
-              </span>
-              {d.type === "bool" ? (
-                <input
-                  type="checkbox"
-                  disabled={busy}
-                  checked={Boolean(value)}
-                  onChange={(e) =>
-                    void action("settings.set", {
-                      key: d.key,
-                      value: e.target.checked,
-                    })
-                  }
-                />
-              ) : d.options.length ? (
-                <select
-                  value={JSON.stringify(value)}
-                  disabled={busy}
-                  onChange={(e) =>
-                    void action("settings.set", {
-                      key: d.key,
-                      value: JSON.parse(e.target.value),
-                    })
-                  }
-                >
-                  {d.options.map((o) => (
-                    <option
-                      key={JSON.stringify(o.value)}
-                      value={JSON.stringify(o.value)}
-                    >
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  key={`${d.key}-${JSON.stringify(value)}`}
-                  type={d.type === "number" ? "number" : "text"}
-                  defaultValue={String(value)}
-                  min={definition.minimum}
-                  max={definition.maximum}
-                  step={d.type === "number" ? "any" : undefined}
-                  disabled={busy}
-                  onBlur={(e) => {
-                    const edited =
-                      d.type === "number"
-                        ? Number(e.target.value)
-                        : e.target.value;
-                    if (edited !== value)
+            <div className="setting-row" key={d.key}>
+              <label>
+                <span>
+                  {d.label}
+                  <small>{d.key}</small>
+                </span>
+                {d.type === "bool" ? (
+                  <input
+                    type="checkbox"
+                    disabled={busy || d.key === "community/discordRichPresence"}
+                    checked={Boolean(value)}
+                    onChange={(e) =>
                       void action("settings.set", {
                         key: d.key,
-                        value: edited,
-                      });
-                  }}
-                />
-              )}
-            </label>
+                        value: e.target.checked,
+                      })
+                    }
+                  />
+                ) : d.options.length ? (
+                  <select
+                    value={JSON.stringify(value)}
+                    disabled={busy}
+                    onChange={(e) =>
+                      void action("settings.set", {
+                        key: d.key,
+                        value: JSON.parse(e.target.value),
+                      })
+                    }
+                  >
+                    {d.options.map((o) => (
+                      <option
+                        key={JSON.stringify(o.value)}
+                        value={JSON.stringify(o.value)}
+                      >
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    key={`${d.key}-${JSON.stringify(value)}`}
+                    type={d.type === "number" ? "number" : "text"}
+                    defaultValue={String(value)}
+                    min={definition.minimum}
+                    max={definition.maximum}
+                    step={d.type === "number" ? "any" : undefined}
+                    disabled={busy}
+                    onBlur={(e) => {
+                      const edited =
+                        d.type === "number"
+                          ? Number(e.target.value)
+                          : e.target.value;
+                      if (edited !== value)
+                        void action("settings.set", {
+                          key: d.key,
+                          value: edited,
+                        });
+                    }}
+                  />
+                )}
+              </label>
+              <button
+                type="button"
+                aria-label={`Reset ${d.label}`}
+                disabled={busy || state.settings?.[d.key] === undefined}
+                onClick={() => void action("settings.resetKey", { key: d.key })}
+              >
+                Reset
+              </button>
+            </div>
           );
         })}
         {category === "paths" &&
@@ -998,22 +1391,89 @@ export function Settings() {
             device routing, profiles and rumble require the input provider.
           </p>
         )}
-        {category === "updates" && (
-          <p>
-            Update preferences are stored. The update provider and installer are
-            not connected yet.
-          </p>
-        )}
+        {category === "updates" && <UpdatesPanel />}
         {category === "community" && (
-          <p>Discord presence is not connected yet.</p>
+          <>
+            <p>
+              Discord Rich Presence is unavailable in this build. Enabling it
+              will require an available provider and a new explicit opt-in.
+            </p>
+            <div className="actions">
+              <button
+                disabled={busy || state.mode !== "native"}
+                onClick={() =>
+                  void action("system.openUrl", {
+                    url: "https://discord.gg/zVGw3HADgA",
+                  })
+                }
+              >
+                Join the Xenon Discord
+              </button>
+              <button
+                disabled={busy || state.mode !== "native"}
+                onClick={() =>
+                  void action("system.openUrl", {
+                    url: "https://github.com/nimauria/Xenon-Recomp",
+                  })
+                }
+              >
+                Open project community
+              </button>
+            </div>
+          </>
         )}
       </section>
     </div>
   );
 }
 
+function HomeShelf({ title, games }: { title: string; games: Game[] }) {
+  const { openGame } = useLauncher();
+  if (!games.length) return null;
+  return (
+    <section className="home-shelf" aria-label={title}>
+      <h2>{title}</h2>
+      <div className="home-games">
+        {games.slice(0, 6).map((game) => (
+          <button
+            key={game.id}
+            aria-label={`Open ${game.title}`}
+            onClick={() => openGame(game.id)}
+          >
+            <CoverImage
+              source={game.tileArt}
+              label={game.title}
+              className="home-cover"
+              x={game.tileArtFocalX}
+              y={game.tileArtFocalY}
+            />
+            <strong>{game.title}</strong>
+            <small>{game.module}</small>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+function timestamp(value: string) {
+  const date = new Date(/^\d+$/.test(value) ? Number(value) : value);
+  return Number.isNaN(date.getTime())
+    ? "Time unavailable"
+    : date.toLocaleString();
+}
 export function Activity() {
-  const { state, action, busy, navigate } = useLauncher();
+  const { state, action, busy, navigate, openGame, query } = useLauncher();
+  const games = state.games.filter((game) =>
+    game.title.toLowerCase().includes(query.toLowerCase()),
+  );
+  const recent = [...games].sort(
+    (a, b) => activityTime(b.addedAt) - activityTime(a.addedAt),
+  );
+  const sessions =
+    state.history
+      ?.filter((row) => row.title.toLowerCase().includes(query.toLowerCase()))
+      .slice(-10)
+      .reverse() ?? [];
   return (
     <>
       <section className="card">
@@ -1029,6 +1489,55 @@ export function Activity() {
           Browse library
         </button>
       </section>
+      <div className="home-stats" aria-label="Launcher overview">
+        <button onClick={() => navigate("Library")}>
+          <strong>{state.games.length}</strong>
+          <span>Games</span>
+        </button>
+        <button onClick={() => navigate("Modules")}>
+          <strong>
+            {state.modules?.filter((module) => module.enabled).length ?? 0} /{" "}
+            {state.modules?.length ?? 0}
+          </strong>
+          <span>Enabled modules</span>
+        </button>
+        <button onClick={() => navigate("Captures")}>
+          <strong>{state.captures?.length ?? 0}</strong>
+          <span>Captures</span>
+        </button>
+        <div>
+          <strong>{state.history?.length ?? 0}</strong>
+          <span>History entries</span>
+        </div>
+        <div>
+          <strong>{playtime(state.activitySummary?.totalPlayTimeMs)}</strong>
+          <span>Recorded playtime</span>
+        </div>
+        <div>
+          <strong>{state.activitySummary?.playCount ?? 0}</strong>
+          <span>Recorded plays</span>
+        </div>
+      </div>
+      <HomeShelf
+        title="Favourites"
+        games={games.filter((game) => game.favorite)}
+      />
+      {(state.activitySummary?.fixturePlayCount ?? 0) > 0 && (
+        <p>
+          Test activity: {state.activitySummary?.fixturePlayCount} sessions ·{" "}
+          {playtime(state.activitySummary?.fixturePlayTimeMs)}. Excluded from
+          recorded playtime.
+        </p>
+      )}
+      <HomeShelf
+        title="Recently played"
+        games={[...games]
+          .filter((game) => Boolean(game.lastPlayed))
+          .sort(
+            (a, b) => activityTime(b.lastPlayed) - activityTime(a.lastPlayed),
+          )}
+      />
+      <HomeShelf title="Recently added" games={recent} />
       <div className="heading">
         <h2>Recent sessions</h2>
         <button
@@ -1041,109 +1550,145 @@ export function Activity() {
           Clear history
         </button>
       </div>
-      {!state.history?.length ? (
+      {!sessions.length ? (
         <Empty title="No sessions yet">
-          Real session history will appear when a runtime adapter supplies it.
+          {query
+            ? "No sessions match this search."
+            : "Session history will appear when a runtime adapter supplies it."}
         </Empty>
       ) : (
-        state.history
-          .slice()
-          .reverse()
-          .map((h) => (
-            <article className="card" key={h.id}>
-              <h3>{h.title}</h3>
-              <p>
-                {h.state} · {h.time}
-              </p>
-            </article>
-          ))
+        sessions.map((h) => (
+          <article className="card" key={h.id}>
+            <h3>
+              {h.title}
+              {h.fixture && <span className="badge">Test session</span>}
+            </h3>
+            <p>
+              {h.state} · {timestamp(h.time)} · {playtime(h.durationMs)}
+            </p>
+            {h.gameId && state.games.some((game) => game.id === h.gameId) && (
+              <button onClick={() => openGame(h.gameId!)}>Open game</button>
+            )}
+          </article>
+        ))
       )}
     </>
   );
 }
-export function Captures() {
-  const { state, busy, query, action } = useLauncher();
-  const [selected, setSelected] = useState("");
-  const captures =
-    state.captures?.filter((c) =>
-      c.name.toLowerCase().includes(query.toLowerCase()),
-    ) ?? [];
-  return (
-    <>
-      <p>
-        Images from your configured screenshots folder. Original files stay on
-        your machine.
-      </p>
-      {!captures.length ? (
-        <Empty title="No captures found">
-          Choose a screenshots folder in Settings → Paths, then refresh the
-          page.
-        </Empty>
-      ) : (
-        <div className="cards">
-          {captures.map((c) => (
-            <article className="card" key={c.id}>
-              <h3>{c.name}</h3>
-              <p>{Math.ceil(c.size / 1024)} KiB</p>
-              <button onClick={() => setSelected(c.id)}>View</button>
-              <button
-                disabled={busy}
-                onClick={() => {
-                  if (window.confirm(`Permanently delete “${c.name}”?`))
-                    void action("captures.delete", { id: c.id });
-                }}
-              >
-                Delete
-              </button>
-            </article>
-          ))}
-        </div>
-      )}
-      {selected && (
-        <Modal title={selected} close={() => setSelected("")}>
-          <img
-            className="capture-image"
-            src={`xenon://app/captures/${encodeURIComponent(selected)}`}
-            alt={selected}
-          />
-        </Modal>
-      )}
-    </>
-  );
-}
+export { Captures } from "./Captures";
 export function Downloads() {
-  const { state, query } = useLauncher();
+  const { state, query, action, busy } = useLauncher();
   const [filter, setFilter] = useState("All");
   const jobs =
-    state.jobs?.filter(
-      (j) =>
-        j.title.toLowerCase().includes(query.toLowerCase()) &&
-        (filter === "All" || j.state === filter),
-    ) ?? [];
+    state.jobs
+      ?.filter(
+        (j) =>
+          j.title.toLowerCase().includes(query.toLowerCase()) &&
+          (filter === "All" ||
+            (filter === "Active" ? isActiveJob(j) : j.state === filter)),
+      )
+      .slice()
+      .reverse() ?? [];
   return (
     <>
-      <label>
-        Show
-        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-          {["All", "running", "completed", "failed", "cancelled"].map((f) => (
-            <option key={f}>{f}</option>
-          ))}
-        </select>
-      </label>
+      <div className="actions">
+        <label>
+          Show
+          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+            {[
+              "All",
+              "Active",
+              "completed",
+              "failed",
+              "cancelled",
+              "interrupted",
+            ].map((f) => (
+              <option key={f} value={f}>
+                {f[0].toUpperCase() + f.slice(1)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          disabled={
+            busy || !state.jobs?.some((j) => !isActiveJob(j) && !j.cleaningUp)
+          }
+          onClick={() => {
+            if (
+              window.confirm(
+                "Clear finished operation records? Imported files and current library data are kept.",
+              )
+            )
+              void action("jobs.clearFinished");
+          }}
+        >
+          Clear finished
+        </button>
+      </div>
       {!jobs.length ? (
         <Empty title="No operations to show">
-          Local module installs will appear here after completion. Online update
-          downloads and cancellable background jobs are still being converted.
+          Module installations, catalogue refreshes and verified update
+          downloads run here in the background.
         </Empty>
       ) : (
         jobs.map((j) => (
-          <article className="card" key={j.id}>
+          <article
+            className="card operation"
+            key={j.id}
+            data-job-id={j.id}
+            data-state={j.state}
+            aria-label={j.title}
+          >
             <h3>{j.title}</h3>
-            <progress max={100} value={j.progress} />
+            <progress
+              aria-label={`${j.title} progress`}
+              max={100}
+              value={j.progress}
+            />
             <p>
-              {j.state} · {j.progress}%
+              <span className="operation-state">
+                {j.state === "committing" ? "Finishing operation" : j.state}
+              </span>
+              {j.state === "running" &&
+                j.phase &&
+                j.phase.toLowerCase() !== j.state.toLowerCase() && (
+                  <> · {j.phase}</>
+                )}{" "}
+              · {Math.round(j.progress)}%
             </p>
-            {j.error && <p role="alert">{j.error}</p>}
+            {isActiveJob(j) && Boolean(j.bytesTotal) && (
+              <small>
+                {((j.bytesDone ?? 0) / 1048576).toFixed(1)} /{" "}
+                {((j.bytesTotal ?? 0) / 1048576).toFixed(1)} MiB in this step
+              </small>
+            )}
+            {j.error && <p>{j.error}</p>}
+            {j.warning && <p role="status">{j.warning}</p>}
+            {j.cleaningUp && <p role="status">Removing temporary files…</p>}
+            {j.cleanupError && (
+              <p>Temporary files could not be removed: {j.cleanupError}</p>
+            )}
+            <div className="actions">
+              {j.canCancel && (
+                <button
+                  disabled={busy}
+                  onClick={() => void action("jobs.cancel", { id: j.id })}
+                >
+                  Cancel
+                </button>
+              )}
+              {j.state === "cancelling" && (
+                <span role="status">Cancelling…</span>
+              )}
+              {j.canRetry && (
+                <button
+                  disabled={busy}
+                  onClick={() => void action("jobs.retry", { id: j.id })}
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           </article>
         ))
       )}
@@ -1229,42 +1774,12 @@ export function Support() {
         )}
       </div>
       <p>
-        The native ZIP includes a privacy-filtered summary. Full sanitized log
-        collection remains to be converted.
+        The ZIP includes a filtered diagnostics summary and bounded
+        launcher/runtime log excerpts. Known local paths, profile names,
+        email-shaped strings and credential-bearing log lines are filtered.
+        Review the files before sharing module output.
       </p>
     </section>
   );
 }
-export function RuntimeTools({ page }: { page: Page }) {
-  const { state } = useLauncher();
-  return (
-    <section className="card">
-      <h2>
-        {page === "Developer" ? "Developer diagnostics" : `${page} service`}
-      </h2>
-      <p>
-        Runtime adapter:{" "}
-        {state.capabilities.runtime ? "available" : "not connected"}
-      </p>
-      {page === "Developer" ? (
-        <pre>
-          {JSON.stringify(
-            {
-              revision: state.revision,
-              mode: state.mode,
-              protocolVersion: 1,
-              capabilities: state.capabilities,
-            },
-            null,
-            2,
-          )}
-        </pre>
-      ) : (
-        <Empty title="Runtime service unavailable">
-          The corresponding Xenon service must provide live state before these
-          controls can be enabled.
-        </Empty>
-      )}
-    </section>
-  );
-}
+export { RuntimeServices as RuntimeTools } from "./RuntimeServices";

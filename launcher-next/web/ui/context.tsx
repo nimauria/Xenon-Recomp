@@ -2,18 +2,32 @@ import {
   createContext,
   useContext,
   useEffect,
+  useId,
   useRef,
   type ReactNode,
+  type Dispatch,
+  type SetStateAction,
 } from "react";
 import type { Page, Snapshot } from "../../contracts/launcher";
+export interface LibraryBrowse {
+  selected: string;
+  filter: string;
+  sort: string;
+  scroll: number;
+}
 export interface LauncherContext {
   state: Snapshot;
   busy: boolean;
   query: string;
   navigate: (page: Page) => void;
+  openGame: (id: string) => void;
+  libraryBrowse: LibraryBrowse;
+  setLibraryBrowse: Dispatch<SetStateAction<LibraryBrowse>>;
   action: (action: string, data?: Record<string, unknown>) => Promise<boolean>;
   pick: (mode: "open" | "multiple" | "folder" | "save") => Promise<string[]>;
   refresh: () => Promise<void>;
+  navigationIntent?: { page: Page; targetId?: string; section?: string };
+  clearNavigationIntent: () => void;
 }
 export const Context = createContext<LauncherContext | null>(null);
 export function useLauncher() {
@@ -47,6 +61,7 @@ export function Modal({
   dirty?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   function dismiss() {
     if (!dirty || window.confirm("Discard unsaved changes?")) close();
   }
@@ -71,6 +86,7 @@ export function Modal({
   return (
     <dialog
       ref={dialog}
+      aria-labelledby={titleId}
       data-dirty={dirty ? "true" : "false"}
       onCancel={(e) => {
         e.preventDefault();
@@ -82,7 +98,7 @@ export function Modal({
     >
       <section>
         <div className="heading">
-          <h2>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button aria-label="Close dialog" onClick={dismiss}>
             ×
           </button>

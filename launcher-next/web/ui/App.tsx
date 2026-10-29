@@ -1,12 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import type { Page, Snapshot, Transport } from "../../contracts/launcher";
+import type {
+  Page,
+  Snapshot,
+  Transport,
+  LauncherIntent,
+  Notification,
+} from "../../contracts/launcher";
 import { connect } from "../backend";
-import { navigationGroups, pages } from "../navigation";
+import { isActiveJob } from "../jobs";
+import { navigationGroups } from "../navigation";
 import { applyAppearance, resolveAppearance } from "../appearance";
 import { ThemeBackdrop } from "./ThemeBackdrop";
 import { SessionPanel } from "./SessionPanel";
 import { Icon } from "./Icon";
-import { Context, Empty, Modal } from "./context";
+import { Context, Empty, Modal, type LibraryBrowse } from "./context";
 import {
   Library,
   Modules,
@@ -18,6 +25,7 @@ import {
   Support,
   RuntimeTools,
 } from "./pages";
+import { CommandPalette } from "./CommandPalette";
 export function App() {
   const [narrow, setNarrow] = useState(
     matchMedia("(max-width: 1000px)").matches,
@@ -48,30 +56,76 @@ export function App() {
   }, []);
   const backend = useRef<Transport | null>(null);
   const inFlight = useRef(false);
-  const [state, setState] = useState<Snapshot>();
+  const [state, storeSnapshot] = useState<Snapshot>();
+  function setState(snapshot: Snapshot) {
+    storeSnapshot((previous) =>
+      previous && previous.revision > snapshot.revision ? previous : snapshot,
+    );
+  }
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState<Page>("Library");
-  const [query, setQuery] = useState("");
+  const [queries, setQueries] = useState<Partial<Record<Page, string>>>({});
+  const query = queries[page] ?? "";
+  const setQuery = (value: string) =>
+    setQueries((previous) => ({ ...previous, [page]: value }));
+  const [libraryBrowse, setLibraryBrowse] = useState<LibraryBrowse>({
+    selected: "",
+    filter: "All games",
+    sort: "A–Z",
+    scroll: 0,
+  });
   const [palette, setPalette] = useState(false);
+  const [navigationIntent, setNavigationIntent] =
+    useState<Extract<LauncherIntent, { type: "navigate" }>>();
+  const [toast, setToast] = useState<Notification>();
+  const notificationSeen = useRef<string | null>(null);
   const [notifications, setNotifications] = useState(false);
   const [help, setHelp] = useState(false);
   async function refresh() {
     if (backend.current)
       setState(await backend.current.request("application.snapshot", {}));
   }
-  function navigate(destination: Page) {
+  function navigate(destination: Page, targetId?: string, section?: string) {
     const dialog = document.querySelector<HTMLDialogElement>("dialog[open]");
     if (
       dialog?.dataset.dirty === "true" &&
       !window.confirm("Discard unsaved changes?")
     )
-      return;
+      return false;
     dialog?.dispatchEvent(new Event("launcher-dismiss"));
     setPage(destination);
-    setQuery("");
+    setNavigationIntent({
+      type: "navigate",
+      page: destination,
+      targetId,
+      section,
+    });
+    if (targetId || section)
+      setQueries((previous) => ({ ...previous, [destination]: "" }));
     setPalette(false);
-    requestAnimationFrame(() => document.getElementById("content")?.focus());
+    if (!targetId && !section)
+      requestAnimationFrame(() => document.getElementById("content")?.focus());
+    return true;
+  }
+  function openGame(id: string) {
+    if (!navigate("Library")) return;
+    setQueries((previous) => ({ ...previous, Library: "" }));
+    setLibraryBrowse((previous) => ({
+      ...previous,
+      selected: id,
+      filter: "All games",
+    }));
+  }
+  async function executeIntent(intent: LauncherIntent) {
+    if (intent.type === "navigate") {
+      if (intent.page === "Library" && intent.targetId)
+        openGame(intent.targetId);
+      else navigate(intent.page, intent.targetId, intent.section);
+    } else {
+      setPalette(false);
+      await action(intent.name, intent.data ?? {});
+    }
   }
   async function action(name: string, data: Record<string, unknown> = {}) {
     if (!backend.current || inFlight.current) return false;
@@ -123,7 +177,51 @@ export function App() {
     }
   }
   useEffect(() => {
-    if (!state?.capabilities.runtime) return;
+    if (!state) return;
+    const latest = state.notifications?.at(-1);
+    const fingerprint = latest
+      ? latest.id + ":" + (latest.repeatCount ?? 1)
+      : "";
+    if (
+      notificationSeen.current !== null &&
+      fingerprint &&
+      fingerprint !== notificationSeen.current &&
+      latest &&
+      !latest.read
+    )
+      setToast(latest);
+    notificationSeen.current = fingerprint;
+  }, [state?.notifications]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(undefined), 7000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+  useEffect(() => {
+    if (!state || !backend.current) return;
+    const timer = window.setTimeout(() => {
+      void backend.current
+        ?.request("launcher.action", {
+          action: "navigation.remember",
+          data: { page },
+        })
+        .then(setState)
+        .catch((error) => setError(String(error)));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [page, state?.mode]);
+  const readySent = useRef(false);
+  useEffect(() => {
+    if(state?.mode !== "native" || readySent.current || !backend.current)return;
+    readySent.current = true;
+    void backend.current.request("launcher.action", {action:"application.ready",data:{}}).catch(error => setError(String(error)));
+  },[state?.mode]);
+  const hasActiveJobs = state?.jobs?.some(isActiveJob) ?? false;
+  const hasPendingJobs =
+    state?.jobs?.some((job) => isActiveJob(job) || job.cleaningUp) ?? false;
+  useEffect(() => {
+    if (!state?.capabilities.runtime && !hasPendingJobs && page !== "Captures")
+      return;
     let active = true,
       pending = false;
     const timer = window.setInterval(async () => {
@@ -146,17 +244,62 @@ export function App() {
       active = false;
       clearInterval(timer);
     };
-  }, [state?.capabilities.runtime]);
+  }, [state?.capabilities.runtime, hasPendingJobs, page]);
   useEffect(() => {
     let active = true;
+    let unsubscribe: (() => void) | undefined;
     try {
       backend.current = connect();
+      let requested = -1,
+        received = -1,
+        fetching = false;
+      unsubscribe = backend.current.subscribe?.((revision) => {
+        requested = Math.max(requested, revision);
+        if (fetching || requested <= received) return;
+        fetching = true;
+        void (async () => {
+          try {
+            let attempts = 0;
+            do {
+              const snapshot = await backend.current!.request(
+                "application.snapshot",
+                {},
+              );
+              received = snapshot.revision;
+              if (active) setState(snapshot);
+            } while (active && received < requested && ++attempts < 2);
+          } catch (error) {
+            if (active) setError(String(error));
+          } finally {
+            fetching = false;
+          }
+        })();
+      });
       backend.current
         .request("application.snapshot", {})
         .then((s) => {
           if (active) {
             setState(s);
             setPage(s.preferences.startPage);
+            setLibraryBrowse((previous) => ({
+              ...previous,
+              selected:
+                s.settings?.["library/rememberSelection"] !== false
+                  ? String(s.settings?.["library/lastSelectedGameId"] ?? "")
+                  : "",
+            }));
+            if (s.mode === "native" && s.capabilities.online)
+              backend.current
+                ?.request("launcher.action", {
+                  action: "updates.initialize",
+                  data: {},
+                })
+                .then((snapshot) => {
+                  if (active) setState(snapshot);
+                })
+                .catch((error) => {
+                  if (active) setError(String(error));
+                });
           }
         })
         .catch((e) => {
@@ -167,6 +310,7 @@ export function App() {
     }
     return () => {
       active = false;
+      unsubscribe?.();
     };
   }, []);
   useEffect(() => {
@@ -271,7 +415,20 @@ export function App() {
     sidebarMode === "Compact" || (sidebarMode === "Auto" && narrow);
   return (
     <Context.Provider
-      value={{ state, busy, query, navigate, action, pick, refresh }}
+      value={{
+        state,
+        busy,
+        query,
+        navigate,
+        action,
+        pick,
+        refresh,
+        openGame,
+        libraryBrowse,
+        setLibraryBrowse,
+        navigationIntent,
+        clearNavigationIntent: () => setNavigationIntent(undefined),
+      }}
     >
       <div
         className="app"
@@ -324,6 +481,11 @@ export function App() {
                     >
                       <Icon name={p} />
                       <span className="nav-label">{p}</span>
+                      {p === "Downloads" && hasActiveJobs && (
+                        <span className="badge">
+                          {state.jobs?.filter(isActiveJob).length}
+                        </span>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -344,6 +506,9 @@ export function App() {
                   : "available"
                 : "not connected"}
             </small>
+            {state.capabilities.networkFixture && (
+              <small>Network fixture provider</small>
+            )}
           </div>
         </aside>
         <section className="workspace">
@@ -422,6 +587,11 @@ export function App() {
           </main>
           <footer>
             <span>Xenon · Launcher Next</span>
+            {hasActiveJobs && (
+              <button onClick={() => navigate("Downloads")}>
+                View operations ({state.jobs?.filter(isActiveJob).length})
+              </button>
+            )}
             <span>
               {busy
                 ? "Working…"
@@ -433,44 +603,19 @@ export function App() {
           </footer>
         </section>
         {palette && (
-          <Modal title="Go anywhere" close={() => setPalette(false)}>
-            <label>
-              Search commands
-              <input
-                autoFocus
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </label>
-            <div className="command-list">
-              {pages
-                .filter((p) => p.toLowerCase().includes(query.toLowerCase()))
-                .map((p) => (
-                  <button key={p} onClick={() => navigate(p)}>
-                    Open {p}
-                  </button>
-                ))}
-              {state.games
-                .filter((g) =>
-                  g.title.toLowerCase().includes(query.toLowerCase()),
-                )
-                .slice(0, 24)
-                .map((g) => (
-                  <button
-                    key={g.id}
-                    onClick={() => {
-                      navigate("Library");
-                      setQuery(g.title);
-                    }}
-                  >
-                    {g.title} · Library
-                  </button>
-                ))}
-            </div>
-          </Modal>
+          <CommandPalette
+            close={() => setPalette(false)}
+            execute={executeIntent}
+          />
         )}
         {notifications && (
           <Modal title="Notifications" close={() => setNotifications(false)}>
+            <button
+              disabled={busy || !unread}
+              onClick={() => void action("notifications.readAll")}
+            >
+              Mark all read
+            </button>
             <button
               disabled={busy}
               onClick={() => void action("notifications.clear")}
@@ -489,6 +634,35 @@ export function App() {
                 <article className="card" key={n.id}>
                   <h3>{n.title}</h3>
                   <p>{n.message}</p>
+                  <small>
+                    {new Date(Number(n.time)).toLocaleString()}
+                    {(n.repeatCount ?? 1) > 1
+                      ? ` ? ${n.repeatCount} occurrences`
+                      : ""}
+                  </small>
+                  {n.action && (
+                    <button
+                      disabled={busy}
+                      onClick={async () => {
+                        await action("notifications.read", {
+                          id: n.id,
+                          read: true,
+                        });
+                        setNotifications(false);
+                        await executeIntent(n.action!);
+                      }}
+                    >
+                      View activity
+                    </button>
+                  )}
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      void action("notifications.dismiss", { id: n.id })
+                    }
+                  >
+                    Dismiss notification
+                  </button>
                   <button
                     disabled={busy}
                     onClick={() =>
@@ -503,6 +677,34 @@ export function App() {
                 </article>
               ))}
           </Modal>
+        )}
+        {toast && (
+          <section
+            className="notification-toast card"
+            role="status"
+            aria-live="polite"
+          >
+            <strong>{toast.title}</strong>
+            <p>{toast.message}</p>
+            <div className="actions">
+              {toast.action && (
+                <button
+                  onClick={() => {
+                    void executeIntent(toast.action!);
+                    setToast(undefined);
+                  }}
+                >
+                  View activity
+                </button>
+              )}
+              <button
+                aria-label="Dismiss toast"
+                onClick={() => setToast(undefined)}
+              >
+                Dismiss
+              </button>
+            </div>
+          </section>
         )}
         {help && (
           <Modal title="Launcher shortcuts" close={() => setHelp(false)}>

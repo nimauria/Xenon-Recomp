@@ -9,6 +9,8 @@ export function GameCollection({
   select,
   scale = 1,
   density = "Auto",
+  scroll,
+  setScroll,
 }: {
   games: Game[];
   selected?: string;
@@ -16,10 +18,15 @@ export function GameCollection({
   select: (id: string) => void;
   scale?: number;
   density?: string;
+  scroll: number;
+  setScroll: (value: number) => void;
 }) {
   const viewport = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(300);
-  const [scroll, setScroll] = useState(0);
+  useEffect(() => {
+    if (viewport.current && viewport.current.scrollTop !== scroll)
+      viewport.current.scrollTop = scroll;
+  }, [scroll]);
   useEffect(() => {
     const node = viewport.current!;
     const observer = new ResizeObserver(() => setWidth(node.clientWidth));
