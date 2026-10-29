@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 
+#include "xenon/audio/downmix.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -220,18 +221,11 @@ bool AudioSystem::translate_render_frame(cpu::GuestAddress samples,
           (channel * kRenderFrameSamples + sample) * sizeof(float);
       return load_be_float(bytes.data() + offset);
     };
-    const float fl = read_channel(0);
-    const float fr = read_channel(1);
-    const float center = read_channel(2);
-    const float back_left = read_channel(4);
-    const float back_right = read_channel(5);
-    // Xbox default 5.1 order: FL, FR, C, LFE, BL, BR. LFE is intentionally
-    // omitted from stereo downmix; scaling keeps full-scale multichannel
-    // content from clipping under normal conditions.
-    out.stereo[sample * 2] =
-        (fl + back_left + center * 0.5f) * (1.0f / 2.5f);
-    out.stereo[sample * 2 + 1] =
-        (fr + back_right + center * 0.5f) * (1.0f / 2.5f);
+    // Xbox default 5.1 order: FL, FR, C, LFE, BL, BR.
+    const auto [left, right] = downmix_5_1_to_stereo(
+        read_channel(0), read_channel(1), read_channel(2), read_channel(4), read_channel(5));
+    out.stereo[sample * 2] = left;
+    out.stereo[sample * 2 + 1] = right;
   }
   return true;
 }

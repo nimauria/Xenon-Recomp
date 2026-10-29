@@ -3,6 +3,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <cstddef>
 #include <cstdint>
@@ -173,6 +174,11 @@ int main() {
   fake->pump(first);
   assert(audio.render_driver_tic() == 128);
   assert(first[0] > first[1]);
+  // The guest's 5.1 frame folds to stereo as Lo/Ro: FR passes at unity with
+  // the center at -3 dB (0.5 + 0.25 * 0.7071); the old 0.4-scaled fold gave
+  // 0.25 and left AC6's music 8 dB low. L overlaps to 1.35 and is clamped.
+  assert(std::abs(first[1] - (0.5f + 0.25f * 0.70710678f)) < 1e-5f);
+  assert(first[0] == 1.0f);
   std::array<float, 128 * 2> second{};
   fake->pump(second);
   assert(audio.render_driver_tic() == 256);
