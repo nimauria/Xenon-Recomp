@@ -22,7 +22,7 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 >
 > Xenon is under active development. Much of the core infrastructure is implemented and covered by automated tests, but running commercial games is still experimental. **No commercial Xbox 360 game is currently confirmed playable**, and there is no public release or release date. You cannot yet download Xenon and play your Xbox 360 library with it.
 >
-> The first title, Ace Combat 6, now renders its boot logo, but slowly; current work is rendering speed and correctness. See [Current milestone](#current-milestone-project-gracemeria).
+> The first title, Ace Combat 6, now boots through its logos and plays its intro movie at the game's native frame rate. It reaches the main menu; controller input, loading past the first menu screen and gameplay have not been tested yet. See [Current milestone](#current-milestone-project-gracemeria).
 
 > [!NOTE]
 > Xenon does not distribute Xbox 360 games, executables, firmware, title updates, DLC, encryption keys or any other proprietary content. You must supply content from lawful sources.
@@ -55,8 +55,15 @@ Where it stands on the `development-restructure` branch:
 
 - The game is prepared, and its recompiled guest code runs on the shared runtime. Guest threads, the GPU command pump and audio callbacks keep running.
 - **First graphical output: the Namco Bandai boot logo is drawn and presented** through the Direct3D 12 backend (28 October 2026). Getting there took generic fixes, not AC6 special cases. Shader ALU operands are now decoded as Xenos encodes them (component-relative swizzles, scalar operations reading source 3), vertex fetch indices are converted numerically, and scan-out applies the front buffer's swizzle.
-- **Rendering is still slow.** Reaching the logo takes minutes and frames take hundreds of milliseconds. Resolves, and some EDRAM ownership changes, still go through CPU readback and conversion. GPU-resident EDRAM and GPU-side resolves are the next step.
-- **No audio playback and no gameplay have been demonstrated.** The title has not been shown to reach a menu.
+- **Boot to the logos in about 3 seconds.** The first frame is presented about 1.5 s after launch, and the first visible logo appears after about 3.2 s; the rest is the game's own fade-in. This comes from compiling switch tables and callbacks rather than interpreting them, inline guest-RAM access in generated code, and import dispatch through a per-thunk index.
+- **The logos run at 60 fps and the intro movie at its native 30 fps, evenly paced** (29 October 2026). DXGI frame statistics show each movie frame held for exactly two display refreshes. The fixes are all generic:
+  - utility shaders are compiled once per process;
+  - EDRAM depth moves between native owners on the GPU;
+  - a VdSwap flip takes effect where the command processor reaches it, not when the CPU calls VdSwap;
+  - guest vblanks are locked to the display's refresh;
+  - the vblank interrupt waits until the frame it ends has been scanned out;
+  - textures are read as guest memory stood at the GPU's last synchronisation with the CPU, so the movie decoder can no longer overwrite planes a draw is about to sample.
+- **The main menu is reached.** Not yet tested: controller input in the menus, loading past the first menu screen, gameplay, and frame rates above the game's own. Running AC6 at 60 fps or more needs a game-specific change to its frame pacing and simulation step, which belongs in the Project Gracemeria module. Audio callbacks run continuously through the intro; audio output quality is still being checked.
 
 Any fix belongs in generic runtime code with its own tests, not in an Ace Combat 6 special case. The earlier runtime investigation is in [`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`](docs/runtime/AC6_RUNTIME_INVESTIGATION.md).
 
@@ -113,10 +120,10 @@ Status labels:
 | Recompilation analysis and generation | Implemented foundation | Function discovery, control-flow and value analysis, module hints, sharded C++ generation and a content-addressed cache (Gen 5–11). Exercised on Ace Combat 6. Not shown to be reliable across retail titles generally. |
 | Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Thread, event and wait behaviour under a real title is part of the open AC6 investigation. |
 | Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL2 presentation. |
-| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. Renders and presents AC6's boot logo; far from full speed. |
+| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. Renders and presents AC6's boot logos and intro movie at the game's native frame rate, with flips, vblanks and texture reads timed as on hardware. Reaches the main menu; in-game 3D is not yet reached. |
 | Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Shares all command handling with Direct3D 12, including GPU-side EDRAM tile transfers. Not yet shown rendering a commercial title. |
-| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. Has rendered AC6's boot logo. |
-| Audio and XMA | Implemented foundation | SDL2 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. Real-title playback is blocked by the AC6 stall. |
+| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. Runs AC6's boot logos and intro movie at native frame rate. |
+| Audio and XMA | Implemented foundation | SDL2 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. AC6's audio callbacks run continuously through its intro; output quality is still being verified. |
 | Input | Implemented foundation | SDL2/SDL3 controllers, XInput on Windows, keyboard and mouse, profiles, HOTAS mapping and XAM guest marshalling. |
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
@@ -125,7 +132,7 @@ Status labels:
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
-**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation is what exposes incorrect Xbox assumptions, and so far it has been performed only on Ace Combat 6, which has reached its boot logo and no further.
+**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation is what exposes incorrect Xbox assumptions, and so far it has been performed only on Ace Combat 6, which has reached its main menu; input, loading past the first menu screen and gameplay are untested.
 
 ---
 
@@ -244,9 +251,22 @@ Shaders are lowered to HLSL and compiled with DXC to DXIL (Direct3D 12) and SPIR
 
 Unsupported packets, formats and shader features are counted and reported rather than silently approximated.
 
-When a render target takes over EDRAM tiles that another native image of the same format holds, the tiles move image to image on the GPU, on both backends. Guest memory reaches the GPU through a mirror that uploads only bytes the CPU changed, from a staging ring the GPU copies asynchronously. Resolves and scan-out still read back through the CPU.
+When a render target takes over EDRAM tiles that another native image of the same format holds, the tiles move image to image on the GPU, on both backends. Colour and depth/stencil both take this path; stencil is written through `SV_StencilRef` where the device supports it, or bit by bit where it does not. Guest memory reaches the GPU through a mirror that uploads only bytes the CPU changed, from a staging ring the GPU copies asynchronously. A resolve runs on the GPU when one native image owns its tiles.
 
-**What has been demonstrated:** subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI, and Ace Combat 6's boot logo rendered and presented through Direct3D 12. **What has not:** rendering at playable speed, or anything past the logo. Replaying captured retail command streams is also still outstanding.
+Presentation follows the hardware's timing:
+
+- A VdSwap flip is a record in the command stream. The front buffer changes when the command processor reaches it, after the frame's draws and resolve.
+- Guest vblanks fall on the display's own refresh when its rate is a whole multiple of 60 Hz (60, 120, 240 Hz), so each frame stays up for a whole number of refreshes. Other rates, such as 144 Hz, keep a 60 Hz timer.
+- The vblank interrupt is delivered only once the frame it ends has been scanned out. Titles that resolve every frame into a single front buffer then cannot overwrite it while it is being presented.
+
+The hardware samples textures microseconds after the command processor passes a wait or raises an interrupt. A host backend decodes them later, so at each such synchronisation point Xenon copies the recently sampled textures the CPU has changed. Draws decode those copies, which stops CPU code woken at that point from rewriting a texture under a pending draw.
+
+**What has been demonstrated:**
+
+- subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI;
+- Ace Combat 6's boot, logos and intro movie rendered and presented through Direct3D 12 at the game's native frame rate.
+
+**What has not:** input, loading past the first menu screen, or in-game 3D rendering. Replaying captured retail command streams is also still outstanding.
 
 See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
 
@@ -254,9 +274,9 @@ See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics
 
 Audio V1 implements the Xbox render-driver and XMA context semantics in Xenon. That includes XMA packet and frame decoding through a pinned, Xenia-maintained FFmpeg build that exposes `XMAFRAMES`, plus bounded voice mixing and resampling, and an SDL2 host output device. There is deliberately no silent null backend.
 
-The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations. In Ace Combat 6, audio callbacks stop after their initial passes. Whether this credit behaviour is the cause is one of the open questions in the investigation.
+The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations. In Ace Combat 6 the callbacks run continuously through the intro, at about 181 per second against the reference recompilation's 187.
 
-Mixer, XMA and export regression tests pass. **Real-title audio output has not been achieved.** See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md).
+Mixer, XMA and export regression tests pass. **AC6's audio output is still being verified**: some XMA decode errors and the music's timing are open. See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md).
 
 ---
 
@@ -563,8 +583,8 @@ These are goals in a rough order, not commitments or dates. Nothing here promise
 1. Finish the structural restructuring. *(In progress.)*
 2. Stabilise Windows and Linux build and test workflows. *(In progress: Linux passes; one Windows D3D12 test is open.)*
 3. ~~Produce the first verified graphical output.~~ *(Done: Ace Combat 6's boot logo, 28 October 2026.)*
-4. Render at speed: GPU-resident EDRAM, GPU-side resolves and scan-out, with Vulkan matching Direct3D 12.
-5. Sustained rendering, audio and gameplay past the logo.
+4. Render at speed: GPU-resident EDRAM, GPU-side resolves and scan-out, with Vulkan matching Direct3D 12. *(In progress: the boot logos and the intro movie run at native frame rate on Direct3D 12.)*
+5. Sustained rendering, audio and gameplay past the main menu: controller input, loading, then the first mission.
 6. Establish the first confirmed playable title.
 
 **Framework maturity**
