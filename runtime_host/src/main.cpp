@@ -272,6 +272,7 @@ int main(int argc, char** argv) {
     } else {
       std::cout << "[runtime_host] Presentation window created (" << launch.display_width << "x"
                 << launch.display_height << ")" << std::endl;
+      session.set_presentation_window(presentation.native_window());
     }
   }
 #endif

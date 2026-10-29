@@ -60,4 +60,33 @@ class WakeSignal {
   std::atomic<std::uint64_t> timeouts_{0};
 };
 
+// A monotonically advancing sequence one thread publishes and another waits
+// for: "everything up to request N has been done".
+class SequenceLatch {
+ public:
+  void publish(std::uint64_t value) {
+    {
+      std::scoped_lock lock(mutex_);
+      if (value <= value_) return;
+      value_ = value;
+    }
+    condition_.notify_all();
+  }
+  // Waits until `value` has been published or `deadline` passes; whether it was.
+  [[nodiscard]] bool wait_until(std::uint64_t value,
+                                std::chrono::steady_clock::time_point deadline) {
+    std::unique_lock lock(mutex_);
+    return condition_.wait_until(lock, deadline, [&] { return value_ >= value; });
+  }
+  [[nodiscard]] std::uint64_t value() const {
+    std::scoped_lock lock(mutex_);
+    return value_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::uint64_t value_{0};
+};
+
 }  // namespace xenon::core

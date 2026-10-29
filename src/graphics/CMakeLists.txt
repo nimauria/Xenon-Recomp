@@ -22,6 +22,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/capture.cpp
     xenos/graphics_system.cpp
     common/backend_capabilities.cpp
+    common/display_vblank.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)

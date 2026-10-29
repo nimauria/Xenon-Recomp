@@ -57,7 +57,9 @@ std::vector<std::string> XenonSession::describe_pump_state() {
   vsync << "GPU vsync interrupt: callback=0x" << std::hex << interrupt.callback_address
         << " context=0x" << interrupt.context << std::dec
         << " delivered=" << gpu_interrupts_delivered_.load()
-        << " failed=" << gpu_interrupts_failed_.load();
+        << " failed=" << gpu_interrupts_failed_.load()
+        << " display_locked_vblanks=" << gpu_vblanks_display_locked_.load()
+        << " scanout_latch_timeouts=" << scanout_latch_timeouts_.load();
   lines.push_back(vsync.str());
   if (memory_) {
     // Who owns the 512 MiB: a title that exhausts physical memory sees

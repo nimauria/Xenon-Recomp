@@ -39,6 +39,9 @@ class PresentationHost {
                             std::string* error);
   void destroy() noexcept;
   [[nodiscard]] bool created() const noexcept { return window_ != nullptr; }
+  // The window's native handle (an HWND on Windows), whichever backend
+  // presents to it; null where there is none.
+  [[nodiscard]] void* native_window() const noexcept;
 
   // Pumps the SDL event queue once, aggregating everything that happened
   // since the last call. Resize is applied directly to the backend here

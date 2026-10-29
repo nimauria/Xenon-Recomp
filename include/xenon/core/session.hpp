@@ -293,6 +293,12 @@ class XenonSession final : public cpu::RuntimeServices {
   [[nodiscard]] kernel::KernelIoManager* kernel_io() noexcept;
   [[nodiscard]] input::InputSystem* input() noexcept { return input_.get(); }
   [[nodiscard]] gpu::Backend* gpu() noexcept { return gpu_.get(); }
+  // The native window frames are presented to (an HWND on Windows). Guest
+  // vblanks lock to the refresh of the display it is on (gpu/display_vblank.hpp);
+  // without one they run from a 60 Hz timer.
+  void set_presentation_window(void* native_window) noexcept {
+    presentation_window_.store(native_window, std::memory_order_release);
+  }
   // The Xenos PM4 frontend (register file, EDRAM, IR stream, command
   // processor) that decodes a guest's GPU command ring buffer into IR and
   // plays it into gpu_. Constructed in init_gpu() once memory_ exists (it
@@ -588,6 +594,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
   [[nodiscard]] std::uint32_t run_gpu_vsync_thread();
+  // Presents the front buffer if the title swapped in a frame since
+  // `last_presented_generation` (GPU pump thread only).
+  void present_front_buffer(std::uint64_t& last_presented_generation);
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never
@@ -823,6 +832,17 @@ class XenonSession final : public cpu::RuntimeServices {
   static constexpr std::uint32_t kGpuWakePresent = 1u << 1u;   // vsync: present a frame
   static constexpr std::uint32_t kGpuWakeStop = 1u << 2u;
   WakeSignal gpu_wake_{};
+  // Scan-out latching. The display samples the front buffer at vertical blank,
+  // and the title waits for the vblank interrupt before it renders into that
+  // buffer again (AC6 resolves every frame into one front buffer). The vsync
+  // thread numbers each vblank in scanout_requested_ and delivers the interrupt
+  // once the worker has presented what the front buffer held then
+  // (scanout_latched_); delivering it first let the next frame's resolve
+  // overwrite the buffer before it was read, tearing its top rows.
+  std::atomic<std::uint64_t> scanout_requested_{0};
+  SequenceLatch scanout_latched_{};
+  // Vblanks whose interrupt went out without the scan-out latched in time.
+  std::atomic<std::uint64_t> scanout_latch_timeouts_{0};
   std::atomic<std::uint64_t> gpu_presents_{0};
   // Presents by gpu::PresentStatus: a window that stays black because
   // every present fails looks the same as one showing a black frame.
@@ -844,6 +864,11 @@ class XenonSession final : public cpu::RuntimeServices {
   // Vsync interrupt deliveries into the title's registered callback (diagnostics).
   std::atomic<std::uint64_t> gpu_interrupts_delivered_{0};
   std::atomic<std::uint64_t> gpu_interrupts_failed_{0};
+  // See set_presentation_window().
+  std::atomic<void*> presentation_window_{nullptr};
+  // Guest vblanks the vsync thread delivered on a host display vblank, rather
+  // than from its timer (diagnostics).
+  std::atomic<std::uint64_t> gpu_vblanks_display_locked_{0};
   // The guest callback each pump is running and how long its callbacks take.
   CallbackWatch gpu_callback_watch_{};
   CallbackWatch audio_callback_watch_{};

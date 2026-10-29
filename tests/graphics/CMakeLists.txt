@@ -157,5 +157,7 @@ if(XENON_BUILD_TESTS)
   if(TARGET xenon_graphics)
     xenon_add_standalone_test(xenon_xenos_register_aperture_tests
       xenos/register_aperture_tests.cpp xenon_graphics xenon_memory)
+    xenon_add_standalone_test(xenon_display_vblank_tests
+      display_vblank_tests.cpp xenon_graphics)
   endif()
 endif()

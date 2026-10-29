@@ -9,6 +9,7 @@
 
 #include "core/session/session_internal.hpp"
 #include "xenon/core/frame_dump.hpp"
+#include "xenon/gpu/display_vblank.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/logging/probe_log.hpp"
 
@@ -187,6 +188,16 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
     if (!graphics_system_ || !gpu_ || !kernel_process_) continue;
 
+    // A vblank scans out what the front buffer holds now, before any ring
+    // work the title queues after it: the vsync thread holds the interrupt
+    // that releases the title to render into that buffer again until this
+    // has been presented (scanout_latched_).
+    if ((reasons & kGpuWakePresent) != 0u) {
+      const auto vblank = scanout_requested_.load(std::memory_order_acquire);
+      present_front_buffer(last_presented_generation);
+      scanout_latched_.publish(vblank);
+    }
+
     const auto _tick_phase_start = Clock::now();
     const auto ring = kernel_process_->gpu_ring_buffer();
     if (ring.configured() && ring.write_index != ring.read_index) {
@@ -259,8 +270,13 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         }
       }
     }
+  }
+  return 0;
+}
 
-    if ((reasons & kGpuWakePresent) == 0u) continue;
+void XenonSession::present_front_buffer(std::uint64_t& last_presented_generation) {
+  using Clock = std::chrono::steady_clock;
+  {
     const auto front_buffer = kernel_process_->gpu_front_buffer();
     // What is scanned out is the front buffer as VdSwap's texture fetch
     // constant describes it; a front buffer published without one has no
@@ -306,7 +322,6 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       }
     }
   }
-  return 0;
 }
 
 std::uint32_t XenonSession::run_gpu_vsync_thread() {
@@ -316,21 +331,72 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
 
   using Clock = std::chrono::steady_clock;
   constexpr auto kVsyncInterval = std::chrono::nanoseconds(16'666'667);  // ~60Hz
+  // The display is re-resolved this often: the window may move to another
+  // monitor, or the mode change.
+  constexpr auto kDisplayReselect = std::chrono::seconds(2);
+  // Consecutive unusable display vblanks (a failed wait, or one returning far
+  // sooner than a refresh, as an output that is off does) before the timer
+  // takes over until the next re-resolve.
+  constexpr int kMaxUnusableDisplayVblanks = 3;
+  // Longest a vblank interrupt waits for the worker to latch the scan-out.
+  constexpr auto kScanoutLatchTimeout = std::chrono::milliseconds(8);
   auto next_vsync = Clock::now() + kVsyncInterval;
 
+  // Guest vblanks fall on host display refreshes where the refresh rate is a
+  // whole multiple of 60 Hz (gpu/display_vblank.hpp): a frame the title holds
+  // for N vblanks is then on screen for exactly N refreshes, where a free
+  // 60 Hz timer drifting against the display made it alternate N-1 / N+1.
+  gpu::HostDisplayVblank display;
+  std::uint32_t refreshes_per_vblank = 0;  // 0: timer-paced
+  int unusable_display_vblanks = 0;
+  auto reselect_at = Clock::now();
+  auto last_display_vblank = Clock::time_point{};
+
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_until(next_vsync);
+    if (Clock::now() >= reselect_at) {
+      display.select(presentation_window_.load(std::memory_order_acquire));
+      refreshes_per_vblank =
+          display.available() ? gpu::host_refreshes_per_guest_vblank(display.refresh_hz()) : 0u;
+      unusable_display_vblanks = 0;
+      reselect_at = Clock::now() + kDisplayReselect;
+    }
+    bool display_locked = false;
+    if (refreshes_per_vblank != 0u && unusable_display_vblanks < kMaxUnusableDisplayVblanks) {
+      bool waited = true;
+      for (std::uint32_t i = 0; waited && i < refreshes_per_vblank; ++i) waited = display.wait();
+      const auto now = Clock::now();
+      if (waited && now - last_display_vblank >= kVsyncInterval / 2) {
+        display_locked = true;
+        unusable_display_vblanks = 0;
+        last_display_vblank = now;
+        next_vsync = now + kVsyncInterval;
+      } else {
+        ++unusable_display_vblanks;
+      }
+    }
+    if (!display_locked) {
+      std::this_thread::sleep_until(next_vsync);
+      // Catch up rather than deliver a burst of back-to-back vsyncs after a
+      // callback that ran long.
+      const auto now = Clock::now();
+      do {
+        next_vsync += kVsyncInterval;
+      } while (next_vsync <= now);
+    }
     if (!gpu_pump_running_.load(std::memory_order_relaxed)) break;
     if (!kernel_process_) continue;
-    // Catch up rather than deliver a burst of back-to-back vsyncs after a
-    // callback that ran long.
-    const auto now = Clock::now();
-    do {
-      next_vsync += kVsyncInterval;
-    } while (next_vsync <= now);
+    if (display_locked) gpu_vblanks_display_locked_.fetch_add(1u, std::memory_order_relaxed);
 
-    // The worker presents the current front buffer at its next wake.
+    // The worker presents the current front buffer at its next wake, before the
+    // interrupt below lets the title render into it again. A worker still busy
+    // past kScanoutLatchTimeout (a long drain or callback) does not hold back
+    // the vblank interrupt further.
+    const auto vblank = scanout_requested_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     gpu_wake_.notify(kGpuWakePresent);
+    if (graphics_system_ && gpu_ &&
+        !scanout_latched_.wait_until(vblank, Clock::now() + kScanoutLatchTimeout)) {
+      scanout_latch_timeouts_.fetch_add(1u, std::memory_order_relaxed);
+    }
 
     const auto interrupt = kernel_process_->gpu_interrupt_callback();
     {

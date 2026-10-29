@@ -7,15 +7,30 @@
 #include <SDL_vulkan.h>
 #include "xenon/gpu/vulkan/backend.hpp"
 #endif
-#if defined(XENON_HAS_D3D12)
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <SDL_syswm.h>
+#endif
+#if defined(XENON_HAS_D3D12)
 #include "xenon/gpu/d3d12/backend.hpp"
 #endif
 
 namespace xenon::runtime_host {
 
 PresentationHost::~PresentationHost() { destroy(); }
+
+void* PresentationHost::native_window() const noexcept {
+#if defined(_WIN32)
+  if (!window_) return nullptr;
+  SDL_SysWMinfo wm_info{};
+  SDL_VERSION(&wm_info.version);
+  if (!SDL_GetWindowWMInfo(window_, &wm_info) || wm_info.subsystem != SDL_SYSWM_WINDOWS)
+    return nullptr;
+  return wm_info.info.win.window;
+#else
+  return nullptr;
+#endif
+}
 
 bool PresentationHost::create(std::uint32_t width, std::uint32_t height,
                               const std::string& title, xenon::gpu::Backend& backend,

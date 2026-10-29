@@ -39,6 +39,7 @@
 
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/event.hpp"
+#include "xenon/kernel/time.hpp"
 #include "xenon/kernel/wait.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 
@@ -117,6 +118,9 @@ struct SessionExecutionTestAccess {
   }
   [[nodiscard]] static std::uint64_t gpu_interrupts_delivered(const XenonSession& session) noexcept {
     return session.gpu_interrupts_delivered_.load();
+  }
+  [[nodiscard]] static std::uint64_t scanout_latch_timeouts(const XenonSession& session) noexcept {
+    return session.scanout_latch_timeouts_.load();
   }
   [[nodiscard]] static std::string present_results(XenonSession& session) {
     return session.describe_present_results();
@@ -798,6 +802,86 @@ void test_published_ring_work_wakes_the_worker() {
   assert(shutdown_completed);
 }
 
+std::atomic<bool> g_presenting{false};
+std::atomic<int> g_scanout_presents{0};
+std::atomic<int> g_vblank_callbacks{0};
+std::atomic<int> g_vblank_callbacks_during_present{0};
+
+// A vblank interrupt delivered while the frame it ends is still being presented.
+ExecutionResult scanout_latch_probe_entry(ExecutionContext& context) {
+  if (context.state.gpr[3] == 0u) {
+    g_vblank_callbacks.fetch_add(1);
+    if (g_presenting.load()) g_vblank_callbacks_during_present.fetch_add(1);
+  }
+  context.state.gpr[3] = 0;
+  context.state.lr = 0u;
+  return {FlowReason::Return, 0u, 0u};
+}
+
+// A present that takes a few milliseconds, as reading back and uploading a
+// scan-out does.
+class SlowPresentBackend final : public gpu::Backend {
+ public:
+  void begin_submission(memory::AddressSpace&, gpu::Edram&) override {}
+  void consume(const gpu::ir::Command&) override {}
+  void end_submission() override {}
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  gpu::PresentStatus present(const gpu::PresentationFrame&) override {
+    g_presenting.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    g_presenting.store(false);
+    g_scanout_presents.fetch_add(1);
+    return gpu::PresentStatus::Success;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return true; }
+  bool presentation_ready() const noexcept override { return true; }
+};
+
+// Regression (Ace Combat 6 intro movie tore at the top): AC6 resolves every
+// frame into one front buffer and renders the next once the vblank interrupt
+// says the display has taken the current one. The vsync thread delivered the
+// interrupt as it asked for the present, so the title's next resolve ran
+// before - or during - the scan-out of the frame it overwrote. The display
+// samples the front buffer at vertical blank: the interrupt is delivered once
+// that frame has been presented.
+void test_vblank_interrupt_follows_the_scanout_it_ends() {
+  // As while a session runs guest code: at the default 15.6 ms tick the
+  // present's few milliseconds, and the vsync thread's waits, last a tick.
+  const xenon::kernel::HostTimerResolution timer_resolution{};
+  g_presenting.store(false);
+  g_scanout_presents.store(0);
+  g_vblank_callbacks.store(0);
+  g_vblank_callbacks_during_present.store(0);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &scanout_latch_probe_entry);
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session,
+                                                       std::make_unique<SlowPresentBackend>());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+  const std::array<std::uint32_t, 6> fetch{0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u,
+                                           63u | 63u << 13, 0u, 0u, 0x200u};
+  // A new frame every vblank or so, each one presented.
+  for (int frame = 0; frame < 40; ++frame) {
+    kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u, fetch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+  // While the worker is running, every vblank waits for its scan-out (the
+  // timeout covers a worker stuck in a long drain, not this).
+  const auto latch_timeouts =
+      xenon::core::SessionExecutionTestAccess::scanout_latch_timeouts(harness.session);
+  std::cout << "  scan-out latch timeouts while running: " << latch_timeouts << "\n";
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  assert(g_scanout_presents.load() >= 15 && g_vblank_callbacks.load() >= 15);
+  assert(g_vblank_callbacks_during_present.load() == 0 &&
+         "no vblank interrupt is delivered while its frame is still being presented");
+  assert(latch_timeouts == 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -815,6 +899,7 @@ int main() {
   test_published_ring_work_wakes_the_worker();
   test_present_outcomes_are_counted_by_status();
   test_a_front_buffer_without_a_fetch_constant_is_not_presented();
+  test_vblank_interrupt_follows_the_scanout_it_ends();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;
