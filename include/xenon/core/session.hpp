@@ -154,6 +154,16 @@ struct SessionConfig {
   // run and start() will report that clearly rather than pretending to
   // execute anything.
   std::string native_extension_path{};
+
+  // The game module's hint package (<module>/xenon-analysis). At launch the
+  // session reads per-revision runtime data from it, such as the temporal
+  // rendering profile revisions/<effective image hash>/rendering.json
+  // (gpu/temporal_profile.hpp). Empty: the game has none.
+  std::filesystem::path module_package_path{};
+  // Temporal probe: every this many frames, log the temporal classification
+  // of a frame, with the camera-matrix and HUD-shader candidates a module
+  // author needs to write a rendering profile. 0 disables it.
+  std::uint32_t temporal_probe_interval{0};
 };
 
 // Diagnostic summary of a single unresolved XEX import, kept for status
@@ -428,6 +438,9 @@ class XenonSession final : public cpu::RuntimeServices {
   bool refresh_dynamic_kernel_variables();
   bool resolve_xex_imports();
   bool bind_compiled_code();
+  // Loads the running revision's temporal rendering profile from the
+  // module package and arms the temporal probe (lifecycle/temporal_rendering.cpp).
+  bool configure_temporal_rendering();
   bool create_guest_process();
   // Stack size for the main thread and for thread creation that passes zero.
   [[nodiscard]] std::uint32_t default_guest_stack_size() const noexcept;

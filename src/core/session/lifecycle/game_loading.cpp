@@ -70,6 +70,8 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
               << " hash=" << xbox::format_effective_image_hash(effective_identity_->effective_image_hash)
               << std::endl;
   }
+  // Before any guest code can submit GPU work.
+  if (!configure_temporal_rendering()) return SessionResult::failure(last_error_);
 
   // Bind true native variable imports to guest-backed system-module
   // variables before any guest code or callbacks can observe the IAT slots.

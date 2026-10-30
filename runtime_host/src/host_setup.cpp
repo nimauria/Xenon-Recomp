@@ -198,6 +198,11 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   if (!launch.save_path.empty()) config.save_root_path = launch.save_path;
 
   config.native_extension_path = launch.native_extension_path;
+  // Per-revision runtime data the module ships beside its hints (the
+  // temporal rendering profile).
+  if (!launch.module_path.empty())
+    config.module_package_path = std::filesystem::path(launch.module_path) / "xenon-analysis";
+  config.temporal_probe_interval = launch.temporal_probe_frames;
   if (!launch.adaptive_observation_path.empty())
     config.adaptive_observation_path = launch.adaptive_observation_path;
   if (!launch.session_dir.empty()) {

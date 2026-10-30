@@ -414,6 +414,34 @@ int main() {
   }
   std::cout << "  [PASS] Invalid memoryWatch entries are rejected\n";
 
+  // Test 15: temporalProbeFrames arms the temporal probe, defaults to off and
+  // rejects values that are not a whole number of frames.
+  {
+    TempFile file("probe.json");
+    file.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X",
+                      "temporalProbeFrames": 60})json");
+    LaunchConfig config{};
+    std::string error;
+    assert(LaunchConfig::load_from_file(file.string(), config, error));
+    assert(config.temporal_probe_frames == 60u);
+
+    TempFile absent("probe_absent.json");
+    absent.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
+    LaunchConfig defaults{};
+    assert(LaunchConfig::load_from_file(absent.string(), defaults, error));
+    assert(defaults.temporal_probe_frames == 0u);
+
+    for (const char* bad : {"-1", "2.5", "1000001"}) {
+      TempFile invalid("probe_bad.json");
+      invalid.write(std::string(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X", "temporalProbeFrames": )json") +
+                    bad + "}");
+      LaunchConfig rejected{};
+      assert(!LaunchConfig::load_from_file(invalid.string(), rejected, error));
+      assert(error.find("temporalProbeFrames") != std::string::npos);
+    }
+  }
+  std::cout << "  [PASS] temporalProbeFrames parses, defaults to off and rejects bad values\n";
+
   std::cout << "All LaunchConfig tests passed!\n";
   return 0;
 }

@@ -119,6 +119,15 @@ descriptor. `runtime_host/src/content_source.cpp` normalizes all four forms.
 Disc images are read and mounted directly without whole-image extraction; a
 loose XEX uses its containing directory as the runtime `game:` filesystem.
 
+`modulePath` also locates the module's hint package,
+`<modulePath>/xenon-analysis`. At launch the session reads the running
+revision's `revisions/<effective image hash>/rendering.json` from it, the
+temporal rendering profile. A malformed profile fails the launch.
+`temporalProbeFrames` (default `0`, off) logs a `[TemporalProbe]` frame
+report every that many frames. It lists camera-matrix and HUD-shader
+candidates, which is how a module author writes that profile (see
+[`TEMPORAL_RENDERING.md`](../graphics/TEMPORAL_RENDERING.md)).
+
 `headlessMode` (defaults to `false`, i.e. Normal Play) is a Gracemeria
 readiness pass addition (Part 5) - see "Normal Play vs. headless/test mode"
 below for exactly what relaxes when it is `true`. An ordinary launcher Play

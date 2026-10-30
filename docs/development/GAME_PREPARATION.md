@@ -286,6 +286,10 @@ hold `hooks/*.cpp`, the routines its instruction hooks name; preparation
 compiles them into that disc's module, and their content is part of the
 cache key. One package can carry several revisions (one per supported
 disc), and preparation builds the module for whichever disc the player has.
+A revision directory may also hold `rendering.json`, the temporal rendering
+profile ([`TEMPORAL_RENDERING.md`](../graphics/TEMPORAL_RENDERING.md)). It is
+runtime data, not a compile input: the session reads it at launch for the
+running revision, so editing it never forces a re-preparation.
 Project Gracemeria exports its revision profiles this way with
 `gracemeria-export-analysis`. A module that ships its own
 pre-built native extension (`manifest.json`'s `"nativeExtension"` field) does

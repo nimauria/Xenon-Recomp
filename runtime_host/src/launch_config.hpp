@@ -100,6 +100,9 @@ struct LaunchConfig {
   std::vector<std::uint32_t> memory_watch_addresses{};
   std::uint32_t memory_watch_history{4096};
   std::uint32_t memory_watch_poll_ms{1};
+  // Diagnostic temporal probe (SessionConfig::temporal_probe_interval):
+  // "temporalProbeFrames", log every this many frames; 0 is off.
+  std::uint32_t temporal_probe_frames{0};
 
   std::string title_update_path;
   std::string dlc_root_path;

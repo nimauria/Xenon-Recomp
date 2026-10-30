@@ -158,6 +158,7 @@ CLAUDE.md
 !/docs/graphics/GPU_V1.md
 !/docs/graphics/HLSL_DXC.md
 !/docs/graphics/NATIVE_BACKENDS.md
+!/docs/graphics/TEMPORAL_RENDERING.md
 !/docs/graphics/VALIDATION.md
 !/docs/input/INPUT_V2.md
 !/docs/kernel/KERNEL_V1.md

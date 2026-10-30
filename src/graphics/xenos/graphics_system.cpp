@@ -434,11 +434,24 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
 }  // namespace
 
 GraphicsSystem::GraphicsSystem(memory::AddressSpace& memory)
-    : memory_(memory), command_processor_(memory_, registers_, stream_) {}
+    : memory_(memory), command_processor_(memory_, registers_, stream_) {
+  set_swap_callback({});
+}
+
+void GraphicsSystem::set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
+  command_processor_.set_swap_callback(
+      [this, callback = std::move(callback)](const FrontBufferSwap& swap) {
+        // The swap shows the frame whose work has just executed (the command
+        // processor runs execute_ir() before it), so that frame ends here.
+        if (temporal_.active()) temporal_.end_frame();
+        if (callback) callback(swap);
+      });
+}
 
 void GraphicsSystem::reset() {
   command_processor_.reset();
   edram_.reset();
+  temporal_.reset();
 }
 
 void GraphicsSystem::submit_buffer(std::uint32_t physical_address,
@@ -601,8 +614,10 @@ void GraphicsSystem::execute_ir(Backend& backend) {
     logging::append_probe_log("ir_timing_diag.log", "begin_submission %lld ms\n", ms);
   // The pump thread runs this between ring drains and vsync interrupts, so a
   // slow command delays both; name the slow ones.
+  const bool temporal = temporal_.active();
   for (const auto& command : stream_.commands()) {
     const auto start = Clock::now();
+    if (temporal) temporal_.observe(command);
     backend.consume(command);
     if (const auto ms = elapsed_ms(start); ms >= 50) {
       std::uint32_t detail = 0;

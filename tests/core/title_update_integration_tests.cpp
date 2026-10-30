@@ -19,6 +19,9 @@
 // Loader V2 in tests/xbox/xex_loader_tests.cpp).
 
 #include <array>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +31,7 @@
 #include <vector>
 
 #include "xenon/core/session.hpp"
+#include "xenon/gpu/graphics_system.hpp"
 #include "xenon/memory/address_space.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
@@ -469,9 +473,67 @@ void test_module_compatibility_gating() {
 
 }  // namespace
 
+// The module's rendering profile for the running revision is read at launch
+// from <package>/revisions/<effective hash>/rendering.json: a valid one arms
+// the temporal analyzer (and the probe its discovery), another revision's is
+// not used, and a malformed one fails the launch instead of being dropped.
+void test_rendering_profile_follows_the_effective_revision() {
+  const auto base_bytes = make_base_xex();
+  auto hash = xenon::xbox::format_effective_image_hash(
+      reference_identity(base_bytes, nullptr).effective_image_hash);
+  for (auto& c : hash) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  const auto package = std::filesystem::temp_directory_path() / "xenon_rendering_profile_session_test";
+  std::filesystem::remove_all(package);
+  const auto write_profile = [&](const std::string& revision, const char* json) {
+    const auto dir = package / "revisions" / revision;
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "rendering.json", std::ios::binary | std::ios::trunc) << json;
+  };
+  auto config = make_config();
+  config.enable_graphics = true;
+  config.graphics_backend = "null";
+  config.module_package_path = package;
+
+  {
+    write_profile(hash, R"({"schema":"xenon.rendering.v1","temporal":{"camera":{"vertexConstant":8,"layout":"columns"}}})");
+    config.temporal_probe_interval = 30;
+    xenon::core::XenonSession session;
+    assert(session.initialize(config).success);
+    assert(session.load_game(base_bytes, "profiled").success);
+    const auto& temporal = session.graphics_system()->temporal();
+    assert(temporal.profile() && temporal.profile()->camera_constant == 8u &&
+           temporal.profile()->camera_layout == xenon::gpu::temporal::MatrixLayout::Columns);
+    assert(temporal.discovery() && "the probe runs discovery");
+    session.shutdown();
+  }
+  {
+    std::filesystem::remove_all(package);
+    write_profile("cca65debbbdf02863111cd9f8ea1fde1c2f34555",
+                  R"({"schema":"xenon.rendering.v1","temporal":{"camera":{"vertexConstant":0}}})");
+    config.temporal_probe_interval = 0;
+    xenon::core::XenonSession session;
+    assert(session.initialize(config).success);
+    assert(session.load_game(base_bytes, "other_revision").success);
+    assert(!session.graphics_system()->temporal().profile() &&
+           !session.graphics_system()->temporal().active());
+    session.shutdown();
+  }
+  {
+    write_profile(hash, R"({"schema":"xenon.rendering.v1","temporal":{"camera":{"layout":"rows"}}})");
+    xenon::core::XenonSession session;
+    assert(session.initialize(config).success);
+    const auto result = session.load_game(base_bytes, "malformed_profile");
+    assert(!result.success && result.message.find("rendering profile") != std::string::npos);
+    session.shutdown();
+  }
+  std::filesystem::remove_all(package);
+  std::cout << "  [ok] rendering profile: read for the effective revision, malformed fails the launch\n";
+}
+
 int main() {
   std::cout << "Testing title-update runtime integration (Content Services -> XEX Loader V2 -> "
                "XenonSession)...\n";
+  test_rendering_profile_follows_the_effective_revision();
   test_base_only_launch();
   test_valid_title_update_applied();
   test_malformed_title_update_rejected();

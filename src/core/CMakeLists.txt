@@ -18,6 +18,7 @@ add_library(xenon_core STATIC
   session/session.cpp
   session/lifecycle/subsystem_init.cpp
   session/lifecycle/graphics_init.cpp
+  session/lifecycle/temporal_rendering.cpp
   session/lifecycle/input_init.cpp
   session/lifecycle/game_loading.cpp
   session/lifecycle/native_extension.cpp

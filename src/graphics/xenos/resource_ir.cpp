@@ -578,6 +578,15 @@ std::optional<TextureDescriptor> decode_texture_fetch_constant(
 }
 
 DrawResourceState ResourceStateTracker::snapshot() const noexcept {
+  auto result = snapshot_targets();
+  for (unsigned i = 0; i < 32; ++i) {
+    result.textures[i] = texture(i);
+    for (unsigned j = 0; j < 3; ++j) result.vertex_buffers[i][j] = vertex_buffer(i, j);
+  }
+  return result;
+}
+
+DrawResourceState ResourceStateTracker::snapshot_targets() const noexcept {
   DrawResourceState result{};
   result.generation = generation_;
   result.edram_mode = static_cast<EdramMode>(bits(registers_[0x2208], 0, 3));
@@ -789,10 +798,6 @@ DrawResourceState ResourceStateTracker::snapshot() const noexcept {
   result.depth_target.stencil_back_reference = static_cast<std::uint8_t>(stencil_back);
   result.depth_target.stencil_back_read_mask = static_cast<std::uint8_t>(stencil_back >> 8u);
   result.depth_target.stencil_back_write_mask = static_cast<std::uint8_t>(stencil_back >> 16u);
-  for (unsigned i = 0; i < 32; ++i) {
-    result.textures[i] = texture(i);
-    for (unsigned j = 0; j < 3; ++j) result.vertex_buffers[i][j] = vertex_buffer(i, j);
-  }
   return result;
 }
 

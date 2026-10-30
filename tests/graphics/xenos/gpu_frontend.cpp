@@ -716,6 +716,53 @@ void test_front_buffer_swap_follows_the_work_before_it() {
   graphics.set_swap_callback({});
 }
 
+// The temporal analyzer sees the work execute_ir() runs and closes a frame at
+// the swap that shows it: the draw before the swap belongs to that frame, the
+// draw after it to the next, and the session's swap callback still runs.
+void test_temporal_frames_end_at_the_front_buffer_swap() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100A000;
+  constexpr std::uint32_t fence = 0x0121A000;
+  store_be32(memory, fence, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  std::vector<std::uint32_t> draws_in_closed_frames;
+  graphics.temporal().set_discovery(true);
+  graphics.temporal().set_frame_callback(
+      [&](const xenon::gpu::TemporalFrameReport& report) {
+        draws_in_closed_frames.push_back(report.draws);
+      });
+  int swaps = 0;
+  graphics.set_swap_callback([&](const xenon::gpu::FrontBufferSwap&) {
+    // The frame is closed before the session hears about the swap.
+    assert(graphics.temporal().frames() == static_cast<std::uint64_t>(swaps) + 1u);
+    ++swaps;
+  });
+  xenon::gpu::FrontBufferSwap flip{};
+  flip.base_address = 0x1F000000u;
+  flip.width = 1280u;
+  flip.height = 720u;
+  flip.pitch = 1280u * 4u;
+  flip.format = 6u;
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  std::vector<std::uint32_t> words{make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator};
+  for (const auto word : xenon::gpu::encode_front_buffer_swap(flip)) words.push_back(word);
+  words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+                             make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  for (const auto word : xenon::gpu::encode_front_buffer_swap(flip)) words.push_back(word);
+  for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+  const auto words_count = static_cast<std::uint32_t>(words.size());
+  assert(graphics.submit_ring(backend, ring, 128, 0, words_count) == words_count);
+  assert(swaps == 2);
+  assert((draws_in_closed_frames == std::vector<std::uint32_t>{1u, 2u}));
+  assert(graphics.temporal().last_frame().frame == 1u);
+  assert(graphics.temporal().last_frame().pass_draws[static_cast<std::size_t>(
+             xenon::gpu::TemporalPass::Unclassified)] == 2u);
+  graphics.set_swap_callback({});
+}
+
 // Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
 // drain at startup): the write pointer can sit inside a packet the guest is
 // still writing. The drain must stop before that packet, with everything
@@ -1574,6 +1621,7 @@ int main() {
   test_ring_wrap(memory, cp, regs);
   test_ring_effects_follow_the_work_before_them();
   test_front_buffer_swap_follows_the_work_before_it();
+  test_temporal_frames_end_at_the_front_buffer_swap();
   test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);

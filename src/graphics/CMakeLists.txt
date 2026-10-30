@@ -21,6 +21,9 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/command_processor.cpp
     xenos/capture.cpp
     xenos/graphics_system.cpp
+    xenos/temporal.cpp
+    xenos/temporal_profile.cpp
+    xenos/temporal_frame.cpp
     xenos/guest_read_sync.cpp
     common/backend_capabilities.cpp
     common/display_vblank.cpp

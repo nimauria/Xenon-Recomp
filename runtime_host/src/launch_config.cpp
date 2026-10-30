@@ -198,6 +198,12 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.memory_watch_history =
       static_cast<std::uint32_t>(root.get_number("memoryWatchHistory", 4096));
   out.memory_watch_poll_ms = static_cast<std::uint32_t>(root.get_number("memoryWatchPollMs", 1));
+  const double probe_frames = root.get_number("temporalProbeFrames", 0);
+  if (probe_frames < 0 || probe_frames > 1000000 || probe_frames != static_cast<double>(static_cast<std::uint32_t>(probe_frames))) {
+    error = "Launch configuration 'temporalProbeFrames' must be a whole number of frames from 0 to 1000000";
+    return false;
+  }
+  out.temporal_probe_frames = static_cast<std::uint32_t>(probe_frames);
 
   out.title_update_path = root.get_string("titleUpdatePath");
   out.dlc_root_path = root.get_string("dlcRootPath");

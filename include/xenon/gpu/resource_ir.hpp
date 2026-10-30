@@ -396,6 +396,12 @@ class ResourceStateTracker {
   [[nodiscard]] std::optional<VertexBufferDescriptor> vertex_buffer(
       std::uint32_t fetch_constant, std::uint32_t select) const noexcept;
   [[nodiscard]] DrawResourceState snapshot() const noexcept;
+  // snapshot() without the texture and vertex fetch constants: the render
+  // target, depth, raster and copy state alone, for per-draw observers.
+  [[nodiscard]] DrawResourceState snapshot_targets() const noexcept;
+  [[nodiscard]] std::uint32_t register_value(std::uint32_t index) const noexcept {
+    return index < registers_.size() ? registers_[index] : 0u;
+  }
   [[nodiscard]] MemExportPlan plan_memexport(
       const DecodedShader& shader) const;
   // Packs the architectural constant register banks into the stable GPU 08

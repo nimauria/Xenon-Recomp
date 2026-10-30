@@ -11,6 +11,7 @@
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/register_file.hpp"
+#include "xenon/gpu/temporal_frame.hpp"
 #include "xenon/memory/address_space.hpp"
 
 namespace xenon::gpu {
@@ -78,9 +79,15 @@ class GraphicsSystem {
       std::function<void(std::uint32_t cpu_index)> callback) {
     command_processor_.set_interrupt_callback(std::move(callback));
   }
-  void set_swap_callback(std::function<void(const FrontBufferSwap&)> callback) {
-    command_processor_.set_swap_callback(std::move(callback));
-  }
+  // Called at each front-buffer swap, after the temporal analyzer (when
+  // active) has closed the frame the swap shows.
+  void set_swap_callback(std::function<void(const FrontBufferSwap&)> callback);
+
+  // Temporal frame classification of the work execute_ir() runs (see
+  // gpu/temporal_frame.hpp). Inactive until given a profile or put in
+  // discovery mode; configure it before the GPU starts executing.
+  [[nodiscard]] TemporalFrameAnalyzer& temporal() noexcept { return temporal_; }
+  [[nodiscard]] const TemporalFrameAnalyzer& temporal() const noexcept { return temporal_; }
 
   [[nodiscard]] RegisterFile& registers() noexcept { return registers_; }
   [[nodiscard]] const RegisterFile& registers() const noexcept { return registers_; }
@@ -96,6 +103,7 @@ class GraphicsSystem {
   ir::Stream stream_{};
   Edram edram_{};
   CommandProcessor command_processor_;
+  TemporalFrameAnalyzer temporal_{};
   // CommandProcessor::Statistics::draws when execute_ir() last ran: a draw
   // (or resolve) has been decoded and not executed while they differ.
   std::uint64_t draws_at_last_execute_{};

@@ -268,7 +268,7 @@ The hardware samples textures microseconds after the command processor passes a 
 
 **What has not:** input, loading past the first menu screen, or in-game 3D rendering. Replaying captured retail command streams is also still outstanding.
 
-See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
+See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md), [`TEMPORAL_RENDERING.md`](docs/graphics/TEMPORAL_RENDERING.md) (upscaling and frame-generation groundwork) and the validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
 
 ### Audio
 
@@ -655,7 +655,7 @@ AI tools have played a part in accelerating progress on this project. Every AI-a
 | CPU and memory | [CPU V2](docs/cpu/CPU_V2_DESIGN.md) · [Memory V2](docs/memory/MEMORY_V2.md) |
 | Recompilation | [Pipeline](docs/recomp/RECOMPILATION_PIPELINE.md) · [Game preparation](docs/development/GAME_PREPARATION.md) · [Game intake](docs/recomp/GAME_INTAKE_GEN11.md) |
 | Xbox system | [XEX loader](docs/xbox/XEX_LOADER_V2.md) · [Import dispatch](docs/xbox/IMPORT_DISPATCH.md) · [Kernel](docs/kernel/KERNEL_V1.md) · [XAM](docs/xam/XAM_V1.md) |
-| Graphics | [GPU V1](docs/graphics/GPU_V1.md) · [Native backends](docs/graphics/NATIVE_BACKENDS.md) · [Validation log](docs/graphics/VALIDATION.md) |
+| Graphics | [GPU V1](docs/graphics/GPU_V1.md) · [Native backends](docs/graphics/NATIVE_BACKENDS.md) · [Temporal rendering](docs/graphics/TEMPORAL_RENDERING.md) · [Validation log](docs/graphics/VALIDATION.md) |
 | Audio, input, files | [Audio V1](docs/audio/AUDIO_V1.md) · [Input V2](docs/input/INPUT_V2.md) · [Input module API](docs/modules/INPUT_API_V1.md) · [Filesystem](docs/filesystem/FILESYSTEM_V1.md) · [Content services](docs/modules/CONTENT_SERVICES.md) |
 | Network | [Xenon Network client](docs/network/XENON_NETWORK_V1.md) |
 | Launcher | [Launcher](launcher/README.md) · [Launcher backend](launcher/BACKEND.md) |
