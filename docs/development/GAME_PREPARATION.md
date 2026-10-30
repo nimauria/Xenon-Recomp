@@ -281,7 +281,13 @@ independent, narrower schemas that predate this pass. The bridge is a fixed
 convention: a module that wants automatic preparation ships its hint package
 at `<installed module directory>/xenon-analysis/`. `PreparationService`
 (`launcher/src/services/preparation_service.cpp`) resolves this path and
-passes it as `xenon-prepare --module`. A module that ships its own
+passes it as `xenon-prepare --module`. Each revision directory may also
+hold `hooks/*.cpp`, the routines its instruction hooks name; preparation
+compiles them into that disc's module, and their content is part of the
+cache key. One package can carry several revisions (one per supported
+disc), and preparation builds the module for whichever disc the player has.
+Project Gracemeria exports its revision profiles this way with
+`gracemeria-export-analysis`. A module that ships its own
 pre-built native extension (`manifest.json`'s `"nativeExtension"` field) does
 not need this at all — `PreparationService::usesAutomaticPreparation()`
 returns false for it, and the existing (pre-existing, unchanged) shipped-
