@@ -81,6 +81,15 @@ void add_edge(ir::Block& block, GuestAddress target, ir::EdgeKind kind,
   if (!duplicate) block.successors.push_back({target, kind, local});
 }
 
+// Only instructions that leave the block unconditionally or conditionally
+// (not calls, which return to the next instruction) have no "after".
+[[nodiscard]] bool has_no_fallthrough_point(const DecodedInstruction& instruction) noexcept {
+  if (!ends_basic_block(instruction)) return false;
+  const bool call = instruction.info && instruction.info->group == InstructionGroup::Branch &&
+                    instruction.lk() && !is_syscall(instruction) && !is_trap(instruction);
+  return !call;
+}
+
 }  // namespace
 
 FunctionCompileResult StaticFunctionCompiler::compile(
@@ -91,7 +100,8 @@ FunctionCompileResult StaticFunctionCompiler::compile(
 
 FunctionCompileResult StaticFunctionCompiler::compile_ranges(
     GuestAddress entry, std::span<const FunctionCodeRange> ranges,
-    std::span<const GuestAddress> extra_leaders) const {
+    std::span<const GuestAddress> extra_leaders,
+    std::span<const InstructionHook> hooks) const {
   FunctionCompileResult out{};
   out.function.guest_address = entry;
   if (ranges.empty()) {
@@ -160,11 +170,44 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
     }
   }
 
+  std::multimap<GuestAddress, const InstructionHook*> hooks_by_address;
+  for (const auto& hook : hooks) {
+    const auto site = decoded.find(hook.address);
+    if (site == decoded.end()) {
+      out.error_address = hook.address;
+      out.error = "instruction hook address is outside the function's ranges";
+      return out;
+    }
+    if (hook.after_instruction && has_no_fallthrough_point(site->second)) {
+      out.error_address = hook.address;
+      out.error_word = site->second.word;
+      out.error = "instruction hook runs after a branch, which has no following point";
+      return out;
+    }
+    for (const auto [action, target] : {std::pair{hook.on_true, hook.jump_on_true},
+                                        std::pair{hook.on_false, hook.jump_on_false}}) {
+      if (action == InstructionHookAction::Jump && in_declared_range(target) &&
+          !decoded.contains(target)) {
+        out.error_address = hook.address;
+        out.error = "instruction hook jump target is inside a declared range but has no "
+                    "decoded local block";
+        return out;
+      }
+    }
+    hooks_by_address.emplace(hook.address, &hook);
+  }
+
   std::map<GuestAddress, bool> leader;
   leader[entry] = true;
   for (const auto start : range_starts) leader[start] = true;
   for (const auto target : extra_leaders)
     if (decoded.contains(target)) leader[target] = true;
+  for (const auto& [address, hook] : hooks_by_address) {
+    if (hook->on_true == InstructionHookAction::Jump && decoded.contains(hook->jump_on_true))
+      leader[hook->jump_on_true] = true;
+    if (hook->on_false == InstructionHookAction::Jump && decoded.contains(hook->jump_on_false))
+      leader[hook->jump_on_false] = true;
+  }
 
   for (const auto& [address, instruction] : decoded) {
     if (is_direct_branch(instruction)) {
@@ -183,9 +226,28 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
     ir::Block block{};
     block.guest_address = block_start;
     ir::Builder builder(block);
+    // Hook operations carry their instruction's guest source, as every node
+    // of a function's IR must.
+    const auto emit_hooks = [&](const DecodedInstruction& instruction, bool after) {
+      const auto [first, last] = hooks_by_address.equal_range(instruction.address);
+      for (auto entry = first; entry != last; ++entry) {
+        const auto& hook = *entry->second;
+        if (hook.after_instruction != after) continue;
+        builder.set_guest(&instruction);
+        std::vector<ir::ValueId> targets;
+        if (hook.on_true == InstructionHookAction::Jump)
+          targets.push_back(builder.constant_i64(hook.jump_on_true));
+        if (hook.on_false == InstructionHookAction::Jump)
+          targets.push_back(builder.constant_i64(hook.jump_on_false));
+        builder.emit(ir::Op::HostHook, ir::Type::Void, targets, hook.ordinal,
+                     hook.packed_actions());
+        builder.set_guest(nullptr);
+      }
+    };
 
     auto current = it;
     while (current != decoded.end()) {
+      emit_hooks(current->second, false);
       const auto before = block.instructions.size();
       if (!lifter_.lift(current->second, builder) ||
           block.instructions.size() == before) {
@@ -194,6 +256,7 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
         out.error = "recognized instruction has no Xenon IR lowering";
         return out;
       }
+      emit_hooks(current->second, true);
 
       const auto next_address = static_cast<GuestAddress>(current->first + 4u);
       auto next = std::next(current);
@@ -228,6 +291,20 @@ FunctionCompileResult StaticFunctionCompiler::compile_ranges(
                  block_by_address.contains(target));
       } else if (is_indirect_branch(instruction) && instruction.lk()) {
         block.has_indirect_call = true;
+      }
+      const auto [first, last] = hooks_by_address.equal_range(address);
+      for (auto entry = first; entry != last; ++entry) {
+        const auto& hook = *entry->second;
+        for (const auto [action, target] : {std::pair{hook.on_true, hook.jump_on_true},
+                                            std::pair{hook.on_false, hook.jump_on_false}}) {
+          if (action == InstructionHookAction::Jump) {
+            const bool local = block_by_address.contains(target);
+            add_edge(block, target, ir::EdgeKind::Branch, local);
+            block.has_external_exit |= !local;
+          } else if (action == InstructionHookAction::Return) {
+            block.has_external_exit = true;
+          }
+        }
       }
     }
 

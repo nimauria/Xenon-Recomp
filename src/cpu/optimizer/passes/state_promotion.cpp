@@ -165,7 +165,9 @@ bool requires_materialization(const Instruction& i) noexcept {
       has_effect(effect, Effect::Barrier) ||
       has_effect(effect, Effect::Synchronization))
     return true;
-  return i.op == Op::Call || i.op == Op::CallIndirect || i.op == Op::WriteSPR;
+  // A host hook reads and writes guest state through CpuState directly.
+  return i.op == Op::Call || i.op == Op::CallIndirect || i.op == Op::WriteSPR ||
+         i.op == Op::HostHook;
 }
 
 bool invalidates_after(const Instruction& i) noexcept {
@@ -174,6 +176,7 @@ bool invalidates_after(const Instruction& i) noexcept {
     case Op::CallIndirect:
     case Op::WriteSPR:
     case Op::StringLoad:
+    case Op::HostHook:
       return true;
     case Op::BranchIf:
     case Op::BranchIndirect:

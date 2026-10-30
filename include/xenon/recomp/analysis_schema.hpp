@@ -315,10 +315,31 @@ struct PatchDeclaration {
   std::string description;
 };
 
+enum class HookKind : std::uint8_t {
+  // Recorded for diagnostics and the generated manifest only.
+  Metadata,
+  // A module-supplied native routine compiled into the generated code at
+  // one guest instruction (cpu::InstructionHook). `symbol` names it.
+  Instruction,
+};
+
+enum class HookAction : std::uint8_t { Continue, Jump, Return };
+
 struct HookDeclaration {
   std::uint32_t address{};
   std::string native_replacement_identity;  // free-form; Gracemeria-defined
   std::string description;
+
+  HookKind kind{HookKind::Metadata};
+  // Instruction hooks: the C++ routine the module links into its native
+  // build, `void symbol(xenon::cpu::ExecutionContext&)`, or `bool` when
+  // either action below is not Continue.
+  std::string symbol;
+  bool after_instruction{};
+  HookAction on_true{HookAction::Continue};
+  HookAction on_false{HookAction::Continue};
+  std::uint32_t jump_on_true{};
+  std::uint32_t jump_on_false{};
 };
 
 // A complete, versioned analysis hint set, scoped to one effective

@@ -62,6 +62,12 @@ bool write_generated_hooks(const std::filesystem::path& generation_stage, const 
                            const AnalysisReport& report) {
   std::ofstream hooks(generation_stage / "hooks.cpp");
   hooks << "// Generated module hooks and patch manifest. Runtime integration owns semantics.\n";
+  // Instruction hooks are compiled into the function shards that carry them;
+  // the module's hook sources (added to xenon_game) implement each routine.
+  for (const auto& hook : report.instruction_hooks.hooks)
+    hooks << "// instruction-hook[0x" << std::hex << hook.address << std::dec << "] "
+          << report.instruction_hooks.symbols[hook.ordinal]
+          << (hook.after_instruction ? " after" : " before") << "\n";
   for (const auto& hint : options.hints) {
     for (const auto& hook : hint.special_hooks)
       hooks << "// hook[" << hint.name << "] " << hook << "\n";
@@ -139,6 +145,7 @@ bool write_module_export(const std::filesystem::path& generation_stage, const An
 }
 
 bool write_generated_cmake(const std::filesystem::path& generation_stage, const DriverOptions& options,
+                           const AnalysisReport& report,
                            const std::vector<std::filesystem::path>& shards) {
   std::ofstream build(generation_stage / "CMakeLists.txt");
   build << "cmake_minimum_required(VERSION 3.25)\n"
@@ -170,8 +177,12 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "add_library(xenon_game STATIC\n";
   for (const auto& path : shards)
     build << "  " << std::filesystem::relative(path, options.output).generic_string() << "\n";
-  build << "  registry.cpp\n  imports.cpp\n  metadata.cpp\n  hooks.cpp\n"
-           ")\n"
+  build << "  registry.cpp\n  imports.cpp\n  metadata.cpp\n  hooks.cpp\n";
+  // The module's instruction hook routines, from wherever the module keeps
+  // them; the generated shards call them by name.
+  for (const auto& source : report.hook_sources)
+    build << "  \"" << std::filesystem::absolute(source).generic_string() << "\"\n";
+  build << ")\n"
            // Xenon::RecompRuntime: runtime helpers and
            // native_replacements.hpp/.cpp - referenced by registry.cpp's
            // lookup_compiled() switch whenever this module used at least one

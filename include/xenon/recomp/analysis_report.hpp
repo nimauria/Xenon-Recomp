@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "xenon/recomp/analysis_schema.hpp"
 #include "xenon/recomp/cpu_coverage.hpp"
 #include "xenon/recomp/function_analysis.hpp"
+#include "xenon/recomp/instruction_hooks.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
 namespace xenon::recomp {
@@ -171,6 +173,11 @@ struct AnalysisReport {
   // DriverOptions::hint_set_v2 or through hint_provider_v2) - see
   // load_and_analyze().
   std::optional<analysis::AnalysisHintSetV2> hint_set_v2;
+  // hint_set_v2's instruction hooks, and the module sources implementing them
+  // (DriverOptions::hook_sources plus the provider's), compiled into the
+  // generated module.
+  InstructionHookPlan instruction_hooks;
+  std::vector<std::filesystem::path> hook_sources;
   AnalysisDiagnostics diagnostics;
 };
 

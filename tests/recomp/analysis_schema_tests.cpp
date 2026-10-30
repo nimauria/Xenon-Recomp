@@ -7,6 +7,7 @@
 
 #include "xenon/recomp/analysis_schema.hpp"
 #include "xenon/recomp/analysis_schema_json.hpp"
+#include "xenon/recomp/instruction_hooks.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -572,6 +573,117 @@ int main() {
     assert(restored.module_name == "bom");
   }
   std::cout << "  [PASS] UTF-8 BOM-prefixed JSON parses normally\n";
+
+  // Instruction hooks round-trip every placement field, and a hint set
+  // written before they existed still reads as metadata-only hooks.
+  {
+    AnalysisHintSetV2 original{};
+    original.identity = make_identity(1, std::byte{1});
+    HookDeclaration jump{};
+    jump.address = 0x821EEBE4u;
+    jump.kind = HookKind::Instruction;
+    jump.symbol = "flipIntervalHook";
+    jump.on_true = HookAction::Jump;
+    jump.jump_on_true = 0x821EEBECu;
+    jump.on_false = HookAction::Return;
+    HookDeclaration after{};
+    after.address = 0x821D3C8Cu;
+    after.kind = HookKind::Instruction;
+    after.symbol = "storageOrderHook";
+    after.after_instruction = true;
+    original.hooks = {jump, after, HookDeclaration{0xC000, "legacy", "metadata only"}};
+
+    core::JsonValue reparsed;
+    assert(core::JsonValue::parse(to_json(original).dump(), reparsed, nullptr));
+    AnalysisHintSetV2 restored{};
+    std::string error;
+    assert(from_json(reparsed, restored, error));
+    assert(restored.hooks.size() == 3);
+    const auto& r0 = restored.hooks[0];
+    assert(r0.kind == HookKind::Instruction && r0.symbol == "flipIntervalHook");
+    assert(r0.on_true == HookAction::Jump && r0.jump_on_true == 0x821EEBECu);
+    assert(r0.on_false == HookAction::Return && !r0.after_instruction);
+    assert(restored.hooks[1].after_instruction && restored.hooks[1].on_true == HookAction::Continue);
+    assert(restored.hooks[2].kind == HookKind::Metadata);
+    std::vector<std::string> errors;
+    assert(validate_hint_set(restored, errors) && errors.empty());
+
+    core::JsonValue unknown;
+    assert(core::JsonValue::parse(
+        R"({"schemaVersion":2,"hooks":[{"address":4096,"kind":"midasm"}]})", unknown, nullptr));
+    assert(!from_json(unknown, restored, error) && error.find("midasm") != std::string::npos);
+  }
+  std::cout << "  [PASS] Instruction hooks round-trip through JSON\n";
+
+  // Instruction hooks must name a C++ routine, sit on an instruction, jump
+  // to one, and keep one signature per routine.
+  {
+    const auto rejects = [](HookDeclaration hook, const char* expected) {
+      AnalysisHintSetV2 hint_set{};
+      hint_set.identity = make_identity(1, std::byte{1});
+      hook.kind = HookKind::Instruction;
+      hint_set.hooks.push_back(hook);
+      std::vector<std::string> errors;
+      if (validate_hint_set(hint_set, errors)) return false;
+      for (const auto& e : errors)
+        if (e.find(expected) != std::string::npos) return true;
+      return false;
+    };
+    HookDeclaration base{};
+    base.address = 0x1000u;
+    base.symbol = "hook";
+    auto bad_symbol = base;
+    bad_symbol.symbol = "not a name";
+    assert(rejects(bad_symbol, "not a C++ identifier"));
+    auto unaligned = base;
+    unaligned.address = 0x1002u;
+    assert(rejects(unaligned, "not 4-byte aligned"));
+    auto bad_jump = base;
+    bad_jump.on_true = HookAction::Jump;
+    bad_jump.jump_on_true = 0x1001u;
+    assert(rejects(bad_jump, "not an instruction address"));
+
+    AnalysisHintSetV2 hint_set{};
+    hint_set.identity = make_identity(1, std::byte{1});
+    auto as_void = base;
+    as_void.kind = HookKind::Instruction;
+    auto as_bool = as_void;
+    as_bool.address = 0x2000u;
+    as_bool.on_true = HookAction::Return;
+    hint_set.hooks = {as_void, as_bool};
+    std::vector<std::string> errors;
+    assert(!validate_hint_set(hint_set, errors));
+    assert(errors.size() == 1 && errors[0].find("different signature") != std::string::npos);
+  }
+  std::cout << "  [PASS] Malformed instruction hooks are rejected\n";
+
+  // The plan gives each routine one ordinal (names sorted) and hooks in
+  // address order, keeping declaration order at a shared address.
+  {
+    AnalysisHintSetV2 hint_set{};
+    const auto hook = [](std::uint32_t address, const char* symbol, bool after) {
+      HookDeclaration h{};
+      h.address = address;
+      h.kind = HookKind::Instruction;
+      h.symbol = symbol;
+      h.after_instruction = after;
+      return h;
+    };
+    hint_set.hooks = {hook(0x3000u, "zeta", false), hook(0x1000u, "alpha", true),
+                      HookDeclaration{0x2000u, "ignored", "metadata"},
+                      hook(0x1000u, "zeta", false)};
+    const auto plan = xenon::recomp::plan_instruction_hooks(hint_set);
+    assert((plan.symbols == std::vector<std::string>{"alpha", "zeta"}));
+    assert(plan.hooks.size() == 3);
+    assert(plan.hooks[0].address == 0x1000u && plan.hooks[0].ordinal == 0u &&
+           plan.hooks[0].after_instruction);
+    assert(plan.hooks[1].address == 0x1000u && plan.hooks[1].ordinal == 1u);
+    assert(plan.hooks[2].address == 0x3000u && plan.hooks[2].ordinal == 1u);
+    std::vector<xenon::cpu::InstructionHook> in_range;
+    plan.collect(0x1000u, 0x3000u, in_range);
+    assert(in_range.size() == 2);
+  }
+  std::cout << "  [PASS] Instruction hook plan orders hooks and routines\n";
 
   std::cout << "All Analysis Hint Schema V2 tests passed!\n";
   return 0;

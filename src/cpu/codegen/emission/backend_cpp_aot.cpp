@@ -142,12 +142,77 @@ bool is_back_edge(const Instruction& i, const ir::Block& block, GuestAddress tar
 
 constexpr std::string_view kSafepointPoll = "context.poll_safepoint(); ";
 
+const std::string& hook_symbol(const Instruction& i, std::span<const std::string> hook_symbols) {
+  if (i.imm0 >= hook_symbols.size())
+    throw std::invalid_argument("CppAotBackend: host hook ordinal has no symbol");
+  return hook_symbols[static_cast<std::size_t>(i.imm0)];
+}
+
+// One action of a host hook's boolean result (cpu::InstructionHookAction:
+// 0 continue, 1 jump, 2 return).
+void emit_hook_action(std::ostringstream& o, std::uint64_t action,
+                      std::optional<GuestAddress> target, const Instruction& i,
+                      const ir::Block& block,
+                      const std::unordered_set<GuestAddress>& local_targets) {
+  switch (action) {
+    case 0: return;
+    case 1:
+      if (!target) throw std::invalid_argument("CppAotBackend: host hook jump has no target");
+      o << "state.nia=" << *target << "u; ";
+      if (local_targets.contains(*target)) {
+        if (is_back_edge(i, block, *target)) o << kSafepointPoll;
+        o << "goto " << local_label(*target) << ";";
+      } else {
+        o << "return {FlowReason::Branch," << *target << "u,0};";
+      }
+      return;
+    case 2:
+      o << "const auto return_target=static_cast<GuestAddress>(state.lr & ~3ull); "
+           "state.nia=return_target; return {FlowReason::Return,return_target,0};";
+      return;
+    default:
+      throw std::invalid_argument("CppAotBackend: unknown host hook action");
+  }
+}
+
+std::string emit_host_hook(const Instruction& i, const ir::Block& block,
+                           const std::unordered_set<GuestAddress>& local_targets,
+                           std::span<const std::string> hook_symbols) {
+  const auto& symbol = hook_symbol(i, hook_symbols);
+  const auto on_true = i.imm1 & 3u;
+  const auto on_false = (i.imm1 >> 2u) & 3u;
+  std::size_t next_target = 0;
+  const auto take_target = [&]() -> std::optional<GuestAddress> {
+    if (next_target >= i.args.size()) return std::nullopt;
+    const auto value = constant_value(block, i.args[next_target++]);
+    if (!value) return std::nullopt;
+    return static_cast<GuestAddress>(*value);
+  };
+  std::optional<GuestAddress> true_target, false_target;
+  if (on_true == 1u) true_target = take_target();
+  if (on_false == 1u) false_target = take_target();
+
+  std::ostringstream o;
+  if (on_true == 0u && on_false == 0u) {
+    o << "  " << symbol << "(context);\n";
+    return o.str();
+  }
+  o << "  if(" << symbol << "(context)) { ";
+  emit_hook_action(o, on_true, true_target, i, block, local_targets);
+  o << " } else { ";
+  emit_hook_action(o, on_false, false_target, i, block, local_targets);
+  o << " }\n";
+  return o.str();
+}
+
 std::string emit_one_in_function(const Instruction& i,
                                  const std::vector<Type>& value_types,
                                  const ir::Block& block,
                                  const std::unordered_set<GuestAddress>& local_targets,
                                  std::span<const DirectCallBinding> direct_calls,
-                                 std::string_view local_dispatch_symbol) {
+                                 std::string_view local_dispatch_symbol,
+                                 std::span<const std::string> hook_symbols) {
+  if (i.op == Op::HostHook) return emit_host_hook(i, block, local_targets, hook_symbols);
   std::ostringstream o;
   if (i.op == Op::Branch) {
     const auto target = i.args.empty() ? std::optional<std::uint64_t>{} : constant_value(block, i.args[0]);
@@ -324,7 +389,8 @@ std::string CppAotBackend::emit_translation_unit(const ir::Block& block,std::str
 std::string CppAotBackend::emit_function(
     const ir::Function& function, std::string_view name,
     std::span<const DirectCallBinding> direct_calls,
-    std::span<const GuestAddress> alternate_entries) const {
+    std::span<const GuestAddress> alternate_entries,
+    std::span<const std::string> hook_symbols) const {
   if (function.blocks.empty()) throw std::runtime_error("CppAotBackend: empty function");
 
   std::unordered_set<GuestAddress> local_targets;
@@ -346,6 +412,17 @@ std::string CppAotBackend::emit_function(
       throw std::invalid_argument("CppAotBackend: invalid direct-call native symbol");
     if (declared_symbols.insert(binding.native_symbol).second)
       o << "ExecutionResult " << binding.native_symbol << "(ExecutionContext&);\n";
+  }
+  // Module-supplied hook routines, linked into the same module.
+  for (const auto& block : function.blocks) {
+    for (const auto& i : block.instructions) {
+      if (i.op != Op::HostHook) continue;
+      const auto& symbol = hook_symbol(i, hook_symbols);
+      if (!valid_cpp_identifier(symbol))
+        throw std::invalid_argument("CppAotBackend: invalid host hook symbol");
+      if (declared_symbols.insert(symbol).second)
+        o << (i.imm1 != 0u ? "bool " : "void ") << symbol << "(ExecutionContext&);\n";
+    }
   }
   const std::string dispatch_symbol = std::string(name) + "_dispatch_v2";
   // Deterministic switch order (the set's iteration order is not).
@@ -375,7 +452,8 @@ std::string CppAotBackend::emit_function(
     }
     for (const auto& i : block.instructions) {
       emit_guest_pc(o, i, current_guest, materialized_guest);
-      o << emit_one_in_function(i, value_types, block, local_targets, direct_calls, dispatch_symbol);
+      o << emit_one_in_function(i, value_types, block, local_targets, direct_calls, dispatch_symbol,
+                                hook_symbols);
     }
 
     if (!is_guaranteed_terminal(block)) {
@@ -506,12 +584,13 @@ std::vector<GuestAddress> CppAotBackend::static_call_targets(
 std::string CppAotBackend::emit_translation_unit(
     const ir::Function& function, std::string_view name,
     std::span<const DirectCallBinding> direct_calls,
-    std::span<const GuestAddress> alternate_entries) const {
+    std::span<const GuestAddress> alternate_entries,
+    std::span<const std::string> hook_symbols) const {
   std::ostringstream o;
   o << "#include <bit>\n#include <cmath>\n#include <cfenv>\n#include <cstdint>\n#include <limits>\n";
   o << "#include \"xenon/cpu/aot_semantics.hpp\"\n\n";
   o << "using namespace xenon::cpu;\n";
-  o << emit_function(function, name, direct_calls, alternate_entries);
+  o << emit_function(function, name, direct_calls, alternate_entries, hook_symbols);
   return o.str();
 }
 

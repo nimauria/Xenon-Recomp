@@ -95,6 +95,9 @@ Arity arity(Op op) noexcept {
     case Op::VStoreLeft: case Op::VStoreRight:
     case Op::VMakeLoadShiftLeft: case Op::VMakeLoadShiftRight:
       return {2, 2};
+
+    case Op::HostHook:
+      return {0, 2};
   }
   return {0, 4};
 }
@@ -118,7 +121,7 @@ bool expects_void(Op op) noexcept {
     case Op::Barrier: case Op::CacheZero: case Op::ICacheInvalidate:
     case Op::CacheHint: case Op::Branch: case Op::BranchIf:
     case Op::BranchIndirect: case Op::Call: case Op::CallIndirect:
-    case Op::Return: case Op::Trap: case Op::Syscall:
+    case Op::Return: case Op::Trap: case Op::Syscall: case Op::HostHook:
       return true;
     default:
       return false;
@@ -392,6 +395,24 @@ VerifyResult Verifier::verify(const Function& function) const {
       if (instruction.op == Op::Constant && instruction.result != kNoValue)
         constants[instruction.result] = instruction.imm0;
       if (instruction.args.empty()) continue;
+      if (instruction.op == Op::HostHook) {
+        // A hook's Jump actions are side exits: each constant target must be
+        // a Branch edge of this block like any direct branch.
+        for (const auto value : instruction.args) {
+          const auto constant = constants.find(value);
+          if (constant == constants.end())
+            return fail(VerifyError::InvalidBranchTarget, block.guest_address, 0,
+                        "host hook jump target is not a constant");
+          const auto target = static_cast<GuestAddress>(constant->second);
+          if (std::none_of(block.successors.begin(), block.successors.end(),
+                           [&](const ControlFlowEdge& edge) {
+                             return edge.target == target && edge.kind == EdgeKind::Branch;
+                           }))
+            return fail(VerifyError::InvalidBranchTarget, block.guest_address, 0,
+                        "host hook jump target is not represented in the CFG");
+        }
+        continue;
+      }
       EdgeKind expected_kind{};
       std::size_t target_arg{};
       bool has_static_target = false;

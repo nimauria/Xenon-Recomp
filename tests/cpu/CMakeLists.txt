@@ -145,6 +145,7 @@ if(XENON_BUILD_TESTS)
   xenon_add_generated_cpu_test(local_indirect codegen_local_indirect.cpp local_indirect.cpp)
   xenon_add_generated_cpu_test(direct_call codegen_direct_call.cpp direct_call.cpp)
   xenon_add_generated_cpu_test(tail_branch codegen_tail_branch.cpp tail_branch.cpp)
+  xenon_add_generated_cpu_test(instruction_hooks codegen_instruction_hooks.cpp instruction_hooks.cpp)
   if(XENON_ENABLE_MEMORY)
 
     add_executable(xenon_dynamic_fallback_tests

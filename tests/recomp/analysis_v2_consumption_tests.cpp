@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -818,6 +819,84 @@ int main() {
   }
   std::cout << "  [PASS] A FunctionChunk excluded by a conflicting independent FunctionHint compiles "
                "as exactly one canonical function\n";
+
+  // Test: an instruction hook is compiled into its function and the module's
+  // hook source into the generated build; generation refuses to emit calls
+  // nothing implements, and analysis refuses a hook no function carries.
+  {
+    // entry: li r3,1; li r5,0x100; blr - the hook runs before the second li.
+    const auto xex_bytes = make_xex({d_form(14, 3, 0, 1), d_form(14, 5, 0, 0x100), kBlr}, 0x40);
+    xbox::XexImage image{};
+    std::string parse_error;
+    assert(xbox::parse_xex_image(xex_bytes, image, &parse_error));
+    const auto make_hints = [&](std::uint32_t address) {
+      AnalysisHintSetV2 hints{};
+      hints.identity = xbox::compute_effective_identity(image);
+      HookDeclaration hook{};
+      hook.address = address;
+      hook.kind = HookKind::Instruction;
+      hook.symbol = "module_probe_hook";
+      hints.hooks.push_back(hook);
+      return hints;
+    };
+    const auto root = std::filesystem::temp_directory_path() / "xenon_v2_consumption_hooks";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    DriverOptions options{};
+    options.input = root / "fixture.xex";
+    options.output = root / "generated";
+    std::ofstream(options.input, std::ios::binary)
+        .write(reinterpret_cast<const char*>(xex_bytes.data()),
+               static_cast<std::streamsize>(xex_bytes.size()));
+    const auto read_text = [](const std::filesystem::path& path) {
+      std::ifstream file(path);
+      std::ostringstream text;
+      text << file.rdbuf();
+      return text.str();
+    };
+
+    const auto hook_address = kLoadAddress + kTextRva + 4u;
+    options.hint_set_v2 = make_hints(hook_address);
+    AnalysisReport report;
+    std::string error;
+    assert(load_and_analyze(options, report, error) && error.empty());
+    bool placed = false;
+    for (const auto& function : report.functions)
+      for (const auto& block : function.ir.blocks)
+        for (const auto& instruction : block.instructions)
+          if (instruction.op == xenon::cpu::ir::Op::HostHook &&
+              instruction.guest_address == hook_address)
+            placed = true;
+    assert(placed);
+
+    assert(!generate_project(options, report, error));
+    assert(error.find("no hook sources") != std::string::npos);
+
+    const auto hook_source = root / "module_hooks.cpp";
+    std::ofstream(hook_source) << "#include \"xenon/cpu/runtime.hpp\"\n"
+                                  "void module_probe_hook(xenon::cpu::ExecutionContext&) {}\n";
+    options.hook_sources = {hook_source};
+    error.clear();
+    assert(load_and_analyze(options, report, error) && error.empty());
+    assert(generate_project(options, report, error) && error.empty());
+    const auto cmake = read_text(options.output / "CMakeLists.txt");
+    assert(cmake.find(std::filesystem::absolute(hook_source).generic_string()) != std::string::npos);
+    bool called = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(options.output / "functions"))
+      if (entry.is_regular_file() &&
+          read_text(entry.path()).find("module_probe_hook(context);") != std::string::npos)
+        called = true;
+    assert(called);
+    assert(read_text(options.output / "hooks.cpp").find("module_probe_hook before") != std::string::npos);
+
+    // A hook in data, which no function covers, would never run.
+    options.hint_set_v2 = make_hints(kLoadAddress + kDataRva);
+    error.clear();
+    assert(!load_and_analyze(options, report, error));
+    assert(error.find("not inside any compiled function") != std::string::npos);
+    std::filesystem::remove_all(root);
+  }
+  std::cout << "  [PASS] Instruction hooks compile into their function and the module build\n";
 
   std::cout << "All Analysis Hint Schema V2 consumption tests passed!\n";
   return 0;

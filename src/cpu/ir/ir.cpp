@@ -95,6 +95,9 @@ Effect effects(Op op) noexcept {
     case Op::Syscall:
       return Effect::ControlFlow | Effect::Call | Effect::StateRead |
              Effect::StateWrite;
+    case Op::HostHook:
+      return Effect::Call | Effect::StateRead | Effect::StateWrite |
+             Effect::MemoryRead | Effect::MemoryWrite;
     default:
       return Effect::None;
   }

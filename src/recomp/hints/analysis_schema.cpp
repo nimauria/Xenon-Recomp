@@ -1,9 +1,11 @@
 #include "xenon/recomp/analysis_schema.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace xenon::recomp::analysis {
 
@@ -13,6 +15,15 @@ std::string hex_address(std::uint32_t address) {
   std::ostringstream out;
   out << "0x" << std::hex << address;
   return out.str();
+}
+
+bool is_cpp_identifier(const std::string& text) {
+  if (text.empty()) return false;
+  const auto first = static_cast<unsigned char>(text.front());
+  if (!(std::isalpha(first) || text.front() == '_')) return false;
+  return std::all_of(text.begin(), text.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+  });
 }
 
 }  // namespace
@@ -347,6 +358,33 @@ bool validate_hint_set(const AnalysisHintSetV2& hint_set, std::vector<std::strin
     if (pattern.scope_start && pattern.scope_end && *pattern.scope_end <= *pattern.scope_start) {
       errors.push_back("instruction pattern " + hex_address(pattern.value) +
                        " has scope_end <= scope_start");
+    }
+  }
+
+  // Instruction hooks become calls in generated C++: the symbol must be a
+  // C++ identifier, the address an instruction, and one symbol must keep one
+  // signature (void, or bool when any action is not Continue) everywhere it
+  // is placed.
+  {
+    std::unordered_map<std::string, bool> returns_bool_by_symbol;
+    for (const auto& hook : hint_set.hooks) {
+      if (hook.kind != HookKind::Instruction) continue;
+      const auto where = "instruction hook at " + hex_address(hook.address);
+      if (!is_cpp_identifier(hook.symbol))
+        errors.push_back(where + " has symbol '" + hook.symbol + "', which is not a C++ identifier");
+      if ((hook.address & 3u) != 0u) errors.push_back(where + " is not 4-byte aligned");
+      for (const auto [action, target] : {std::pair{hook.on_true, hook.jump_on_true},
+                                          std::pair{hook.on_false, hook.jump_on_false}}) {
+        if (action == HookAction::Jump && (target == 0u || (target & 3u) != 0u))
+          errors.push_back(where + " jumps to " + hex_address(target) +
+                           ", which is not an instruction address");
+      }
+      const bool returns_bool =
+          hook.on_true != HookAction::Continue || hook.on_false != HookAction::Continue;
+      const auto [it, inserted] = returns_bool_by_symbol.emplace(hook.symbol, returns_bool);
+      if (!inserted && it->second != returns_bool)
+        errors.push_back(where + " uses symbol '" + hook.symbol +
+                         "' with a different signature than another hook (void vs bool)");
     }
   }
 

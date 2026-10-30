@@ -36,14 +36,17 @@ class CppAotBackend {
 
   // Whole-function AOT path. Local direct branches are emitted as native host
   // control flow rather than returning to an instruction dispatcher.
+  // `hook_symbols[n]` names the module routine for HostHook ordinal n.
   [[nodiscard]] std::string emit_function(
       const ir::Function& function, std::string_view function_name,
       std::span<const DirectCallBinding> direct_calls = {},
-      std::span<const GuestAddress> alternate_entries = {}) const;
+      std::span<const GuestAddress> alternate_entries = {},
+      std::span<const std::string> hook_symbols = {}) const;
   [[nodiscard]] std::string emit_translation_unit(
       const ir::Function& function, std::string_view function_name,
       std::span<const DirectCallBinding> direct_calls = {},
-      std::span<const GuestAddress> alternate_entries = {}) const;
+      std::span<const GuestAddress> alternate_entries = {},
+      std::span<const std::string> hook_symbols = {}) const;
 
   // Every statically known call target of the function (direct and
   // conditional calls with a constant target) that is not one of its own

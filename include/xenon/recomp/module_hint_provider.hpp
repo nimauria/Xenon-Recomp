@@ -14,6 +14,8 @@
 //     revisions/<effective_image_hash_hex>/analysis.json  - one AnalysisHintSetV2 (see
 //                                             analysis_schema_json.hpp), scoped to exactly
 //                                             that effective executable revision
+//     revisions/<effective_image_hash_hex>/hooks/*.cpp    - the C++ routines its
+//                                             instruction hooks name (optional)
 //
 // "compatibilityVersion" (Part 16 of the automatic game preparation pass) is
 // an explicit, author-controlled identity distinct from the module's
@@ -49,6 +51,10 @@ class FileModuleHintProvider final : public ModuleHintProviderV2 {
   [[nodiscard]] bool provide(const xbox::XexEffectiveIdentity& identity,
                              analysis::AnalysisHintSetV2& out_hint_set,
                              std::string& error) const override;
+  // Every .cpp file in that revision's hooks/ directory, sorted by name.
+  [[nodiscard]] bool hook_sources(const xbox::XexEffectiveIdentity& identity,
+                                  std::vector<std::filesystem::path>& out_sources,
+                                  std::string& error) const override;
 
   // The module's declared name (manifest.json's "moduleName"), or empty if
   // the manifest could not be read. Diagnostic use only.

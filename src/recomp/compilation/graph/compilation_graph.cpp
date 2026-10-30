@@ -194,7 +194,7 @@ bool deserialize_ir(std::string_view bytes,cpu::ir::Function& fn) {
       b.successors.resize(r.count());for(auto& e:b.successors){e.target=static_cast<cpu::GuestAddress>(r.get());auto kind=r.get();if(kind>2)return false;e.kind=static_cast<cpu::ir::EdgeKind>(kind);e.local=r.get()!=0;}
       b.predecessors.resize(r.count());for(auto& p:b.predecessors)p=static_cast<cpu::GuestAddress>(r.get());
       b.instructions.resize(r.count());for(auto& i:b.instructions){
-        auto op=r.get(),type=r.get();if(op>static_cast<unsigned>(cpu::ir::Op::Syscall)||type>static_cast<unsigned>(cpu::ir::Type::V128))return false;
+        auto op=r.get(),type=r.get();if(op>static_cast<unsigned>(cpu::ir::Op::HostHook)||type>static_cast<unsigned>(cpu::ir::Type::V128))return false;
         i.op=static_cast<cpu::ir::Op>(op);i.type=static_cast<cpu::ir::Type>(type);i.result=static_cast<cpu::ir::ValueId>(r.get());i.imm0=r.get();i.imm1=r.get();
         i.guest_address=static_cast<cpu::GuestAddress>(r.get());i.guest_word=static_cast<std::uint32_t>(r.get());i.guest_opcode=cpu::OpcodeId{static_cast<std::uint32_t>(r.get())};
         auto n=r.count();if(n>4)return false;std::vector<cpu::ir::ValueId> args(n);for(auto& a:args)a=static_cast<cpu::ir::ValueId>(r.get());i.args.assign(args);
@@ -205,11 +205,16 @@ bool deserialize_ir(std::string_view bytes,cpu::ir::Function& fn) {
   }catch(...){return false;}
 }
 RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddress entry,std::span<const cpu::FunctionCodeRange> ranges,
-                            std::span<const cpu::GuestAddress> extra_leaders){
+                            std::span<const cpu::GuestAddress> extra_leaders,
+                            std::span<const cpu::InstructionHook> hooks){
   std::string raw;number(raw,entry);number(raw,ranges.size());
   for(auto r:ranges){number(raw,r.base);number(raw,r.words.size());for(auto w:r.words)number(raw,w);}
   // Leaders change the block structure; regions without any keep their keys.
   if(!extra_leaders.empty()){number(raw,extra_leaders.size());for(auto l:extra_leaders)number(raw,l);}
+  // So do hooks; the routine names are bound later, at emission.
+  if(!hooks.empty()){raw+="hooks";number(raw,hooks.size());
+    for(const auto&h:hooks){number(raw,h.address);number(raw,h.ordinal);number(raw,h.after_instruction);
+      number(raw,h.packed_actions());number(raw,h.jump_on_true);number(raw,h.jump_on_false);}}
   RegionResult result;
   Node decoded{"decoded-region",v.decoder,{{"guest_ranges_sha256",digest(raw)}},{}};
   // The range boundary is the analysis output contract: title/DB identity is
@@ -218,7 +223,7 @@ RegionResult compile_region(const Store& store,const Versions& v,cpu::GuestAddre
   Node ir{"ir",v.ir,{{"cpu_semantics",v.semantics},{"producer_build",producer_identity("ir")}},{analysis.key()}};
   result.nodes={decoded,analysis,ir};
   if(auto cached=store.lookup(ir);cached && deserialize_ir(cached->bytes,result.compiled.function)) {result.compiled.ok=true;result.ir_hit=true;return result;}
-  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges,extra_leaders);
+  result.compiled=cpu::StaticFunctionCompiler{}.compile_ranges(entry,ranges,extra_leaders,hooks);
   if(result.compiled.ok){
     (void)store.publish(decoded,raw);(void)store.publish(analysis,raw);
     (void)store.publish(ir,serialize_ir(result.compiled.function));

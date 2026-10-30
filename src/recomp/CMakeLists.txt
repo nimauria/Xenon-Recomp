@@ -56,6 +56,7 @@ add_library(xenon_recomp STATIC
   analysis/diagnostics/cpu_coverage.cpp
   # Module hints and learned knowledge.
   hints/analysis_schema.cpp
+  hints/instruction_hooks.cpp
   hints/analysis_schema_json.cpp
   hints/module_hint_provider.cpp
   hints/module_hints.cpp

@@ -2,6 +2,9 @@
 #include <chrono>
 #include <fstream>
 #include <iterator>
+#include <set>
+#include <sstream>
+#include <utility>
 
 #include "recomp/analysis/analysis_phases.hpp"
 #include "recomp/driver/driver_support.hpp"
@@ -74,10 +77,13 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
   // never a silent "run without hints" or "use the nearest-looking
   // revision" (Part 2.5).
   const auto effective_identity = xbox::compute_effective_identity(report.image);
+  report.hook_sources = options.hook_sources;
   if (options.hint_provider_v2) {
     analysis::AnalysisHintSetV2 resolved{};
     if (!options.hint_provider_v2->provide(effective_identity, resolved, error)) return false;
     report.hint_set_v2 = std::move(resolved);
+    if (!options.hint_provider_v2->hook_sources(effective_identity, report.hook_sources, error))
+      return false;
   } else if (options.hint_set_v2) {
     report.hint_set_v2 = options.hint_set_v2;
   }
@@ -97,6 +103,7 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
     }
   }
   const auto& hint_set_v2 = report.hint_set_v2;
+  if (hint_set_v2) report.instruction_hooks = plan_instruction_hooks(*hint_set_v2);
 
   // Phase B (Part 2): immutable executable-memory description, built once
   // and shared read-only by every analysis worker below.
@@ -158,7 +165,8 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
                             effective.graph_cache.empty() ? effective.output / ".graph" : effective.graph_cache,
                             effective.graph_versions,
                             report.configuration_hash,
-                            discovered_evidence};
+                            discovered_evidence,
+                            report.instruction_hooks};
 
   // Phase F (Part 2/3/4): parallel per-function analysis, driven in
   // deterministic discovery waves (Part 5) so that compiling one function
@@ -211,6 +219,26 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
   // NoReturn metadata seeds the lattice; normal returns and terminal tail
   // calls then converge monotonically to a fixed point.
   const auto return_inference = infer_return_behaviors(report.functions, report.warnings);
+
+  // A declared hook that no compiled function carries would silently not
+  // run: fail instead, naming it.
+  if (!report.instruction_hooks.empty()) {
+    std::set<std::pair<GuestAddress, std::uint64_t>> placed;
+    for (const auto& function : report.functions)
+      for (const auto& block : function.ir.blocks)
+        for (const auto& instruction : block.instructions)
+          if (instruction.op == cpu::ir::Op::HostHook)
+            placed.emplace(instruction.guest_address, instruction.imm0);
+    for (const auto& hook : report.instruction_hooks.hooks) {
+      if (placed.contains({hook.address, hook.ordinal})) continue;
+      std::ostringstream message;
+      message << "instruction hook " << report.instruction_hooks.symbols[hook.ordinal] << " at 0x"
+              << std::hex << hook.address
+              << " is not inside any compiled function, so it would never run";
+      error = message.str();
+      return false;
+    }
+  }
 
   build_guest_entry_map(report, std::move(absorption.entries), effective, expanded_runtime_helpers);
   diagnose_function_ownership(report, range_index);

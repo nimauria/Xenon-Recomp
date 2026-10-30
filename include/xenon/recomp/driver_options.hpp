@@ -47,6 +47,9 @@ struct DriverOptions {
   // hint set is meant for tests/manual invocation, not production).
   std::optional<analysis::AnalysisHintSetV2> hint_set_v2;
   const ModuleHintProviderV2* hint_provider_v2{nullptr};
+  // C++ sources implementing the hint set's instruction hooks, compiled into
+  // the generated module. A hint_provider_v2's own sources are added to these.
+  std::vector<std::filesystem::path> hook_sources;
   std::size_t shard_function_count{128};
   // Byte-size shard budget, an alternative to shard_function_count. When set,
   // shard boundaries are decided by accumulated generated-source size instead

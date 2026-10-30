@@ -54,6 +54,7 @@ EmittedFunctionSources emit_function_sources(
     const std::vector<const DiscoveredFunction*>& codegen_items,
     const AlternateEntriesByOwner& alternate_entries_by_owner,
     const std::unordered_map<GuestAddress, std::string>& direct_call_symbols,
+    std::span<const std::string> hook_symbols,
     const graph::Store& graph_store, const DriverOptions& options);
 
 // --- Shards (compilation/shards/shard_assembly.cpp) ------------------------
@@ -84,6 +85,7 @@ bool write_shard_manifest(const std::filesystem::path& generation_stage, const A
                           const std::vector<std::filesystem::path>& shards);
 bool write_module_export(const std::filesystem::path& generation_stage, const AnalysisReport& report);
 bool write_generated_cmake(const std::filesystem::path& generation_stage, const DriverOptions& options,
+                           const AnalysisReport& report,
                            const std::vector<std::filesystem::path>& shards);
 
 // --- Staging and promotion (compilation/project/generation_staging.cpp) ----

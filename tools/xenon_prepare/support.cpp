@@ -55,8 +55,15 @@ bool read_whole_host_file(const std::filesystem::path& path, std::vector<std::by
   return true;
 }
 
-std::uint64_t hash_hint_set(const xenon::recomp::analysis::AnalysisHintSetV2& hint_set) {
-  const auto json_text = xenon::recomp::analysis::to_json(hint_set).dump();
+std::uint64_t hash_hint_set(const xenon::recomp::analysis::AnalysisHintSetV2& hint_set,
+                            const std::vector<std::filesystem::path>& hook_sources) {
+  auto json_text = xenon::recomp::analysis::to_json(hint_set).dump();
+  for (const auto& source : hook_sources) {
+    std::ifstream file(source, std::ios::binary);
+    std::ostringstream content;
+    content << file.rdbuf();
+    json_text += "\nhook-source:" + source.filename().string() + "\n" + content.str();
+  }
   const std::span<const std::byte> bytes(reinterpret_cast<const std::byte*>(json_text.data()),
                                          json_text.size());
   const auto digest = xenon::xbox::crypto::sha1(bytes);
