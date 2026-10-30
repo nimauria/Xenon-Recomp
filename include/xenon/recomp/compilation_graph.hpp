@@ -16,7 +16,8 @@ struct Versions {
   std::string decoder{"ppc-decoder-1"};
   std::string analysis{"cfg-9"};
   // cpu-9: record forms set CR0 from the low 32 bits of the result.
-  std::string semantics{"cpu-9"};
+  // cpu-10: the add/subtract family's XER.CA/OV come from the low word.
+  std::string semantics{"cpu-10"};
   std::string ir{"xenon-ir-1"};
   std::string codegen{"cpp-aot-10"};
 };

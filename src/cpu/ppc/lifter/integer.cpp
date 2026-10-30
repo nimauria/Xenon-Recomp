@@ -41,11 +41,29 @@ void set_xer_overflow(ir::Builder& b, ValueId overflow) {
   b.emit(Op::SetXerSO, Type::Void, so_args);
 }
 
+ValueId low_word(ir::Builder& b, ValueId v) {
+  const ValueId args[] = {v};
+  return b.emit(Op::Truncate, Type::I32, args);
+}
+
+// XER.CA and XER.OV of the add/subtract family come from the low word (see
+// aot::carry_out); the register keeps the full 64-bit result.
 void emit_ca_from_add(ir::Builder& b, ValueId a, ValueId /*c*/, ValueId sum) {
   // carry = sum <u a (valid for two-input unsigned addition)
-  const ValueId args[] = {sum, a};
+  const ValueId args[] = {low_word(b, sum), low_word(b, a)};
   auto carry = b.emit(Op::CompareUlt, Type::I1, args);
   const ValueId ca_args[] = {carry};
+  b.emit(Op::SetXerCA, Type::Void, ca_args);
+}
+
+// CA of a - c ("no borrow"): a >=u c on the low words.
+void emit_ca_from_sub(ir::Builder& b, ValueId a, ValueId c) {
+  const ValueId args[] = {low_word(b, a), low_word(b, c)};
+  auto gt = b.emit(Op::CompareUgt, Type::I1, args);
+  auto eq = b.emit(Op::CompareEq, Type::I1, args);
+  const ValueId or_args[] = {gt, eq};
+  auto ca = b.emit(Op::Or, Type::I1, or_args);
+  const ValueId ca_args[] = {ca};
   b.emit(Op::SetXerCA, Type::Void, ca_args);
 }
 
@@ -53,7 +71,7 @@ void emit_overflow_add(ir::Builder& b, ValueId a, ValueId c, ValueId sum) {
   auto axr = emit_binary(b, Op::Xor, a, sum);
   auto bxr = emit_binary(b, Op::Xor, c, sum);
   auto both = emit_binary(b, Op::And, axr, bxr);
-  auto sign = b.constant_i64(0x8000000000000000ull);
+  auto sign = b.constant_i64(0x80000000ull);
   auto masked = emit_binary(b, Op::And, both, sign);
   auto zero = b.constant_i64(0);
   const ValueId cmp_args[] = {masked, zero};
@@ -66,7 +84,7 @@ void emit_overflow_sub(ir::Builder& b, ValueId a, ValueId c, ValueId result) {
   auto axc = emit_binary(b, Op::Xor, a, c);
   auto axr = emit_binary(b, Op::Xor, a, result);
   auto both = emit_binary(b, Op::And, axc, axr);
-  auto sign = b.constant_i64(0x8000000000000000ull);
+  auto sign = b.constant_i64(0x80000000ull);
   auto masked = emit_binary(b, Op::And, both, sign);
   auto zero = b.constant_i64(0);
   const ValueId cmp_args[] = {masked, zero};
@@ -79,12 +97,12 @@ ValueId read_xer_ca(ir::Builder& b) {
 }
 
 void set_ca3(ir::Builder& b, ValueId a, ValueId c, ValueId carry) {
-  const ValueId args[]={a,c,carry}; auto out=b.emit(Op::CarryOut,Type::I1,args,64,0);
+  const ValueId args[]={a,c,carry}; auto out=b.emit(Op::CarryOut,Type::I1,args,32,0);
   const ValueId x[]={out}; b.emit(Op::SetXerCA,Type::Void,x);
 }
 
 void set_ov3(ir::Builder& b, ValueId a, ValueId c, ValueId carry, unsigned variant=0) {
-  const ValueId args[]={a,c,carry}; auto out=b.emit(Op::SignedOverflow,Type::I1,args,64,variant);
+  const ValueId args[]={a,c,carry}; auto out=b.emit(Op::SignedOverflow,Type::I1,args,32,variant);
   set_xer_overflow(b, out);
 }
 
@@ -178,16 +196,7 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     auto a = read_rb(); auto c = read_ra();
     auto r = emit_binary(b, Op::Sub, a, c);
     write_rt(r);
-    if (m == "subfcx") {
-      const ValueId args[] = {a, c};
-      auto ca = b.emit(Op::CompareUgt, Type::I1, args); // no-borrow iff a >= c, fixed below
-      const ValueId eq_args[] = {a, c};
-      auto eq = b.emit(Op::CompareEq, Type::I1, eq_args);
-      const ValueId or_args[] = {ca, eq};
-      ca = b.emit(Op::Or, Type::I1, or_args);
-      const ValueId ca_args[] = {ca};
-      b.emit(Op::SetXerCA, Type::Void, ca_args);
-    }
+    if (m == "subfcx") emit_ca_from_sub(b, a, c);
     if (i.oe()) emit_overflow_sub(b, a, c, r);
     if (i.rc()) emit_cr0(b, r);
     return true;
@@ -197,14 +206,7 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     auto c = read_ra();
     auto r = emit_binary(b, Op::Sub, a, c);
     write_rt(r);
-    const ValueId gt_args[] = {a, c};
-    auto gt = b.emit(Op::CompareUgt, Type::I1, gt_args);
-    const ValueId eq_args[] = {a, c};
-    auto eq = b.emit(Op::CompareEq, Type::I1, eq_args);
-    const ValueId or_args[] = {gt, eq};
-    auto ca = b.emit(Op::Or, Type::I1, or_args);
-    const ValueId ca_args[] = {ca};
-    b.emit(Op::SetXerCA, Type::Void, ca_args);
+    emit_ca_from_sub(b, a, c);
     return true;
   }
   if (m == "mulli") {
@@ -247,8 +249,8 @@ bool Lifter::lift_integer(const DecodedInstruction& i, ir::Builder& b) const {
     auto r = b.emit(Op::Neg, Type::I64, args);
     write_rt(r);
     if (i.oe()) {
-      auto minv = b.constant_i64(0x8000000000000000ull);
-      const ValueId cmp[] = {a, minv};
+      auto minv = b.constant_i32(0x80000000u);
+      const ValueId cmp[] = {low_word(b, a), minv};
       auto ov = b.emit(Op::CompareEq, Type::I1, cmp);
       set_xer_overflow(b, ov);
     }

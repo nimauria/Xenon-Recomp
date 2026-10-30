@@ -453,6 +453,17 @@ int main() {
   assert(addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call).handled);
   assert((state.cr >> 28) == 0b0010u);  // CR0 = EQ: low word 0
 
+  // CA is the carry out of the low word: the closing "addic. r6,r4,-1" on
+  // 0x1_00000000 adds 0xFFFFFFFF to a zero low word, which does not carry,
+  // although the 64-bit sum does.
+  state = {};
+  state.gpr[4] = 0x1'00000000ull;
+  state.lr = kReturn;
+  assert(addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call).handled);
+  assert(state.gpr[6] == 0xFFFFFFFFull);
+  assert(!state.xer_ca());
+  assert((state.cr >> 28) == 0b1000u);  // CR0 = LT: low word 0xFFFFFFFF is -1
+
   // Real AC6 repro, part four: the entire VMX/VMX128 vector unit - the
   // largest single gap this interpreter has ever had - had no case here at
   // all, starting with "lvx128" (AC6's own compiled code executes this

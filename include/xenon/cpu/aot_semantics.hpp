@@ -148,20 +148,23 @@ template <typename T>
                                              bool carry) noexcept {
   return a + b + static_cast<std::uint64_t>(carry);
 }
+// The add/subtract family's XER.CA and XER.OV follow 32-bit mode, as on the
+// console: CA is the carry out of the low word and OV the signed overflow of
+// the low word (xenia's AddDidCarry/SubDidCarry truncate to INT32, XenonRecomp
+// compares u32). The register still receives the full 64-bit sum.
 [[nodiscard]] inline bool carry_out(std::uint64_t a, std::uint64_t b,
                                     bool carry) noexcept {
-  const auto ab = a + b;
-  const bool c1 = ab < a;
-  const auto abc = ab + static_cast<std::uint64_t>(carry);
-  const bool c2 = abc < ab;
-  return c1 || c2;
+  const std::uint64_t sum = std::uint64_t{static_cast<std::uint32_t>(a)} +
+                            static_cast<std::uint32_t>(b) + static_cast<std::uint64_t>(carry);
+  return (sum >> 32) != 0;
 }
 
 [[nodiscard]] inline bool signed_add_overflow(std::uint64_t a, std::uint64_t b,
                                               bool carry = false) noexcept {
-  const auto r = add_carry(a,b,carry);
-  const auto sign = std::uint64_t{1} << 63;
-  return (((a ^ r) & (b ^ r) & sign) != 0);
+  const auto r = static_cast<std::uint32_t>(add_carry(a, b, carry));
+  const auto a32 = static_cast<std::uint32_t>(a);
+  const auto b32 = static_cast<std::uint32_t>(b);
+  return ((a32 ^ r) & (b32 ^ r) & 0x80000000u) != 0;
 }
 
 [[nodiscard]] inline std::uint64_t mul_hi_unsigned(std::uint64_t a,

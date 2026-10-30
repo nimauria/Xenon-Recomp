@@ -387,8 +387,12 @@ int main() {
 
   // Integer edge cases used by XER/CR-producing instructions.
   {
+    // The add/subtract family's CA and OV come from the low word.
     assert(aot::carry_out(~std::uint64_t{0}, 0, true));
-    assert(aot::signed_add_overflow(0x7FFFFFFFFFFFFFFFull, 1, false));
+    assert(aot::carry_out(0x00000000FFFFFFFFull, 1, false));    // low-word carry only
+    assert(!aot::carry_out(0xFFFFFFFF00000000ull, 0x100000000ull, false));  // high only
+    assert(aot::signed_add_overflow(0x7FFFFFFFull, 1, false));
+    assert(!aot::signed_add_overflow(0x7FFFFFFFFFFFFFFFull, 1, false));  // low word -1 + 1
     assert(!aot::signed_add_overflow(1, 2, false));
     assert(aot::div_overflow(0x8000000000000000ull, ~std::uint64_t{0}, 64, false));
     assert(aot::div_overflow(123, 0, 64, true));

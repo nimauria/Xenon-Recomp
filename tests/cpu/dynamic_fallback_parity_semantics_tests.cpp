@@ -39,20 +39,24 @@ std::uint32_t fp63(unsigned xo, unsigned rt, unsigned ra_field, unsigned rb_fiel
 }
 
 // ---- Independent references ------------------------------------------------------
-// Carry out of the top bit of x + y (+ carry_in), from the bit-level identity
-// carry = (x&y | (x|y)&~sum) >> 63, applied twice for the three-input form.
-bool carry64(std::uint64_t x, std::uint64_t y, bool carry_in) {
-  const std::uint64_t s1 = x + y;
-  const bool c1 = ((x & y) | ((x | y) & ~s1)) >> 63;
-  const std::uint64_t s2 = s1 + (carry_in ? 1u : 0u);
-  const bool c2 = ((s1 & (carry_in ? 1u : 0u)) | ((s1 | (carry_in ? 1u : 0u)) & ~s2)) >> 63;
+// XER.CA/OV of the add/subtract family come from the low word (32-bit mode, as
+// on the console), so the references work on the low 32 bits.
+// Carry out of bit 31 of x + y (+ carry_in), from the bit-level identity
+// carry = (x&y | (x|y)&~sum) >> 31, applied twice for the three-input form.
+bool carry32(std::uint64_t wide_x, std::uint64_t wide_y, bool carry_in) {
+  const auto x = static_cast<std::uint32_t>(wide_x), y = static_cast<std::uint32_t>(wide_y);
+  const std::uint32_t s1 = x + y;
+  const bool c1 = ((x & y) | ((x | y) & ~s1)) >> 31;
+  const std::uint32_t s2 = s1 + (carry_in ? 1u : 0u);
+  const bool c2 = ((s1 & (carry_in ? 1u : 0u)) | ((s1 | (carry_in ? 1u : 0u)) & ~s2)) >> 31;
   return c1 || c2;
 }
-// Signed overflow of x + y + carry_in: same-signed operands with a differently
-// signed result (carry-in is 0 or 1, so this identity holds for it too).
-bool overflow64(std::uint64_t x, std::uint64_t y, bool carry_in) {
-  const std::uint64_t r = x + y + (carry_in ? 1u : 0u);
-  const bool sx = x >> 63, sy = y >> 63, sr = r >> 63;
+// Signed overflow of the low words of x + y + carry_in: same-signed operands
+// with a differently signed result (carry-in is 0 or 1, so the identity holds).
+bool overflow32(std::uint64_t wide_x, std::uint64_t wide_y, bool carry_in) {
+  const auto x = static_cast<std::uint32_t>(wide_x), y = static_cast<std::uint32_t>(wide_y);
+  const std::uint32_t r = x + y + (carry_in ? 1u : 0u);
+  const bool sx = x >> 31, sy = y >> 31, sr = r >> 31;
   return sx == sy && sr != sx;
 }
 
@@ -114,9 +118,9 @@ void test_add_carry_family() {
           s.gpr[4] = a; s.gpr[5] = b; s.set_xer_ca(ca);
         });
         assert(h.state.gpr[3] == a + b);
-        assert(h.state.xer_ca() == carry64(a, b, false));
-        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(a, b, false));
-        assert(((h.state.xer & xer_bits::SO) != 0u) == overflow64(a, b, false));
+        assert(h.state.xer_ca() == carry32(a, b, false));
+        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow32(a, b, false));
+        assert(((h.state.xer & xer_bits::SO) != 0u) == overflow32(a, b, false));
         assert(h.state.cr_field(0) ==
                cr0_compare(a + b) + (((h.state.xer & xer_bits::SO) != 0u) ? 1u : 0u));
         // adde r3,r4,r5 : a + b + CA
@@ -124,19 +128,19 @@ void test_add_carry_family() {
           s.gpr[4] = a; s.gpr[5] = b; s.set_xer_ca(ca);
         });
         assert(h.state.gpr[3] == a + b + (ca ? 1u : 0u));
-        assert(h.state.xer_ca() == carry64(a, b, ca));
-        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(a, b, ca));
+        assert(h.state.xer_ca() == carry32(a, b, ca));
+        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow32(a, b, ca));
       }
     }
     for (const bool ca : {false, true}) {
       // addme r3,r4 : a + (-1) + CA ; addze r3,r4 : a + 0 + CA
       h.run({xo31(234, 3, 4, 0)}, [&](CpuState& s) { s.gpr[4] = a; s.set_xer_ca(ca); });
       assert(h.state.gpr[3] == a + ~0ull + (ca ? 1u : 0u));
-      assert(h.state.xer_ca() == carry64(a, ~0ull, ca));
+      assert(h.state.xer_ca() == carry32(a, ~0ull, ca));
       h.run({xo31(202, 3, 4, 0, true)}, [&](CpuState& s) { s.gpr[4] = a; s.set_xer_ca(ca); });
       assert(h.state.gpr[3] == a + (ca ? 1u : 0u));
-      assert(h.state.xer_ca() == carry64(a, 0, ca));
-      assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(a, 0, ca));
+      assert(h.state.xer_ca() == carry32(a, 0, ca));
+      assert(((h.state.xer & xer_bits::OV) != 0u) == overflow32(a, 0, ca));
     }
   }
 }
@@ -150,30 +154,30 @@ void test_subtract_carry_family() {
         // subfc r3,r4,r5 : rB - rA ; CA = rB >= rA (unsigned)
         h.run({xo31(8, 3, 4, 5, true)}, [&](CpuState& s) { s.gpr[4] = ra; s.gpr[5] = rb; s.set_xer_ca(ca); });
         assert(h.state.gpr[3] == rb - ra);
-        assert(h.state.xer_ca() == (rb >= ra));
-        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(rb, ~ra, true));
+        assert(h.state.xer_ca() == (static_cast<std::uint32_t>(rb) >= static_cast<std::uint32_t>(ra)));
+        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow32(rb, ~ra, true));
         // subfe r3,r4,r5 : rB + ~rA + CA
         h.run({xo31(136, 3, 4, 5, true)}, [&](CpuState& s) { s.gpr[4] = ra; s.gpr[5] = rb; s.set_xer_ca(ca); });
         assert(h.state.gpr[3] == rb + ~ra + (ca ? 1u : 0u));
-        assert(h.state.xer_ca() == carry64(rb, ~ra, ca));
-        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(rb, ~ra, ca));
+        assert(h.state.xer_ca() == carry32(rb, ~ra, ca));
+        assert(((h.state.xer & xer_bits::OV) != 0u) == overflow32(rb, ~ra, ca));
       }
     }
     for (const bool ca : {false, true}) {
       // subfme r3,r4 : -1 + ~rA + CA ; subfze r3,r4 : 0 + ~rA + CA
       h.run({xo31(232, 3, 4, 0)}, [&](CpuState& s) { s.gpr[4] = ra; s.set_xer_ca(ca); });
       assert(h.state.gpr[3] == ~0ull + ~ra + (ca ? 1u : 0u));
-      assert(h.state.xer_ca() == carry64(~0ull, ~ra, ca));
+      assert(h.state.xer_ca() == carry32(~0ull, ~ra, ca));
       h.run({xo31(200, 3, 4, 0)}, [&](CpuState& s) { s.gpr[4] = ra; s.set_xer_ca(ca); });
       assert(h.state.gpr[3] == ~ra + (ca ? 1u : 0u));
-      assert(h.state.xer_ca() == carry64(0, ~ra, ca));
+      assert(h.state.xer_ca() == carry32(0, ~ra, ca));
     }
     // subfic r3,r4,imm : imm - rA, CA = imm >= rA (imm sign-extended, unsigned compare)
     for (const std::int16_t imm : {std::int16_t{0}, std::int16_t{1}, std::int16_t{-1}, std::int16_t{0x7FFF}}) {
       h.run({d_form(8, 3, 4, imm)}, [&](CpuState& s) { s.gpr[4] = ra; });
       const auto immediate = static_cast<std::uint64_t>(static_cast<std::int64_t>(imm));
       assert(h.state.gpr[3] == immediate - ra);
-      assert(h.state.xer_ca() == (immediate >= ra));
+      assert(h.state.xer_ca() == (static_cast<std::uint32_t>(immediate) >= static_cast<std::uint32_t>(ra)));
     }
   }
 }
@@ -181,19 +185,26 @@ void test_subtract_carry_family() {
 // addo/subfo (the OE forms of plain add/subf) now set XER.OV/SO too.
 void test_overflow_enabled_add_and_subtract() {
   Harness h;
-  // addo r3,r4,r5 with INT64_MAX + 1 overflows.
-  h.run({xo31(266, 3, 4, 5, /*oe=*/true)}, [](CpuState& s) { s.gpr[4] = 0x7FFFFFFFFFFFFFFFull; s.gpr[5] = 1; });
+  // OV is the signed overflow of the low word. addo r3,r4,r5 with INT32_MAX + 1
+  // overflows.
+  h.run({xo31(266, 3, 4, 5, /*oe=*/true)}, [](CpuState& s) { s.gpr[4] = 0x7FFFFFFFull; s.gpr[5] = 1; });
   assert((h.state.xer & xer_bits::OV) != 0u && (h.state.xer & xer_bits::SO) != 0u);
+  // INT64_MAX + 1 does not: its low word is -1 + 1.
+  h.run({xo31(266, 3, 4, 5, true)}, [](CpuState& s) { s.gpr[4] = 0x7FFFFFFFFFFFFFFFull; s.gpr[5] = 1; });
+  assert((h.state.xer & xer_bits::OV) == 0u && (h.state.xer & xer_bits::SO) == 0u);
   // No overflow clears OV but leaves the sticky SO.
   h.run({xo31(266, 3, 4, 5, true)}, [](CpuState& s) {
     s.gpr[4] = 1; s.gpr[5] = 2; s.xer |= xer_bits::SO | xer_bits::OV;
   });
   assert((h.state.xer & xer_bits::OV) == 0u && (h.state.xer & xer_bits::SO) != 0u);
-  // subfo r3,r4,r5 : rB - rA ; INT64_MIN - 1 overflows.
-  h.run({xo31(40, 3, 4, 5, true)}, [](CpuState& s) { s.gpr[4] = 1; s.gpr[5] = 0x8000000000000000ull; });
+  // subfo r3,r4,r5 : rB - rA ; INT32_MIN - 1 overflows.
+  h.run({xo31(40, 3, 4, 5, true)}, [](CpuState& s) { s.gpr[4] = 1; s.gpr[5] = 0x80000000ull; });
   assert((h.state.xer & xer_bits::OV) != 0u);
+  // INT64_MIN - 1 does not: its low word is 0 - 1.
+  h.run({xo31(40, 3, 4, 5, true)}, [](CpuState& s) { s.gpr[4] = 1; s.gpr[5] = 0x8000000000000000ull; });
+  assert((h.state.xer & xer_bits::OV) == 0u);
   // Without OE, XER is untouched.
-  h.run({xo31(266, 3, 4, 5, false)}, [](CpuState& s) { s.gpr[4] = 0x7FFFFFFFFFFFFFFFull; s.gpr[5] = 1; });
+  h.run({xo31(266, 3, 4, 5, false)}, [](CpuState& s) { s.gpr[4] = 0x7FFFFFFFull; s.gpr[5] = 1; });
   assert((h.state.xer & xer_bits::OV) == 0u);
 }
 

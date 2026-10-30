@@ -65,11 +65,30 @@ int main() {
   assert(state.gpr[5] == std::numeric_limits<std::uint64_t>::max());
   assert(!state.xer_ca());
 
+  // CA and OV come from the low word: a carry out of bit 31 counts, one out
+  // of bit 63 alone does not.
   state.xer = 0;
-  state.gpr[3] = 0x8000000000000000ull;
+  state.gpr[3] = 0x00000000FFFFFFFFull;
+  state.gpr[4] = 1;
+  edge_addc(state, memory, runtime);
+  assert(state.gpr[5] == 0x0000000100000000ull);
+  assert(state.xer_ca());
+  state.gpr[3] = 0xFFFFFFFF00000000ull;
+  state.gpr[4] = 0x0000000100000000ull;
+  edge_addc(state, memory, runtime);
+  assert(state.gpr[5] == 0);
+  assert(!state.xer_ca());
+
+  state.xer = 0;
+  state.gpr[3] = 0x0000000080000000ull;
+  edge_neg_o(state, memory, runtime);
+  assert(state.gpr[5] == 0xFFFFFFFF80000000ull);
+  assert(state.xer_ov() && state.xer_so());
+  state.xer = 0;
+  state.gpr[3] = 0x8000000000000000ull;  // low word 0: no overflow
   edge_neg_o(state, memory, runtime);
   assert(state.gpr[5] == 0x8000000000000000ull);
-  assert(state.xer_ov() && state.xer_so());
+  assert(!state.xer_ov() && !state.xer_so());
 
   state.xer = 0;
   state.gpr[3] = 123;
