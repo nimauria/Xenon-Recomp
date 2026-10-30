@@ -560,6 +560,52 @@ void test_nt_signal_and_wait_signals_then_waits() {
   assert(bad_result.success && bad_cpu.gpr[3] != 0u);
 }
 
+// Regression (Ace Combat 6 went black after its DLC check): the arguments
+// are signal handle, wait handle, wait mode, alertable, timeout - XAPI's
+// SignalObjectAndWait passes wait mode 1 (UserMode) in r5 and the caller's
+// bAlertable in r6. Reading alertable from r5 made every such wait
+// alertable, so AC6's main thread ran a queued XOVERLAPPED completion APC
+// whose routine field the title never set (0xFEFEFEFE). A non-alertable
+// wait leaves queued APCs alone; an alertable one returns STATUS_USER_APC.
+void test_nt_signal_and_wait_alertable_is_its_fourth_argument() {
+  Fixture f;
+  const auto make_event = [&](std::uint32_t type) {
+    const auto handle_out = f.alloc32();
+    cpu::CpuState cpu{};
+    cpu.gpr[3] = handle_out;
+    cpu.gpr[5] = type;
+    assert(f.invoke(0x0D1u, cpu).success && cpu.gpr[3] == 0u);
+    return f.address_space->read32_be(handle_out);
+  };
+  const auto signal = make_event(1u);  // auto-reset
+  const auto never = make_event(0u);   // manual-reset, never set
+  const auto timeout = f.alloc64();
+  f.address_space->write64_be(timeout, static_cast<std::uint64_t>(-200000LL));  // 20 ms relative
+
+  kernel::ThreadCreationParams params{};
+  auto thread = std::make_shared<kernel::KernelThread>(
+      [&]() -> std::uint32_t {
+        auto& self = *kernel::KernelThread::current();
+        self.queue_user_apc({0x82001000u, 0x12u, 0u, 0xA40101D0u});
+        const auto signal_and_wait = [&](std::uint32_t alertable) {
+          cpu::CpuState cpu{};
+          cpu.gpr[3] = signal;
+          cpu.gpr[4] = never;
+          cpu.gpr[5] = 1u;  // wait mode: UserMode, as XAPI always passes
+          cpu.gpr[6] = alertable;
+          cpu.gpr[7] = timeout;
+          assert(f.invoke(0x0FBu, cpu, self.thread_id()).success);
+          return static_cast<std::uint32_t>(cpu.gpr[3]);
+        };
+        assert(signal_and_wait(0u) == 0x00000102u && "a non-alertable wait times out");
+        assert(self.user_apc_pending() && "the APC stays queued for an alertable wait");
+        assert(signal_and_wait(1u) == 0x000000C0u && "an alertable wait returns STATUS_USER_APC");
+        return 0;
+      },
+      params);
+  assert(thread->start() && thread->join());
+}
+
 // A stalled wait's report must name the object's last signaller however long
 // ago that was, so every guest signal is noted on the object itself, even
 // with diagnostic event recording off (AC6's main thread waited 42 s on a
@@ -712,6 +758,7 @@ int main() {
   test_nt_wait_for_multiple_objects_rejects_bad_wait_types_and_duplicates();
   test_nt_create_timer_set_and_cancel();
   test_nt_signal_and_wait_signals_then_waits();
+  test_nt_signal_and_wait_alertable_is_its_fourth_argument();
   test_signals_are_noted_on_the_object_without_event_recording();
   test_io_completion_ports();
 

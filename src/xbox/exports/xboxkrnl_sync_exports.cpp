@@ -727,11 +727,14 @@ bool nt_set_timer_ex_export(kernel::KernelProcess& process, ExportCallContext& c
 }
 
 // NtSignalAndWaitForSingleObjectEx (ordinal 0xFB / 251)
-// Guest ABI (verified against rexglue-sdk's
-// NtSignalAndWaitForSingleObjectEx_entry register mapping): r3 = signal
-// handle, r4 = wait handle, r5 = alertable (user APCs run,
-// STATUS_USER_APC), r6 = unused by that same reference
-// implementation, r7 = PLARGE_INTEGER timeout (nullable) -> r3 = NTSTATUS.
+// Guest ABI: r3 = signal handle, r4 = wait handle, r5 = wait mode, r6 =
+// alertable (user APCs run, STATUS_USER_APC), r7 = PLARGE_INTEGER timeout
+// (nullable) -> r3 = NTSTATUS. The same order as NtWaitForSingleObjectEx's
+// mode-then-alertable, and what XAPI's SignalObjectAndWait passes (AC6
+// 0x821F5868: r5 = 1, UserMode, always; r6 = the caller's bAlertable).
+// xenia and rexglue-sdk read alertable from r5, which makes every such wait
+// alertable: AC6's main thread then ran a queued XOVERLAPPED completion
+// APC whose routine field the title never set.
 // Signals signal_handle (Event -> Set, Semaphore -> Release(1), Mutant ->
 // Release) then waits on wait_handle. As on NT, the signal and the start of
 // the wait are one dispatcher operation (kernel::signal_and_wait_for_object):
@@ -745,7 +748,7 @@ bool nt_signal_and_wait_for_single_object_ex_export(kernel::KernelProcess& proce
                                                      ExportCallContext& context) {
   const auto signal_handle = static_cast<Handle>(context.cpu.gpr[3]);
   const auto wait_handle = static_cast<Handle>(context.cpu.gpr[4]);
-  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[5]) != 0u;
+  const bool alertable = static_cast<std::uint32_t>(context.cpu.gpr[6]) != 0u;
   const auto timeout_ptr = static_cast<cpu::GuestAddress>(context.cpu.gpr[7]);
 
   HandleView signal_view{};
