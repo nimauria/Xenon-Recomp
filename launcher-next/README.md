@@ -27,6 +27,7 @@ Browser preview uses its own localStorage. Native imports, package installation,
 
 ## Implemented conversion slices
 
+- English master catalogue and French/German/Spanish UI translations, persistent language selection, translated command search and safe English fallback. See [LOCALIZATION.md](LOCALIZATION.md) for authoring and remaining native-message work.
 - CEF Views desktop window, sandbox bootstrap on Windows, packaged local assets, origin-restricted asynchronous command bridge, bounded native worker queue and renderer error logging.
 - Original System/Xenon Dark/Carbon/Industrial/Light theme catalogue, palettes, all seven raster backgrounds, decorative SVGs and branding. Accent presets/custom colour, corners, per-theme backgrounds, intensity, decorations, panel transparency, high contrast, text scaling, reduced motion and system appearance changes.
 - Library source registration, search/filter/sort, virtualized list/grid and optional carousel, favourites, metadata/module association, local module cover/hero artwork, local DLC references and source-path checks. Registration does not assert game compatibility or integrity.
@@ -37,9 +38,9 @@ Browser preview uses its own localStorage. Native imports, package installation,
 - Background module ZIP jobs with progress, cancellation before commit, retry, interrupted-work recovery and persistent shell status. A renderer reload leaves the native job running. See [JOBS.md](JOBS.md).
 - Visible pre-React loading/error screens, a React render error boundary and a native main-document failure page. Failed startup does not silently reset state.
 
-The original registry/catalogue schema, cached/bundled entries, native HTTPS, verified release downloads, module updates/install/rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings ? General, with backups and unchanged originals.
+The original registry/catalogue schema, cached/bundled entries, native HTTPS, verified release downloads, module updates/install/rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings → General, with backups and unchanged originals.
 
-Some surfaces remain partial: launcher self-replacement, full log sanitization, remaining library workflows, input-provider routing and production runtime integration. A converted page is not evidence of parity.
+Open gates include optional community-provider features, remaining property/recovery acceptance, native-message translation, broader platform/accessibility checks and production runtime integration. A converted page is not evidence of parity.
 
 ## Native builds and validation
 
@@ -101,3 +102,17 @@ Automatic replacement is offered only by a marked packaged Windows installation,
 `create-updater-fixture.mjs <old-payload> <new-package.zip>` and `smoke-updater.mjs` exercise isolated real package replacement. Additional checks are `test:library`, `test:services`, `test:shell`, `scripts/smoke-parity-actions.mjs`, `scripts/smoke-dlc-catalog.mjs` and `scripts/smoke-startup-failure.mjs <isolated-fixture-data>`. Chooser selection remains a manual gate; automated content fixtures use native RPC.
 
 See [the individual parity audit](MIGRATION_PARITY.md) and [current migration gates](MIGRATION_STATUS.md). The original 183 invokable methods and 55 QML components are accounted for; remaining partial flows and platform/performance/accessibility gates are explicitly open.
+
+`npm run test:media` and `npm run test:modules` require fresh isolated desktop instances with the explicit fixture host and debug endpoint described above. They exercise grouped discs/primary launch sources, metadata/unsaved changes, separate test activity, API declaration checks and owned-module uninstall. Their source paths and deletion requests use native RPC; the operating-system picker remains a separate acceptance gate. Native Release checks now include eighteen suites. See [JOBS.md](JOBS.md) for ownership, cancellation and interrupted-deletion behaviour, and [the property audit](MIGRATION_PROPERTIES.md) for individual legacy getter dispositions.
+
+`npm run test:presentation-paths -- build/presentation-paths-network` additionally requires a local network fixture generated with `node scripts/create-network-fixtures.mjs build/presentation-paths-network` and the desktop arguments `--fixture-network="<absolute fixture folder>" --fixture-host="<absolute fixture host>"`. It checks catalogue text/artwork/DLC refresh, unsaved-edit protection, storage defaults/reset, decoded captures, build information and launch paths. Use a new isolated data directory; omit `--offline` so the explicit network fixture is selected. No real network service is used.
+
+Settings > Paths shows working destinations separately from fixed launcher storage. Game/save/module/capture destination changes affect future imports/launches and keep existing files at their recorded locations. Cache changes queue a verified copy of managed artwork/downloads and update package references atomically; previous copies are retained and listed by their managed subfolders. Browser cache stays with launcher data. Profile/settings data is stored together in `state.json`; unused old profile-folder values and cache values not yet applied remain visible for review. A different launcher data root can be supplied with `--data-dir` at startup.
+
+`npm run test:profile-cache -- build/profile-cache-network` uses a fresh isolated desktop instance with `--fixture-network="<absolute fixture folder>"` and the debug endpoint. Generate that fixture first with `node scripts/create-network-fixtures.mjs build/profile-cache-network`; omit `--offline`. It tests Unicode profile creation/copy/import and inline duplicate errors, cache copy/reset/reload/image decoding, installation from copied packages, future downloads and unsupported-provider controls. Cache destination/source selection uses native RPC; no real network service is contacted.
+
+Profile names use pinned Unicode 17.0 data in both native and preview validation. The mapping is locale-independent scalar lowercase with Unicode whitespace trimming, preserving display names and the 48 UTF-16-unit limit; it does not add case folding or Unicode normalization. Metadata edits to older Unicode-equivalent display names remain possible without forced renaming, while new duplicates are rejected. `node scripts/generate-profile-unicode.mjs` reproduces both tables using a Node build with Unicode 17.0. Normal builds use the checked-in data and do not regenerate it. The Unicode licence ships with the package. The baseline is the original locale-independent [QString lowercase policy](https://doc.qt.io/qt-6/qstring.html#toLower); the new launcher has no Qt dependency.
+
+All 23 old frontend feature names and current provider gating are recorded in [FEATURE_PARITY.md](FEATURE_PARITY.md). Runtime network status, runtime network configuration and the launcher's own update transport have separate availability.
+
+The [initial library performance baseline](PERFORMANCE.md) records isolated 0/100/1,000/10,000-entry desktop measurements, the runner, and limits. It does not close platform, cold-startup, total-memory or physical-input acceptance gates.
