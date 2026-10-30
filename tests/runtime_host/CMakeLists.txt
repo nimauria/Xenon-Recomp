@@ -3,6 +3,8 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
     launch_config_tests.cpp
     ${XENON_SOURCE_DIR}/runtime_host/src/launch_config.cpp
     ${XENON_SOURCE_DIR}/runtime_host/src/launch_config.hpp
+    ${XENON_SOURCE_DIR}/runtime_host/src/host_setup.cpp
+    ${XENON_SOURCE_DIR}/runtime_host/src/host_setup.hpp
   )
   target_include_directories(xenon_runtime_host_tests PRIVATE ${XENON_SOURCE_DIR}/runtime_host/src)
   target_link_libraries(xenon_runtime_host_tests PRIVATE xenon_core)
@@ -31,11 +33,11 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
   target_compile_features(xenon_status_writer_tests PRIVATE cxx_std_20)
   xenon_enable_test_asserts(xenon_status_writer_tests)
   add_test(NAME xenon_status_writer_tests COMMAND xenon_status_writer_tests)
-  xenon_resolve_sdl2(XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET)
-  if(NOT XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET)
+  xenon_resolve_sdl3(XENON_PRESENTATION_HOST_TESTS_SDL_TARGET)
+  if(NOT XENON_PRESENTATION_HOST_TESTS_SDL_TARGET)
     message(FATAL_ERROR
-      "xenon_presentation_host_tests requires SDL2 (needed by presentation_host.cpp) - "
-      "resolve an SDL2 dependency instead of silently skipping this test")
+      "xenon_presentation_host_tests requires SDL3 (needed by presentation_host.cpp) - "
+      "resolve an SDL3 dependency instead of silently skipping this test")
   endif()
   add_executable(xenon_presentation_host_tests
     presentation_host_tests.cpp
@@ -43,7 +45,7 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
     ${XENON_SOURCE_DIR}/runtime_host/src/presentation_host.hpp
   )
   target_include_directories(xenon_presentation_host_tests PRIVATE ${XENON_SOURCE_DIR}/runtime_host/src)
-  target_link_libraries(xenon_presentation_host_tests PRIVATE xenon_core ${XENON_PRESENTATION_HOST_TESTS_SDL2_TARGET})
+  target_link_libraries(xenon_presentation_host_tests PRIVATE xenon_core ${XENON_PRESENTATION_HOST_TESTS_SDL_TARGET})
   target_compile_features(xenon_presentation_host_tests PRIVATE cxx_std_20)
   xenon_enable_test_asserts(xenon_presentation_host_tests)
   add_test(NAME xenon_presentation_host_tests COMMAND xenon_presentation_host_tests)

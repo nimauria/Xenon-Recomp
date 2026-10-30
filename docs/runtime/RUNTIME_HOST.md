@@ -371,7 +371,7 @@ install. See `launcher/tests/runtime/runtime_bridge_tests.cpp` and
   "Vulkan"/"D3D12" request is honored or fails initialization outright, and
   "Null"/"None" is the only way to get `gpu::NullBackend` (a deliberate,
   explicit choice, never a silent fallback). `runtime_host/src/
-  presentation_host.{hpp,cpp}` now creates a real SDL2 window and wires it
+  presentation_host.{hpp,cpp}` now creates a real SDL3 window and wires it
   to that backend's `configure_presentation()` whenever one is active (never
   for `NullBackend`), and the main loop pumps window events (close ->
   orderly `session.stop()`, resize -> `resize_presentation()`, focus ->

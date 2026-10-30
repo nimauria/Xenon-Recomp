@@ -13,7 +13,7 @@
 // backends must not create a window") without ever calling
 // SDL_CreateWindow. This is the same category of ownership bug this
 // project's contract cares about most - a "no-op backend" quietly creating
-// (or leaking) a real OS resource - proven through the real SDL2 stack, not
+// (or leaking) a real OS resource - proven through the real SDL3 stack, not
 // a mock.
 
 #include <cassert>

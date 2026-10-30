@@ -1,7 +1,7 @@
 # Production release and installer pipeline
 
 Xenon's public distribution model is **install the package and run it**. An end
-user must not be asked to install Qt, SDL2, FFmpeg, DXC, the Vulkan SDK, Visual
+user must not be asked to install Qt, SDL3, FFmpeg, DXC, the Vulkan SDK, Visual
 C++ redistributables, or other development tooling manually.
 
 The release build therefore differs deliberately from a developer build.
@@ -105,7 +105,7 @@ checks for:
 - Qt Core and a desktop platform plugin;
 - `qt.conf` on Linux;
 - Xenon and third-party notices;
-- license material for FFmpeg, DXC, Vulkan, SDL2 and Qt.
+- license material for FFmpeg, DXC, Vulkan, SDL3 and Qt.
 
 Missing runtime or compliance files cause the release job to fail.
 

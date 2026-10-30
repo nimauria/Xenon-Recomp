@@ -2,7 +2,7 @@
 """Pinned dependency bootstrapper for Xenon Recomp.
 
 This tool owns reproducible build/release dependencies that need exact behaviour
-not reliably provided by a distro package. SDL2 is built static; the XMA-capable
+not reliably provided by a distro package. SDL3 is built static; the XMA-capable
 xenia-project FFmpeg fork is built shared and staged beside Xenon release binaries
 so end users do not need local SDL/FFmpeg installations while LGPL redistribution
 remains straightforward. The committed Windows x64 static FFmpeg bundle remains a
@@ -475,7 +475,7 @@ def _cmake_generator_args() -> list[str]:
     return []
 
 
-def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
+def _build_sdl(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool) -> None:
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -486,9 +486,9 @@ def _build_sdl2(source: Path, build: Path, prefix: Path, jobs: int, quiet: bool)
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         "-DSDL_SHARED=OFF",
         "-DSDL_STATIC=ON",
-        "-DSDL_TEST=OFF",
         "-DSDL_TESTS=OFF",
         "-DSDL_TEST_LIBRARY=OFF",
+        "-DSDL_EXAMPLES=OFF",
         "-DSDL_INSTALL=ON",
     ]
     _run(cmd, quiet=quiet)
@@ -705,12 +705,11 @@ def verify_dependency(key: str, entry: dict, root: Path, triplet: str) -> tuple[
     if not _stamp_matches(prefix, key, entry, triplet):
         return False, "missing or stale dependency stamp"
 
-    if key == "sdl2":
-        header_candidates = [prefix / "include" / "SDL2" / "SDL.h", prefix / "include" / "SDL.h"]
-        if not any(p.is_file() for p in header_candidates):
-            return False, "SDL.h not found"
-        if not _candidate_lib(prefix, ["libSDL2.a", "SDL2-static.lib", "SDL2.lib", "libSDL2.lib"]):
-            return False, "SDL2 static/import library not found"
+    if key == "sdl3":
+        if not (prefix / "include" / "SDL3" / "SDL.h").is_file():
+            return False, "SDL3/SDL.h not found"
+        if not _candidate_lib(prefix, ["libSDL3.a", "SDL3-static.lib", "SDL3.lib", "libSDL3.lib"]):
+            return False, "SDL3 static library not found"
         return True, "ok"
 
     if key == "xenia-ffmpeg":
@@ -837,8 +836,8 @@ def ensure_dependency(key: str, entry: dict, *, root: Path, cache_base: Path, tr
             raise BootstrapError(f"No archive installer implemented for dependency {key}")
     else:
         source = _ensure_checkout(key, entry, cache_base, offline=offline, quiet=quiet)
-        if key == "sdl2":
-            _build_sdl2(source, build, prefix, jobs, quiet)
+        if key == "sdl3":
+            _build_sdl(source, build, prefix, jobs, quiet)
         elif key == "xenia-ffmpeg":
             if sys.platform.startswith("win"):
                 _build_ffmpeg_windows(source, build, prefix, entry, jobs, quiet)

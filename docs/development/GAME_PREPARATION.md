@@ -389,7 +389,7 @@ this pass can make unilaterally:
   package manager already; the realistic path there is a first-run
   dependency check with a clear, actionable message (mirroring
   `cmake/Dependencies.cmake`'s existing `xenon_dependency_help()` pattern
-  for SDL2/FFmpeg) rather than a bundled compiler.
+  for SDL3/FFmpeg) rather than a bundled compiler.
 
 **Recommended concrete next step** (not done here): (1) add a first-run
 "toolchain check" to the launcher (locate `cmake` + a working C++ compiler,

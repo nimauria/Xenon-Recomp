@@ -20,7 +20,7 @@ Xenon AudioSystem + XMA context semantics
 bounded stereo float host stream
         |
         v
-SDL2 native audio device (Windows / Linux)
+SDL3 native audio device (Windows / Linux)
 ```
 
 The implementation is under `include/xenon/audio/` and `src/audio/`. Xbox
@@ -32,9 +32,9 @@ exports are registered through the central `core::ExportRegistry` by
 Audio V1 intentionally has no production `NullBackend` and does not report
 success when native audio cannot be created.
 
-* SDL2 provides the desktop host backend on Windows and Linux. CMake first
-  uses an installed SDL2 and, for source builds with dependency fetching
-  enabled, falls back to a pinned upstream SDL2 revision built statically.
+* SDL3 provides the desktop host backend on Windows and Linux. CMake first
+  uses an installed SDL3 and, for source builds with dependency fetching
+  enabled, falls back to a pinned upstream SDL3 revision built statically.
 * Windows x64 ships a Xenon-owned `libavcodec` + `libavutil` dependency under
   `third_party/xenon-ffmpeg/windows-x64`; users do not install Xenia or FFmpeg.
   Other platforms may provide a compatible FFmpeg through
@@ -49,7 +49,7 @@ CMake enables Audio V1 by default. A developer may explicitly configure
 that way will reject a session that requests audio instead of silently using a
 fake backend.
 
-SDL2 is zlib-licensed. The bundled Windows FFmpeg archives come from the
+SDL3 is zlib-licensed. The bundled Windows FFmpeg archives come from the
 non-GPL Xenia-maintained FFmpeg configuration and retain FFmpeg's LGPL terms;
 see `THIRD_PARTY_NOTICES.md` and `third_party/xenon-ffmpeg/README.md`.
 Xbox/XMA semantics remain a clean Xenon implementation informed by public
@@ -222,19 +222,19 @@ per-game behavior.
   and the packed 64-byte `XMASetLoopData` contract.
 
 The mixer test has no external native-audio dependency and can be built
-standalone. The other Audio V1 tests require the same SDL2/FFmpeg development
+standalone. The other Audio V1 tests require the same SDL3/FFmpeg development
 packages as production Audio V1.
 
 ## Current validation boundary
 
 The common Audio V1 code path is implemented. Windows x64 now carries a vetted
 Xenon-owned FFmpeg/XMA dependency and CMake automatically validates the
-`XMAFRAMES` API before enabling Audio. SDL2 can be resolved locally or fetched
+`XMAFRAMES` API before enabling Audio. SDL3 can be resolved locally or fetched
 from a pinned upstream revision. Mixer, XMA-context/MMIO, render-system, and
 xboxkrnl export regression tests have passed in prior Audio V1 validation; the
 export path has also passed ASan/UBSan.
 
-Release qualification still requires a real SDL2 device plus a real compatible
+Release qualification still requires a real SDL3 device plus a real compatible
 FFmpeg build, and an actual Ace Combat 6 module/assets to prove title-level
 initialize/stream/play behavior with compressed game data. The current Xenon
 kernel also has no general APU interrupt-controller delivery API; therefore

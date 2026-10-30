@@ -21,8 +21,7 @@ option(XENON_ENABLE_AUDIO "Build the production Xbox audio translation subsystem
 set(XENON_AUDIO_FFMPEG_ROOT "" CACHE PATH
   "Optional FFmpeg root exposing AV_CODEC_ID_XMAFRAMES; overrides Xenon managed/bundled discovery")
 option(XENON_ENABLE_INPUT "Enable input subsystem" ON)
-option(XENON_INPUT_ENABLE_SDL2 "Enable SDL2 controller backend when SDL2 is available" ON)
-option(XENON_INPUT_ENABLE_SDL3 "Enable SDL3 controller backend when SDL3 is available" ON)
+option(XENON_INPUT_ENABLE_SDL3 "Enable the SDL3 controller backend (SDL3 also hosts the window and audio)" ON)
 option(XENON_INPUT_ENABLE_XINPUT "Enable native Windows XInput backend" ON)
 option(XENON_ENABLE_NETWORK "Enable networking subsystem" ON)
 option(XENON_ENABLE_FILESYSTEM "Build the Xenon virtual filesystem subsystem" ON)

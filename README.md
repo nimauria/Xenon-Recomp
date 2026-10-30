@@ -119,12 +119,12 @@ Status labels:
 | XEX loading | Implemented foundation | XEX1/XEX2 headers, AES decryption, Basic/LZX/delta decompression, imports/exports/TLS/relocations and title updates. Exercised with Ace Combat 6. Wider retail qualification remains. |
 | Recompilation analysis and generation | Implemented foundation | Function discovery, control-flow and value analysis, module hints, sharded C++ generation and a content-addressed cache (Gen 5–11). Exercised on Ace Combat 6. Not shown to be reliable across retail titles generally. |
 | Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Thread, event and wait behaviour under a real title is part of the open AC6 investigation. |
-| Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL2 presentation. |
+| Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL3 presentation. |
 | Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. Renders and presents AC6's boot logos and intro movie at the game's native frame rate, with flips, vblanks and texture reads timed as on hardware. Reaches the main menu; in-game 3D is not yet reached. |
 | Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Shares all command handling with Direct3D 12, including GPU-side EDRAM tile transfers. Not yet shown rendering a commercial title. |
 | Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. Runs AC6's boot logos and intro movie at native frame rate. |
-| Audio and XMA | Implemented foundation | SDL2 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. AC6's audio callbacks run continuously through its intro; output quality is still being verified. |
-| Input | Implemented foundation | SDL2/SDL3 controllers, XInput on Windows, keyboard and mouse, profiles, HOTAS mapping and XAM guest marshalling. |
+| Audio and XMA | Implemented foundation | SDL3 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. AC6's audio callbacks run continuously through its intro; output quality is still being verified. |
+| Input | Implemented foundation | SDL3 controllers (Valve's Steam Controller included, without Steam), XInput on Windows, keyboard and mouse used interchangeably with a controller, profiles, HOTAS mapping and XAM guest marshalling. |
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
 | Networking | Experimental | Xenon Network client foundation, offline by default. There is no hosted service and no XAM/XNet mapping. This is not Xbox Live. |
@@ -188,7 +188,7 @@ EXECUTION (xenon_runtime_host)
    Vulkan    Direct3D 12
       └─────┬─────┘
             ▼
-  Host system (SDL2 window,
+  Host system (SDL3 window,
   audio device, controllers)
 ```
 
@@ -272,7 +272,7 @@ See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics
 
 ### Audio
 
-Audio V1 implements the Xbox render-driver and XMA context semantics in Xenon. That includes XMA packet and frame decoding through a pinned, Xenia-maintained FFmpeg build that exposes `XMAFRAMES`, plus bounded voice mixing and resampling, and an SDL2 host output device. There is deliberately no silent null backend.
+Audio V1 implements the Xbox render-driver and XMA context semantics in Xenon. That includes XMA packet and frame decoding through a pinned, Xenia-maintained FFmpeg build that exposes `XMAFRAMES`, plus bounded voice mixing and resampling, and an SDL3 host output device. There is deliberately no silent null backend.
 
 The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations. In Ace Combat 6 the callbacks run continuously through the intro, at about 181 per second against the reference recompilation's 187.
 
@@ -306,7 +306,7 @@ Xenon is currently a developer-oriented project. Building it produces the runtim
 | CMake 3.25+ and Ninja | The supplied presets use Ninja |
 | C++20 compiler | MSVC (Visual Studio 2022 developer environment) on Windows; GCC on Linux. These are the configurations CI builds |
 | Python 3 and Git | Dependency bootstrap and build-accountability tooling |
-| SDL2 and XMA-capable FFmpeg | Required for audio, which is on by default. Resolved automatically in `AUTO` mode; see below |
+| SDL3 and XMA-capable FFmpeg | Required for audio, which is on by default. Resolved automatically in `AUTO` mode; see below |
 
 Optional components:
 
@@ -375,8 +375,8 @@ The authoritative list is in [`CMakeLists.txt`](CMakeLists.txt) and [`cmake/Depe
 ```text
 XENON_BUILD_TESTS                    XENON_ENABLE_AUDIO
 XENON_BUILD_BENCHMARKS               XENON_ENABLE_INPUT
-XENON_BUILD_LAUNCHER                 XENON_INPUT_ENABLE_SDL2
-XENON_BUILD_RUNTIME_HOST             XENON_INPUT_ENABLE_SDL3
+XENON_BUILD_LAUNCHER                 XENON_INPUT_ENABLE_SDL3
+XENON_BUILD_RUNTIME_HOST             XENON_VULKAN_ROOT
 XENON_BUILD_INSTALLER                XENON_INPUT_ENABLE_XINPUT
 XENON_ENABLE_MEMORY                  XENON_ENABLE_NETWORK
 XENON_MEMORY_DEFAULT_DIRECT_APERTURE XENON_ENABLE_FILESYSTEM
@@ -384,7 +384,7 @@ XENON_ENABLE_GRAPHICS                XENON_ENABLE_KERNEL
 XENON_ENABLE_VULKAN                  XENON_DEPENDENCY_MODE
 XENON_ENABLE_D3D12                   XENON_AUTO_BOOTSTRAP_DEPS
 XENON_ENABLE_DXC                     XENON_FETCH_MISSING_DEPS
-XENON_MANAGED_DEPS_ROOT              XENON_SDL2_ROOT
+XENON_MANAGED_DEPS_ROOT              XENON_SDL3_ROOT
 XENON_AUDIO_FFMPEG_ROOT              XENON_PREFER_BUNDLED_FFMPEG
 ```
 

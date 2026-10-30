@@ -35,8 +35,10 @@ Families currently identified by the SDL hosts are:
 - Steam Controller and Steam Deck controls;
 - generic, virtual and unknown controllers.
 
-SDL3 supplies a native Steam family. SDL2 additionally recognizes Valve's USB
-vendor ID and Steam/Valve device names because SDL2 predates that enum.
+SDL3 supplies a native Steam family and reads Valve's controllers, including
+the 2026 Steam Controller and its wireless dongles, directly over HID without
+Steam running. Xenon also recognizes Valve's USB vendor ID and Steam/Valve
+device names.
 
 ## PlayStation 5 DualSense
 
@@ -89,14 +91,14 @@ The launcher persists both the route and its automatic/explicit mode.
 It performs a quiet coarse hotplug scan every 1.5 seconds and updates the UI
 only when the connected topology changes; manual refresh remains available.
 
-SDL2 identity quality is improved in this order:
+SDL identity quality is improved in this order:
 
 1. GUID, vendor, product and product version;
 2. serial number when available;
 3. host device path when SDL exposes it;
 4. device name plus deterministic duplicate suffix as the final fallback.
 
-SDL3 continues to prefer serial and path information. Stable Xenon `DeviceId`
+Serial and path information are preferred. Stable Xenon `DeviceId`
 values and ordinals survive ordinary reconnects.
 
 ## Robustness changes
@@ -108,7 +110,7 @@ values and ordinals survive ordinary reconnects.
   string views into a container that hotplug reconciliation may rehash.
 - SDL3 capability reporting reads the backend's actual rumble and LED
   properties instead of claiming every controller supports them.
-- SDL3 now maps the Guide button, matching the SDL2 and XInput paths.
+- SDL3 maps the Guide button, matching the XInput path.
 - Complete multi-source routes can be replaced transactionally, preventing a
   half-applied launcher configuration.
 
@@ -122,8 +124,8 @@ without changing or invalidating existing v1 consumers.
 ## Validation boundary
 
 The host-neutral behavior, extended-device routing, sticky assignments and SDL
-adapter contract are covered by automated tests. SDL2 compilation is validated
-against the repository's managed SDL 2.32 headers and the complete launcher is
+adapter contract are covered by automated tests. SDL3 compilation is validated
+against the repository's managed SDL 3.4 headers and the complete launcher is
 built with the new backend selection and QML metadata.
 
 Physical USB/Bluetooth qualification still requires real DualSense, Steam

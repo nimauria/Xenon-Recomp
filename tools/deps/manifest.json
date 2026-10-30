@@ -1,16 +1,16 @@
 {
   "schema": 3,
   "dependencies": {
-    "sdl2": {
-      "name": "SDL2",
+    "sdl3": {
+      "name": "SDL3",
       "kind": "git",
       "repository": "https://github.com/libsdl-org/SDL.git",
-      "revision": "5d249570393f7a37e037abf22cd6012a4cc56a71",
-      "version": "2.32.10",
+      "revision": "829a65d769d935c4852f8159e964312c0957260a",
+      "version": "3.4.18",
       "license": "Zlib",
       "linkage": "static",
-      "install_subdir": "sdl2",
-      "required_capabilities": ["SDL.h"]
+      "install_subdir": "sdl3",
+      "required_capabilities": ["SDL3/SDL.h"]
     },
     "xenia-ffmpeg": {
       "name": "xenia-project FFmpeg",

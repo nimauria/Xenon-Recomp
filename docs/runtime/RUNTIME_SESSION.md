@@ -331,7 +331,7 @@ When an unknown export is called:
   a real `kernel::ExceptionDispatcher` (a default handler logs the
   structured record) instead of only reaching a stringified `last_error()`.
 - ✅ Real presentation host: `runtime_host/src/presentation_host.{hpp,cpp}`
-  create an SDL2 window (SDL2 is already an Xenon dependency for input/
+  create an SDL3 window (SDL3 is already an Xenon dependency for input/
   audio - no second window/UI toolkit added) whenever `session.gpu()` is a
   real backend (Vulkan or D3D12; never for `NullBackend`/headless), and wire
   it to the already-implemented `configure_presentation()` on whichever

@@ -42,7 +42,7 @@ The future production release set is pinned in `tools/deps/manifest.json`. These
 
 | Dependency | Purpose | Release linkage |
 | --- | --- | --- |
-| SDL2 2.32.10 | Audio output and SDL2 input | static |
+| SDL3 3.4.18 | Runtime window, audio output and controller input | static |
 | Xenia-maintained FFmpeg | raw XMA frame decoding (`AV_CODEC_ID_XMAFRAMES`) | shared |
 | Vulkan-Headers | Vulkan API declarations | headers |
 | Vulkan-Loader | host Vulkan dispatch | shared |

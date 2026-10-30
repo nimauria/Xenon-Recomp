@@ -91,8 +91,8 @@ def inactive_reason(path: Path, targets: dict[str, dict], cache: dict[str, str])
         return "POSIX host VM implementation"
     if text == "src/input/xinput/xinput_host_win32.cpp" and (not windows or cache.get("XENON_INPUT_ENABLE_XINPUT") == "OFF"):
         return "Windows XInput implementation"
-    if text == "src/input/sdl/sdl2_host.cpp" and cache.get("XENON_INPUT_ENABLE_SDL2") == "OFF":
-        return "SDL2 input disabled"
+    if text == "src/input/sdl/sdl3_host.cpp" and cache.get("XENON_INPUT_ENABLE_SDL3") == "OFF":
+        return "SDL3 input disabled"
     if text == "src/input/sdl/sdl3_host.cpp" and (
         cache.get("XENON_INPUT_ENABLE_SDL3") == "OFF"
         or cache.get("SDL3_DIR", "").endswith("-NOTFOUND")

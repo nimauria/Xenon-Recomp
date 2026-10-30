@@ -40,14 +40,14 @@ if(MSVC)
 endif()
 
 # The game window belongs to this process (see presentation_host.hpp), reusing
-# the same SDL2 dependency xenon_input/xenon_audio already resolve rather than
+# the same SDL3 dependency xenon_input/xenon_audio already resolve rather than
 # adding a second window/UI toolkit.
-xenon_resolve_sdl2(XENON_RUNTIME_HOST_SDL2_TARGET)
-if(XENON_RUNTIME_HOST_SDL2_TARGET)
-  target_link_libraries(xenon_runtime_host PRIVATE ${XENON_RUNTIME_HOST_SDL2_TARGET})
+xenon_resolve_sdl3(XENON_RUNTIME_HOST_SDL_TARGET)
+if(XENON_RUNTIME_HOST_SDL_TARGET)
+  target_link_libraries(xenon_runtime_host PRIVATE ${XENON_RUNTIME_HOST_SDL_TARGET})
   target_compile_definitions(xenon_runtime_host PRIVATE XENON_HAS_PRESENTATION_HOST=1)
 else()
-  message(WARNING "xenon_runtime_host: SDL2 not resolved - game window/presentation will be disabled")
+  message(WARNING "xenon_runtime_host: SDL3 not resolved - game window/presentation will be disabled")
 endif()
 
 # Managed xenia-project FFmpeg is intentionally shared for release builds.

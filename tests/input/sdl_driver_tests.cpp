@@ -431,7 +431,7 @@ void test_dualsense_family_motion_touchpad_and_light() {
 }
 
 void test_missing_real_sdl_backend_fails_truthfully_when_unavailable() {
-#if !defined(XENON_INPUT_HAS_SDL2)
+#if !defined(XENON_INPUT_HAS_SDL3)
   input::SdlInputOptions options{};
   options.load_mappings_if_present = false;
   input::SdlInputDriver driver(options);

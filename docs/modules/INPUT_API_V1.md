@@ -104,7 +104,7 @@ reimplementing them.
 
 This is important for title modules: Project Gracemeria can query the final
 controller state or identify that the active source is a flight device, but it
-does not need to know whether the user's hardware arrived through SDL3, SDL2,
+does not need to know whether the user's hardware arrived through SDL3,
 Windows XInput, keyboard/mouse synthesis or a HOTAS adapter.
 
 ## Example state query

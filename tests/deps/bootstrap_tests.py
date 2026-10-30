@@ -31,10 +31,10 @@ class DependencyBootstrapTests(unittest.TestCase):
         prefix = bootstrap.dependency_prefix(root, entry)
         (prefix / "lib").mkdir(parents=True)
 
-        if key == "sdl2":
-            (prefix / "include" / "SDL2").mkdir(parents=True)
-            (prefix / "include" / "SDL2" / "SDL.h").write_text("/* SDL */\n")
-            (prefix / "lib" / "libSDL2.a").write_bytes(b"")
+        if key == "sdl3":
+            (prefix / "include" / "SDL3").mkdir(parents=True)
+            (prefix / "include" / "SDL3" / "SDL.h").write_text("/* SDL */\n")
+            (prefix / "lib" / "libSDL3.a").write_bytes(b"")
         elif key == "xenia-ffmpeg":
             (prefix / "include" / "libavcodec").mkdir(parents=True)
             (prefix / "include" / "libavcodec" / "avcodec.h").write_text("/* avcodec */\n")
@@ -69,7 +69,8 @@ class DependencyBootstrapTests(unittest.TestCase):
     def test_manifest_matches_release_pins(self):
         self.assertEqual(self.manifest["schema"], 3)
         deps = self.manifest["dependencies"]
-        self.assertEqual(deps["sdl2"]["revision"], "5d249570393f7a37e037abf22cd6012a4cc56a71")
+        self.assertEqual(deps["sdl3"]["revision"], "829a65d769d935c4852f8159e964312c0957260a")
+        self.assertNotIn("sdl2", deps)
         self.assertEqual(deps["xenia-ffmpeg"]["revision"], "15ece0882e8d5875051ff5b73c5a8326f7cee9f5")
         self.assertEqual(deps["vulkan-headers"]["version"], "1.4.357.0")
         self.assertEqual(deps["vulkan-loader"]["version"], "1.4.357.0")
@@ -215,13 +216,13 @@ class DependencyBootstrapTests(unittest.TestCase):
     def test_stale_manifest_stamp_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            prefix = self._fake_ready_dependency(root, "sdl2")
+            prefix = self._fake_ready_dependency(root, "sdl3")
             stamp_path = prefix / bootstrap.STAMP_NAME
             stamp = json.loads(stamp_path.read_text())
             stamp["manifest_sha256"] = "0" * 64
             stamp_path.write_text(json.dumps(stamp))
-            entry = self.manifest["dependencies"]["sdl2"]
-            ok, detail = bootstrap.verify_dependency("sdl2", entry, root, self.triplet)
+            entry = self.manifest["dependencies"]["sdl3"]
+            ok, detail = bootstrap.verify_dependency("sdl3", entry, root, self.triplet)
             self.assertFalse(ok)
             self.assertIn("stale", detail)
 

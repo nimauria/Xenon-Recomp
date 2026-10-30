@@ -140,9 +140,9 @@ tests).
 ## Optional and platform targets
 
 D3D12 and XInput compile on Windows. Vulkan and DXC require their native SDKs.
-Audio requires SDL2 and XMA-capable FFmpeg. SDL2/SDL3 input support follows
+Audio requires SDL3 and XMA-capable FFmpeg. SDL3 input support follows
 available SDKs. The launcher requires Qt 6.6+ and its GUI dependencies; the
-runtime host uses SDL2 for presentation. Configuration can omit optional
+runtime host uses SDL3 for presentation. Configuration can omit optional
 targets, so a passing build of one configuration does not establish coverage
 of another platform or feature.
 

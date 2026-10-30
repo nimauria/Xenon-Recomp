@@ -43,10 +43,10 @@ The Qt modules used by Xenon are selected from modules available under Qt's
 open-source licensing terms. Public releases must preserve the bundled Qt
 license material and the accompanying source-availability artifact.
 
-## SDL2
+## SDL3
 
-Desktop Audio/Input uses SDL2. The managed production build pins SDL2 2.32.10
-(the exact revision is recorded in `tools/deps/manifest.json`) and links it statically. SDL2 is distributed under
+The runtime window, desktop audio and input use SDL3. The managed production build pins SDL3 3.4.18
+(the exact revision is recorded in `tools/deps/manifest.json`) and links it statically. SDL3 is distributed under
 the zlib license. The upstream license text is retained with the package.
 
 ## Vulkan-Headers and Vulkan-Loader
