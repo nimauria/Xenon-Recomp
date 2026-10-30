@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -6,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <vector>
 
 #include "xenon/audio/xma.hpp"
 #include "xenon/memory/types.hpp"
@@ -13,7 +15,111 @@
 using namespace xenon;
 using namespace xenon::audio;
 
+namespace {
+
+constexpr std::size_t kPacketBits = kXmaPacketBytes * 8u;
+
+// A packet header: frame count, first-frame offset (bits after the 32-bit
+// header; 0x7FFF = no frame starts here), metadata 0, skip count.
+void write_packet_header(std::vector<std::byte>& stream, std::size_t packet,
+                         std::uint16_t first_frame_raw, std::uint8_t skip = 0) {
+  auto* p = stream.data() + packet * kXmaPacketBytes;
+  p[0] = std::byte((1u << 2u) | ((first_frame_raw >> 13u) & 0x3u));
+  p[1] = std::byte((first_frame_raw >> 5u) & 0xFFu);
+  p[2] = std::byte((first_frame_raw & 0x1Fu) << 3u);
+  p[3] = std::byte{skip};
+}
+
+void write_bits(std::vector<std::byte>& stream, std::size_t bit, unsigned count,
+                std::uint32_t value) {
+  for (unsigned i = 0; i < count; ++i) {
+    const auto set = (value >> (count - 1u - i)) & 1u;
+    const auto at = bit + i;
+    const auto mask = std::byte(1u << (7u - (at & 7u)));
+    stream[at >> 3u] = set ? (stream[at >> 3u] | mask) : (stream[at >> 3u] & ~mask);
+  }
+}
+
+// Regression (AC6 audio dropouts, XMA parser error 1 / decode error 8 in
+// pairs on the streaming contexts): after an input-buffer swap the context
+// read offset is bit 32, which is the tail of a frame begun in the previous
+// buffer, not a frame. Decoding must resume at the packet's first frame.
+void test_frame_start_skips_a_continuation() {
+  std::vector<std::byte> stream(3u * kXmaPacketBytes);
+  // Packet 0: 100 bits of continuation, then a 300-bit frame at bit 132.
+  write_packet_header(stream, 0, 100);
+  write_bits(stream, 32, 15, 0x0003);  // what the tail looks like as a "length"
+  write_bits(stream, 132, 15, 300);
+  // Packet 1 is continuation only; packet 2's first frame is at bit 32 + 40.
+  write_packet_header(stream, 1, 0x7FFF);
+  write_packet_header(stream, 2, 40);
+
+  assert(xma_frame_start_bit(stream, 32) == 132u);
+  assert(xma_frame_start_bit(stream, 132) == 132u);
+  assert(xma_frame_start_bit(stream, 432) == 432u);  // a later frame in the same packet
+  assert(xma_frame_start_bit(stream, kPacketBits) == 2u * kPacketBits + 72u);
+  assert(xma_frame_start_bit(stream, kPacketBits + 32u) == 2u * kPacketBits + 72u);
+  assert(xma_frame_start_bit(stream, 3u * kPacketBits) == 3u * kPacketBits);
+
+  assert(gather_xma_frame(stream, 32).status == XmaFrameGather::Invalid);
+  const auto frame = gather_xma_frame(stream, 132);
+  assert(frame.status == XmaFrameGather::Complete && frame.frame_bits == 300u);
+  assert(frame.final_packet == 0u && frame.final_source_bit == 432u);
+}
+
+// A frame that runs off the end of the current buffer waits for the other
+// buffer instead of failing; with the continuation present it is gathered
+// across the packet header, following the skip count.
+void test_frame_across_buffers() {
+  std::vector<std::byte> one(kXmaPacketBytes);
+  write_packet_header(one, 0, static_cast<std::uint16_t>(kPacketBits - 32u - 200u));
+  const auto start = kPacketBits - 200u;
+  write_bits(one, start, 15, 1000);
+  write_bits(one, start + 15u, 32, 0x1ABCDEF5u);
+  assert(gather_xma_frame(one, start).status == XmaFrameGather::NeedsMoreInput);
+
+  // Continuation in packet 2 (skip 1 jumps over another stream's packet 1).
+  std::vector<std::byte> three(3u * kXmaPacketBytes);
+  std::copy(one.begin(), one.end(), three.begin());
+  write_packet_header(three, 0, static_cast<std::uint16_t>(kPacketBits - 32u - 200u), 1);
+  write_packet_header(three, 1, 0);
+  write_packet_header(three, 2, 800);
+  write_bits(three, kPacketBits + 32u, 32, 0xFFFFFFFFu);  // must not be copied
+  write_bits(three, 2u * kPacketBits + 32u, 8, 0xA5);
+  const auto frame = gather_xma_frame(three, start);
+  assert(frame.status == XmaFrameGather::Complete && frame.frame_bits == 1000u);
+  assert(frame.final_packet == 2u && frame.final_source_bit == 2u * kPacketBits + 32u + 800u);
+  // Bit 200 of the frame is the first continuation bit: 0xA5 from packet 2.
+  std::uint32_t continuation = 0;
+  for (unsigned i = 0; i < 8; ++i) {
+    const auto at = 200u + i;
+    continuation = (continuation << 1u) |
+                   ((std::to_integer<unsigned>(frame.packed_bits[at >> 3u]) >> (7u - (at & 7u))) & 1u);
+  }
+  assert(continuation == 0xA5u);
+}
+
+// The 15-bit frame length itself can straddle two packets; it is read across
+// the next packet's header, not through it.
+void test_frame_length_across_packets() {
+  std::vector<std::byte> stream(2u * kXmaPacketBytes);
+  write_packet_header(stream, 0, static_cast<std::uint16_t>(kPacketBits - 32u - 6u));
+  write_packet_header(stream, 1, 100);
+  const std::uint32_t length = 500;  // 15 bits: first 6 in packet 0, last 9 in packet 1
+  write_bits(stream, kPacketBits - 6u, 6, length >> 9u);
+  write_bits(stream, kPacketBits + 32u, 9, length & 0x1FFu);
+  const auto frame = gather_xma_frame(stream, kPacketBits - 6u);
+  assert(frame.status == XmaFrameGather::Complete && frame.frame_bits == length);
+  assert(frame.final_packet == 1u && frame.final_source_bit == kPacketBits + 32u + 494u);
+}
+
+}  // namespace
+
 int main() {
+  test_frame_start_skips_a_continuation();
+  test_frame_across_buffers();
+  test_frame_length_across_packets();
+
   {
     std::array<std::byte, kXmaPacketBytes> packet{};
     // frame count 3, 15-bit first-frame offset value 0x123 -> +32 bits,

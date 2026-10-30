@@ -84,74 +84,39 @@ void append_bit(std::vector<std::byte>& data, std::size_t bit_offset,
   return capacity - write_offset + read_offset;
 }
 
-struct GatheredFrame {
-  std::vector<std::byte> packed_bits{};
-  std::uint32_t frame_bits{};
-  std::size_t final_packet{};
-  std::size_t final_source_bit{};
-  bool follows_in_packet{};
-};
-
-// XMA packets may interleave streams. For a frame split across packets, the
-// packet skip count says how many packets to jump before the continuation.
-[[nodiscard]] std::optional<GatheredFrame> gather_frame(
-    std::span<const std::byte> input, std::size_t start_bit) {
-  if (input.size() < kXmaPacketBytes || start_bit >= input.size() * 8u) {
-    return std::nullopt;
-  }
-
-  std::uint32_t frame_bits{};
-  if (!read_bits(input, start_bit, 15, frame_bits) || frame_bits < 16u ||
-      frame_bits >= kMaxFrameBits) {
-    return std::nullopt;
-  }
-
-  GatheredFrame result{};
-  result.frame_bits = frame_bits;
-  result.packed_bits.resize((frame_bits + 7u) / 8u, std::byte{0});
-
-  std::size_t source_bit = start_bit;
+// Copies `count` stream bits starting at `source_bit`, crossing packet
+// boundaries the way the XMA engine does: past the end of a packet's data,
+// the stream continues after the 32-bit header of the packet `skip_count + 1`
+// packets on. Leaves `source_bit`/`packet_index` at the bit after the copy.
+[[nodiscard]] XmaFrameGather copy_stream_bits(std::span<const std::byte> input,
+                                              std::size_t& source_bit,
+                                              std::size_t& packet_index,
+                                              std::size_t count,
+                                              std::vector<std::byte>& out) {
   std::size_t copied = 0;
-  std::size_t packet_index = source_bit / kBitsPerPacket;
-  while (copied < frame_bits) {
-    if ((packet_index + 1u) * kXmaPacketBytes > input.size()) return std::nullopt;
+  while (copied < count) {
+    if ((packet_index + 1u) * kXmaPacketBytes > input.size()) {
+      return XmaFrameGather::NeedsMoreInput;
+    }
     const std::size_t packet_start = packet_index * kBitsPerPacket;
     const std::size_t packet_end = packet_start + kBitsPerPacket;
     if (source_bit < packet_start + 32u) source_bit = packet_start + 32u;
-    const auto available = packet_end - source_bit;
-    const auto take = std::min<std::size_t>(frame_bits - copied, available);
+    const auto take = std::min<std::size_t>(count - copied, packet_end - source_bit);
     for (std::size_t i = 0; i < take; ++i) {
       std::uint8_t bit{};
-      if (!read_bit(input, source_bit + i, bit)) return std::nullopt;
-      append_bit(result.packed_bits, copied + i, bit);
+      if (!read_bit(input, source_bit + i, bit)) return XmaFrameGather::NeedsMoreInput;
+      append_bit(out, copied + i, bit);
     }
     copied += take;
     source_bit += take;
-    if (copied == frame_bits) break;
+    if (copied == count) break;
 
     const auto header = parse_xma_packet_header(
         input.subspan(packet_index * kXmaPacketBytes, kXmaPacketBytes));
     packet_index += static_cast<std::size_t>(header.skip_count) + 1u;
-    if ((packet_index + 1u) * kXmaPacketBytes > input.size()) return std::nullopt;
     source_bit = packet_index * kBitsPerPacket + 32u;
   }
-
-  result.final_packet = packet_index;
-  result.final_source_bit = source_bit;
-  std::uint8_t follows{};
-  if (frame_bits && read_bit(result.packed_bits, frame_bits - 1u, follows)) {
-    result.follows_in_packet = follows != 0;
-  }
-  return result;
-}
-
-[[nodiscard]] std::size_t next_packet_frame_offset(
-    std::span<const std::byte> input, std::size_t packet_index) noexcept {
-  if ((packet_index + 1u) * kXmaPacketBytes > input.size()) return input.size() * 8u;
-  const auto packet = input.subspan(packet_index * kXmaPacketBytes, kXmaPacketBytes);
-  const auto header = parse_xma_packet_header(packet);
-  if (header.first_frame_offset_bits >= kBitsPerPacket) return input.size() * 8u;
-  return packet_index * kBitsPerPacket + header.first_frame_offset_bits;
+  return XmaFrameGather::Complete;
 }
 
 [[nodiscard]] std::int16_t float_to_s16(float value) noexcept {
@@ -160,6 +125,57 @@ struct GatheredFrame {
 }
 
 }  // namespace
+
+std::size_t xma_frame_start_bit(std::span<const std::byte> input,
+                                std::size_t read_offset_bits) noexcept {
+  for (auto packet = read_offset_bits / kBitsPerPacket;
+       (packet + 1u) * kXmaPacketBytes <= input.size(); ++packet) {
+    const auto header = parse_xma_packet_header(
+        input.subspan(packet * kXmaPacketBytes, kXmaPacketBytes));
+    // No frame starts in this packet: it is all continuation.
+    if (header.first_frame_offset_bits >= kBitsPerPacket) continue;
+    const auto first_frame = packet * kBitsPerPacket + header.first_frame_offset_bits;
+    return std::max(read_offset_bits, first_frame);
+  }
+  return input.size() * 8u;
+}
+
+XmaGatheredFrame gather_xma_frame(std::span<const std::byte> input, std::size_t start_bit) {
+  XmaGatheredFrame result{};
+  if (input.size() < kXmaPacketBytes || start_bit >= input.size() * 8u) {
+    result.status = XmaFrameGather::NeedsMoreInput;
+    return result;
+  }
+
+  // The 15-bit frame length may itself straddle two packets.
+  std::size_t source_bit = start_bit;
+  std::size_t packet_index = source_bit / kBitsPerPacket;
+  std::vector<std::byte> length_bits;
+  result.status = copy_stream_bits(input, source_bit, packet_index, 15u, length_bits);
+  if (result.status != XmaFrameGather::Complete) return result;
+  std::uint32_t frame_bits{};
+  if (!read_bits(length_bits, 0u, 15u, frame_bits) || frame_bits < 16u ||
+      frame_bits >= kMaxFrameBits) {
+    result.status = XmaFrameGather::Invalid;
+    return result;
+  }
+
+  result.frame_bits = frame_bits;
+  result.packed_bits.resize((frame_bits + 7u) / 8u, std::byte{0});
+  source_bit = start_bit;
+  packet_index = source_bit / kBitsPerPacket;
+  result.status = copy_stream_bits(input, source_bit, packet_index, frame_bits,
+                                   result.packed_bits);
+  if (result.status != XmaFrameGather::Complete) return result;
+
+  result.final_packet = packet_index;
+  result.final_source_bit = source_bit;
+  std::uint8_t follows{};
+  if (read_bit(result.packed_bits, frame_bits - 1u, follows)) {
+    result.follows_in_packet = follows != 0;
+  }
+  return result;
+}
 
 bool XmaDecoder::decode_one(std::size_t index) {
   if (index >= kXmaContextCount || !allocated_[index].load() ||
@@ -370,10 +386,13 @@ bool XmaDecoder::decode_one(std::size_t index) {
 
   const auto loop_start = std::max<std::uint32_t>(32u, data.loop_start);
   const auto loop_end = std::max<std::uint32_t>(32u, data.loop_end);
-  std::size_t start_bit = std::max<std::uint32_t>(32u, data.input_buffer_read_offset);
-  if ((start_bit % kBitsPerPacket) == 0) {
-    start_bit = next_packet_frame_offset(input, start_bit / kBitsPerPacket);
-  }
+  // Regression (AC6 audio dropouts): after an input-buffer swap the read
+  // offset is bit 32, the start of the first packet's data, which is the tail
+  // of a frame begun in the previous buffer. Decoding from there read part of
+  // that tail as a frame length (a parser error) or handed it to the decoder
+  // (a decode error), and either error stopped the voice.
+  std::size_t start_bit = xma_frame_start_bit(
+      input, std::max<std::uint32_t>(32u, data.input_buffer_read_offset));
   if (start_bit >= input.size() * 8u) {
     if (current) data.input_buffer_1_valid = false;
     else data.input_buffer_0_valid = false;
@@ -394,8 +413,17 @@ bool XmaDecoder::decode_one(std::size_t index) {
                                                 kXmaPacketBytes));
   data.packet_metadata = packet_header.metadata;
 
-  const auto gathered = gather_frame(input, start_bit);
-  if (!gathered) {
+  const auto gathered_frame = gather_xma_frame(input, start_bit);
+  if (gathered_frame.status == XmaFrameGather::NeedsMoreInput &&
+      input.size() == current_input_bytes) {
+    // The frame continues into the other input buffer, which the title has
+    // not made valid yet. Consume nothing and wait for it, as the engine
+    // does; the title's next kick resumes here with the whole frame.
+    idle_passes_[kIdleNoInput].fetch_add(1, std::memory_order_relaxed);
+    finish();
+    return false;
+  }
+  if (gathered_frame.status != XmaFrameGather::Complete) {
     data.parser_error_status = 1;
     data.parser_error_set = true;
     (void)merge_hardware_progress(context, initial, data);
@@ -460,7 +488,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
   }
 
   av_packet_unref(runtime.packet);
-  const auto payload_bytes = (gathered->frame_bits + 7u) / 8u;
+  const auto payload_bytes = (gathered_frame.frame_bits + 7u) / 8u;
   if (av_new_packet(runtime.packet, static_cast<int>(payload_bytes + 1u)) < 0) {
     data.error_status = 7;
     data.error_set = true;
@@ -469,9 +497,9 @@ bool XmaDecoder::decode_one(std::size_t index) {
     return false;
   }
   const auto end_padding =
-      static_cast<std::uint8_t>((8u - (gathered->frame_bits & 7u)) & 7u);
+      static_cast<std::uint8_t>((8u - (gathered_frame.frame_bits & 7u)) & 7u);
   runtime.packet->data[0] = static_cast<std::uint8_t>(end_padding << 2u);
-  std::memcpy(runtime.packet->data + 1, gathered->packed_bits.data(), payload_bytes);
+  std::memcpy(runtime.packet->data + 1, gathered_frame.packed_bits.data(), payload_bytes);
 
   av_frame_unref(runtime.frame);
   const int send_result = avcodec_send_packet(runtime.codec_context, runtime.packet);
@@ -551,16 +579,16 @@ bool XmaDecoder::decode_one(std::size_t index) {
   runtime.loop_start_skip_pending = false;
 
   std::size_t next_bit{};
-  if (gathered->follows_in_packet &&
-      gathered->final_source_bit < (gathered->final_packet + 1u) * kBitsPerPacket) {
-    next_bit = gathered->final_source_bit;
+  if (gathered_frame.follows_in_packet &&
+      gathered_frame.final_source_bit < (gathered_frame.final_packet + 1u) * kBitsPerPacket) {
+    next_bit = gathered_frame.final_source_bit;
   } else {
     const auto final_packet_span = std::span<const std::byte>(input).subspan(
-        gathered->final_packet * kXmaPacketBytes, kXmaPacketBytes);
+        gathered_frame.final_packet * kXmaPacketBytes, kXmaPacketBytes);
     const auto final_header = parse_xma_packet_header(final_packet_span);
-    const auto next_packet = gathered->final_packet +
+    const auto next_packet = gathered_frame.final_packet +
                              static_cast<std::size_t>(final_header.skip_count) + 1u;
-    next_bit = next_packet_frame_offset(input, next_packet);
+    next_bit = xma_frame_start_bit(input, next_packet * kBitsPerPacket);
   }
 
   if (is_loop_end_frame ||

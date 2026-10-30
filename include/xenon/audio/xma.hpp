@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "xenon/cpu/types.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -36,6 +37,40 @@ struct XmaPacketHeader {
 
 [[nodiscard]] XmaPacketHeader parse_xma_packet_header(
     std::span<const std::byte> packet) noexcept;
+
+// Where decoding resumes for a context read offset (in bits from the start of
+// `input`, a run of whole 2 KiB packets). An offset short of its packet's
+// first frame - bit 32, where an input-buffer swap leaves it, or a packet
+// start - lies in the tail of a frame that began in an earlier packet, so
+// decoding starts at that packet's first frame; a packet with no frame start
+// passes to the next packet that has one. Returns input.size() * 8 when no
+// frame starts at or after the offset.
+[[nodiscard]] std::size_t xma_frame_start_bit(std::span<const std::byte> input,
+                                              std::size_t read_offset_bits) noexcept;
+
+enum class XmaFrameGather : std::uint8_t {
+  Complete,
+  // The frame continues past the end of `input`: the rest is in an input
+  // buffer the title has not made valid yet.
+  NeedsMoreInput,
+  // The frame header is impossible (a size below 16 bits or the 0x7FFF
+  // maximum), so this is not the start of a frame.
+  Invalid,
+};
+
+// One frame copied out of its packets (following each packet's skip count to
+// the packet that carries the continuation), as the XMA engine assembles it.
+struct XmaGatheredFrame {
+  XmaFrameGather status{XmaFrameGather::Invalid};
+  std::vector<std::byte> packed_bits{};
+  std::uint32_t frame_bits{};
+  std::size_t final_packet{};
+  std::size_t final_source_bit{};
+  bool follows_in_packet{};
+};
+
+[[nodiscard]] XmaGatheredFrame gather_xma_frame(std::span<const std::byte> input,
+                                                std::size_t start_bit);
 
 // Semantic view of the 64-byte hardware context. encode/decode explicitly use
 // Xbox big-endian dwords rather than relying on host C++ bitfield layout.
