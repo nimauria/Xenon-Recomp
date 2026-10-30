@@ -45,6 +45,15 @@ void test_complete_format_catalogue() {
   assert(texture_format_info(49).host_format == TextureHostFormat::BC5Unorm);
   assert(texture_format_info(22).host_format == TextureHostFormat::Unsupported);
   assert(texture_format_info(23).host_format == TextureHostFormat::Unsupported);
+
+  // A format without a native mapping fails with an error naming it, so the
+  // GPU error log says which mapping a title needs.
+  auto unsupported = rgba8(16, 16, false);
+  unsupported.format = 22;  // 24_8
+  std::vector<std::byte> memory(0x40000);
+  const auto failed = decode_texture(unsupported, memory);
+  assert(!failed.valid);
+  assert(failed.error == "Xenos texture format 22 (24_8) has no lossless native mapping");
 }
 
 void test_tiled_decode_and_endian() {

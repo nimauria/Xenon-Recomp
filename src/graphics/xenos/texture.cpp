@@ -157,6 +157,12 @@ void packed_origin(const TextureDescriptor& descriptor, const TextureFormatInfo&
   y /= format.block_height;
 }
 
+// Names the format, so a failure log says which mapping is missing.
+std::string unsupported_format_error(const TextureFormatInfo& format) {
+  return "Xenos texture format " + std::to_string(format.xenos_format) + " (" +
+         std::string(format.name) + ") has no lossless native mapping";
+}
+
 }  // namespace
 
 const TextureFormatInfo& texture_format_info(std::uint8_t format) noexcept {
@@ -310,7 +316,7 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
   DecodedTexture result{};
   result.layout = build_texture_layout(descriptor);
   if (!result.layout.valid || !result.layout.format.host_supported()) {
-    result.error = result.layout.valid ? "Xenos texture format has no lossless native mapping"
+    result.error = result.layout.valid ? unsupported_format_error(result.layout.format)
                                        : result.layout.error;
     return result;
   }
@@ -369,7 +375,7 @@ bool encode_texture(const TextureDescriptor& descriptor,
   const auto layout = build_texture_layout(descriptor);
   if (!layout.valid) return fail(layout.error);
   if (!layout.format.host_supported())
-    return fail("Xenos texture format has no lossless native mapping");
+    return fail(unsupported_format_error(layout.format));
   if (linear_data.size() < layout.linear_size_bytes)
     return fail("linear texture source is smaller than the declared layout");
 
