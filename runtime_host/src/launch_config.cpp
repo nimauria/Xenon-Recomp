@@ -157,7 +157,7 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
   out.diagnostic_events = root.get_bool("diagnosticEvents", false);
   out.probe_logs = root.get_bool("probeLogs", false);
 
-  out.memory_watch_addresses.clear();
+  out.memory_watch_targets.clear();
   if (const auto* watch = root.find("memoryWatch")) {
     const auto* watch_array = watch->as_array();
     if (!watch_array) {
@@ -165,34 +165,26 @@ bool LaunchConfig::load_from_file(const std::string& path, LaunchConfig& out,
       return false;
     }
     for (const auto& entry : *watch_array) {
-      std::uint64_t address = 0;
       if (entry.is_string()) {
-        try {
-          std::size_t consumed = 0;
-          const auto& text = entry.as_string();
-          address = std::stoull(text, &consumed, 0);
-          if (consumed != text.size()) throw std::invalid_argument("trailing characters");
-        } catch (const std::exception&) {
-          error = "Launch configuration 'memoryWatch' entry is not a valid address: " +
+        const auto target = xenon::core::parse_watch_target(entry.as_string());
+        if (!target) {
+          error = "Launch configuration 'memoryWatch' entry is not a valid address or "
+                  "pointer chain: " +
                   entry.as_string();
           return false;
         }
+        out.memory_watch_targets.push_back(*target);
       } else if (entry.type() == xenon::core::JsonValue::Type::Number) {
         const double number = entry.as_number();
         if (number < 0.0 || number > 4294967295.0) {
           error = "Launch configuration 'memoryWatch' entry is outside the 32-bit guest space";
           return false;
         }
-        address = static_cast<std::uint64_t>(number);
+        out.memory_watch_targets.push_back(static_cast<std::uint32_t>(number));
       } else {
         error = "Launch configuration 'memoryWatch' entries must be numbers or strings";
         return false;
       }
-      if (address > 0xFFFFFFFFull) {
-        error = "Launch configuration 'memoryWatch' entry is outside the 32-bit guest space";
-        return false;
-      }
-      out.memory_watch_addresses.push_back(static_cast<std::uint32_t>(address));
     }
   }
   out.memory_watch_history =

@@ -125,7 +125,7 @@ struct SessionConfig {
   // report. The words are sampled at kernel-call and compiled-dispatch
   // boundaries plus by a background poll thread, never by hooking guest stores,
   // so a change is attributed to the observer, not to the storing instruction.
-  std::vector<std::uint32_t> memory_watch_addresses{};
+  std::vector<WatchTarget> memory_watch_targets{};
   std::uint32_t memory_watch_history{static_cast<std::uint32_t>(GuestMemoryWatch::kDefaultCapacity)};
   // Poll thread period in milliseconds; 0 disables the poll thread (boundary
   // sampling alone still runs).
@@ -334,15 +334,15 @@ class XenonSession final : public cpu::RuntimeServices {
   }
   [[nodiscard]] xam::XamSession* xam() noexcept { return xam_.get(); }
   [[nodiscard]] ExportRegistry* exports() noexcept { return &export_registry_; }
-  // History of the words named by SessionConfig::memory_watch_addresses. Inactive
+  // History of the words named by SessionConfig::memory_watch_targets. Inactive
   // (and empty) when none were configured.
   [[nodiscard]] const GuestMemoryWatch& memory_watch() const noexcept { return memory_watch_; }
-  // Replaces the watched set (see SessionConfig::memory_watch_addresses), clearing
+  // Replaces the watched set (see SessionConfig::memory_watch_targets), clearing
   // history. Takes effect for boundary sampling immediately and for the poll thread
   // at the next start().
-  void configure_memory_watch(std::vector<std::uint32_t> addresses,
+  void configure_memory_watch(std::vector<WatchTarget> targets,
                               std::size_t history = GuestMemoryWatch::kDefaultCapacity) {
-    memory_watch_.configure(std::move(addresses), history);
+    memory_watch_.configure(std::move(targets), history);
   }
   // Samples the watched words now, attributing any change to `observer`. Used by
   // the session's own boundaries; public so embedders/tests can add their own.

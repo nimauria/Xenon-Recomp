@@ -738,12 +738,12 @@ int main() {
     config.enable_logging = false;
     config.enable_graphics = false;
     config.enable_input = false;
-    config.memory_watch_addresses = {0x40000000u, 0x40000004u, 0x40000000u};
+    config.memory_watch_targets = {0x40000000u, 0x40000004u, 0x40000000u};
     config.memory_watch_history = 8u;
     assert(session.initialize(config).success);
     assert(session.memory_watch().active());
-    assert((session.memory_watch().addresses() ==
-            std::vector<std::uint32_t>{0x40000000u, 0x40000004u}));
+    assert((session.memory_watch().targets() ==
+            std::vector<xenon::core::WatchTarget>{0x40000000u, 0x40000004u}));
     session.shutdown();
   }
 

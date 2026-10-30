@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "xenon/core/guest_memory_watch.hpp"
+
 namespace xenon::runtime_host {
 
 struct DlcEntry {
@@ -96,8 +98,9 @@ struct LaunchConfig {
   bool probe_logs{false};
 
   // Diagnostic guest-word watch (SessionConfig::memory_watch_*). "memoryWatch" is
-  // an array of guest addresses, each a JSON number or a "0x..." / decimal string.
-  std::vector<std::uint32_t> memory_watch_addresses{};
+  // an array of guest addresses, each a JSON number or a "0x..." / decimal string,
+  // or a pointer chain string such as "0x8293B930->0x8->0x0" (see WatchTarget).
+  std::vector<xenon::core::WatchTarget> memory_watch_targets{};
   std::uint32_t memory_watch_history{4096};
   std::uint32_t memory_watch_poll_ms{1};
   // Diagnostic temporal probe (SessionConfig::temporal_probe_interval):

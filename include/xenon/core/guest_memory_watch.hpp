@@ -49,10 +49,32 @@ struct WatchObserver {
   std::function<std::string()> describe{};
 };
 
+// A watched 32-bit word: the word at `address`, or, with `offsets`, the end of
+// a pointer chain - read the word at `address`, then for each offset read the
+// word at (previous value + offset). Written "0x8293B930->0x8->0x0": the word
+// at offset 0 of the object whose pointer sits at offset 8 of the object
+// 0x8293B930 points to. A null or unreadable link makes the value unreadable.
+struct WatchTarget {
+  cpu::GuestAddress address{};
+  std::vector<std::uint32_t> offsets{};
+  WatchTarget() = default;
+  WatchTarget(cpu::GuestAddress plain) : address(plain) {}  // NOLINT: a plain address is a target
+  WatchTarget(cpu::GuestAddress base, std::vector<std::uint32_t> chain)
+      : address(base), offsets(std::move(chain)) {}
+  friend bool operator==(const WatchTarget&, const WatchTarget&) = default;
+  friend auto operator<=>(const WatchTarget&, const WatchTarget&) = default;
+};
+
+// Parses "0x8293B930", "2191220416" or "0x8293B930->0x8->0x0" (each part a
+// C-style integer, decimal or 0x hex, at most 32 bits). Empty when malformed.
+[[nodiscard]] std::optional<WatchTarget> parse_watch_target(std::string_view text);
+[[nodiscard]] std::string format_watch_target(const WatchTarget& target);
+
 struct WatchRecord {
   std::uint64_t sequence{};
   std::int64_t microseconds{};  // since the watch was constructed
   cpu::GuestAddress address{};
+  std::vector<std::uint32_t> offsets{};  // the target's pointer chain, if any
   // nullopt = the word could not be read (unmapped/uncommitted) at that sample.
   std::optional<std::uint32_t> old_value{};
   std::optional<std::uint32_t> new_value{};
@@ -70,13 +92,13 @@ class GuestMemoryWatch {
   static constexpr std::size_t kDefaultCapacity = 4096;
 
   GuestMemoryWatch() = default;
-  GuestMemoryWatch(std::vector<cpu::GuestAddress> addresses, std::size_t capacity);
+  GuestMemoryWatch(std::vector<WatchTarget> targets, std::size_t capacity);
 
   // Replaces the watched set and clears all history and baselines.
-  void configure(std::vector<cpu::GuestAddress> addresses, std::size_t capacity);
+  void configure(std::vector<WatchTarget> targets, std::size_t capacity);
 
   [[nodiscard]] bool active() const noexcept { return active_.load(std::memory_order_relaxed); }
-  [[nodiscard]] std::vector<cpu::GuestAddress> addresses() const;
+  [[nodiscard]] std::vector<WatchTarget> targets() const;
 
   // Reads every watched word through `reader` and appends a record for each one
   // whose value differs from the previous sample. Returns the records added by this
@@ -86,14 +108,14 @@ class GuestMemoryWatch {
   // Oldest-to-newest.
   [[nodiscard]] std::vector<WatchRecord> history() const;
   [[nodiscard]] std::uint64_t total_changes() const;
-  // Last value seen for `address` (nullopt if never readable or not watched).
-  [[nodiscard]] std::optional<std::uint32_t> last_value(cpu::GuestAddress address) const;
+  // Last value seen for `target` (nullopt if never readable or not watched).
+  [[nodiscard]] std::optional<std::uint32_t> last_value(const WatchTarget& target) const;
 
   [[nodiscard]] static std::string format(const WatchRecord& record);
 
  private:
   struct Slot {
-    cpu::GuestAddress address{};
+    WatchTarget target{};
     bool seen{};
     std::optional<std::uint32_t> value{};
   };

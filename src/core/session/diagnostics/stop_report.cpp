@@ -518,17 +518,18 @@ void XenonSession::report_stop_diagnostics() {
     sample_memory_watch(final_sample);
     const auto history = memory_watch_.history();
     std::scoped_lock console_log_lock(console_log_mutex());
-    std::cout << "[XenonSession] Memory watch: " << memory_watch_.addresses().size()
+    const auto targets = memory_watch_.targets();
+    std::cout << "[XenonSession] Memory watch: " << targets.size()
               << " word(s), " << memory_watch_.total_changes() << " change(s), "
               << history.size() << " retained record(s):" << std::endl;
     for (const auto& record : history) {
       std::cout << "[XenonSession]   " << GuestMemoryWatch::format(record) << std::endl;
     }
-    for (const auto address : memory_watch_.addresses()) {
-      const auto value = memory_watch_.last_value(address);
-      std::cout << "[XenonSession]   0x" << std::hex << std::uppercase << address << " = ";
+    for (const auto& target : targets) {
+      const auto value = memory_watch_.last_value(target);
+      std::cout << "[XenonSession]   " << format_watch_target(target) << " = ";
       if (value) {
-        std::cout << "0x" << *value;
+        std::cout << "0x" << std::hex << std::uppercase << *value;
       } else {
         std::cout << "<unreadable>";
       }

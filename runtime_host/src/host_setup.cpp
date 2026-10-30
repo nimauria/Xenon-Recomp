@@ -146,7 +146,7 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   xenon::core::SessionConfig config{};
   config.enable_logging = true;
   config.verbose_logging = launch.log_verbose;
-  config.memory_watch_addresses = launch.memory_watch_addresses;
+  config.memory_watch_targets = launch.memory_watch_targets;
   config.memory_watch_history = launch.memory_watch_history;
   config.memory_watch_poll_ms = launch.memory_watch_poll_ms;
   config.enable_export_diagnostics = true;

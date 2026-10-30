@@ -372,7 +372,7 @@ int main() {
     file.write(R"json({
       "sessionDir": "C:/sessions/x",
       "contentPath": "C:/Games/X",
-      "memoryWatch": ["0x829DDEBC", "2191220416", 2191220420],
+      "memoryWatch": ["0x829DDEBC", "2191220416", 2191220420, "0x8293B930->0x8->0x0"],
       "memoryWatchHistory": 128,
       "memoryWatchPollMs": 5
     })json");
@@ -381,10 +381,22 @@ int main() {
     std::string error;
     const bool ok = LaunchConfig::load_from_file(file.string(), config, error);
     assert(ok);
-    assert(config.memory_watch_addresses.size() == 3u);
-    assert(config.memory_watch_addresses[0] == 0x829DDEBCu);
-    assert(config.memory_watch_addresses[1] == 2191220416u);
-    assert(config.memory_watch_addresses[2] == 2191220420u);
+    assert(config.memory_watch_targets.size() == 4u);
+    assert(config.memory_watch_targets[0] == xenon::core::WatchTarget{0x829DDEBCu});
+    assert(config.memory_watch_targets[1] == xenon::core::WatchTarget{2191220416u});
+    assert(config.memory_watch_targets[2] == xenon::core::WatchTarget{2191220420u});
+    assert((config.memory_watch_targets[3] ==
+            xenon::core::WatchTarget{0x8293B930u, {0x8u, 0x0u}}));
+
+    TempFile bad("watch_bad.json");
+    bad.write(R"json({
+      "sessionDir": "C:/sessions/x",
+      "contentPath": "C:/Games/X",
+      "memoryWatch": ["0x8293B930->"]
+    })json");
+    LaunchConfig rejected{};
+    assert(!LaunchConfig::load_from_file(bad.string(), rejected, error));
+    assert(error.find("0x8293B930->") != std::string::npos);
     assert(config.memory_watch_history == 128u);
     assert(config.memory_watch_poll_ms == 5u);
 
@@ -392,7 +404,7 @@ int main() {
     absent.write(R"json({"sessionDir": "C:/sessions/x", "contentPath": "C:/Games/X"})json");
     LaunchConfig defaults{};
     assert(LaunchConfig::load_from_file(absent.string(), defaults, error));
-    assert(defaults.memory_watch_addresses.empty());
+    assert(defaults.memory_watch_targets.empty());
     assert(defaults.memory_watch_history == 4096u);
     assert(defaults.memory_watch_poll_ms == 1u);
   }
