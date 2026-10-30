@@ -57,6 +57,7 @@ add_library(xenon_recomp STATIC
   # Module hints and learned knowledge.
   hints/analysis_schema.cpp
   hints/instruction_hooks.cpp
+  hints/revision_mapping.cpp
   hints/analysis_schema_json.cpp
   hints/module_hint_provider.cpp
   hints/module_hints.cpp

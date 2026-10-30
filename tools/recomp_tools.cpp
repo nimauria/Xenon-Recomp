@@ -1,4 +1,5 @@
 ﻿#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <fstream>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "xenon/recomp/driver.hpp"
+#include "xenon/recomp/game_intake.hpp"
 #include "xenon/recomp/module_hint_provider.hpp"
 #include "xenon/cpu/decoder.hpp"
 
@@ -80,7 +82,7 @@ int main(int argc, char** argv) {
                    "  Recomp Analysis V2 pass): 'auto' (default) is roughly hardware_concurrency\n"
                    "  minus one, '1' forces deterministic single-thread execution, or supply an\n"
                    "  explicit worker count. --quiet suppresses progress milestones on stderr.\n";
-    else if (tool == "ppc-disasm") std::cout << "usage: ppc-disasm <game.xex> [--json]\n";
+    else if (tool == "ppc-disasm") std::cout << "usage: ppc-disasm <game.xex|disc image|folder> [--json]\n";
     else if (tool == "ir-dump") std::cout << "usage: ir-dump <game.xex> [--json]\n";
     else if (tool == "import-scanner") std::cout << "usage: import-scanner <game.xex> [--json]\n"
                                                      "  Whole-XEX import capability audit (Phase 6 of the AC6 Runtime\n"
@@ -236,6 +238,23 @@ int main(int argc, char** argv) {
   if (!quiet) options.progress = [](const std::string& message) { std::cerr << message << "\n"; };
   xenon::recomp::AnalysisReport report;
   std::string error;
+  // A disc image or extracted game folder is read the way game preparation
+  // reads it: its default.xex, without extracting anything to disk.
+  {
+    auto extension = options.input.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (std::filesystem::is_directory(options.input) || extension != ".xex") {
+      std::vector<std::byte> bytes;
+      xenon::xbox::XexImage image;
+      if (!xenon::recomp::read_game_executable_bytes(options.input, "default.xex", bytes, error) ||
+          !xenon::xbox::parse_xex_image(bytes, image, &error)) {
+        std::cerr << tool << ": " << options.input.string() << ": " << error << "\n";
+        return 2;
+      }
+      options.pre_parsed_image = std::move(image);
+    }
+  }
   if (!xenon::recomp::load_and_analyze(options, report, error)) {
     std::cerr << tool << ": " << error << "\n";
     return 2;

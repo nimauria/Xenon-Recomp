@@ -218,11 +218,11 @@ XEX parsing → function discovery → control-flow analysis
 5. **Native compilation and registration.** A host C++ compiler builds the generated project into a native module. The runtime binds that module's registry into the CPU execution context.
 6. **Execution.** Guest calls dispatch to compiled native functions. If a target is missing, the bounded dynamic fallback runs it and records the observation, so a later preparation can include that code.
 
-**Module hints** let a game project supply function boundaries, known symbols, data regions, hooks and patches. They never provide PowerPC semantics.
+**Module hints** let a game project supply function boundaries, known symbols, data regions, hooks and patches. They never provide PowerPC semantics. An **instruction hook** runs a module's own C++ routine before or after one guest instruction, with full access to guest registers and memory, and can jump or return when it returns true. The module ships the routine's source and Xenon compiles the call into that function ([details](docs/recomp/RECOMPILATION_PIPELINE.md#instruction-hooks)).
 
 **Automatic game preparation.** `xenon-prepare`, which the launcher drives, accepts a disc image, an extracted folder or a loose XEX. It discovers every executable module, then analyses, generates, compiles and validates each one. The result goes into a **content-addressed cache** keyed by the effective (decrypted, title-update-patched) image, the module and its hints, Xenon's generated-code ABI, the build configuration and the compiler, so unchanged modules are not rebuilt. Preparation still needs a C++ toolchain on the local machine (MSVC or Build Tools on Windows; a C++20 compiler and CMake on Linux). Xenon does not bundle one yet.
 
-The standalone tools (`recomp-driver`, `ppc-disasm`, `ir-dump`, `import-scanner` and `module-inspector`) share the same analysis and are useful for inspecting a title.
+The standalone tools (`recomp-driver`, `ppc-disasm`, `ir-dump`, `import-scanner` and `module-inspector`) share the same analysis and are useful for inspecting a title. They accept a disc image or extracted folder as well as a loose XEX. `hint-port` carries a module's hints to another revision of the same title, such as another region's disc, by aligning the two executables ([details](docs/recomp/RECOMPILATION_PIPELINE.md#porting-hints-to-another-revision)).
 
 These tools have been run on a single retail title. They are not yet proven reliable across commercial games in general.
 

@@ -9,6 +9,12 @@ foreach(xenon_tool recomp-driver ppc-disasm ir-dump module-inspector)
   xenon_enable_warnings(${xenon_tool})
 endforeach()
 
+# hint-port: translates a module's hint set to another executable revision
+# of the same title (see xenon/recomp/revision_mapping.hpp).
+add_executable(hint-port hint_port.cpp)
+target_link_libraries(hint-port PRIVATE xenon_recomp)
+xenon_enable_warnings(hint-port)
+
 # import-scanner additionally links xenon_core: for Project Gracemeria import
 # auditing (see docs/xam/XAM_V1.md), it cross-references every import against a
 # real, minimally-initialized XenonSession export_registry_ - the exact same
