@@ -165,5 +165,7 @@ if(XENON_BUILD_TESTS)
       xenos/temporal.cpp xenon_graphics)
     xenon_add_standalone_test(xenon_sampler_address_tests
       sampler_address_tests.cpp xenon_graphics)
+    xenon_add_standalone_test(xenon_gpu_failure_log_tests
+      failure_log_tests.cpp xenon_graphics)
   endif()
 endif()

@@ -1,5 +1,6 @@
 #include "host_setup.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -24,6 +25,7 @@
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
 #include "xenon/memory/types.hpp"
@@ -80,6 +82,80 @@ std::optional<std::string> parse_launch_config_argument(int argc, char** argv) {
 // Redirects stdout/stderr into the session log file so every
 // XenonSession/runtime-host diagnostic line lands somewhere the launcher can
 // tail, since this process normally runs detached with no visible console.
+std::string error_log_run_name(const std::tm& local_time) {
+  char name[32];
+  std::snprintf(name, sizeof(name), "%04d-%02d-%02d_%02d-%02d-%02d", local_time.tm_year + 1900,
+                local_time.tm_mon + 1, local_time.tm_mday, local_time.tm_hour, local_time.tm_min,
+                local_time.tm_sec);
+  return name;
+}
+
+namespace {
+
+// "YYYY-MM-DD_HH-MM-SS", optionally followed by "-N".
+bool is_error_log_run_name(std::string_view name) {
+  if (name.size() < 19u) return false;
+  for (std::size_t i = 0; i < 19u; ++i) {
+    const char c = name[i];
+    const bool separator = i == 4u || i == 7u || i == 13u || i == 16u;
+    if (i == 10u ? c != '_' : separator ? c != '-' : (c < '0' || c > '9')) return false;
+  }
+  if (name.size() == 19u) return true;
+  if (name[19] != '-' || name.size() == 20u) return false;
+  for (std::size_t i = 20u; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') return false;
+  }
+  return true;
+}
+
+// Run folders oldest first: by start time, then by the "-N" suffix.
+bool error_log_run_before(const std::string& a, const std::string& b) {
+  const auto stamp_a = a.substr(0, 19u), stamp_b = b.substr(0, 19u);
+  if (stamp_a != stamp_b) return stamp_a < stamp_b;
+  const auto suffix = [](const std::string& s) {
+    return s.size() > 20u ? std::stoull(s.substr(20u)) : 1ull;
+  };
+  return suffix(a) < suffix(b);
+}
+
+}  // namespace
+
+void prune_error_log_runs(const std::filesystem::path& errors_dir, std::size_t keep_runs) {
+  std::error_code error;
+  std::vector<std::string> runs;
+  for (const auto& entry : std::filesystem::directory_iterator(errors_dir, error)) {
+    const auto name = entry.path().filename().string();
+    if (entry.is_directory(error) && is_error_log_run_name(name)) runs.push_back(name);
+  }
+  if (runs.size() <= keep_runs) return;
+  std::sort(runs.begin(), runs.end(), error_log_run_before);
+  for (std::size_t i = 0; i + keep_runs < runs.size(); ++i) {
+    std::filesystem::remove_all(errors_dir / runs[i], error);
+  }
+}
+
+std::filesystem::path open_error_logs(const std::string& session_dir, std::size_t keep_runs) {
+  const auto errors_dir = std::filesystem::path(session_dir) / "errors";
+  const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s(&local, &now);
+#else
+  localtime_r(&now, &local);
+#endif
+  const auto base = error_log_run_name(local);
+  std::error_code error;
+  std::filesystem::create_directories(errors_dir, error);
+  auto run_dir = errors_dir / base;
+  for (unsigned n = 2u; std::filesystem::exists(run_dir, error); ++n) {
+    run_dir = errors_dir / (base + "-" + std::to_string(n));
+  }
+  // Prune first so the new run is never the one removed.
+  if (keep_runs > 0u) prune_error_log_runs(errors_dir, keep_runs - 1u);
+  if (!xenon::logging::Logger::instance().set_error_directory(run_dir.string())) return {};
+  return run_dir;
+}
+
 void redirect_log(const std::string& session_dir) {
   std::error_code error;
   std::filesystem::create_directories(session_dir, error);

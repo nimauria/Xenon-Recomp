@@ -7,6 +7,7 @@
 
 #include "launch_config.hpp"
 #include "host_setup.hpp"
+#include "xenon/logging/logger.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -453,6 +454,51 @@ int main() {
     }
   }
   std::cout << "  [PASS] temporalProbeFrames parses, defaults to off and rejects bad values\n";
+
+  // Per-run error logs: a folder per run named by its start time, the newest
+  // kept, one file per subsystem.
+  {
+    std::tm when{};
+    when.tm_year = 2026 - 1900; when.tm_mon = 9; when.tm_mday = 30;
+    when.tm_hour = 20; when.tm_min = 5; when.tm_sec = 9;
+    assert(xenon::runtime_host::error_log_run_name(when) == "2026-10-30_20-05-09");
+
+    const auto session = std::filesystem::temp_directory_path() / "xenon_error_log_runs_test";
+    std::filesystem::remove_all(session);
+    const auto errors = session / "errors";
+    std::filesystem::create_directories(errors);
+    const char* existing[] = {"2026-10-29_10-00-00", "2026-10-29_10-00-00-2",
+                              "2026-10-30_09-00-00", "2026-10-28_23-59-59"};
+    for (const auto* name : existing) std::filesystem::create_directories(errors / name);
+    std::filesystem::create_directories(errors / "keep-me");  // not a run folder
+    std::ofstream(errors / "notes.txt") << "x";
+
+    // Keeping two removes the two oldest runs only.
+    xenon::runtime_host::prune_error_log_runs(errors, 2);
+    assert(!std::filesystem::exists(errors / "2026-10-28_23-59-59"));
+    assert(!std::filesystem::exists(errors / "2026-10-29_10-00-00"));
+    assert(std::filesystem::exists(errors / "2026-10-29_10-00-00-2"));
+    assert(std::filesystem::exists(errors / "2026-10-30_09-00-00"));
+    assert(std::filesystem::exists(errors / "keep-me") && std::filesystem::exists(errors / "notes.txt"));
+
+    // Opening keeps `keep_runs` including the new one and routes the logger there.
+    const auto run = xenon::runtime_host::open_error_logs(session.string(), 2);
+    assert(!run.empty() && std::filesystem::is_directory(run));
+    assert(run.parent_path() == errors);
+    assert(!std::filesystem::exists(errors / "2026-10-29_10-00-00-2"));
+    assert(std::filesystem::exists(errors / "2026-10-30_09-00-00"));
+    auto& logger = xenon::logging::Logger::instance();
+    logger.set_sink([](xenon::logging::Level, std::string_view, std::string_view) {});
+    logger.log(xenon::logging::Level::Error, "filesystem", "game:\\missing.bin was not found");
+    assert(std::filesystem::exists(run / "filesystem.log"));
+    // A second run in the same second gets its own folder.
+    const auto again = xenon::runtime_host::open_error_logs(session.string(), 5);
+    assert(again != run && again.parent_path() == errors);
+    logger.set_error_directory("");
+    logger.set_sink({});
+    std::filesystem::remove_all(session);
+  }
+  std::cout << "  [PASS] Error logs get a timestamped folder per run, oldest pruned\n";
 
   std::cout << "All LaunchConfig tests passed!\n";
   return 0;

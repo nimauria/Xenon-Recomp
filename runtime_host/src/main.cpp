@@ -65,6 +65,13 @@ int main(int argc, char** argv) {
   redirect_log(launch.session_dir);
   std::cout << "[runtime_host] Starting session '" << launch.session_id << "' for game '"
             << launch.game_id << "' (" << launch.title << ")" << std::endl;
+  if (const auto error_logs = open_error_logs(launch.session_dir); !error_logs.empty()) {
+    std::cout << "[runtime_host] Error logs (one file per subsystem): " << error_logs.string()
+              << std::endl;
+  } else {
+    std::cout << "[runtime_host] Error logs could not be created under " << launch.session_dir
+              << std::endl;
+  }
   // Opt-in diagnostics; XENON_DIAG_EVENTS / XENON_PROBE_LOGS turn them on too.
   if (launch.diagnostic_events) xenon::logging::events::set_enabled(true);
   if (launch.probe_logs) xenon::logging::set_probe_logs_enabled(true);

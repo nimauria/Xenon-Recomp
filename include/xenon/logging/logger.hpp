@@ -10,7 +10,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <fstream>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -67,6 +70,22 @@ class Logger {
   using Sink = std::function<void(Level, std::string_view, std::string_view)>;
   void set_sink(Sink sink);
 
+  // Also appends every entry at `min_level` or above to a file per category
+  // in `directory` ("gpu" -> gpu.log, "filesystem" -> filesystem.log), one
+  // "<UTC time> <level>: <message>" line each, flushed as written, so a run's
+  // problems can be read back subsystem by subsystem after it ends. Works
+  // alongside the sink. Characters other than letters, digits, '-' and '_' in
+  // a category become '_' in its file name; an empty category goes to
+  // general.log. Returns false (keeping no files) if `directory` cannot be
+  // created; an empty path closes every file.
+  bool set_error_directory(const std::string& directory, Level min_level = Level::Warning);
+  // Lines written to the per-category error files so far.
+  [[nodiscard]] std::uint64_t error_file_lines() const noexcept {
+    return error_file_lines_.load(std::memory_order_relaxed);
+  }
+  // The file a category's entries go to, relative to the error directory.
+  [[nodiscard]] static std::string error_file_name(std::string_view category);
+
   // Total log() invocations that actually reached a sink (i.e. passed the
   // enabled() gate). Used by tests to prove a disabled-level call chain did
   // no work.
@@ -96,6 +115,11 @@ class Logger {
   std::mutex sink_mutex_;
   std::mutex stream_mutex_;
   Sink sink_;
+  std::mutex error_file_mutex_;
+  std::string error_directory_;
+  std::map<std::string, std::unique_ptr<std::ofstream>, std::less<>> error_files_;
+  Level error_file_level_{Level::Warning};
+  std::atomic<std::uint64_t> error_file_lines_{0};
 };
 
 }  // namespace xenon::logging

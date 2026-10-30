@@ -190,6 +190,9 @@ class BackendCore {
   std::size_t draw_count{};
   std::size_t compiled_shader_count{};
   GpuPerformanceCounters performance{};
+  // Why draws and resolves failed (see GpuFailureLog); each failure is also
+  // written to the "gpu" error log, rate-limited per reason.
+  GpuFailureLog failure_log{};
   // Part 7 of the AC6 Runtime Readiness pass - see GpuUnsupportedCounters's
   // doc comment. Incremented at the point each category is actually
   // detected, never inferred after the fact from error strings.

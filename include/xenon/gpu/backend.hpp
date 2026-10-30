@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "xenon/gpu/edram.hpp"
+#include "xenon/gpu/failure_log.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/register_file.hpp"
@@ -141,6 +143,9 @@ class Backend {
   // What the most recent failure was (a present that returned Error, a
   // draw that could not be recorded), for diagnostics; empty if none.
   [[nodiscard]] virtual std::string last_error() const { return {}; }
+  // Every distinct reason a draw or resolve failed this run, with counts (see
+  // GpuFailureLog); last_error() alone keeps only the newest.
+  [[nodiscard]] virtual std::vector<GpuFailureReason> failure_reasons() const { return {}; }
   [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
     return {};
   }

@@ -398,6 +398,10 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
   return impl_->performance_counters();
 }
 
+std::vector<GpuFailureReason> Backend::failure_reasons() const {
+  return impl_->failure_log.reasons();
+}
+
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
   return impl_->unsupported_counters();
 }

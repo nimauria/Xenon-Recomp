@@ -329,6 +329,10 @@ void XenonSession::report_stop_diagnostics() {
                     << performance.resolve_operations << " (" << performance.failed_resolves
                     << " failed); last error: "
                     << (gpu_->last_error().empty() ? "none" : gpu_->last_error()) << std::endl;
+          for (const auto& reason : gpu_->failure_reasons()) {
+            std::cout << "[XenonSession]   " << (reason.resolve ? "resolve" : "draw")
+                      << " failed x" << reason.count << ": " << reason.message << std::endl;
+          }
         }
         // Whether the scanout source holds an image at all: a black window
         // with an all-zero front buffer is a rendering problem, not a

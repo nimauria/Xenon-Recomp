@@ -108,6 +108,15 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       error = std::move(previous_error);
     } else {
       ++(resolve ? performance.failed_resolves : performance.failed_draws);
+      // The first 64 of each reason, then every 1000th: a draw that fails
+      // every frame stays readable in the log; the stop report has totals.
+      const auto occurrence = failure_log.record(error, resolve);
+      if (occurrence != 0u && (occurrence <= 64u || occurrence % 1000u == 0u)) {
+        xenon::logging::Logger::instance().log(
+            xenon::logging::Level::Error, "gpu",
+            std::string(resolve ? "resolve" : "draw") + " failed (#" +
+                std::to_string(occurrence) + " of this reason): " + error);
+      }
     }
     if (resolve) return;
   }

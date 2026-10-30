@@ -35,6 +35,7 @@ class Backend final : public xenon::gpu::Backend {
                                          std::uint32_t height) override;
   [[nodiscard]] bool presentation_ready() const noexcept override;
   [[nodiscard]] GpuPerformanceCounters performance_counters() const noexcept override;
+  [[nodiscard]] std::vector<GpuFailureReason> failure_reasons() const override;
   [[nodiscard]] GpuUnsupportedCounters unsupported_counters() const noexcept override;
   [[nodiscard]] GpuShaderCoverage shader_coverage() const noexcept override;
   void sync_guest_reads() override;

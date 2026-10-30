@@ -27,6 +27,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/guest_read_sync.cpp
     common/backend_capabilities.cpp
     common/display_vblank.cpp
+    common/failure_log.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)
