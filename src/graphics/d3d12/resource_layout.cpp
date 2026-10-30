@@ -4,6 +4,8 @@
 #include <array>
 #include <span>
 
+#include "xenon/gpu/sampler_address.hpp"
+
 namespace xenon::gpu::d3d12 {
 namespace {
 
@@ -245,19 +247,19 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   device_->CreateShaderResourceView(resource, &view, resource_handle);
 
   const auto address_mode = [this](std::uint8_t clamp) {
-    switch (clamp) {
-      case 0: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-      case 1: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
-      case 2: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-      case 3: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
-      default:
-        // Real Xenos clamp mode is 0-3; anything else is guest-visible
-        // garbage or a value this backend does not yet map. Previously
-        // silently defaulted to BORDER with zero observability - Part 7 of
-        // the AC6 Runtime Readiness pass requires this be counted.
-        ++unsupported_sampler_behaviors_;
-        return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    SamplerAddress address{};
+    if (!xenos_sampler_address(clamp, address)) {
+      ++unsupported_sampler_behaviors_;
+      return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
     }
+    switch (address) {
+      case SamplerAddress::Wrap: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+      case SamplerAddress::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+      case SamplerAddress::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+      case SamplerAddress::MirrorOnceToEdge: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
+      case SamplerAddress::ClampToBorder: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    }
+    return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
   };
   D3D12_SAMPLER_DESC sampler{};
   sampler.Filter = state.aniso_filter ? D3D12_FILTER_ANISOTROPIC
@@ -265,6 +267,8 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   sampler.AddressU = address_mode(state.clamps[0]);
   sampler.AddressV = address_mode(state.clamps[1]);
   sampler.AddressW = address_mode(state.clamps[2]);
+  const float border = xenos_border_is_white(state.border_color) ? 1.0f : 0.0f;
+  for (auto& channel : sampler.BorderColor) channel = border;
   sampler.MipLODBias = float(state.lod_bias) / 32.0f;
   sampler.MaxAnisotropy = max_anisotropy(state.aniso_filter);
   sampler.MinLOD = float(state.mip_min_level);

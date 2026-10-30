@@ -161,5 +161,7 @@ if(XENON_BUILD_TESTS)
       display_vblank_tests.cpp xenon_graphics)
     xenon_add_standalone_test(xenon_guest_read_sync_tests
       guest_read_sync_tests.cpp xenon_graphics xenon_memory)
+    xenon_add_standalone_test(xenon_sampler_address_tests
+      sampler_address_tests.cpp xenon_graphics)
   endif()
 endif()

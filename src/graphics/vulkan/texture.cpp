@@ -5,6 +5,7 @@
 #include <span>
 #include <vector>
 
+#include "xenon/gpu/sampler_address.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
 
 namespace xenon::gpu::vulkan {
@@ -39,19 +40,19 @@ VkImageType image_type(TextureDimension dimension) {
 }
 
 VkSamplerAddressMode address_mode(std::uint8_t clamp, std::uint64_t& unsupported_counter) {
-  switch (clamp) {
-    case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    case 1: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-    case 2: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    case 3: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
-    default:
-      // Real Xenos clamp mode is 0-3; anything else is guest-visible
-      // garbage or a value this backend does not yet map. Previously
-      // silently defaulted to CLAMP_TO_BORDER with zero observability -
-      // Part 7 of the AC6 Runtime Readiness pass requires this be counted.
-      ++unsupported_counter;
-      return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+  SamplerAddress address{};
+  if (!xenos_sampler_address(clamp, address)) {
+    ++unsupported_counter;
+    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
   }
+  switch (address) {
+    case SamplerAddress::Wrap: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case SamplerAddress::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case SamplerAddress::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case SamplerAddress::MirrorOnceToEdge: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
+    case SamplerAddress::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+  }
+  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 }
 
 VkComponentSwizzle component_swizzle(std::uint16_t swizzle,
@@ -273,6 +274,9 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
   sampler_info.addressModeU = address_mode(descriptor.clamps[0], unsupported_sampler_behaviors_);
   sampler_info.addressModeV = address_mode(descriptor.clamps[1], unsupported_sampler_behaviors_);
   sampler_info.addressModeW = address_mode(descriptor.clamps[2], unsupported_sampler_behaviors_);
+  sampler_info.borderColor = xenos_border_is_white(descriptor.border_color)
+                                 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                                 : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
   sampler_info.mipLodBias = float(descriptor.lod_bias) / 32.0f;
   sampler_info.minLod = float(descriptor.mip_min_level);
   sampler_info.maxLod = float(descriptor.mip_max_level);
