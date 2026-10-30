@@ -39,6 +39,22 @@ if(MSVC)
   target_link_options(xenon_runtime_host PRIVATE /DEBUG /MAP)
 endif()
 
+# Host stack for every thread this process creates without an explicit size,
+# which includes each guest thread's host thread. Recompiled guest functions
+# keep their state in host frames several times the size of the PowerPC
+# frames they replace, so recursion a guest stack holds can overflow the 1 MiB
+# default: Ace Combat 6 died with STATUS_STACK_OVERFLOW starting the campaign
+# opening and got past it with 64 MiB. Only address space is reserved; pages
+# are committed as a stack actually grows. xenon_runtime_host_stack_tests
+# checks the built executable keeps this.
+set(XENON_RUNTIME_HOST_STACK_RESERVE 268435456 CACHE INTERNAL
+    "Host stack reserved per xenon_runtime_host thread (256 MiB)")
+if(MSVC)
+  target_link_options(xenon_runtime_host PRIVATE /STACK:${XENON_RUNTIME_HOST_STACK_RESERVE})
+elseif(WIN32)
+  target_link_options(xenon_runtime_host PRIVATE
+    -Wl,--stack,${XENON_RUNTIME_HOST_STACK_RESERVE})
+endif()
 # The game window belongs to this process (see presentation_host.hpp), reusing
 # the same SDL3 dependency xenon_input/xenon_audio already resolve rather than
 # adding a second window/UI toolkit.
