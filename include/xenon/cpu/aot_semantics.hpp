@@ -435,11 +435,22 @@ inline bool fp_strict_mode = [] {
   return !fp_strict_mode && state.fp_rounding_mode() == FpRoundingMode::Nearest;
 }
 
+// The strict path reads the host's exception flags around one operation, so
+// that operation has to happen at run time. Once a helper is inlined with
+// constant operands the compiler can fold "a + b" away, raising no flag (a
+// strict-mode test lost FE_INEXACT that way); a volatile read of each operand
+// keeps it a real instruction. The result store is volatile for the same reason.
+template <typename T>
+[[nodiscard]] inline T fp_operand(T value) noexcept {
+  volatile T held = value;
+  return held;
+}
+
 [[nodiscard]] inline double fp_add(CpuState& state, double a, double b) noexcept {
   if (fp_native(state)) return a + b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a + b;
+  volatile double r = fp_operand(a) + fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXISI;
   return r;
@@ -448,7 +459,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a - b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a - b;
+  volatile double r = fp_operand(a) - fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXISI;
   return r;
@@ -457,7 +468,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a * b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a * b;
+  volatile double r = fp_operand(a) * fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXIMZ;
   return r;
@@ -466,7 +477,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return a / b;
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = a / b;
+  volatile double r = fp_operand(a) / fp_operand(b);
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
     if (a == 0.0 && b == 0.0) last_fp_invalid_detail |= fpscr_bits::VXZDZ;
@@ -479,7 +490,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = std::sqrt(a);
+  volatile double r = std::sqrt(fp_operand(a));
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) last_fp_invalid_detail |= fpscr_bits::VXSQRT;
   return r;
@@ -488,7 +499,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return std::fma(a, b, c);
   begin_fp_operation(state);
   if (is_signaling_nan(a) || is_signaling_nan(b) || is_signaling_nan(c)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double r = std::fma(a,b,c);
+  volatile double r = std::fma(fp_operand(a), fp_operand(b), fp_operand(c));
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
     if ((a == 0.0 && std::isinf(b)) || (b == 0.0 && std::isinf(a))) last_fp_invalid_detail |= fpscr_bits::VXIMZ;
@@ -503,7 +514,7 @@ inline bool fp_strict_mode = [] {
   if (fp_native(state)) return 1.0 / std::sqrt(a);
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile double root = std::sqrt(a);
+  volatile double root = std::sqrt(fp_operand(a));
   volatile double r = 1.0 / root;
   finish_fp_operation();
   if ((last_fp_exceptions & FE_INVALID) && !last_fp_invalid_detail) {
@@ -523,7 +534,7 @@ inline bool fp_strict_mode = [] {
 
   begin_fp_operation(state);
   if (is_signaling_nan(a)) last_fp_invalid_detail |= fpscr_bits::VXSNAN;
-  volatile float f = static_cast<float>(a);
+  volatile float f = static_cast<float>(fp_operand(a));
   volatile double r = static_cast<double>(f);
   finish_fp_operation();
 
@@ -539,7 +550,7 @@ inline bool fp_strict_mode = [] {
 [[nodiscard]] inline double fp_from_i64(CpuState& state, std::uint64_t bits) noexcept {
   if (fp_native(state)) return static_cast<double>(static_cast<std::int64_t>(bits));
   begin_fp_operation(state);
-  volatile double r = static_cast<double>(static_cast<std::int64_t>(bits));
+  volatile double r = static_cast<double>(static_cast<std::int64_t>(fp_operand(bits)));
   finish_fp_operation();
   return r;
 }
