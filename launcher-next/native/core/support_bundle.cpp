@@ -155,7 +155,24 @@ fs::path create_support_bundle(const fs::path &storage, const Json &state) {
     for (const auto &source : job.value("_sources", Json::array()))
       if (source.is_string())
         private_values.push_back(source.get<std::string>());
+    const auto cache_paths = [&](const Json &location) {
+      if (location.is_object())
+        for (const auto *key : {"root", "configuredPath"})
+          if (location.contains(key) && location.at(key).is_string())
+            private_values.push_back(location.at(key));
+    };
+    cache_paths(job.value("_cacheLocation", Json::object()));
+    if (job.value("_command", "") == "cache.relocate" && job.contains("_data")) {
+      cache_paths(job.at("_data").value("source", Json::object()));
+      cache_paths(job.at("_data").value("target", Json::object()));
+    }
   }
+  for (const auto &location : state.value("cacheHistory", Json::array()))
+    for (const auto *key : {"root", "configuredPath"})
+      private_values.push_back(location.value(key, ""));
+  if (state.contains("cache"))
+    for (const auto *key : {"root", "configuredPath"})
+      private_values.push_back(state.at("cache").value(key, ""));
   for (const auto &module : state.at("modules"))
     private_values.push_back(module.value("path", ""));
   Json report = {{"launcher", "Xenon Launcher Next"},

@@ -4,6 +4,7 @@
 #include "core/dlc_catalog.hpp"
 #include "core/game_media.hpp"
 #include "core/game_activity.hpp"
+#include "core/launcher_paths.hpp"
 #include <algorithm>
 #include <chrono>
 namespace xenon::launcher_next {
@@ -25,10 +26,7 @@ Json &row(Json &rows, const std::string &id) {
       return value;
   throw std::runtime_error("The game or operation no longer exists");
 }
-bool within(const fs::path &path, const fs::path &root) {
-  const auto relative = path.lexically_relative(root);
-  return !relative.empty() && *relative.begin() != "..";
-}
+bool within(const fs::path &path, const fs::path &root) { return path_within(path, root); }
 Json owner(const Json &job) {
   return {{"owner", "xenon-launcher-next-library"},
           {"jobId", job.at("_ownerId")},
@@ -162,9 +160,7 @@ void LauncherService::enqueue_library(Json &next, const std::string &kind, const
       if (extension != ".xex" && extension != ".iso" && extension != ".xgd" && extension != ".dvd")
         throw std::runtime_error("Choose a game folder, XEX or disc image");
     }
-    auto configured = next["settings"].value("paths/games", "");
-    auto root = fs::absolute(configured.empty() ? storage_ / "games" : fs::u8path(configured))
-                    .lexically_normal();
+    auto root = launcher_destination(storage_, next["settings"], "paths/games");
     fs::create_directories(root);
     root = fs::canonical(root);
     if (within(root, source) || within(source, root) || within(storage_, source) ||

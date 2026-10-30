@@ -63,6 +63,27 @@ bool redirected_path(const fs::path &path) {
   return false;
 #endif
 }
+bool path_within(const fs::path &path, const fs::path &root) {
+  if (!path.is_absolute() || !root.is_absolute())
+    return false;
+  const auto candidate = path.lexically_normal(), boundary = root.lexically_normal();
+  auto part = candidate.begin();
+  for (const auto &expected : boundary) {
+    if (expected.empty())
+      continue;
+    if (part == candidate.end())
+      return false;
+#ifdef _WIN32
+    if (CompareStringOrdinal(part->c_str(), -1, expected.c_str(), -1, TRUE) != CSTR_EQUAL)
+      return false;
+#else
+    if (*part != expected)
+      return false;
+#endif
+    ++part;
+  }
+  return true;
+}
 void check_transfer_tree(const fs::path &path) {
   plain(path);
   std::size_t count = 0;

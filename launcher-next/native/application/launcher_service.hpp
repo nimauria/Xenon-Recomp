@@ -5,6 +5,8 @@
 #include "capture_index.hpp"
 #include "platform/storage_lock.hpp"
 #include "platform/desktop.hpp"
+#include "core/recovery.hpp"
+#include "core/presence.hpp"
 #include <filesystem>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -22,7 +24,8 @@ public:
       std::filesystem::path storage, bool safe_mode = false,
       std::filesystem::path fixture_host = {},
       std::function<void(const std::string &, const std::string &)> install_observer = {},
-      std::shared_ptr<IHttpClient> http = platform_http());
+      std::shared_ptr<IHttpClient> http = platform_http(),
+      std::unique_ptr<IPresenceTransport> presence_transport = {});
   ~LauncherService();
   Json request(const Json &request);
   Json snapshot();
@@ -43,9 +46,11 @@ private:
   void load();
   void validate(const Json &state) const;
   void notify(Json &next, const std::string &title, const std::string &message,
-              const std::string &severity = "info", Json action = Json::object());
+              const std::string &severity = "info", Json action = Json::object(),
+              bool program_title = true);
   void poll_runtime();
   Json project() const;
+  Json community_state() const;
   Json launch_configuration(const Json &state, const std::string &game_id) const;
   void enqueue_install(Json &next, const std::filesystem::path &source);
   void recover_install_jobs();
@@ -74,14 +79,22 @@ private:
   void recover_migrations();
   void enqueue_service(Json &next, const std::string &command, Json data);
   void run_service(const Json &job, const std::shared_ptr<std::atomic_bool> &cancel);
+  Json prepare_cache_relocation(const Json &next, const Json &data);
+  void run_cache_relocation(const Json &job, const std::shared_ptr<std::atomic_bool> &cancel);
+  void cleanup_cache_relocation(const Json &job);
   void run_module_scan(const Json &job, const std::shared_ptr<std::atomic_bool> &cancel);
+  void require_module_idle(const Json &state, const std::string &id,
+                           const std::string &ignore_job = "") const;
+  Json prepare_module_uninstall(Json &next, const std::string &id);
+  void run_module_uninstall(const Json &job, const std::shared_ptr<std::atomic_bool> &cancel);
   void refresh_module_presentations(Json &next);
   Json fetch_json(const std::string &url, const std::shared_ptr<std::atomic_bool> &cancel);
   std::filesystem::path storage_;
   StorageLock storage_lock_;
+  RecoveryState recovery_;
+  std::unique_ptr<PresenceService> presence_;
   Json state_;
   bool safe_mode_ = false;
-  bool recovery_needed_ = false;
   std::unique_ptr<IRuntimeAdapter> runtime_;
   std::unique_ptr<IHostServices> host_services_;
   std::string dismissed_session_;

@@ -1,6 +1,7 @@
 #include "launcher_service.hpp"
 #include "core/launcher_update.hpp"
 #include "core/releases.hpp"
+#include "core/cache_storage.hpp"
 namespace xenon::launcher_next {
 namespace fs = std::filesystem;
 void LauncherService::configure_update_installation(const fs::path &installation) {
@@ -44,10 +45,12 @@ fs::path LauncherService::prepare_update_installation(ProcessIdentity parent) {
           "The staged launcher release must be newer than the running application");
     installation = update_installation_;
     const auto id = update.at("_downloadId").get<std::string>();
+    const auto location = update.value("_cacheLocation", cache_location(storage_, Json::object()));
+    check_cache_location(storage_, location);
     if (id.empty() || id.size() > 100 ||
         id.find_first_not_of("0123456789abcdef-") != std::string::npos ||
         fs::u8path(update.at("_packagePath").get<std::string>()) !=
-            storage_ / "downloads" / id / "package.zip")
+            cache_root(storage_, location) / "downloads" / id / "package.zip")
       throw std::runtime_error("The staged launcher package no longer matches its download record");
     if (update.at("downloadVersion") != update.at("release").at("version") ||
         update.at("downloadDigest") != update.at("release").at("asset").at("sha256"))

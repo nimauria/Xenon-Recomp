@@ -3,6 +3,7 @@
 #include "game_media.hpp"
 #include "game_activity.hpp"
 #include "module_settings.hpp"
+#include "profile_names.hpp"
 #include "settings.hpp"
 #include "catalogues.hpp"
 #include "platform/legacy_storage.hpp"
@@ -43,16 +44,14 @@ std::string prefix(const std::string &name, std::size_t max) {
   return name.substr(0, offset);
 }
 std::string unique_name(const Json &profiles, const std::string &original) {
-  const auto first = original.find_first_not_of(" \t\r\n");
-  const auto trimmed =
-      first == std::string::npos
-          ? std::string{}
-          : original.substr(first, original.find_last_not_of(" \t\r\n") - first + 1);
+  const auto trimmed = trim_profile_name(original);
   const auto base = prefix(trimmed.empty() ? "Imported profile" : trimmed, 48);
   auto value = base;
   for (unsigned i = 2;
        std::any_of(profiles.begin(), profiles.end(),
-                   [&](const auto &p) { return lower(p.value("name", "")) == lower(value); });
+                   [&](const auto &p) {
+                     return profile_name_key(p.value("name", "")) == profile_name_key(value);
+                   });
        ++i) {
     const auto suffix = " (" + std::to_string(i) + ")";
     value = prefix(base, 48 - suffix.size()) + suffix;

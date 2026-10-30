@@ -1,6 +1,7 @@
 #include "application/launcher_service.hpp"
 #include "core/launcher_update.hpp"
 #include "include/cef_app.h"
+#include "include/base/cef_compiler_specific.h"
 #include "include/cef_browser.h"
 #include "include/cef_command_line.h"
 #include "include/cef_parser.h"
@@ -34,6 +35,9 @@ bool restart_requested = false;
 bool restart_safe = false;
 fs::path update_receipt;
 std::string update_token;
+#ifdef __APPLE__
+CefRefPtr<CefBrowser> primary_browser;
+#endif
 bool trusted(CefRefPtr<CefFrame> frame) {
   return frame && frame->IsMain() && frame->GetURL().ToString() == "xenon://app/";
 }
@@ -271,7 +275,13 @@ public:
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override { state_signal_->browser = browser; }
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    state_signal_->browser = browser;
+    browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
+#ifdef __APPLE__
+    primary_browser = browser;
+#endif
+  }
   void show_failure(CefRefPtr<CefFrame> frame, const std::string &description) {
     fallback_ =
         "data:text/html;charset=utf-8," +
@@ -318,6 +328,9 @@ public:
     return false;
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+#ifdef __APPLE__
+    primary_browser = nullptr;
+#endif
     state_signal_->browser = nullptr;
     service_->observe_changes({});
     router_->OnBeforeClose(browser);
@@ -635,6 +648,9 @@ public:
     fs::path startup_storage;
     try {
       auto directory = executable_directory();
+#ifdef __APPLE__
+      directory = directory.parent_path() / "Resources";
+#endif
       auto storage = xenon::launcher_next::default_storage();
       auto args = CefCommandLine::GetGlobalCommandLine();
       if (args->HasSwitch("data-dir"))
@@ -678,6 +694,11 @@ private:
   CefRefPtr<CefMessageRouterRendererSide> renderer_;
   IMPLEMENT_REFCOUNTING(App);
 };
+// Linux zygotes rotate the stack guard inside CefExecuteProcess. Its callers
+// must follow CEF's entry-point annotation, while other functions stay protected.
+#if defined(OS_LINUX)
+NO_STACK_PROTECTOR
+#endif
 int run(CefMainArgs args, void *sandbox) {
   CefRefPtr<App> app(new App);
   const auto result = CefExecuteProcess(args, app, sandbox);
@@ -752,6 +773,23 @@ CEF_BOOTSTRAP_EXPORT int RunWinMain(HINSTANCE instance, LPWSTR, int, void *sandb
     return 1;
   }
 }
+#elif defined(__APPLE__)
+int xenon_launcher_main(int argc, char **argv) { return run(CefMainArgs(argc, argv), nullptr); }
+void xenon_launcher_quit() {
+  if (primary_browser) primary_browser->GetHost()->CloseBrowser(false);
+}
+void xenon_launcher_reopen() {
+  if (!primary_browser) return;
+  const auto view = CefBrowserView::GetForBrowser(primary_browser);
+  if (view && view->GetWindow()) {
+    view->GetWindow()->Show();
+    view->GetWindow()->Restore();
+    view->GetWindow()->Activate();
+  }
+}
 #else
+#if defined(OS_LINUX)
+NO_STACK_PROTECTOR
+#endif
 int main(int argc, char **argv) { return run(CefMainArgs(argc, argv), nullptr); }
 #endif

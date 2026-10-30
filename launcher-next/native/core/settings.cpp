@@ -3,9 +3,16 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <regex>
 namespace xenon::launcher_next {
-void validate_setting(const std::string &key, const Json &value) {
-  if (key == "community/discordRichPresence" && value != false)
+void validate_setting(const std::string &key, const Json &value, bool presence_available) {
+  if (key == "general/language") {
+    if (!value.is_string() ||
+        (value != "auto" && !std::regex_match(value.get<std::string>(),
+                                              std::regex("^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$"))))
+      throw std::runtime_error("Choose an available language or the system default");
+  }
+  if (key == "community/discordRichPresence" && value != false && !presence_available)
     throw std::runtime_error(
         "Discord Rich Presence requires an available provider and a new explicit opt-in");
   const auto &schema = settings_definitions();

@@ -1,5 +1,7 @@
 #include "launcher_service.hpp"
 #include "core/archive.hpp"
+#include "core/cache_storage.hpp"
+#include "core/file_transfer.hpp"
 #include "picosha2/picosha2.h"
 #include <fstream>
 #include <regex>
@@ -7,11 +9,19 @@ namespace xenon::launcher_next {
 namespace fs = std::filesystem;
 void LauncherService::cache_catalog_art(Json &entry,
                                         const std::shared_ptr<std::atomic_bool> &cancel) {
-  const auto root = storage_ / "catalog-art";
+  Json location;
+  {
+    std::lock_guard lock(mutex_);
+    location = cache_location(storage_, state_);
+  }
+  check_cache_location(storage_, location, true);
+  const auto root = cache_root(storage_, location) / "catalog-art";
   std::error_code directory_error;
   fs::create_directories(root, directory_error);
   if (directory_error)
     return;
+  if (redirected_path(root) || fs::weakly_canonical(root) != root)
+    throw std::runtime_error("Artwork cache was redirected");
   const auto valid =
       std::regex("^assets/[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._/-]*\\.(?:png|jpg|jpeg|webp)$",
                  std::regex::icase);

@@ -2,6 +2,7 @@
 #include "core/archive.hpp"
 #include "core/file_transfer.hpp"
 #include "core/module_settings.hpp"
+#include "core/module_manifest.hpp"
 #include "core/dlc_catalog.hpp"
 #include <algorithm>
 #include <map>
@@ -87,12 +88,30 @@ void LauncherService::run_module_scan(const Json &job,
         throw std::runtime_error("Manifest was redirected");
       const auto definition = read_document(file, 1024 * 1024);
       (void)normalize_dlc_definitions(definition);
-      const auto module_id = definition.value("id", definition.value("moduleId", ""));
+      const auto module_id = module_identity(definition);
       if (!std::regex_match(module_id, identity) || !seen.insert(module_id).second)
         throw std::runtime_error("Invalid or duplicate module identity");
+      Json ownership = Json::object();
+      auto ancestor = path;
+      for (unsigned depth = 0; depth < 64 && ancestor.has_relative_path();
+           ++depth, ancestor = ancestor.parent_path()) {
+        if (!fs::is_regular_file(ancestor / "owner.json"))
+          continue;
+        const auto marker = read_document(ancestor / "owner.json", 4096);
+        const auto owner = marker.value("jobId", "");
+        if (!owner.empty() && owner.size() <= 100 &&
+            owner.find_first_not_of("0123456789abcdef-") == std::string::npos &&
+            marker == Json({{"owner", "xenon-launcher-next-module-install"}, {"jobId", owner}}) &&
+            ancestor.filename() == fs::u8path("xenon-" + owner)) {
+          ownership = {{"_installRoot", path_string(ancestor)}, {"_installOwnerId", owner}};
+          break;
+        }
+      }
       found.push_back({{"id", module_id},
                        {"path", path_string(path)},
+                       {"ownership", ownership},
                        {"manifest", definition},
+                       {"compatibility", module_compatibility(definition, path)},
                        {"schema", module_settings_schema(definition)}});
     } catch (const OperationCancelled &) {
       throw;
@@ -128,13 +147,15 @@ void LauncherService::run_module_scan(const Json &job,
                                    {"name", definition.value("name", module_id)},
                                    {"version", definition.value("version", "Unknown")},
                                    {"enabled", true},
-                                   {"managed", false},
+                                   {"managed", !entry.at("ownership").empty()},
                                    {"manifest", definition},
+                                   {"compatibility", entry.at("compatibility")},
                                    {"schema", schema},
                                    {"settings", module_settings_values(schema, Json::object())}});
         ++added;
       } else {
         (*existing)["manifest"] = definition;
+        (*existing)["compatibility"] = entry.at("compatibility");
         (*existing)["schema"] = schema;
         (*existing)["settings"] =
             module_settings_values(schema, existing->value("settings", Json::object()));
@@ -142,6 +163,13 @@ void LauncherService::run_module_scan(const Json &job,
         (*existing)["version"] = definition.value("version", "Unknown");
         ++refreshed;
       }
+      if (!entry.at("ownership").empty())
+        for (auto &module : next["modules"])
+          if (module.at("id") == module_id) {
+            module["managed"] = true;
+            module["_installRoot"] = entry.at("ownership").at("_installRoot");
+            module["_installOwnerId"] = entry.at("ownership").at("_installOwnerId");
+          }
     }
     refresh_module_presentations(next);
     next["serviceResult"] = {

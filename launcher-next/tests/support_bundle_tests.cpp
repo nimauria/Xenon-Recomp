@@ -21,7 +21,9 @@ int main() {
         std::string("Renderer diagnostic at C:\\Users\\PrivateUser\\Desktop\\game.iso and "
                     "/home/HiddenName/games\nmail alice@example.test\nAuthorization: Bearer "
                     "keep-this-secret\napi_token=keep-this-token\nPilot SecretPilot loaded "
-                    "E:/PrivateGames/Game\nError code 1234 in renderer.cpp:70\n");
+                    "E:/PrivateGames/Game\nSecondary media F:/RegionalCopies/PAL Disc.iso\n"
+                    "Copied from G:/ImportedMedia/Disc.iso\nCache failure H:/PendingCache/partial\n"
+                    "Old cache I:/PreviousCache/files\nError code 1234 in renderer.cpp:70\n");
     const auto cleaned = redact_support_text(raw, {"SecretPilot", "E:/PrivateGames"});
     for (const auto *secret :
          {"PrivateUser", "HiddenName", "alice@example.test", "keep-this-secret", "keep-this-token",
@@ -36,12 +38,24 @@ int main() {
       auto state = service.snapshot();
       state["profiles"][0]["name"] = "SecretPilot";
       state["settings"]["paths/games"] = "E:/PrivateGames";
+      state["games"].push_back(
+          {{"contentPath", "E:/PrivateGames/Game"},
+           {"media", Json::array({{{"sourcePath", "F:/RegionalCopies/PAL Disc.iso"},
+                                   {"name", "PAL Disc"}}})},
+           {"managedCopies", Json::array({{{"originalPath", "G:/ImportedMedia/Disc.iso"}}})}});
       state["settings"]["network/baseUrl"] = "https://secret.example/?auth=private";
       state["jobs"].push_back({{"id", "support-test"},
                                {"kind", "fixture"},
                                {"state", "failed"},
                                {"progress", 10},
                                {"error", "Authorization: Bearer secret"}});
+      state["jobs"].push_back({{"id", "cache-test"},
+                               {"kind", "service.operation"},
+                               {"state", "failed"},
+                               {"progress", 10},
+                               {"_command", "cache.relocate"},
+                               {"_data", {{"target", {{"root", "H:/PendingCache"}}}}}});
+      state["cacheHistory"] = Json::array({{{"root", "I:/PreviousCache"}}});
       const auto zip = create_support_bundle(root, state), destination = root / "unpacked";
       extract_package(zip, destination);
       const auto report = read_document(destination / "diagnostics.json");
@@ -51,7 +65,11 @@ int main() {
             "Private path and endpoint settings must not be exported");
       const auto log = read(destination / "logs/renderer.log");
       check(log.find("SecretPilot") == std::string::npos &&
-                log.find("keep-this-secret") == std::string::npos,
+                log.find("keep-this-secret") == std::string::npos &&
+                log.find("F:/RegionalCopies/PAL Disc.iso") == std::string::npos &&
+                log.find("G:/ImportedMedia/Disc.iso") == std::string::npos &&
+                log.find("H:/PendingCache") == std::string::npos &&
+                log.find("I:/PreviousCache") == std::string::npos,
             "Included log excerpts must be sanitized");
       check(read(root / "renderer.log") == raw, "Export must not modify source logs");
       check(fs::exists(destination / "privacy.txt"), "Bundle must explain its local contents");

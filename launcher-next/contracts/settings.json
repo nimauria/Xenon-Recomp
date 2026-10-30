@@ -1,5 +1,13 @@
 [
   {
+    "key": "general/language",
+    "category": "general",
+    "type": "string",
+    "label": "Language",
+    "default": "auto",
+    "options": []
+  },
+  {
     "key": "general/startupPage",
     "category": "general",
     "type": "enum",

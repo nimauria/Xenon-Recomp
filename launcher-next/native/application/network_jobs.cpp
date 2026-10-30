@@ -1,7 +1,10 @@
 #include "launcher_service.hpp"
 #include "core/archive.hpp"
 #include "core/releases.hpp"
+#include "core/module_presentation.hpp"
 #include "core/launcher_update.hpp"
+#include "core/cache_storage.hpp"
+#include "core/file_transfer.hpp"
 #include "picosha2/picosha2.h"
 #include <algorithm>
 #include <chrono>
@@ -170,9 +173,16 @@ void LauncherService::enqueue_network(Json &next, const std::string &kind,
     throw std::runtime_error("Online services are disabled in this launcher session");
   if (!network_job_kind(kind))
     throw std::runtime_error("Unsupported online operation");
+  if (kind == "module.download")
+    for (const auto &job : next["jobs"])
+      if (active(job) && job.value("_command", "") == "modules.uninstall")
+        throw std::runtime_error("Wait for module uninstall before downloading packages");
   unsigned pending = 0;
   for (const auto &job : next["jobs"])
     if (active(job)) {
+      if (cache_relocation_job(job))
+        throw std::runtime_error(
+            "Wait for cache relocation to finish before starting online operations");
       ++pending;
       if (job.value("kind", "") == kind && job.value("moduleId", "") == module_id)
         throw std::runtime_error("This online operation is already active");
@@ -228,6 +238,7 @@ void LauncherService::enqueue_network(Json &next, const std::string &kind,
       job["title"] = "Download " + entry.at("name").get<std::string>() + " " +
                      value["release"].at("version").get<std::string>();
       job["_release"] = value.at("release");
+      job["_cacheLocation"] = cache_location(storage_, next);
       value["state"] = "downloading";
     }
     value["jobId"] = job["id"];
@@ -294,9 +305,11 @@ void LauncherService::cleanup_download(const Json &job) {
   if (id.empty() || id.size() > 100 ||
       id.find_first_not_of("0123456789abcdef-") != std::string::npos)
     throw std::runtime_error("Invalid download identity");
-  const auto directory = fs::absolute(storage_ / "downloads" / id).lexically_normal();
+  const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
+  const auto directory = cache_root(storage_, location) / "downloads" / id;
   if (!fs::exists(directory))
     return;
+  check_cache_location(storage_, location);
   if (fs::weakly_canonical(directory) != directory ||
       read_document(directory / "owner.json", 4096) != download_owner(id))
     throw std::runtime_error("Download ownership changed; temporary files were retained");
@@ -308,6 +321,7 @@ void LauncherService::cleanup_download(const Json &job) {
     if (state_["launcherUpdate"].value("_downloadId", "") == id)
       return;
   }
+  check_transfer_tree(directory);
   fs::remove_all(directory);
 }
 void LauncherService::run_network(const Json &job,
@@ -355,6 +369,21 @@ void LauncherService::run_network(const Json &job,
           {"errors", errors},
           {"lastChecked", now()},
           {"lastError", errors.empty() ? "" : "Some module entries could not be loaded"}};
+      refresh_module_presentations(next);
+      for (const auto &operation : next["jobs"])
+        if (operation.at("id") == id && operation.contains("_metadataRefresh"))
+          for (auto request = operation.at("_metadataRefresh").begin();
+               request != operation.at("_metadataRefresh").end(); ++request)
+            for (auto &game : next["games"])
+              if (game.at("id") == request.key() &&
+                  game.value("moduleId", "") == request.value().at("moduleId").get<std::string>() &&
+                  game.at("title") == request.value().at("expectedTitle"))
+                for (const auto &module : next["modules"])
+                  if (module.at("id") == request.value().at("moduleId"))
+                    apply_module_presentation(
+                        game, module,
+                        presentation_catalog_entry(next, module.at("id").get<std::string>()),
+                        next["revision"].get<std::int64_t>() + 1, true);
       if (job.value("_checkInstalled", false))
         enqueue_network(next, "module.checkAll");
     });
@@ -427,8 +456,13 @@ void LauncherService::run_network(const Json &job,
     const auto expected = sha256_digest(asset.at("sha256"));
     if (expected.empty())
       throw std::runtime_error("Missing SHA-256 package digest");
-    const auto directory = fs::absolute(storage_ / "downloads" / id).lexically_normal();
+    const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
+    check_cache_location(storage_, location, true);
+    const auto directory = cache_root(storage_, location) / "downloads" / id;
     fs::create_directories(directory.parent_path());
+    if (redirected_path(directory.parent_path()) ||
+        fs::weakly_canonical(directory.parent_path()) != directory.parent_path())
+      throw std::runtime_error("Download cache was redirected");
     if (!fs::create_directory(directory) || fs::weakly_canonical(directory) != directory)
       throw std::runtime_error("Could not create a fresh download directory");
     write_document(directory / "owner.json", download_owner(id));
@@ -481,6 +515,7 @@ void LauncherService::run_network(const Json &job,
       value["state"] = "ready-to-install";
       value["_packagePath"] = path_string(complete);
       value["_downloadId"] = id;
+      value["_cacheLocation"] = location;
       value["downloadVersion"] = release.at("version");
       value["downloadDigest"] = expected;
       value["lastError"] = "";

@@ -1,6 +1,9 @@
 #include "launcher_service.hpp"
 #include "core/archive.hpp"
 #include "core/module_settings.hpp"
+#include "core/module_manifest.hpp"
+#include "core/launcher_paths.hpp"
+#include "core/cache_storage.hpp"
 #include "core/releases.hpp"
 #include "picosha2/picosha2.h"
 #include <algorithm>
@@ -113,6 +116,10 @@ void LauncherService::enqueue_install(Json &next, const fs::path &input) {
   for (const auto &job : next["jobs"])
     if (active(job)) {
       ++pending;
+      if (cache_relocation_job(job))
+        throw std::runtime_error("Wait for cache relocation to finish before installing packages");
+      if (job.value("_command", "") == "modules.uninstall")
+        throw std::runtime_error("Wait for module uninstall to finish before installing packages");
       if (job.value("kind", "") == "module.install" &&
           job.value("_source", "") == path_string(source))
         throw std::runtime_error("This package already has an active installation");
@@ -128,10 +135,7 @@ void LauncherService::enqueue_install(Json &next, const fs::path &input) {
       break;
     rows.erase(old);
   }
-  const auto configured = next["settings"].value("paths/modules", "");
-  const auto requested =
-      fs::absolute(configured.empty() ? storage_ / "modules" : fs::u8path(configured))
-          .lexically_normal();
+  const auto requested = launcher_destination(storage_, next["settings"], "paths/modules");
   fs::create_directories(requested);
   const auto root = fs::weakly_canonical(requested);
   next["jobs"].push_back({{"id", make_id()},
@@ -157,7 +161,8 @@ void LauncherService::recover_install_jobs() {
                      "Retry when ready.";
       const auto kind = job.value("kind", "");
       job["_cleanup"] = kind == "library.transfer" || kind == "module.install" ||
-                        kind == "module.download" || kind == "launcher.download";
+                        kind == "module.download" || kind == "launcher.download" ||
+                        cache_relocation_job(job);
       apply_online_error(state_, job,
                          "The previous online operation was interrupted. Retry when ready.");
       job["endedAt"] = time_now();
@@ -234,7 +239,9 @@ void LauncherService::jobs_worker() noexcept {
       if (cleanup) {
         std::string error;
         try {
-          if (job.value("kind", "") == "module.install")
+          if (cache_relocation_job(job))
+            cleanup_cache_relocation(job);
+          else if (job.value("kind", "") == "module.install")
             cleanup_install(job);
           else if (library_job_kind(job.value("kind", "")))
             cleanup_library(job);
@@ -279,7 +286,8 @@ void LauncherService::jobs_worker() noexcept {
                                    : error.what()},
              {"endedAt", time_now()},
              {"_cleanup", kind == "library.transfer" || kind == "module.install" ||
-                              kind == "module.download" || kind == "launcher.download"}});
+                              kind == "module.download" || kind == "launcher.download" ||
+                              cache_relocation_job(job)}});
       }
       {
         std::lock_guard lock(mutex_);
@@ -409,6 +417,8 @@ void LauncherService::run_install(const Json &job,
       break;
     }
   (void)module_settings_schema(definition);
+  const auto module_id = module_identity(definition);
+  (void)module_compatibility(definition, candidates[0]);
   if (job.contains("_expectedModuleId") &&
       definition.value("id", definition.value("moduleId", "")) !=
           job.at("_expectedModuleId").get<std::string>())
@@ -425,6 +435,7 @@ void LauncherService::run_install(const Json &job,
     std::lock_guard lock(mutex_);
     check();
     auto committing = state_;
+    require_module_idle(committing, module_id, id);
     auto &row = job_row(committing, id);
     row["state"] = "committing";
     row["phase"] = "Installing";
@@ -442,6 +453,11 @@ void LauncherService::run_install(const Json &job,
     std::lock_guard lock(mutex_);
     auto next = state_;
     register_installed_module(next, definition, paths.installed / relative);
+    for (auto &module : next["modules"])
+      if (module.at("id") == module_id) {
+        module["_installRoot"] = path_string(paths.installed);
+        module["_installOwnerId"] = id;
+      }
     auto &completed = job_row(next, id);
     completed["state"] = "completed";
     completed["phase"] = "Completed";

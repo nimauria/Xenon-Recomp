@@ -115,6 +115,7 @@ public:
     session_ = {{"sessionId", id},
                 {"sessionDir", configuration.at("sessionDir")},
                 {"gameId", configuration.value("gameId", "")},
+                {"moduleId", configuration.value("moduleId", "")},
                 {"primaryMediaId", configuration.value("primaryMediaId", "")},
                 {"title", configuration.value("title", "")},
                 {"state", "starting"},
