@@ -197,9 +197,9 @@ bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
   bool match = actual.size() == expected.size();
   for (std::size_t pixel = 0; match && pixel < actual.size(); ++pixel) {
     const auto a = actual[pixel], e = expected[pixel];
-    const auto a_depth = a & 0x00FFFFFFu, e_depth = e & 0x00FFFFFFu;
+    const auto a_depth = a >> 8u, e_depth = e >> 8u;
     const auto depth_error = a_depth > e_depth ? a_depth - e_depth : e_depth - a_depth;
-    if ((a >> 24u) == (e >> 24u) && depth_error <= (unorm24 ? 1u : 0u)) continue;
+    if ((a & 0xFFu) == (e & 0xFFu) && depth_error <= (unorm24 ? 1u : 0u)) continue;
     std::cerr << backend_label << " depth mismatch: format="
               << static_cast<unsigned>(format) << " sample=" << sample
               << " pixel=" << pixel << " expected=0x" << std::hex << e

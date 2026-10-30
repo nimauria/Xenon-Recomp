@@ -229,7 +229,7 @@ std::uint32_t depth_pattern(DepthRenderTargetFormat format,
           ? (0xF00000u + sample * 0x10000u + y * 0x100u + x)
           : (0x180000u + sample * 0x20000u + y * 0x100u + x);
   const auto stencil = 0x50u + sample;
-  return (stencil << 24u) | (depth & 0x00FFFFFFu);
+  return ((depth & 0x00FFFFFFu) << 8u) | stencil;
 }
 
 template <typename Backend>

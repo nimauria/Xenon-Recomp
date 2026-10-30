@@ -31,6 +31,12 @@ struct DepthStencilSample {
 // Converts between the canonical 32-bit Xenos EDRAM representation and a
 // native depth/stencil value. Keeping the packed word authoritative makes both
 // D24S8 and D24FS8 reversible even when a host API exposes float32 depth.
+//
+// The word is the hardware's: depth (unorm 24 or 20e4) in bits 31..8 and
+// stencil in bits 7..0. RB_DEPTH_CLEAR, EDRAM depth tiles, depth resolves and
+// sampled 24_8 / 24_8_FLOAT textures all use it (xenia's depth loads take
+// depth as word >> 8), so a clear word copied straight from the register
+// unpacks to the depth and stencil the title asked for.
 [[nodiscard]] std::uint32_t pack_depth_stencil(
     DepthRenderTargetFormat format, float depth, std::uint8_t stencil,
     Float20e4Rounding rounding = Float20e4Rounding::NearestEven) noexcept;

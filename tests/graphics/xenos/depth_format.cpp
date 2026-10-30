@@ -65,7 +65,7 @@ void test_packed_depth_stencil() {
   using namespace xenon::gpu;
   constexpr std::uint8_t kStencil = 0xA7;
   for (const auto code : {0u, 1u, 0x7FFFFFu, 0xFFFFFEu, 0xFFFFFFu}) {
-    const auto packed = code | (std::uint32_t(kStencil) << 24u);
+    const auto packed = (code << 8u) | kStencil;
     const auto value = unpack_depth_stencil(DepthRenderTargetFormat::D24S8,
                                              packed);
     assert(value.stencil == kStencil);
@@ -73,7 +73,7 @@ void test_packed_depth_stencil() {
                               value.stencil) == packed);
   }
   for (const auto code : {0u, 1u, 0x0FFFFFu, 0xE00000u, 0xFFFFFFu}) {
-    const auto packed = code | (std::uint32_t(kStencil) << 24u);
+    const auto packed = (code << 8u) | kStencil;
     const auto value = unpack_depth_stencil(DepthRenderTargetFormat::D24FS8,
                                              packed);
     assert(value.stencil == kStencil);
@@ -81,9 +81,9 @@ void test_packed_depth_stencil() {
                               value.stencil) == packed);
   }
   assert(pack_depth_stencil(DepthRenderTargetFormat::D24S8, -1.0f, 3) ==
-         0x03000000u);
+         0x00000003u);
   assert(pack_depth_stencil(DepthRenderTargetFormat::D24S8, 2.0f, 3) ==
-         0x03FFFFFFu);
+         0xFFFFFF03u);
   for (const auto depth : {0.0f, 0.5f, 1.0f, 1.25f, 1.5f, 1.99999f}) {
     const auto packed = pack_depth_stencil(DepthRenderTargetFormat::D24FS8,
                                            depth, 0x5Au);
@@ -99,11 +99,40 @@ void test_packed_depth_stencil() {
                                  host.depth, host.stencil) == packed);
   }
   for (const auto code : {0u, 1u, 0x7FFFFFu, 0x800000u, 0xFFFFFFu}) {
-    const auto packed = code | 0xC3000000u;
+    const auto packed = (code << 8u) | 0xC3u;
     const auto host = depth_stencil_to_host(
         DepthRenderTargetFormat::D24S8, packed);
     assert(host_to_depth_stencil(DepthRenderTargetFormat::D24S8,
                                  host.depth, host.stencil) == packed);
+  }
+}
+
+// Regression (AC6 campaign opening rendered black with no failed draws): a
+// post-resolve depth clear copies RB_DEPTH_CLEAR into EDRAM as is, and the
+// register holds depth in bits 31..8 and stencil in 7..0. The packed word
+// used depth in the low 24 bits and stencil in the top 8, so the common
+// "depth 1.0, stencil 0" clear (0xFFFFFF00) read back as stencil 0xFF and
+// every stencil-tested pass after it drew nothing.
+void test_clear_register_words_unpack_as_written() {
+  using namespace xenon::gpu;
+  auto value = unpack_depth_stencil(DepthRenderTargetFormat::D24S8, 0xFFFFFF00u);
+  assert(value.depth == 1.0f && value.stencil == 0u);
+  value = unpack_depth_stencil(DepthRenderTargetFormat::D24S8, 0x00000080u);
+  assert(value.depth == 0.0f && value.stencil == 0x80u);
+  value = unpack_depth_stencil(DepthRenderTargetFormat::D24S8, 0x80000001u);
+  assert(value.stencil == 1u);
+  assert(value.depth > 0.5f && value.depth < 0.5001f);
+  // 20e4 depth 1.0 is exponent 15 (0xF00000): the word is 0xF0000000 | stencil.
+  value = unpack_depth_stencil(DepthRenderTargetFormat::D24FS8, 0xF0000042u);
+  assert(value.depth == 1.0f && value.stencil == 0x42u);
+  assert(pack_depth_stencil(DepthRenderTargetFormat::D24S8, 1.0f, 0) == 0xFFFFFF00u);
+  assert(pack_depth_stencil(DepthRenderTargetFormat::D24FS8, 1.0f, 0x42) == 0xF0000042u);
+  // As the reference's load shader decodes sampled 24_8: (d + (d >> 23)) / 2^24
+  // with d = word >> 8.
+  for (const std::uint32_t word : {0x00000000u, 0x12345600u, 0x7FFFFF00u, 0xFFFFFFFFu}) {
+    const auto d = word >> 8u;
+    const float expected = float(d + (d >> 23u)) * (1.0f / 16777216.0f);
+    assert(unpack_depth_stencil(DepthRenderTargetFormat::D24S8, word).depth == expected);
   }
 }
 
@@ -115,5 +144,6 @@ int main() {
   test_rounding_modes();
   test_round_trip_lattice_samples();
   test_packed_depth_stencil();
+  test_clear_register_words_unpack_as_written();
   std::cout << "xenon_depth_format_tests: ok\n";
 }

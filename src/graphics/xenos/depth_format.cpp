@@ -80,18 +80,18 @@ std::uint32_t pack_depth_stencil(DepthRenderTargetFormat format, float depth,
     depth_bits = static_cast<std::uint32_t>(
         std::nearbyint(static_cast<double>(clamped) * 16777215.0));
   }
-  return depth_bits | (std::uint32_t(stencil) << 24u);
+  return (depth_bits << 8u) | stencil;
 }
 
 DepthStencilSample unpack_depth_stencil(DepthRenderTargetFormat format,
                                         std::uint32_t packed) noexcept {
-  const auto depth_bits = packed & 0x00FFFFFFu;
+  const auto depth_bits = packed >> 8u;
   DepthStencilSample result{};
   result.depth = format == DepthRenderTargetFormat::D24FS8
                      ? float20e4_to_float32(depth_bits)
                      : float(depth_bits + (depth_bits >> 23u)) *
                            (1.0f / float(1u << 24u));
-  result.stencil = static_cast<std::uint8_t>(packed >> 24u);
+  result.stencil = static_cast<std::uint8_t>(packed & 0xFFu);
   return result;
 }
 
