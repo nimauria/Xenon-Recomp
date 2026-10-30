@@ -146,6 +146,24 @@ int main() {
   }
   std::cout << "  [PASS] write_capability_report() publishes valid JSON atomically\n";
 
+  // Regression: relaunching the same launch config found the previous run's
+  // stop.signal and stopped the new session immediately. A stop request
+  // older than this launch is discarded; a fresh one is kept.
+  {
+    const auto stop_path = session_dir / "stop.signal";
+    std::ofstream(stop_path).put('\n');
+    std::filesystem::last_write_time(
+        stop_path, std::filesystem::file_time_type::clock::now() - std::chrono::minutes(5));
+    xenon::runtime_host::StatusWriter stale(session_dir.string(), launch);
+    assert(!stale.stop_requested() && "a previous session's stop request must not end this one");
+
+    std::ofstream(stop_path).put('\n');
+    xenon::runtime_host::StatusWriter fresh(session_dir.string(), launch);
+    assert(fresh.stop_requested() && "a stop requested during startup must be honoured");
+    std::filesystem::remove(stop_path);
+  }
+  std::cout << "  [PASS] a stale stop.signal from an earlier session is discarded\n";
+
   std::filesystem::remove_all(session_dir);
   std::cout << "All StatusWriter tests passed!\n";
   return 0;

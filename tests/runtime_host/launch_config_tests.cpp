@@ -6,6 +6,7 @@
 // process-spawning dependency.
 
 #include "launch_config.hpp"
+#include "host_setup.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -145,6 +146,11 @@ int main() {
     assert(config.save_path == "C:/Xenon/saves/halo3");
     assert(config.screenshots_path == "C:/Xenon/screenshots/halo3");
     assert(config.offline == false);
+
+    // Regression: savePath was parsed but never handed to the session, so
+    // game saves went to a new temporary folder each run and were lost.
+    const auto session_config = xenon::runtime_host::build_session_config(config);
+    assert(session_config.save_root_path == std::filesystem::path("C:/Xenon/saves/halo3"));
   }
   std::cout << "  [PASS] Valid config round-trips every field\n";
 

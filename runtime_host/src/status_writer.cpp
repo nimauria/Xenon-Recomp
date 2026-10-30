@@ -102,6 +102,16 @@ StatusWriter::StatusWriter(std::string session_dir, LaunchConfig config)
       config_(std::move(config)),
       started_at_epoch_ms_(now_epoch_ms()) {
   std::filesystem::create_directories(session_dir_);
+  // A stop request older than this launch was left by an earlier session in
+  // the same directory (relaunching one launch config does this) and would
+  // end this one at once. A request the launcher makes during startup is
+  // newer than that and is kept.
+  constexpr auto kStartupSlack = std::chrono::seconds(2);
+  std::error_code error;
+  const auto requested = std::filesystem::last_write_time(stop_signal_path(), error);
+  if (!error && requested < std::filesystem::file_time_type::clock::now() - kStartupSlack) {
+    std::filesystem::remove(stop_signal_path(), error);
+  }
 }
 
 std::string StatusWriter::status_path() const {

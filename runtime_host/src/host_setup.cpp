@@ -192,6 +192,11 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   config.audio_mute_unfocused = launch.audio_mute_unfocused;
   config.audio_latency_profile = launch.audio_latency_profile;
 
+  // Game saves (XamContentCreate) and title profile settings live here.
+  // Without it the session falls back to a fresh temporary folder per run,
+  // so a save made in one session was gone in the next.
+  if (!launch.save_path.empty()) config.save_root_path = launch.save_path;
+
   config.native_extension_path = launch.native_extension_path;
   if (!launch.adaptive_observation_path.empty())
     config.adaptive_observation_path = launch.adaptive_observation_path;
