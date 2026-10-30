@@ -1,3 +1,4 @@
+import { t, tText } from "../localization";
 import { useLauncher } from "./context";
 export function SessionPanel() {
   const { state, busy, action } = useLauncher();
@@ -7,30 +8,25 @@ export function SessionPanel() {
   return (
     <section
       className={`session-panel${session.state === "failed" ? " session-failed" : ""}`}
-      aria-label="Current session"
+      aria-label={t("ui.a32789d2b53d")}
     >
       <div>
         <strong>
-          {session.fixture ? "Development fixture runtime" : "Runtime session"}
+          {session.fixture ? t("ui.b85587ed6193") : t("ui.92fbc8484002")}
         </strong>
         <span role="status">
           {session.title ? `${session.title} · ` : ""}
-          {session.state.replaceAll("-", " ")}
+          {tText(session.state)}
         </span>
-        {session.fixture && (
-          <small>
-            This provider tests launcher lifecycle only. It does not execute a
-            game.
-          </small>
-        )}
-        {session.lastError && <p role="alert">{session.lastError}</p>}
+        {session.fixture && <small>{t("ui.5203ba38197c")}</small>}
+        {session.lastError && <p role="alert">{tText(session.lastError)}</p>}
       </div>
       {active ? (
         <button
           disabled={busy || session.state === "stopping"}
           onClick={() => void action("session.stop")}
         >
-          Stop test session
+          {t("ui.7b4213c0988d")}
         </button>
       ) : (
         session.state !== "idle" && (
@@ -38,7 +34,7 @@ export function SessionPanel() {
             disabled={busy}
             onClick={() => void action("session.dismiss")}
           >
-            Dismiss
+            {t("ui.48845bff334a")}
           </button>
         )
       )}

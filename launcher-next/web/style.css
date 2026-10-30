@@ -1519,3 +1519,11 @@ header select {
   max-height: 300px;
   overflow: auto;
 }
+/* Native popovers stay above modal-free page content and use the shared tokens. */
+.action-menu {
+  position:fixed;inset:auto;margin:0;padding:6px;min-width:220px;max-width:calc(100vw - 16px);
+  max-height:calc(100vh - 16px);overflow:auto;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);color:var(--text);box-shadow:0 12px 38px #0005;
+}
+.action-menu button {display:block;width:100%;text-align:start;border:0;background:transparent;}
+.action-menu button:focus-visible,.action-menu button:hover {background:var(--surface-hover,var(--panel));}

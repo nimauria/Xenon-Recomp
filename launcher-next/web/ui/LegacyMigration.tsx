@@ -1,3 +1,4 @@
+import { t } from "../localization";
 import { useState } from "react";
 import { isActiveJob } from "../jobs";
 import { useLauncher } from "./context";
@@ -13,20 +14,16 @@ export function LegacyMigration() {
     .find((job) => job.kind?.startsWith("migration."));
   const running = Boolean(operation && isActiveJob(operation));
   return (
-    <section className="legacy-migration" aria-label="Previous launcher data">
-      <h3>Bring your previous launcher data across</h3>
-      <p>
-        Review profiles, avatars, themes, settings and library/module references
-        before importing. The previous launcher's files stay in place. A backup
-        of this launcher's state is saved before import.
-      </p>
+    <section className="legacy-migration" aria-label={t("ui.2b36f4e9e378")}>
+      <h3>{t("ui.6e2c3ade539e")}</h3>
+      <p>{t("ui.ddf90d127ae5")}</p>
       <label>
-        Previous data folder
+        {t("ui.4f5809e124df")}
         <input
           readOnly
-          aria-label="Previous data folder"
+          aria-label={t("ui.4f5809e124df")}
           value={path}
-          placeholder="Discover the previous launcher's folders automatically"
+          placeholder={t("ui.a49daf7801a9")}
         />
       </label>
       <div className="actions">
@@ -37,16 +34,16 @@ export function LegacyMigration() {
             if (folder) setPath(folder);
           }}
         >
-          Choose copied data folder
+          {t("ui.92bdd5d642da")}
         </button>
         {path && (
           <button disabled={running} onClick={() => setPath("")}>
-            Use automatic discovery
+            {t("ui.eebd4ff210fc")}
           </button>
         )}
       </div>
       <label className="row">
-        Replace settings already saved in this launcher
+        {t("ui.e52a68807f3c")}
         <input
           type="checkbox"
           checked={replaceSettings}
@@ -55,7 +52,7 @@ export function LegacyMigration() {
         />
       </label>
       <label className="row">
-        Use the previous active profile after import
+        {t("ui.4598213400ff")}
         <input
           type="checkbox"
           checked={activateProfile}
@@ -73,7 +70,7 @@ export function LegacyMigration() {
           })
         }
       >
-        Review previous launcher data
+        {t("ui.3eaba41e5aed")}
       </button>
       {operation && (
         <p role="status">
@@ -85,23 +82,33 @@ export function LegacyMigration() {
         <div className="card">
           <h3>
             {review.state === "completed"
-              ? "Previous data imported"
-              : "Import review"}
+              ? t("ui.e21ebbdc943f")
+              : t("ui.4f7928797414")}
           </h3>
-          <p className="path">Source: {review.source}</p>
+          <p className="path">
+            {t("ui.1a5ac0bd0b6b")}
+            {review.source}
+          </p>
           <p>
-            {review.counts.profiles} profiles · {review.counts.avatars} avatars
-            · {review.counts.games} games · {review.counts.modules} modules ·{" "}
-            {review.counts.settings} settings · {review.counts.skipped} existing
-            entries/settings kept
+            {review.counts.profiles}
+            {t("ui.8c2485f7611b")}
+            {review.counts.avatars}
+            {t("ui.61616fcf6289")}
+            {review.counts.games}
+            {t("ui.9a11553bae04")}
+            {review.counts.modules}
+            {t("ui.d4ec5524cd37")} {review.counts.settings}
+            {t("ui.508d23934638")}
+            {review.counts.skipped}
+            {t("ui.31e4ef835989")}
           </p>
           <p>
             {review.replaceSettings
-              ? "Reviewed settings replace current values."
-              : "Current settings are kept where a value is already saved."}{" "}
+              ? t("ui.1b9f34d7e56f")
+              : t("ui.86a0285e4831")}{" "}
             {review.activateProfile
-              ? "The previous active profile will be selected."
-              : "Your current active profile will be kept."}
+              ? t("ui.8b0fda52673c")
+              : t("ui.8ac15bc76025")}
           </p>
           {review.changes &&
             Object.entries(review.changes).map(
@@ -122,7 +129,8 @@ export function LegacyMigration() {
           {review.warnings.length > 0 && (
             <details open>
               <summary>
-                Items needing attention ({review.warnings.length})
+                {t("ui.945f85c9e672")}
+                {review.warnings.length})
               </summary>
               <ul>
                 {review.warnings.map((warning, index) => (
@@ -135,19 +143,18 @@ export function LegacyMigration() {
             <button
               disabled={busy || running}
               onClick={() => {
-                if (
-                  window.confirm(
-                    "Import the reviewed data? A backup of the new launcher state will be saved first. Original files will be retained.",
-                  )
-                )
+                if (window.confirm(t("ui.f823ce143012")))
                   void action("migration.apply", { id: review.id });
               }}
             >
-              Import reviewed data
+              {t("ui.0f307bec8476")}
             </button>
           )}
           {review.backupPath && (
-            <p className="path">State backup: {review.backupPath}</p>
+            <p className="path">
+              {t("ui.f9abb1b089f6")}
+              {review.backupPath}
+            </p>
           )}
         </div>
       )}

@@ -1,3 +1,4 @@
+import { t, tText } from "./localization";
 import type { LauncherIntent, Snapshot } from "../contracts/launcher";
 import definitions from "../contracts/settings.json";
 import { navigationGroups } from "./navigation";
@@ -23,18 +24,18 @@ export function commandResults(
       for (const page of group.pages)
         add({
           id: `page:${page}`,
-          group: "Pages",
-          title: `Go to ${page}`,
-          description: `Open ${page}`,
+          group: tText("Pages"),
+          title: t("command.goto", { page: tText(page) }),
+          description: t("command.open", { page: tText(page) }),
           priority: page === "Home" ? 100 : 90,
           quick: true,
           intent: { type: "navigate", page },
         });
   add({
     id: "profile:create",
-    group: "Commands",
-    title: "Create profile",
-    description: "Create a launcher profile",
+    group: tText("Commands"),
+    title: tText("Create profile"),
+    description: tText("Create a launcher profile"),
     keywords: "new user add",
     priority: 72,
     quick: true,
@@ -42,9 +43,9 @@ export function commandResults(
   });
   add({
     id: "catalog",
-    group: "Commands",
-    title: "Browse module catalogue",
-    description: "Browse the Xenon Modules registry",
+    group: tText("Commands"),
+    title: tText("Browse module catalogue"),
+    description: tText("Browse the Xenon Modules registry"),
     keywords: "catalog registry discover install packages",
     priority: 70,
     quick: true,
@@ -53,18 +54,18 @@ export function commandResults(
   if (state.capabilities.online) {
     add({
       id: "launcher:check",
-      group: "Commands",
-      title: "Check for launcher updates",
-      description: "Check the launcher release channel",
+      group: tText("Commands"),
+      title: tText("Check for launcher updates"),
+      description: tText("Check the launcher release channel"),
       priority: 66,
       quick: true,
       intent: { type: "action", name: "updates.check" },
     });
     add({
       id: "modules:check",
-      group: "Commands",
-      title: "Check module updates",
-      description: "Check all registered modules",
+      group: tText("Commands"),
+      title: tText("Check module updates"),
+      description: tText("Check all registered modules"),
       priority: 64,
       quick: true,
       intent: { type: "action", name: "modules.checkAllUpdates" },
@@ -73,9 +74,9 @@ export function commandResults(
   if (state.mode === "native")
     add({
       id: "support:bundle",
-      group: "Commands",
-      title: "Create support bundle",
-      description: "Export sanitized diagnostics",
+      group: tText("Commands"),
+      title: tText("Create support bundle"),
+      description: tText("Export sanitized diagnostics"),
       keywords: "logs zip bug report",
       priority: 62,
       quick: true,
@@ -83,9 +84,9 @@ export function commandResults(
     });
   add({
     id: "community:discord",
-    group: "Commands",
-    title: "Join Xenon Discord",
-    description: "Open community and support",
+    group: tText("Commands"),
+    title: tText("Join Xenon Discord"),
+    description: tText("Open community and support"),
     keywords: "help server",
     priority: 58,
     quick: true,
@@ -101,9 +102,11 @@ export function commandResults(
   )
     add({
       id: "session:stop",
-      group: "Session",
-      title: `Stop ${state.session.title ?? "current session"}`,
-      description: "Stop or cancel the current session",
+      group: tText("Session"),
+      title: t("command.stop", {
+        title: state.session.title ?? tText("current session"),
+      }),
+      description: tText("Stop or cancel the current session"),
       priority: 130,
       quick: true,
       intent: { type: "action", name: "session.stop" },
@@ -113,12 +116,14 @@ export function commandResults(
   ))
     add({
       id: `settings:${category}`,
-      group: "Settings",
-      title: category[0].toUpperCase() + category.slice(1),
-      description: `Settings · ${category}`,
+      group: tText("Settings"),
+      title: tText(category[0].toUpperCase() + category.slice(1)),
+      description: t("command.settings", {
+        category: tText(category[0].toUpperCase() + category.slice(1)),
+      }),
       keywords: definitions
         .filter((d) => d.category === category)
-        .map((d) => `${d.label} ${d.key}`)
+        .map((d) => `${tText(d.label)} ${d.key}`)
         .join(" "),
       priority: 30,
       intent: { type: "navigate", page: "Settings", targetId: category },
@@ -126,9 +131,9 @@ export function commandResults(
   for (const game of state.games)
     add({
       id: `game:${game.id}`,
-      group: "Games",
+      group: tText("Games"),
       title: game.title,
-      description: `Library · ${game.module}`,
+      description: t("command.library", { module: game.module }),
       keywords: `${game.id} ${game.moduleId ?? ""} ${game.description}`,
       priority: 46,
       intent: { type: "navigate", page: "Library", targetId: game.id },
@@ -136,9 +141,9 @@ export function commandResults(
   for (const module of state.modules ?? [])
     add({
       id: `module:${module.id}`,
-      group: "Modules",
+      group: tText("Modules"),
       title: module.name,
-      description: `Module · Version ${module.version}`,
+      description: t("command.version", { version: module.version }),
       keywords: module.id,
       priority: 44,
       intent: { type: "navigate", page: "Modules", targetId: module.id },
@@ -146,7 +151,7 @@ export function commandResults(
   for (const profile of state.profiles)
     add({
       id: `profile:${profile.id}`,
-      group: "Profiles",
+      group: tText("Profiles"),
       title: profile.name,
       description:
         profile.id === state.activeProfileId

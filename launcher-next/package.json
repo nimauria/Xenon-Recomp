@@ -7,6 +7,8 @@
     "node": ">=22.12.0"
   },
   "scripts": {
+    "predev": "node scripts/sync-localization.mjs",
+    "prebuild": "node scripts/sync-localization.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
@@ -23,10 +25,16 @@
     "test:crash": "node scripts/smoke-crash.mjs",
     "desktop:package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1",
     "test:library": "node scripts/smoke-library.mjs",
+    "test:media": "node scripts/smoke-media-activity.mjs",
+    "test:modules": "node scripts/smoke-module-lifecycle.mjs",
+    "test:presentation-paths": "node scripts/smoke-presentation-paths.mjs",
+    "test:profile-cache": "node scripts/smoke-profile-cache.mjs",
     "test:services": "node scripts/smoke-services.mjs",
     "test:shell": "node scripts/smoke-shell.mjs",
     "test:dlc": "node scripts/smoke-dlc-catalog.mjs",
-    "test:parity-actions": "node scripts/smoke-parity-actions.mjs"
+    "test:parity-actions": "node scripts/smoke-parity-actions.mjs",
+    "pretest": "node scripts/sync-localization.mjs",
+    "test:localization": "node scripts/smoke-localization.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

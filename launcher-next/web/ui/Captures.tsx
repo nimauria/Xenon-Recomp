@@ -1,3 +1,4 @@
+import { t, tText, tCount, language } from "../localization";
 import { useEffect, useRef, useState } from "react";
 import type { Capture } from "../../contracts/launcher";
 import { Empty, Modal, useLauncher } from "./context";
@@ -76,27 +77,26 @@ export function Captures() {
     setZoom((value) => Math.min(4, Math.max(1, value + delta)));
   }
   async function remove(capture: Capture) {
-    if (window.confirm(`Permanently delete “${capture.name}”?`)) {
+    if (window.confirm(t("ui.a83bcbd031c1", { arg0: capture.name }))) {
       const ok = await action("captures.delete", { id: capture.id });
       if (ok && selected === capture.id) select("");
     }
   }
   return (
     <>
-      <p>
-        Images from your configured screenshots folder. Original files stay on
-        your machine.
-      </p>
+      <p>{t("ui.1006b2666c1a")}</p>
       <div className="actions">
         <label>
-          Order
+          {t("ui.6be090825c99")}
           <select
-            aria-label="Capture order"
+            aria-label={t("ui.2222e7905656")}
             value={sort}
             onChange={(event) => setSort(event.target.value)}
           >
             {["Newest first", "Oldest first", "Name"].map((value) => (
-              <option key={value}>{value}</option>
+              <option key={value} value={value}>
+                {tText(value)}
+              </option>
             ))}
           </select>
         </label>
@@ -104,38 +104,31 @@ export function Captures() {
           disabled={busy || state.mode !== "native"}
           onClick={() => void action("captures.refresh")}
         >
-          Rescan captures
+          {t("ui.f33b13ab00d4")}
         </button>
         <button
           disabled={busy || state.mode !== "native"}
           onClick={() => void action("system.openPath", { target: "captures" })}
         >
-          Open captures folder
+          {t("ui.0e5ca87f6320")}
         </button>
         <span role="status">
           {state.captureScan?.state === "scanning"
-            ? "Scanning captures…"
-            : `${captures.length} captures`}
+            ? t("ui.96f218d3fa60")
+            : tCount("captures.count", captures.length)}
         </span>
       </div>
       {state.captureScan?.error && (
-        <p role="alert">{state.captureScan.error}</p>
+        <p role="alert">{tText(state.captureScan.error)}</p>
       )}
-      {state.captureScan?.truncated && (
-        <p>
-          The scan shows up to 10,000 of the newest images among the first
-          100,000 folder entries.
-        </p>
-      )}
-      {error && <p role="alert">{error}</p>}
+      {state.captureScan?.truncated && <p>{t("ui.c3a8fbecfdfd")}</p>}
+      {error && <p role="alert">{tText(error)}</p>}
       {!captures.length && state.captureScan?.state !== "scanning" && (
-        <Empty title="No captures found">
-          Choose a screenshots folder in Settings → Paths, then rescan.
-        </Empty>
+        <Empty title={t("ui.f499a243c542")}>{t("ui.960413011340")}</Empty>
       )}
       <div
         className="capture-grid"
-        aria-label="Capture thumbnails"
+        aria-label={t("ui.3ca82f15e59c")}
         ref={viewport}
         onScroll={(event) => setScroll(event.currentTarget.scrollTop)}
         style={{ display: captures.length ? undefined : "none" }}
@@ -161,7 +154,7 @@ export function Captures() {
                   {capture.viewable !== false ? (
                     <button
                       className="capture-thumbnail"
-                      aria-label={`View ${capture.name}`}
+                      aria-label={t("ui.17c73ea32664", { arg0: capture.name })}
                       onClick={() => open(capture)}
                     >
                       <img
@@ -172,16 +165,14 @@ export function Captures() {
                       />
                     </button>
                   ) : (
-                    <p>
-                      Image exceeds the 20 MiB viewer limit. Open it in your
-                      image app.
-                    </p>
+                    <p>{t("ui.6e2d74fe4a38")}</p>
                   )}
                   <h3 title={capture.name}>{capture.name}</h3>
                   <small>
-                    {Math.ceil(capture.size / 1024)} KiB
+                    {Math.ceil(capture.size / 1024)}
+                    {t("ui.ad94f7d950c4")}
                     {capture.modified
-                      ? ` · ${new Date(capture.modified).toLocaleDateString()}`
+                      ? ` · ${new Date(capture.modified).toLocaleDateString(language())}`
                       : ""}
                   </small>
                   <div className="actions">
@@ -189,13 +180,13 @@ export function Captures() {
                       disabled={capture.viewable === false}
                       onClick={() => open(capture)}
                     >
-                      View
+                      {t("ui.dcc839a4015c")}
                     </button>
                     <button
                       disabled={busy}
                       onClick={() => void remove(capture)}
                     >
-                      Delete
+                      {t("ui.e2d0a54968ea")}
                     </button>
                   </div>
                 </article>
@@ -207,32 +198,34 @@ export function Captures() {
         <Modal title={current.name} close={() => select("")}>
           <div className="actions capture-viewer-controls">
             <button
-              aria-label="Previous capture"
+              aria-label={t("ui.69e116a2f315")}
               disabled={index <= 0}
               onClick={() => step(-1)}
             >
-              Previous
+              {t("ui.a57b08a480b8")}
             </button>
             <span role="status">
-              {index + 1} of {captures.length} · {Math.round(zoom * 100)}%
+              {index + 1}
+              {t("ui.a4282e4b2298")}
+              {captures.length} · {Math.round(zoom * 100)}%
             </span>
             <button
-              aria-label="Next capture"
+              aria-label={t("ui.f45eedac87e9")}
               disabled={index + 1 >= captures.length}
               onClick={() => step(1)}
             >
-              Next
+              {t("ui.1ff57a29d7c9")}
             </button>
             <button
-              aria-label="Zoom out"
+              aria-label={t("ui.bc7b631a689b")}
               disabled={zoom <= 1}
               onClick={() => adjust(-0.25)}
             >
               −
             </button>
-            <button onClick={() => setZoom(1)}>Fit</button>
+            <button onClick={() => setZoom(1)}>{t("ui.9f872ed43d00")}</button>
             <button
-              aria-label="Zoom in"
+              aria-label={t("ui.0e47f09a748f")}
               disabled={zoom >= 4}
               onClick={() => adjust(0.25)}
             >
@@ -243,7 +236,7 @@ export function Captures() {
             className="capture-stage"
             tabIndex={0}
             role="region"
-            aria-label="Capture viewer"
+            aria-label={t("ui.b9b1cf51915e")}
             onWheel={(event) => {
               if (event.ctrlKey) {
                 event.preventDefault();
@@ -283,7 +276,7 @@ export function Captures() {
               disabled={busy}
               onClick={() => void action("captures.open", { id: current.id })}
             >
-              Open in image app
+              {t("ui.9887c8e8d51d")}
             </button>
             <button
               onClick={async () => {
@@ -296,10 +289,10 @@ export function Captures() {
                 }
               }}
             >
-              Copy capture path
+              {t("ui.008fe647bbbc")}
             </button>
             <button disabled={busy} onClick={() => void remove(current)}>
-              Delete capture
+              {t("ui.0b2c96558a2e")}
             </button>
           </div>
           {error && <p role="alert">{error}</p>}

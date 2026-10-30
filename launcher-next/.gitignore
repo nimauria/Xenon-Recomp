@@ -3,3 +3,5 @@ node_modules/
 dist/
 build/
 *.local
+/public/localization.json
+/web/generated/

@@ -1,3 +1,13 @@
+import { useControllerNavigation, controllerGlyphs } from "../controller";
+import { ActionMenu } from "./ActionMenu";
+import {
+  t,
+  tText,
+  useLocalization,
+  loadLocalization,
+  setLanguage,
+  language,
+} from "../localization";
 import { useEffect, useRef, useState } from "react";
 import type {
   Page,
@@ -27,6 +37,10 @@ import {
 } from "./pages";
 import { CommandPalette } from "./CommandPalette";
 export function App() {
+  useLocalization();
+  useEffect(() => {
+    void loadLocalization();
+  }, []);
   const [narrow, setNarrow] = useState(
     matchMedia("(max-width: 1000px)").matches,
   );
@@ -64,7 +78,13 @@ export function App() {
   }
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setLanguage(String(state?.settings?.["general/language"] ?? "auto"));
+  }, [state?.settings?.["general/language"]]);
   const [page, setPage] = useState<Page>("Library");
+  const pageRef = useRef<Page>(page);
+  pageRef.current = page;
+  const pageHistory = useRef<Page[]>([]);
   const [queries, setQueries] = useState<Partial<Record<Page, string>>>({});
   const query = queries[page] ?? "";
   const setQuery = (value: string) =>
@@ -86,14 +106,24 @@ export function App() {
     if (backend.current)
       setState(await backend.current.request("application.snapshot", {}));
   }
-  function navigate(destination: Page, targetId?: string, section?: string) {
+  function navigate(
+    destination: Page,
+    targetId?: string,
+    section?: string,
+    record = true,
+  ) {
     const dialog = document.querySelector<HTMLDialogElement>("dialog[open]");
     if (
       dialog?.dataset.dirty === "true" &&
-      !window.confirm("Discard unsaved changes?")
+      !window.confirm(t("ui.470e7ee2a579"))
     )
       return false;
     dialog?.dispatchEvent(new Event("launcher-dismiss"));
+    if (record && destination !== pageRef.current) {
+      pageHistory.current.push(pageRef.current);
+      if (pageHistory.current.length > 32) pageHistory.current.shift();
+    }
+    pageRef.current = destination;
     setPage(destination);
     setNavigationIntent({
       type: "navigate",
@@ -107,6 +137,11 @@ export function App() {
     if (!targetId && !section)
       requestAnimationFrame(() => document.getElementById("content")?.focus());
     return true;
+  }
+  function goBack() {
+    const previous = pageHistory.current.at(-1);
+    if (previous && navigate(previous, undefined, undefined, false))
+      pageHistory.current.pop();
   }
   function openGame(id: string) {
     if (!navigate("Library")) return;
@@ -212,11 +247,41 @@ export function App() {
   }, [page, state?.mode]);
   const readySent = useRef(false);
   useEffect(() => {
-    if(state?.mode !== "native" || readySent.current || !backend.current)return;
+    if (state?.mode !== "native" || readySent.current || !backend.current)
+      return;
     readySent.current = true;
-    void backend.current.request("launcher.action", {action:"application.ready",data:{}}).catch(error => setError(String(error)));
-  },[state?.mode]);
+    void backend.current
+      .request("launcher.action", { action: "application.ready", data: {} })
+      .catch((error) => setError(String(error)));
+  }, [state?.mode]);
   const hasActiveJobs = state?.jobs?.some(isActiveJob) ?? false;
+  useEffect(() => {
+    if (!state?.community?.presence.requestedEnabled) return;
+    let active = true,
+      pending = false;
+    const timer = window.setInterval(async () => {
+      if (pending || inFlight.current || !backend.current) return;
+      pending = true;
+      try {
+        const community = await backend.current.request("community.state", {});
+        if (active)
+          storeSnapshot((previous) =>
+            previous &&
+            JSON.stringify(previous.community) !== JSON.stringify(community)
+              ? { ...previous, community }
+              : previous,
+          );
+      } catch {
+        /* The main request path reports bridge failures. */
+      } finally {
+        pending = false;
+      }
+    }, 1000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [state?.community?.presence.requestedEnabled]);
   const hasPendingJobs =
     state?.jobs?.some((job) => isActiveJob(job) || job.cleaningUp) ?? false;
   useEffect(() => {
@@ -318,8 +383,55 @@ export function App() {
     applyAppearance(resolveAppearance(state, systemDark, systemContrast));
     document.documentElement.style.fontSize = `${16 * Number(state.settings?.["accessibility/textScale"] ?? 1)}px`;
   }, [state, systemDark, systemContrast]);
+  const navigation = useRef({ navigate, goBack });
+  navigation.current = { navigate, goBack };
+  useEffect(() => {
+    const cycle = (event: Event) => {
+      if (document.querySelector("dialog[open],[role=menu]:popover-open"))
+        return;
+      const pages = Array.from(
+        document.querySelectorAll<HTMLButtonElement>("nav button[data-page]"),
+      ).map((button) => button.dataset.page as Page);
+      if (!pages.length) return;
+      const index = Math.max(0, pages.indexOf(pageRef.current)),
+        delta = (event as CustomEvent).detail === -1 ? -1 : 1;
+      navigation.current.navigate(
+        pages[(index + delta + pages.length) % pages.length],
+      );
+    };
+    window.addEventListener("launcher-cycle-page", cycle);
+    return () => window.removeEventListener("launcher-cycle-page", cycle);
+  }, []);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (
+        (event.altKey && event.key === "ArrowLeft") ||
+        (event.key === "Escape" &&
+          !document.querySelector("dialog[open],[role=menu]:popover-open") &&
+          !(event.target as HTMLElement)?.matches("input,textarea,select"))
+      ) {
+        event.preventDefault();
+        navigation.current.goBack();
+        return;
+      }
+      if (
+        event.key === "ContextMenu" ||
+        (event.shiftKey && event.key === "F10")
+      ) {
+        event.preventDefault();
+        const active = document.activeElement as HTMLElement;
+        const rect = active?.getBoundingClientRect();
+        active?.dispatchEvent(
+          new MouseEvent("contextmenu", {
+            bubbles: true,
+            cancelable: true,
+            clientX: rect?.left,
+            clientY: rect?.bottom,
+          }),
+        );
+        return;
+      }
       if (event.ctrlKey || event.metaKey) {
         const destination = (
           {
@@ -332,7 +444,7 @@ export function App() {
         )[event.key];
         if (destination) {
           event.preventDefault();
-          navigate(destination);
+          navigation.current.navigate(destination);
         }
         if (event.key === "k" || event.key === "f") {
           event.preventDefault();
@@ -347,65 +459,16 @@ export function App() {
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
-  useEffect(() => {
-    let frame = 0;
-    let last = 0;
-    let held = false;
-    function poll(time: number) {
-      const pad = navigator.getGamepads?.().find((p) => p?.connected);
-      const active =
-        document.visibilityState === "visible" && document.hasFocus();
-      const pressed =
-        pad &&
-        active &&
-        (pad.buttons.some((b) => b.pressed) ||
-          pad.axes.some((a) => Math.abs(a) > 0.6));
-      if (pad && active && pressed && (!held || time - last > 220)) {
-        last = time;
-        const dialog = document.querySelector("dialog[open]");
-        const scope = dialog ?? document;
-        const elements = [
-          ...scope.querySelectorAll<HTMLElement>(
-            "button:not(:disabled),input:not(:disabled),select:not(:disabled),a[href]",
-          ),
-        ].filter((e) => e.getClientRects().length > 0);
-        const index = elements.indexOf(document.activeElement as HTMLElement);
-        if (pad.buttons[0]?.pressed)
-          (document.activeElement as HTMLElement)?.click();
-        else if (pad.buttons[1]?.pressed) {
-          if (dialog)
-            dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
-          else navigate("Library");
-        } else {
-          const backwards =
-            pad.buttons[12]?.pressed ||
-            pad.buttons[14]?.pressed ||
-            pad.axes[0] < -0.6 ||
-            pad.axes[1] < -0.6;
-          elements[
-            (index + (backwards ? -1 : 1) + elements.length) % elements.length
-          ]?.focus();
-        }
-      }
-      held = Boolean(pressed);
-      frame = requestAnimationFrame(poll);
-    }
-    frame = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(frame);
-  }, []);
+  const controller = useControllerNavigation(goBack);
+  const glyphs = controllerGlyphs(controller.family);
   if (!state)
     return (
       <main className="startup">
-        <h1>Xenon</h1>
+        <h1>{t("ui.e1e2d099ffa0")}</h1>
         <p role={error ? "alert" : "status"}>
-          {error || "Opening your library…"}
+          {(error ? tText(error) : "") || t("ui.2d9a4d61d2b0")}
         </p>
-        {error && (
-          <p>
-            Existing data is preserved. Inspect the startup error before
-            retrying.
-          </p>
-        )}
+        {error && <p>{t("ui.de128e71c411")}</p>}
       </main>
     );
   const unread = state.notifications?.filter((n) => !n.read).length ?? 0;
@@ -435,19 +498,19 @@ export function App() {
         data-sidebar={compactSidebar ? "compact" : "expanded"}
       >
         <a className="skip" href="#content">
-          Skip to content
+          {t("ui.ac576a66d456")}
         </a>
         <aside className="rail">
           <div className="brand">
             <span className="brand-mark" aria-hidden="true" />
-            <strong>XENON</strong>
+            <strong>{t("ui.ca8152fba865")}</strong>
           </div>
-          <p className="eyebrow">YOUR GAMES. YOUR SPACE.</p>
+          <p className="eyebrow">{t("ui.da36ef5ed6e5")}</p>
           <button
             className="sidebar-toggle"
             disabled={busy}
             aria-label={
-              compactSidebar ? "Expand navigation" : "Collapse navigation"
+              compactSidebar ? t("ui.4a984a4ea6d0") : t("ui.1afa67a9d3e7")
             }
             aria-expanded={!compactSidebar}
             onClick={() =>
@@ -458,9 +521,9 @@ export function App() {
             }
           >
             <Icon name="Menu" />
-            {!compactSidebar && <span>Navigation</span>}
+            {!compactSidebar && <span>{t("ui.3db65f8c2a7d")}</span>}
           </button>
-          <nav aria-label="Main navigation">
+          <nav aria-label={t("ui.eb355944b92d")}>
             {navigationGroups
               .filter((group) => !group.developer || developer)
               .map((group) => (
@@ -468,19 +531,20 @@ export function App() {
                   key={group.label}
                   className={`nav-group${group.bottom ? " nav-group-bottom" : ""}`}
                   role="group"
-                  aria-label={group.label}
+                  aria-label={tText(group.label)}
                 >
-                  <span className="nav-group-label">{group.label}</span>
+                  <span className="nav-group-label">{tText(group.label)}</span>
                   {group.pages.map((p) => (
                     <button
                       key={p}
-                      aria-label={p}
-                      title={p}
+                      data-page={p}
+                      aria-label={tText(p)}
+                      title={tText(p)}
                       aria-current={page === p ? "page" : undefined}
                       onClick={() => navigate(p)}
                     >
                       <Icon name={p} />
-                      <span className="nav-label">{p}</span>
+                      <span className="nav-label">{tText(p)}</span>
                       {p === "Downloads" && hasActiveJobs && (
                         <span className="badge">
                           {state.jobs?.filter(isActiveJob).length}
@@ -495,19 +559,19 @@ export function App() {
             <span className="dot" />
             <span className="rail-status-copy">
               {state.mode === "preview"
-                ? "Browser preview"
-                : "Desktop launcher"}
+                ? t("ui.352da55ba74a")
+                : t("ui.9abee42d2dd8")}
             </span>
             <small>
-              Runtime{" "}
+              {t("ui.109311589787")}{" "}
               {state.capabilities.runtime
                 ? state.session?.fixture
-                  ? "fixture provider"
-                  : "available"
-                : "not connected"}
+                  ? t("ui.9246b3d83911")
+                  : t("ui.ddd9818abacf")
+                : t("ui.98b1024757db")}
             </small>
             {state.capabilities.networkFixture && (
-              <small>Network fixture provider</small>
+              <small>{t("ui.23f08cd93ed1")}</small>
             )}
           </div>
         </aside>
@@ -516,26 +580,73 @@ export function App() {
             appearance={resolveAppearance(state, systemDark, systemContrast)}
           />
           <header>
+            <ActionMenu
+              quick
+              label={t("menu.quick")}
+              items={[
+                {
+                  id: "library",
+                  label: tText("Library"),
+                  run: () => navigate("Library"),
+                },
+                {
+                  id: "profile",
+                  label: t("ui.61d30d997d13"),
+                  run: () => navigate("Profiles", undefined, "create"),
+                },
+                {
+                  id: "downloads",
+                  label: tText("Downloads"),
+                  run: () => navigate("Downloads"),
+                },
+                {
+                  id: "settings",
+                  label: tText("Settings"),
+                  run: () => navigate("Settings"),
+                },
+                {
+                  id: "commands",
+                  label: t("ui.b269dc4e81a5"),
+                  run: () => setPalette(true),
+                },
+                {
+                  id: "notifications",
+                  label: t("ui.788011833a5a"),
+                  run: () => setNotifications(true),
+                },
+                {
+                  id: "help",
+                  label: t("ui.559cd2d4cc76"),
+                  run: () => setHelp(true),
+                },
+              ]}
+            />
             <label className="search">
-              <span className="sr-only">Search current page</span>
+              <span className="sr-only">{t("ui.e55511f8d7f5")}</span>
               <input
                 type="search"
-                placeholder={`Search ${page.toLowerCase()}`}
+                placeholder={t("ui.8e1c2173dbf4", {
+                  arg0: tText(page).toLocaleLowerCase(),
+                })}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
             </label>
-            <button onClick={() => setPalette(true)} title="Ctrl+K">
-              Commands
+            <button
+              onClick={() => setPalette(true)}
+              title={t("ui.199f6f88d1fc")}
+            >
+              {t("ui.b269dc4e81a5")}
             </button>
             <button
               onClick={() => setNotifications(true)}
-              aria-label={`Notifications, ${unread} unread`}
+              aria-label={t("ui.522e065ca17f", { arg0: unread })}
             >
-              Inbox {unread > 0 && <span className="badge">{unread}</span>}
+              {t("ui.4af28ba48e90")}
+              {unread > 0 && <span className="badge">{unread}</span>}
             </button>
             <label>
-              <span className="sr-only">Active profile</span>
+              <span className="sr-only">{t("ui.5608b89a8112")}</span>
               <select
                 disabled={busy}
                 value={state.activeProfileId}
@@ -555,20 +666,23 @@ export function App() {
             <SessionPanel />
             <div className="heading">
               <div>
-                <p className="eyebrow">XENON LAUNCHER</p>
-                <h1>{page}</h1>
+                <p className="eyebrow">{t("ui.7f001e843613")}</p>
+                <h1>{tText(page)}</h1>
               </div>
               <button
                 onClick={() => void refresh().catch((e) => setError(String(e)))}
                 disabled={busy}
               >
-                Refresh
+                {t("ui.0e9161011702")}
               </button>
             </div>
             {error && (
               <div className="error" role="alert">
-                {error}
-                <button onClick={() => setError("")} aria-label="Dismiss error">
+                {tText(error)}
+                <button
+                  onClick={() => setError("")}
+                  aria-label={t("ui.2db046678b9c")}
+                >
                   ×
                 </button>
               </div>
@@ -586,20 +700,23 @@ export function App() {
             ) && <RuntimeTools page={page} />}
           </main>
           <footer>
-            <span>Xenon · Launcher Next</span>
+            <span>{t("ui.c3b26bd9718b")}</span>
             {hasActiveJobs && (
               <button onClick={() => navigate("Downloads")}>
-                View operations ({state.jobs?.filter(isActiveJob).length})
+                {t("ui.882559b2cc39")}
+                {state.jobs?.filter(isActiveJob).length})
               </button>
             )}
             <span>
               {busy
-                ? "Working…"
+                ? t("ui.5474eef8d0f1")
                 : state.mode === "preview"
-                  ? "Preview storage · No native file access"
-                  : "Native services · Local storage"}
+                  ? t("ui.cc3518f7a88c")
+                  : t("ui.2e67ef168705")}
             </span>
-            <button onClick={() => setHelp(true)}>Help · F1</button>
+            <button onClick={() => setHelp(true)}>
+              {t("ui.e0f2cf0da6ab")}
+            </button>
           </footer>
         </section>
         {palette && (
@@ -609,35 +726,36 @@ export function App() {
           />
         )}
         {notifications && (
-          <Modal title="Notifications" close={() => setNotifications(false)}>
+          <Modal
+            title={t("ui.788011833a5a")}
+            close={() => setNotifications(false)}
+          >
             <button
               disabled={busy || !unread}
               onClick={() => void action("notifications.readAll")}
             >
-              Mark all read
+              {t("ui.3bc62a9e6a39")}
             </button>
             <button
               disabled={busy}
               onClick={() => void action("notifications.clear")}
             >
-              Clear history
+              {t("ui.496121494e4a")}
             </button>
             {!state.notifications?.length && (
-              <Empty title="You're up to date">
-                Launcher activity will appear here.
-              </Empty>
+              <Empty title={t("ui.df7d1cc1aa81")}>{t("ui.c5e80a5efa49")}</Empty>
             )}
             {state.notifications
               ?.slice()
               .reverse()
               .map((n) => (
                 <article className="card" key={n.id}>
-                  <h3>{n.title}</h3>
+                  <h3>{n.programTitle ? tText(n.title) : n.title}</h3>
                   <p>{n.message}</p>
                   <small>
-                    {new Date(Number(n.time)).toLocaleString()}
+                    {new Date(Number(n.time)).toLocaleString(language())}
                     {(n.repeatCount ?? 1) > 1
-                      ? ` ? ${n.repeatCount} occurrences`
+                      ? t("ui.92d15f16adb2", { arg0: n.repeatCount ?? 1 })
                       : ""}
                   </small>
                   {n.action && (
@@ -652,7 +770,7 @@ export function App() {
                         await executeIntent(n.action!);
                       }}
                     >
-                      View activity
+                      {t("ui.4bf3f8ddd7bf")}
                     </button>
                   )}
                   <button
@@ -661,7 +779,7 @@ export function App() {
                       void action("notifications.dismiss", { id: n.id })
                     }
                   >
-                    Dismiss notification
+                    {t("ui.b7bb3f342402")}
                   </button>
                   <button
                     disabled={busy}
@@ -672,7 +790,7 @@ export function App() {
                       })
                     }
                   >
-                    {n.read ? "Mark unread" : "Mark read"}
+                    {n.read ? t("ui.54b4e3f28dc5") : t("ui.b49c9b6cdf43")}
                   </button>
                 </article>
               ))}
@@ -684,7 +802,9 @@ export function App() {
             role="status"
             aria-live="polite"
           >
-            <strong>{toast.title}</strong>
+            <strong>
+              {toast.programTitle ? tText(toast.title) : toast.title}
+            </strong>
             <p>{toast.message}</p>
             <div className="actions">
               {toast.action && (
@@ -694,52 +814,72 @@ export function App() {
                     setToast(undefined);
                   }}
                 >
-                  View activity
+                  {t("ui.4bf3f8ddd7bf")}
                 </button>
               )}
               <button
-                aria-label="Dismiss toast"
+                aria-label={t("ui.dfc6e194ec78")}
                 onClick={() => setToast(undefined)}
               >
-                Dismiss
+                {t("ui.48845bff334a")}
               </button>
             </div>
           </section>
         )}
         {help && (
-          <Modal title="Launcher shortcuts" close={() => setHelp(false)}>
+          <Modal title={t("ui.559cd2d4cc76")} close={() => setHelp(false)}>
             <dl>
-              <dt>Ctrl+K / Ctrl+F</dt>
-              <dd>Global commands</dd>
-              <dt>Ctrl+1 / 2 / 3</dt>
-              <dd>Library / Modules / Profiles</dd>
-              <dt>Ctrl+,</dt>
-              <dd>Settings</dd>
-              <dt>Ctrl+H</dt>
-              <dd>Home</dd>
-              <dt>Controller</dt>
-              <dd>
-                D-pad or stick moves focus; A/Cross activates; B/Circle goes
-                back. Input is limited to the foreground window.
-              </dd>
+              <dt>{t("ui.22395070ef87")}</dt>
+              <dd>{t("ui.8be0feb36a8a")}</dd>
+              <dt>{t("ui.fba9e6c21f1d")}</dt>
+              <dd>{t("ui.0466c6703eb0")}</dd>
+              <dt>{t("ui.44fdb5a83aa6")}</dt>
+              <dd>{t("ui.74a883a037bc")}</dd>
+              <dt>{t("ui.015e6e9220f6")}</dt>
+              <dd>{t("ui.3a78695388b3")}</dd>
+              <dt>{t("ui.31df66dc9f06")}</dt>
+              <dd>{t("ui.3c0237a355d1")}</dd>
+              {controller.connected && (
+                <dd>
+                  {t(
+                    controller.standard
+                      ? "controller.help"
+                      : "controller.unmapped",
+                    {
+                      activate: glyphs.activate,
+                      back: glyphs.back,
+                      context: glyphs.context,
+                    },
+                  )}
+                </dd>
+              )}
             </dl>
           </Modal>
         )}
         {state.recovery?.previousUncleanExit && (
           <Modal
-            title="Launcher recovery"
+            title={t("ui.d978235e451c")}
             close={() => void action("recovery.acknowledge")}
           >
-            <p>
-              The previous launcher session did not close cleanly. Your saved
-              data has been preserved.
-            </p>
+            <p>{t("ui.172207fa1b30")}</p>
+            {state.recovery.automaticSafeMode && (
+              <p>
+                {t(
+                  state.recovery.automaticSafeModeReason === "startup-failure"
+                    ? "recovery.startupFailure"
+                    : "recovery.repeated",
+                  { count: state.recovery.consecutiveUncleanStarts ?? 0 },
+                )}
+              </p>
+            )}
             <div className="actions">
               <button
                 disabled={busy}
                 onClick={() => void action("recovery.acknowledge")}
               >
-                Continue normally
+                {state.recovery.safeMode
+                  ? t("recovery.continueSafe")
+                  : t("ui.f6e80e3f8fbe")}
               </button>
               <button
                 disabled={busy}
@@ -747,7 +887,7 @@ export function App() {
                   void action("application.restart", { safeMode: true })
                 }
               >
-                Restart in safe mode
+                {t("ui.0a34df8a178f")}
               </button>
             </div>
           </Modal>

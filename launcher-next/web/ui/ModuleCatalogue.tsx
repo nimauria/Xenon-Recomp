@@ -1,3 +1,4 @@
+import { t, tText, language } from "../localization";
 import { useState } from "react";
 import { Modal, Empty, useLauncher } from "./context";
 import { CoverImage } from "./CoverImage";
@@ -32,22 +33,26 @@ export function UpdateControls({
   const value = launcher ? state.launcherUpdate : state.moduleUpdates?.[id];
   const release = value?.release;
   return (
-    <section className="update-controls" aria-label={`${name} updates`}>
+    <section
+      className="update-controls"
+      aria-label={t("ui.52d568bf50bb", { arg0: name })}
+    >
       <p role={value?.busy ? "status" : undefined}>
         {value
-          ? (descriptions[value.state] ?? value.state)
-          : "This module is not listed in the saved registry."}
+          ? tText(descriptions[value.state] ?? value.state)
+          : t("ui.cae41b68a298")}
       </p>
       {release && (
         <p>
-          Available: <strong>{release.version}</strong>
-          {release.prerelease ? " · Prerelease" : ""}
+          {t("ui.333771bad487")}
+          <strong>{release.version}</strong>
+          {release.prerelease ? t("ui.81511a8a149c") : ""}
           {value?.installedVersion
-            ? ` · Installed: ${value.installedVersion}`
+            ? t("ui.b9d90b0a2a53", { arg0: value.installedVersion })
             : ""}
         </p>
       )}
-      {value?.lastError && <p className="update-error">{value.lastError}</p>}
+      {value?.lastError && <p className="update-error">{tText(value.lastError)}</p>}
       <div className="actions">
         <button
           disabled={busy || !value?.canCheck}
@@ -57,7 +62,7 @@ export function UpdateControls({
             })
           }
         >
-          Check for updates
+          {t("ui.f26f3275e735")}
         </button>
         {value?.canDownload && (
           <button
@@ -69,7 +74,7 @@ export function UpdateControls({
               )
             }
           >
-            Download release
+            {t("ui.f808eebbf4fb")}
           </button>
         )}
         {value?.canInstall && (
@@ -80,8 +85,11 @@ export function UpdateControls({
               if (
                 window.confirm(
                   launcher
-                    ? `Install launcher ${release?.version} and restart? The previous installation is retained for rollback if startup fails.`
-                    : `Install ${name} ${release?.version}? The current module is retained for rollback.`,
+                    ? t("ui.b3544960eb55", { arg0: release?.version })
+                    : t("ui.8989db5eff99", {
+                        arg0: name,
+                        arg1: release?.version,
+                      }),
                 )
               )
                 void action(
@@ -90,7 +98,7 @@ export function UpdateControls({
                 );
             }}
           >
-            Install verified package
+            {t("ui.7d10ba698d22")}
           </button>
         )}
         {release && (
@@ -98,20 +106,16 @@ export function UpdateControls({
             disabled={busy}
             onClick={() => void action("system.openUrl", { url: release.url })}
           >
-            Release page
+            {t("ui.6ba4c7ebdff7")}
           </button>
         )}
       </div>
       {launcher && value?.state === "ready-to-install" && !value.canInstall && (
-        <p>
-          The verified CEF package is staged. Automatic replacement requires a
-          packaged Windows installation. Development builds and other platforms
-          use manual installation.
-        </p>
+        <p>{t("ui.6fd04b3dc33e")}</p>
       )}
       {release?.notes && (
         <details className="release-notes">
-          <summary>Release notes</summary>
+          <summary>{t("ui.1254829bd999")}</summary>
           <p>{release.notes}</p>
         </details>
       )}
@@ -131,17 +135,17 @@ export function UpdateHistory({
     .slice()
     .reverse();
   return (
-    <Modal title="Update history" close={close}>
+    <Modal title={t("ui.c665338a9287")} close={close}>
       <button
         disabled={busy || !rows.length}
         onClick={() => {
-          if (window.confirm("Clear these update-history records?"))
+          if (window.confirm(t("ui.c93ca52ffd5d")))
             void action("updates.clearHistory", { id: id ?? "" });
         }}
       >
-        Clear update history
+        {t("ui.9ddc0b95903a")}
       </button>
-      {!rows.length && <p>No update activity recorded.</p>}
+      {!rows.length && <p>{t("ui.62d510a3dd71")}</p>}
       {rows.map((row) => (
         <article className="card" key={row.id}>
           <strong>
@@ -150,7 +154,7 @@ export function UpdateHistory({
           <p>
             {row.message} · {row.outcome}
           </p>
-          <small>{new Date(Number(row.time)).toLocaleString()}</small>
+          <small>{new Date(Number(row.time)).toLocaleString(language())}</small>
         </article>
       ))}
     </Modal>
@@ -161,20 +165,18 @@ export function UpdatesPanel() {
   const [history, setHistory] = useState(false);
   return (
     <section className="card">
-      <h3>Launcher updates</h3>
+      <h3>{t("ui.f614e9e1ecaf")}</h3>
       <UpdateControls id="launcher" name="Xenon Launcher" launcher />
       <div className="actions">
         <button
           disabled={busy || !state.capabilities.online}
           onClick={() => void action("modules.checkAllUpdates")}
         >
-          Check all module updates
+          {t("ui.40e3ee18b30a")}
         </button>
-        <button onClick={() => setHistory(true)}>Update history</button>
+        <button onClick={() => setHistory(true)}>{t("ui.c665338a9287")}</button>
       </div>
-      {!state.capabilities.online && (
-        <p>Online services are disabled in this launcher session.</p>
-      )}
+      {!state.capabilities.online && <p>{t("ui.cbe84cdaa82e")}</p>}
       {history && <UpdateHistory close={() => setHistory(false)} />}
     </section>
   );
@@ -190,12 +192,12 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
       .includes(query.toLowerCase()),
   );
   return (
-    <Modal title="Module catalogue" close={close}>
+    <Modal title={t("ui.7d9e69313fa6")} close={close}>
       <div className="actions">
         <input
           type="search"
-          aria-label="Search module catalogue"
-          placeholder="Search modules"
+          aria-label={t("ui.123997597a9c")}
+          placeholder={t("ui.a67f6147d439")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -205,27 +207,30 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
           }
           onClick={() => void action("catalog.refresh")}
         >
-          Refresh catalogue
+          {t("ui.4bc465d2f66c")}
         </button>
       </div>
       <p role="status">
         {catalog?.state === "loading"
-          ? "Refreshing the official registry…"
+          ? t("ui.602169ad67e9")
           : catalog?.state === "bundled"
-            ? "Showing the bundled registry snapshot. Refresh for current information."
+            ? t("ui.9ef0fe728df1")
             : catalog?.state === "offline"
-              ? "Showing saved registry information."
+              ? t("ui.fd60015b17a7")
               : catalog?.state === "partial"
-                ? "Some registry entries could not be refreshed."
-                : `${entries.length} modules · ${state.capabilities.networkFixture ? "Network fixture" : "Official Xenon Modules registry"}`}
+                ? t("ui.c9e73e26cbf6")
+                : t("ui.8840b2d1dc40", {
+                    arg0: entries.length,
+                    arg1: state.capabilities.networkFixture
+                      ? "Network fixture"
+                      : "Official Xenon Modules registry",
+                  })}
       </p>
       {catalog?.lastError && (
-        <p className="update-error">{catalog.lastError}</p>
+        <p className="update-error">{tText(catalog.lastError)}</p>
       )}
       {!entries.length && (
-        <Empty title="No matching modules">
-          Refresh the catalogue or change the search.
-        </Empty>
+        <Empty title={t("ui.ecee6d9c672d")}>{t("ui.82250b05afa4")}</Empty>
       )}
       {entries.map((entry) => (
         <article
@@ -247,12 +252,15 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
             <p>{entry.description}</p>
             <small>
               {entry.publisher}
-              {entry.verified ? " · Registry verified" : ""}
+              {entry.verified ? t("ui.637fe328ab16") : ""}
             </small>
             {entry.assetName ? (
               <UpdateControls id={entry.id} name={entry.name} />
             ) : (
-              <p>No package is declared for {entry.hostKey}.</p>
+              <p>
+                {t("ui.85a63e8b5ea3")}
+                {entry.hostKey}.
+              </p>
             )}
             <div className="actions">
               <button
@@ -261,10 +269,10 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
                   void action("system.openUrl", { url: entry.repositoryUrl })
                 }
               >
-                Project page
+                {t("ui.d6e6cdd8433d")}
               </button>
               <button onClick={() => setHistory(entry.id)}>
-                Update history
+                {t("ui.c665338a9287")}
               </button>
             </div>
           </div>
