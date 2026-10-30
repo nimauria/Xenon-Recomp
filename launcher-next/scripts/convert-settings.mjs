@@ -92,6 +92,7 @@ definitions.push({
   default: "#35D7EA",
   options: [],
 });
+definitions.push({key:"general/language",category:"general",label:"Language",type:"string",default:"auto",options:[]});
 for (const palette of appearance.palettes)
   definitions.push(
     choice(
