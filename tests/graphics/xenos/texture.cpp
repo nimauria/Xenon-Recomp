@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "xenon/gpu/depth_format.hpp"
@@ -43,17 +44,72 @@ void test_complete_format_catalogue() {
   assert(texture_format_info(18).bytes_per_block() == 8);
   assert(texture_format_info(20).bytes_per_block() == 16);
   assert(texture_format_info(49).host_format == TextureHostFormat::BC5Unorm);
-  assert(texture_format_info(22).host_format == TextureHostFormat::Unsupported);
-  assert(texture_format_info(23).host_format == TextureHostFormat::Unsupported);
+  // Sampled depth: float32 depth in one channel, read by every component.
+  assert(texture_format_info(22).host_format == TextureHostFormat::R32Float);
+  assert(texture_format_info(22).load == TextureLoad::DepthUnorm24ToFloat);
+  assert(texture_format_info(23).host_format == TextureHostFormat::R32Float);
+  assert(texture_format_info(23).load == TextureLoad::DepthFloat20e4ToFloat);
+  assert(texture_format_info(22).replicate_first_component);
+  assert(!texture_format_info(6).replicate_first_component);
 
   // A format without a native mapping fails with an error naming it, so the
   // GPU error log says which mapping a title needs.
   auto unsupported = rgba8(16, 16, false);
-  unsupported.format = 22;  // 24_8
+  unsupported.format = 5;  // 6_5_5
   std::vector<std::byte> memory(0x40000);
   const auto failed = decode_texture(unsupported, memory);
   assert(!failed.valid);
-  assert(failed.error == "Xenos texture format 22 (24_8) has no lossless native mapping");
+  assert(failed.error == "Xenos texture format 5 (6_5_5) has no lossless native mapping");
+}
+
+// A resolved depth buffer sampled as a texture (Ace Combat 6's opening reads
+// one through 24_8 and 24_8_FLOAT): each packed depth/stencil word decodes to
+// its float32 depth, the stencil byte is dropped, and a fetch of any component
+// reads that depth.
+void test_sampled_depth_formats() {
+  struct Case {
+    std::uint8_t format;
+    DepthRenderTargetFormat depth_format;
+    float values[4];
+  };
+  const Case cases[] = {
+      {22, DepthRenderTargetFormat::D24S8, {0.0f, 0.25f, 0.5f, 1.0f}},
+      {23, DepthRenderTargetFormat::D24FS8, {0.0f, 0.5f, 1.0f, 1.5f}},  // 20e4 reaches past 1
+  };
+  for (const auto& c : cases) {
+    auto descriptor = rgba8(4, 1, false);
+    descriptor.format = c.format;
+    descriptor.endian = Endian::None;
+    std::vector<std::byte> memory(0x40000);
+    for (std::uint32_t x = 0; x < 4u; ++x) {
+      const auto packed = pack_depth_stencil(c.depth_format, c.values[x],
+                                             static_cast<std::uint8_t>(0xA0u + x));
+      std::memcpy(memory.data() + descriptor.base_address + x * 4u, &packed, 4u);
+    }
+    const auto decoded = decode_texture(descriptor, memory);
+    assert(decoded.valid && decoded.error.empty());
+    for (std::uint32_t x = 0; x < 4u; ++x) {
+      float depth{};
+      std::memcpy(&depth, decoded.linear_data.data() + x * 4u, sizeof(depth));
+      const auto expected = c.depth_format == DepthRenderTargetFormat::D24FS8
+                                ? quantize_float20e4(c.values[x])
+                                : unpack_depth_stencil(c.depth_format,
+                                                       pack_depth_stencil(c.depth_format,
+                                                                          c.values[x], 0))
+                                      .depth;
+      assert(depth == expected);
+    }
+    // Encoding back would need the dropped stencil.
+    std::string error;
+    assert(!encode_texture(descriptor, decoded.linear_data, memory, &error));
+    assert(error.find("cannot be encoded back") != std::string::npos);
+  }
+
+  // Swizzle: 3 bits per component, 0-3 select x/y/z/w, 4/5 force 0/1.
+  const std::uint16_t yzw_one = 1u | (2u << 3u) | (3u << 6u) | (5u << 9u);
+  assert(host_view_swizzle(22, yzw_one) == (0u | (0u << 3u) | (0u << 6u) | (5u << 9u)));
+  assert(host_view_swizzle(23, yzw_one) == (0u | (0u << 3u) | (0u << 6u) | (5u << 9u)));
+  assert(host_view_swizzle(6, yzw_one) == yzw_one);  // other formats keep theirs
 }
 
 void test_tiled_decode_and_endian() {
@@ -381,6 +437,7 @@ void test_converted_resolve_write() {
 
 int main() {
   test_complete_format_catalogue();
+  test_sampled_depth_formats();
   test_tiled_decode_and_endian();
   test_mips_packing_and_dirty_ranges();
   test_3d_tiled_addressing();

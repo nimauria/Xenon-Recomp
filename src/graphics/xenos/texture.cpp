@@ -1,4 +1,5 @@
 #include "xenon/gpu/texture.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/memory/address_space.hpp"
 
 #include <algorithm>
@@ -27,6 +28,13 @@ constexpr TextureFormatInfo f(std::uint8_t id, std::string_view name,
   return {id, name, storage, bw, bh, bpp, host};
 }
 
+// A depth format sampled as float32 depth, replicated to every component.
+constexpr TextureFormatInfo sampled_depth(std::uint8_t id, std::string_view name,
+                                          TextureLoad load) {
+  return {id, name, TextureStorage::Uncompressed, 1, 1, 32, TextureHostFormat::R32Float, load,
+          true};
+}
+
 constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(0,"1_REVERSE",TextureStorage::Uncompressed,1,1,1,TextureHostFormat::Unsupported),
     f(1,"1",TextureStorage::Uncompressed,1,1,1,TextureHostFormat::Unsupported),
@@ -50,10 +58,11 @@ constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(19,"DXT2_3",TextureStorage::BlockCompressed,4,4,8,TextureHostFormat::BC2Unorm),
     f(20,"DXT4_5",TextureStorage::BlockCompressed,4,4,8,TextureHostFormat::BC3Unorm),
     f(21,"16_16_16_16_EDRAM",TextureStorage::Uncompressed,1,1,64,TextureHostFormat::R16G16B16A16Unorm),
-    // Xenos depth values need explicit depth/stencil conversion. GPU 10 owns
-    // that EDRAM/depth path, so do not claim a lossless sampled-image mapping.
-    f(22,"24_8",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::Unsupported),
-    f(23,"24_8_FLOAT",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::Unsupported),
+    // Sampled depth (a resolved depth buffer read as a texture, e.g. for
+    // depth of field): float32 depth in R, replicated, as xenia samples it
+    // (R32_FLOAT, swizzle RRRR); stencil is not sampled.
+    sampled_depth(22,"24_8",TextureLoad::DepthUnorm24ToFloat),
+    sampled_depth(23,"24_8_FLOAT",TextureLoad::DepthFloat20e4ToFloat),
     f(24,"16",TextureStorage::Uncompressed,1,1,16,TextureHostFormat::R16Unorm),
     f(25,"16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R16G16Unorm),
     f(26,"16_16_16_16",TextureStorage::Uncompressed,1,1,64,TextureHostFormat::R16G16B16A16Unorm),
@@ -164,6 +173,17 @@ std::string unsupported_format_error(const TextureFormatInfo& format) {
 }
 
 }  // namespace
+
+std::uint16_t host_view_swizzle(std::uint8_t format, std::uint16_t swizzle) noexcept {
+  if (!texture_format_info(format).replicate_first_component) return swizzle;
+  std::uint16_t result = 0;
+  for (unsigned component = 0; component < 4u; ++component) {
+    auto select = static_cast<std::uint16_t>((swizzle >> (component * 3u)) & 7u);
+    if (select < 4u) select = 0u;  // x/y/z/w all read the one host channel
+    result |= static_cast<std::uint16_t>(select << (component * 3u));
+  }
+  return result | static_cast<std::uint16_t>(swizzle & ~0x0FFFu);
+}
 
 const TextureFormatInfo& texture_format_info(std::uint8_t format) noexcept {
   return kFormats[format & 63u];
@@ -360,6 +380,17 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
       }
     }
   }
+  if (result.layout.format.load != TextureLoad::Copy) {
+    const auto depth_format = result.layout.format.load == TextureLoad::DepthFloat20e4ToFloat
+                                  ? DepthRenderTargetFormat::D24FS8
+                                  : DepthRenderTargetFormat::D24S8;
+    for (std::size_t offset = 0; offset + 4u <= result.linear_data.size(); offset += 4u) {
+      std::uint32_t packed{};
+      std::memcpy(&packed, result.linear_data.data() + offset, sizeof(packed));
+      const float depth = unpack_depth_stencil(depth_format, packed).depth;
+      std::memcpy(result.linear_data.data() + offset, &depth, sizeof(depth));
+    }
+  }
   result.valid = true;
   return result;
 }
@@ -376,6 +407,10 @@ bool encode_texture(const TextureDescriptor& descriptor,
   if (!layout.valid) return fail(layout.error);
   if (!layout.format.host_supported())
     return fail(unsupported_format_error(layout.format));
+  if (layout.format.load != TextureLoad::Copy)
+    return fail("Xenos texture format " + std::to_string(layout.format.xenos_format) + " (" +
+                std::string(layout.format.name) +
+                ") is decoded to depth only, so it cannot be encoded back without its stencil");
   if (linear_data.size() < layout.linear_size_bytes)
     return fail("linear texture source is smaller than the declared layout");
 

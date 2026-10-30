@@ -1,4 +1,5 @@
 #include "xenon/gpu/vulkan/texture.hpp"
+#include "xenon/gpu/texture.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -256,11 +257,12 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
   view_info.image = image_;
   view_info.viewType = view_type(descriptor);
   view_info.format = format_;
+  const auto swizzle = host_view_swizzle(descriptor.format, descriptor.swizzle);
   view_info.components = {
-      component_swizzle(descriptor.swizzle, 0),
-      component_swizzle(descriptor.swizzle, 1),
-      component_swizzle(descriptor.swizzle, 2),
-      component_swizzle(descriptor.swizzle, 3)};
+      component_swizzle(swizzle, 0),
+      component_swizzle(swizzle, 1),
+      component_swizzle(swizzle, 2),
+      component_swizzle(swizzle, 3)};
   view_info.subresourceRange = {aspect, 0, mip_levels, 0, layers};
   if (vkCreateImageView(device_, &view_info, nullptr, &view_) != VK_SUCCESS) {
     error_ = "vkCreateImageView failed for Xenos texture";

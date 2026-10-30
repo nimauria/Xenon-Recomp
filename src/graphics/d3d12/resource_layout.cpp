@@ -1,4 +1,5 @@
 #include "xenon/gpu/d3d12/resource_layout.hpp"
+#include "xenon/gpu/texture.hpp"
 
 #include <algorithm>
 #include <array>
@@ -213,9 +214,10 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   D3D12_SHADER_RESOURCE_VIEW_DESC view{};
   view.Format = format == DXGI_FORMAT_R24G8_TYPELESS
                     ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : format;
+  const auto swizzle = host_view_swizzle(state.format, state.swizzle);
   view.Shader4ComponentMapping = D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(
-      component_mapping(state.swizzle, 0), component_mapping(state.swizzle, 1),
-      component_mapping(state.swizzle, 2), component_mapping(state.swizzle, 3));
+      component_mapping(swizzle, 0), component_mapping(swizzle, 1),
+      component_mapping(swizzle, 2), component_mapping(swizzle, 3));
   switch (dimension) {
     case TextureDimension::OneD:
       descriptor_index = 1u + slot;
