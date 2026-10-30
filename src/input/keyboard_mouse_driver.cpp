@@ -55,25 +55,35 @@ std::uint16_t virtual_key_for_control(VirtualControl control) {
 
 KeyboardMouseOptions default_keyboard_mouse_options() {
   KeyboardMouseOptions options{};
+  // The PC menu conventions AC7 established (and the AC6 static recomp's
+  // keyboard layer follows): WASD or arrows navigate, Space/Enter or the left
+  // button confirm, Escape/Backspace or the right button cancel, Enter is
+  // Start and Tab is Back.
   options.key_bindings = {
-      {static_cast<KeyCode>(Key::W), VirtualControl::LeftStickUp, 1.0f},
-      {static_cast<KeyCode>(Key::S), VirtualControl::LeftStickDown, 1.0f},
-      {static_cast<KeyCode>(Key::A), VirtualControl::LeftStickLeft, 1.0f},
-      {static_cast<KeyCode>(Key::D), VirtualControl::LeftStickRight, 1.0f},
-      {static_cast<KeyCode>(Key::Up), VirtualControl::RightStickUp, 1.0f},
-      {static_cast<KeyCode>(Key::Down), VirtualControl::RightStickDown, 1.0f},
-      {static_cast<KeyCode>(Key::Left), VirtualControl::RightStickLeft, 1.0f},
-      {static_cast<KeyCode>(Key::Right), VirtualControl::RightStickRight, 1.0f},
+      {static_cast<KeyCode>(Key::W), VirtualControl::DpadUp, 1.0f},
+      {static_cast<KeyCode>(Key::S), VirtualControl::DpadDown, 1.0f},
+      {static_cast<KeyCode>(Key::A), VirtualControl::DpadLeft, 1.0f},
+      {static_cast<KeyCode>(Key::D), VirtualControl::DpadRight, 1.0f},
+      {static_cast<KeyCode>(Key::Up), VirtualControl::DpadUp, 1.0f},
+      {static_cast<KeyCode>(Key::Down), VirtualControl::DpadDown, 1.0f},
+      {static_cast<KeyCode>(Key::Left), VirtualControl::DpadLeft, 1.0f},
+      {static_cast<KeyCode>(Key::Right), VirtualControl::DpadRight, 1.0f},
       {static_cast<KeyCode>(Key::Space), VirtualControl::ButtonA, 1.0f},
-      {static_cast<KeyCode>(Key::LeftControl), VirtualControl::ButtonB, 1.0f},
+      {static_cast<KeyCode>(Key::Enter), VirtualControl::ButtonA, 1.0f},
+      {static_cast<KeyCode>(Key::Escape), VirtualControl::ButtonB, 1.0f},
+      {static_cast<KeyCode>(Key::Backspace), VirtualControl::ButtonB, 1.0f},
       {static_cast<KeyCode>(Key::Q), VirtualControl::ButtonX, 1.0f},
       {static_cast<KeyCode>(Key::E), VirtualControl::ButtonY, 1.0f},
       {static_cast<KeyCode>(Key::Enter), VirtualControl::Start, 1.0f},
-      {static_cast<KeyCode>(Key::Backspace), VirtualControl::Back, 1.0f},
+      {static_cast<KeyCode>(Key::Tab), VirtualControl::Back, 1.0f},
       {static_cast<KeyCode>(Key::LeftShift), VirtualControl::LeftShoulder, 1.0f},
       {static_cast<KeyCode>(Key::R), VirtualControl::RightShoulder, 1.0f},
       {static_cast<KeyCode>(Key::Z), VirtualControl::LeftTrigger, 1.0f},
       {static_cast<KeyCode>(Key::C), VirtualControl::RightTrigger, 1.0f},
+  };
+  options.mouse_bindings = {
+      {MouseButton::Left, VirtualControl::ButtonA, 1.0f},
+      {MouseButton::Right, VirtualControl::ButtonB, 1.0f},
   };
   return options;
 }

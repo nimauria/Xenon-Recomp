@@ -1,12 +1,15 @@
 #pragma once
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -34,6 +37,12 @@ class InputSystem {
   // persistent device keys and are never recycled during the process lifetime.
   void refresh_devices();
 
+  // Calls refresh_devices() every `interval` on a background thread until
+  // shutdown(), so a controller connected, paired or unplugged after setup
+  // reaches the guest the way XAM reports hotplug on hardware. Calling it
+  // again while the monitor runs does nothing.
+  void start_hotplug_monitor(std::chrono::milliseconds interval);
+
   [[nodiscard]] std::vector<DeviceInfo> devices() const;
   [[nodiscard]] std::optional<DeviceInfo> device(DeviceId id) const;
   [[nodiscard]] std::optional<DeviceId> device_for_user(
@@ -58,6 +67,12 @@ class InputSystem {
   [[nodiscard]] Result add_user_source(std::uint32_t user_index, DeviceId device_id);
   [[nodiscard]] Result remove_user_source(std::uint32_t user_index, DeviceId device_id);
   [[nodiscard]] std::vector<DeviceId> sources_for_user(std::uint32_t user_index) const;
+  // Makes the device with this identity key (driver name + ':' + persistent
+  // key) a companion of the user: merged into whatever controller the user
+  // has, standing in as the user's controller while there is none, and never
+  // auto-assigned a user of its own. Keyboard + mouse uses this so it and a
+  // controller work interchangeably as player 1, across hotplug.
+  void set_companion_source(std::uint32_t user_index, std::string identity_key);
 
   // When inactive, state polling returns a neutral connected state and
   // vibration requests are suppressed. This lets a launcher/overlay gate input
@@ -150,6 +165,9 @@ class InputSystem {
                                  State& out_state);
   void auto_assign_locked();
   void reconcile_user_routes_locked();
+  [[nodiscard]] bool is_companion_locked(const DeviceRecord& record) const;
+  [[nodiscard]] std::optional<RoutedDevice> companion_route_locked(
+      std::uint32_t user_index) const;
   [[nodiscard]] std::optional<DeviceId> connected_id_for_identity_locked(
       std::string_view identity) const;
   [[nodiscard]] static std::string make_identity_key(
@@ -157,6 +175,7 @@ class InputSystem {
   [[nodiscard]] bool effective_active_locked() const noexcept;
   void stop_vibration_for_inactive_transition(bool was_active, bool now_active);
   void sync_player_indicators();
+  void stop_hotplug_monitor() noexcept;
 
   // Serializes driver lifecycle, hotplug enumeration, and I/O. The routing
   // mutex below protects Xenon's records; host drivers are not required to
@@ -171,6 +190,14 @@ class InputSystem {
   std::array<std::vector<std::string>, kMaxUsers>
       desired_source_identities_{};
   std::array<bool, kMaxUsers> auto_assignment_{{true, true, true, true}};
+  std::array<std::string, kMaxUsers> companion_identities_{};
+  // Which of a user's controller and companion was used last (get_state()).
+  struct CompanionSticky {
+    bool companion_active{};
+    GamepadState last_pad{};
+    GamepadState last_keys{};
+  };
+  std::array<CompanionSticky, kMaxUsers> companion_sticky_{};
   std::array<GamepadState, kMaxUsers> merged_last_state_{};
   std::array<std::uint32_t, kMaxUsers> merged_packet_number_{};
   std::array<bool, kMaxUsers> merged_has_state_{};
@@ -184,6 +211,10 @@ class InputSystem {
   bool vibration_enabled_{true};
   ProfileStore profiles_{};
   FrontendInputRouter frontend_router_{};
+  std::mutex hotplug_mutex_{};
+  std::condition_variable hotplug_wake_{};
+  bool hotplug_stop_{};
+  std::thread hotplug_thread_{};
 };
 
 }  // namespace xenon::input

@@ -1,7 +1,7 @@
 #pragma once
 
 // The game window belongs to XenonRuntime (this process), not XenonLauncher -
-// see docs/runtime/RUNTIME_HOST.md. Reuses SDL2 (already an Xenon dependency for
+// see docs/runtime/RUNTIME_HOST.md. Reuses SDL3 (already an Xenon dependency for
 // input/audio) rather than adding a second window/UI toolkit: this is a game
 // host, not a second launcher UI. Owns no Xbox semantics - it only creates a
 // native window/surface and hands it to the already-implemented Vulkan/D3D12
@@ -10,12 +10,24 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "xenon/gpu/backend.hpp"
 
 struct SDL_Window;
 
 namespace xenon::runtime_host {
+
+// A keyboard or mouse event from the window, in the session's terms
+// (XenonSession::input_key()/input_mouse_button()/input_mouse_motion()).
+struct PresentationInput {
+  enum class Kind : std::uint8_t { Key, MouseButton, MouseMotion };
+  Kind kind{Kind::Key};
+  std::uint16_t code{};  // USB HID usage for Key; 1 left, 2 right, 3 middle, 4/5 extra
+  bool pressed{};
+  float dx{};
+  float dy{};
+};
 
 struct PresentationEvents {
   bool close_requested{false};
@@ -24,6 +36,7 @@ struct PresentationEvents {
   std::uint32_t height{0};
   bool focus_changed{false};
   bool focused{false};
+  std::vector<PresentationInput> input{};
 };
 
 class PresentationHost {

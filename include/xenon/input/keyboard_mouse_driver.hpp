@@ -27,6 +27,7 @@ enum class Key : KeyCode {
   Enter = 0x28,
   Escape = 0x29,
   Backspace = 0x2A,
+  Tab = 0x2B,
   Space = 0x2C,
   Right = 0x4F,
   Left = 0x50,

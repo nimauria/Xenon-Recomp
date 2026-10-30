@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -15,6 +16,7 @@ namespace xenon::core {
 using detail::ascii_lower;
 
 bool XenonSession::init_input() {
+  keyboard_mouse_ = nullptr;
   input_ = std::make_unique<input::InputSystem>();
 
   std::vector<std::string> requested = config_.input_drivers;
@@ -22,6 +24,21 @@ bool XenonSession::init_input() {
 
   bool added_real_driver = false;
   bool explicit_null = false;
+
+  // The presentation window's keys and mouse buttons, as a virtual
+  // controller. The cursor is not captured, so mouse motion stays off the
+  // right stick (moving it across the window would swing the camera).
+  const auto add_keyboard_mouse = [this, &added_real_driver] {
+    if (keyboard_mouse_) return;
+    auto options = input::default_keyboard_mouse_options();
+    options.mouse_to_right_stick = false;
+    auto driver = std::make_unique<input::KeyboardMouseInputDriver>(std::move(options));
+    auto* raw = driver.get();
+    if (input_->add_driver(std::move(driver))) {
+      keyboard_mouse_ = raw;
+      added_real_driver = true;
+    }
+  };
 
   for (const auto& name : requested) {
     const std::string driver = ascii_lower(name);
@@ -38,6 +55,11 @@ bool XenonSession::init_input() {
       if (auto sdl = input::create_sdl_input_driver()) {
         added_real_driver |= input_->add_driver(std::move(sdl));
       }
+      add_keyboard_mouse();
+      continue;
+    }
+    if (driver == "keyboard" || driver == "keyboard-mouse") {
+      add_keyboard_mouse();
       continue;
     }
     if (driver == "xinput") {
@@ -90,6 +112,15 @@ bool XenonSession::init_input() {
     set_error("Input system setup failed");
     return false;
   }
+  // Keyboard + mouse and a controller both drive player 1, whichever was
+  // used last; the keyboard stands in while no controller is connected.
+  if (keyboard_mouse_) {
+    input_->set_companion_source(
+        0, std::string(keyboard_mouse_->name()) + ':' + keyboard_mouse_->options().persistent_key);
+  }
+  // setup() enumerates once; controllers plugged in or paired later are
+  // picked up by the monitor (an unenumerated pad never reaches the guest).
+  input_->start_hotplug_monitor(std::chrono::seconds(1));
 
   // Apply the launcher's focus policy after setup so a foreground-only
   // session never leaks input while its presentation window is unfocused.

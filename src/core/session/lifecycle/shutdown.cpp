@@ -129,6 +129,7 @@ void XenonSession::shutdown() {
   xam_.reset();
 
   input_bridge_.reset();
+  keyboard_mouse_ = nullptr;
   if (input_) {
     input_->shutdown();
     input_.reset();

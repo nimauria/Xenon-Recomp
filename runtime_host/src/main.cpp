@@ -355,6 +355,16 @@ int main(int argc, char** argv) {
       if (events.focus_changed) {
         session.set_focused(events.focused);
       }
+      for (const auto& input : events.input) {
+        using Kind = xenon::runtime_host::PresentationInput::Kind;
+        switch (input.kind) {
+          case Kind::Key: session.input_key(input.code, input.pressed); break;
+          case Kind::MouseButton:
+            session.input_mouse_button(static_cast<std::uint8_t>(input.code), input.pressed);
+            break;
+          case Kind::MouseMotion: session.input_mouse_motion(input.dx, input.dy); break;
+        }
+      }
       if (events.resized) {
         std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
         std::cout << "[runtime_host] Presentation resized to " << events.width << "x"

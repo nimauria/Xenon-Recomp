@@ -61,6 +61,25 @@ std::vector<std::string> XenonSession::describe_pump_state() {
         << " display_locked_vblanks=" << gpu_vblanks_display_locked_.load()
         << " scanout_latch_timeouts=" << scanout_latch_timeouts_.load();
   lines.push_back(vsync.str());
+  if (input_) {
+    // Whether a controller reached the guest: a pad that was never enumerated,
+    // never assigned to a user, or gated by focus leaves the title idle.
+    const auto input = input_->diagnostics();
+    lines.push_back("Input: " + std::to_string(input.driver_count) + " drivers, " +
+                    std::to_string(input.connected_device_count) + " connected devices, " +
+                    std::to_string(input.assigned_user_count) + " assigned users; focused=" +
+                    (input.focused ? "yes" : "no") +
+                    " effective_active=" + (input.effective_active ? "yes" : "no"));
+    for (const auto& device : input.devices) {
+      const auto info = input_->device(device.id);
+      lines.push_back("  " + device.identity_key + " '" + (info ? info->name : std::string{}) +
+                      "' " + (device.connected ? "connected" : "disconnected") + " user=" +
+                      std::to_string(device.assigned_user) + " state polls " +
+                      std::to_string(device.state_polls) + " (failed " +
+                      std::to_string(device.state_failures) + "), last result " +
+                      std::string(input::to_string(device.last_result)));
+    }
+  }
   if (memory_) {
     // Who owns the 512 MiB: a title that exhausts physical memory sees
     // MmAllocatePhysicalMemoryEx/NtAllocateVirtualMemory fail and usually

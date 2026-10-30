@@ -40,6 +40,7 @@ Result InputSystem::setup() {
 }
 
 void InputSystem::shutdown() noexcept {
+  stop_hotplug_monitor();
   std::scoped_lock driver_lock(driver_mutex_);
   std::vector<InputDriver*> drivers;
   std::vector<std::pair<InputDriver*, NativeDeviceId>> stop_vibration;
@@ -179,6 +180,32 @@ void InputSystem::refresh_devices() {
   }
   driver_lock.unlock();
   sync_player_indicators();
+}
+
+void InputSystem::start_hotplug_monitor(std::chrono::milliseconds interval) {
+  std::scoped_lock lock(hotplug_mutex_);
+  if (hotplug_thread_.joinable()) return;
+  hotplug_stop_ = false;
+  hotplug_thread_ = std::thread([this, interval] {
+    std::unique_lock monitor_lock(hotplug_mutex_);
+    while (!hotplug_wake_.wait_for(monitor_lock, interval,
+                                   [this] { return hotplug_stop_; })) {
+      monitor_lock.unlock();
+      refresh_devices();
+      monitor_lock.lock();
+    }
+  });
+}
+
+void InputSystem::stop_hotplug_monitor() noexcept {
+  std::thread monitor;
+  {
+    std::scoped_lock lock(hotplug_mutex_);
+    hotplug_stop_ = true;
+    monitor = std::move(hotplug_thread_);
+  }
+  hotplug_wake_.notify_all();
+  if (monitor.joinable()) monitor.join();
 }
 
 void InputSystem::sync_player_indicators() {
