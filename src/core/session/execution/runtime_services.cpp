@@ -180,6 +180,18 @@ std::uint64_t XenonSession::read_time_base(const cpu::CpuState& /*state*/) {
   return kernel::TimeServices::performance_counter();
 }
 
+void XenonSession::leave_guest_code_if_terminated() {
+  // A kernel call that terminated its caller - ExTerminateThread, or a
+  // termination that landed while the caller sat in a kernel wait - never
+  // returns to the guest on hardware. Titles put nothing meaningful after
+  // such a call (AC6's thread exit stub falls into an unrelated routine that
+  // dereferences null), so the thread leaves compiled code here, the same way
+  // it does at a loop back-edge (enter_safepoint()).
+  if (!kernel_process_) return;
+  const auto current = kernel_process_->thread_manager().current_thread();
+  if (current && current->is_terminated()) throw cpu::GuestThreadTerminated{};
+}
+
 bool XenonSession::external_call(std::string_view module,
                                  std::uint32_t ordinal,
                                  cpu::CpuState& state,
@@ -293,11 +305,13 @@ bool XenonSession::dispatch_export(std::string_view module, std::uint32_t ordina
 
   if (result.handled) {
     observe_boot_checkpoint_from_export_call(module, ordinal, state);
+    leave_guest_code_if_terminated();
     return true;
   }
 
   // Fall back to legacy registry (for backwards compatibility)
   if (legacy_call_registry_.dispatch(module, ordinal, state, memory)) {
+    leave_guest_code_if_terminated();
     return true;
   }
 

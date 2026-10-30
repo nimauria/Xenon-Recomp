@@ -36,6 +36,7 @@
 #include "xenon/gpu/backend.hpp"
 #include "xenon/gpu/graphics_system.hpp"
 #include "xenon/gpu/register_aperture.hpp"
+#include "xenon/input/keyboard_mouse_driver.hpp"
 #include "xenon/input/system.hpp"
 #include "xenon/input/xam_guest.hpp"
 #include "xenon/kernel/exception.hpp"
@@ -286,6 +287,14 @@ class XenonSession final : public cpu::RuntimeServices {
   // and additionally mutes AudioSystem when SessionConfig::audio_mute_unfocused
   // was requested. Safe to call before graphics/audio/input are enabled.
   void set_focused(bool focused);
+
+  // Host keyboard and mouse events from the presentation window, fed to the
+  // keyboard + mouse virtual controller (player 1's companion source). `key`
+  // is a USB HID keyboard usage (SDL scancodes are HID usages); `button` is
+  // 1 = left, 2 = right, 3 = middle, 4/5 = extra. No-ops without input.
+  void input_key(std::uint16_t key, bool pressed);
+  void input_mouse_button(std::uint8_t button, bool pressed);
+  void input_mouse_motion(float dx, float dy);
 
   // Subsystem access
   [[nodiscard]] memory::AddressSpace* memory() noexcept { return memory_.get(); }
@@ -699,6 +708,8 @@ class XenonSession final : public cpu::RuntimeServices {
   std::unique_ptr<kernel::xbox::GuestIoBridge> io_bridge_{};
   xbox::ImportRegistry xbox_imports_{};
   std::unique_ptr<input::InputSystem> input_{};
+  // Owned by input_ (a registered driver); null when keyboard + mouse is off.
+  input::KeyboardMouseInputDriver* keyboard_mouse_{};
   // Bridges guest XamInput* calls to input_. Registered into the same
   // export_registry_ that XAM/Audio use (see init_exports()) rather than the
   // separate cpu::ExternalCallRegistry input::xam::guest historically
@@ -734,6 +745,9 @@ class XenonSession final : public cpu::RuntimeServices {
   bool dispatch_export(std::string_view module, std::uint32_t ordinal,
                        const ExportDescriptor* descriptor, cpu::CpuState& state,
                        cpu::MemoryPort& memory);
+  // Throws cpu::GuestThreadTerminated when the calling guest thread was
+  // terminated by (or during) the kernel call that is returning.
+  void leave_guest_code_if_terminated();
   // Guest module records (XexGetModuleHandle) and dynamic export thunks
   // (XexGetProcedureAddress); consulted by call()/is_recognized_import_thunk()
   // alongside the loaded XEX's own import thunks. Created by init_exports().

@@ -374,9 +374,20 @@ bool XenonSession::call_guest_routine(cpu::CpuState& caller, cpu::GuestAddress r
   const auto outcome = dispatch_guest_thread(state, routine, thread, /*trace_dispatches=*/false);
   if (outcome.crashed) {
     if (config_.enable_logging) {
+      // The arguments identify the request a stale routine came from (an
+      // XOVERLAPPED completion passes the overlapped as its third), and the
+      // thread's recent kernel calls show which wait delivered it.
+      std::ostringstream detail;
+      detail << std::hex << "thread " << std::dec << thread->thread_id() << std::hex
+             << " arguments=(";
+      for (std::size_t i = 0; i < arguments.size(); ++i)
+        detail << (i ? ", 0x" : "0x") << arguments[i];
+      detail << ") caller lr=0x" << caller.lr << ' '
+             << describe_recent_exports(thread->thread_id(), 8u);
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Guest routine 0x" << std::hex << routine << std::dec
-                << " called from the kernel crashed: " << outcome.crash_message << std::endl;
+                << " called from the kernel crashed: " << outcome.crash_message << "; "
+                << detail.str() << std::endl;
     }
     return false;
   }

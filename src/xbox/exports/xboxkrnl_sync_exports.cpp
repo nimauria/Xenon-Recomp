@@ -477,14 +477,10 @@ bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& 
 // authoritative over any in-flight register state, and already runs whether
 // termination happened via a preemptive safepoint OR (this export's own
 // case) the thread calling into a kernel export that terminates itself -
-// this only needs to flip that state; the dispatch loop and thread
-// trampoline that observe it, unwind cleanly, and report exit_code already
-// exist and need no changes. Xenon's dispatch loop observes termination at
-// its own safepoints rather than truly never returning to this call's own
-// C++ frame (documented latency, not a bug - see KernelThread::terminate()'s
-// comment) - guest code after this call may still execute a few more
-// instructions before the loop notices, matching how any other external
-// termination request already behaves.
+// this only needs to flip that state. The session's export boundary
+// (XenonSession::leave_guest_code_if_terminated()) sees the terminated
+// caller as this handler returns and unwinds it out of compiled code, so no
+// guest instruction after the call runs - titles place nothing valid there.
 bool ex_terminate_thread_export(kernel::KernelProcess& process, ExportCallContext& context) {
   const auto exit_code = static_cast<std::uint32_t>(context.cpu.gpr[3]);
   auto thread = process.thread_manager().current_thread();
