@@ -302,6 +302,28 @@ void test_shard_byte_budget() {
   assert(normalize(read_all_shards(tiny.output)) == normalize(read_all_shards(baseline.output)));
   assert(tiny_report.diagnostics.codegen_max_shard_bytes > 0);
 
+  // Regression (Ace Combat 6 preparation took hours): xenon-prepare
+  // generated one function per shard, 12,480 translation units for AC6. A
+  // whole-game preparation packs functions into byte-budget shards, so
+  // these three share one.
+  const auto game = make_fixture("shard_budget_game", xex);
+  auto game_options = DriverOptions::for_game_preparation();
+  game_options.input = game.input;
+  game_options.output = game.output;
+  game_options.graph_cache = game.root / "cas";
+  game_options.analysis_jobs = 1;
+  game_options.codegen_jobs = 1;
+  assert(game_options.shard_max_bytes == DriverOptions::kGameShardMaxBytes);
+  AnalysisReport game_report;
+  assert(load_and_analyze(game_options, game_report, error));
+  assert(generate_project(game_options, game_report, error));
+  std::size_t game_shard_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(game.output / "functions")) {
+    if (entry.path().extension() == ".cpp") ++game_shard_count;
+  }
+  assert(game_shard_count == 1);
+  assert(normalize(read_all_shards(game.output)) == normalize(read_all_shards(baseline.output)));
+
   std::cout << "Shard byte-budget bundling/oversized-function tests passed\n";
 }
 

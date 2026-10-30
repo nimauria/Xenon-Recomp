@@ -29,9 +29,8 @@ ModuleBuildResult prepare_one_module(const xenon::xbox::XexImage& effective_imag
                 is_primary ? "Discovering functions and applying analysis hints"
                            : "Discovering functions and applying analysis hints (" +
                                  module_relative_path + ")");
-  xenon::recomp::DriverOptions driver_options;
+  auto driver_options = xenon::recomp::DriverOptions::for_game_preparation();
   driver_options.graph_cache = options.cache_root / "graph-v1";
-  driver_options.shard_function_count = 1;
   driver_options.pre_parsed_image = effective_image;
   driver_options.hint_set_v2 = hint_set;
   driver_options.hook_sources = hook_sources;

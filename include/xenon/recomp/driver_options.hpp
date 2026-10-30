@@ -66,6 +66,17 @@ struct DriverOptions {
   // budget changes on-disk shard layout, so callers opt in deliberately
   // rather than being silently repartitioned by an upstream default change).
   std::optional<std::size_t> shard_max_bytes;
+  // The byte budget to use for a whole game (xenon-prepare, game modules'
+  // own generators): about 300 shards for Ace Combat 6. One function per
+  // shard instead made 12,480 translation units for it, each paying the full
+  // header and compiler start-up cost, and turned a short build into hours.
+  static constexpr std::size_t kGameShardMaxBytes = 1024u * 1024u;
+  // The options a whole-game preparation starts from.
+  [[nodiscard]] static DriverOptions for_game_preparation() {
+    DriverOptions options;
+    options.shard_max_bytes = kGameShardMaxBytes;
+    return options;
+  }
   bool allow_partial{false};
 
   // Worker-count configuration (Part 3/16 of the Recomp Analysis V2 pass).
