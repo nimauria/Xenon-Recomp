@@ -73,6 +73,7 @@ add_library(xenon_recomp STATIC
   compilation/shards/shard_assembly.cpp
   # Caching, reporting and title intake.
   caching/artifact_cache.cpp
+  caching/workspace_lock.cpp
   caching/configuration_identity.cpp
   reporting/report_json.cpp
   reporting/report_text.cpp

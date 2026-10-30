@@ -88,6 +88,10 @@ if(XENON_BUILD_TESTS)
   endif()
   xenon_enable_test_asserts(xenon_artifact_cache_tests)
   add_test(NAME xenon_artifact_cache_tests COMMAND xenon_artifact_cache_tests)
+  add_executable(xenon_workspace_lock_tests workspace_lock_tests.cpp)
+  target_link_libraries(xenon_workspace_lock_tests PRIVATE xenon_recomp)
+  xenon_enable_test_asserts(xenon_workspace_lock_tests)
+  add_test(NAME xenon_workspace_lock_tests COMMAND xenon_workspace_lock_tests)
 
   # End-to-end xenon-prepare worker tests: drives the real xenon-prepare
   # binary as a subprocess (first build, no-rebuild, hint-change rebuild,

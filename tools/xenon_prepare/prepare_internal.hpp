@@ -28,6 +28,7 @@
 #include "xenon/recomp/driver.hpp"
 #include "xenon/recomp/game_intake.hpp"
 #include "xenon/recomp/module_hint_provider.hpp"
+#include "xenon/recomp/workspace_lock.hpp"
 #include "xenon/xbox/xex_crypto.hpp"
 #include "xenon/xbox/xex_loader.hpp"
 
@@ -43,14 +44,16 @@
 
 namespace xenon::prepare_tool {
 
+// The workspace a preparation generates and builds in, held exclusively; a
+// lock left by a preparation that died (crash, kill, power cut) is taken
+// over (xenon/recomp/workspace_lock.hpp).
 struct PreparationWorkspace {
   std::filesystem::path path;
-  explicit PreparationWorkspace(std::filesystem::path p) : path(std::move(p)) {
-    std::filesystem::create_directories(path);
-    if (!std::filesystem::create_directory(path / ".lock"))
-      throw std::runtime_error("preparation workspace is busy (or has an abandoned .lock): " + path.string());
+  xenon::recomp::WorkspaceLock lock;
+  explicit PreparationWorkspace(std::filesystem::path p) : path(p), lock(std::move(p)) {
+    if (lock.reclaimed())
+      std::cout << "xenon-prepare: took over the abandoned lock of " << path.string() << "\n";
   }
-  ~PreparationWorkspace() { std::error_code ec; std::filesystem::remove(path / ".lock", ec); }
 };
 
 std::string lower_ascii(std::string value);
