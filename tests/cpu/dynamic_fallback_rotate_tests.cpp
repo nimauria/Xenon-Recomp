@@ -185,7 +185,8 @@ void test_rldcl_rldcr() {
   }
 }
 
-// The record forms set CR0 from the 64-bit result (LT/GT/EQ, SO copied from XER).
+// The record forms set CR0 from the low 32 bits of the result (LT/GT/EQ, SO
+// copied from XER), as every record form does on the console.
 void test_record_forms_update_cr0() {
   Harness h;
   auto cr0 = [](const CpuState& s) { return s.cr_field(0); };
@@ -195,9 +196,12 @@ void test_record_forms_update_cr0() {
   // positive
   out = h.run(md(0, 4, 5, 0, 32, true), 0xFFFFFFFF00000001ull, 0, 0, 4, 5, 6);
   assert(out.gpr[5] == 1u && cr0(out) == 0x4u);
-  // negative (the sign bit of the 64-bit result decides, not bit 31)
+  // negative: bit 31 is the sign CR0 sees
+  out = h.run(md(0, 4, 5, 0, 0, true), 0x0000000080000000ull, 0, 0, 4, 5, 6);
+  assert(out.gpr[5] == 0x0000000080000000ull && cr0(out) == 0x8u);
+  // bit 63 alone does not make it negative: the low word is zero
   out = h.run(md(0, 4, 5, 0, 0, true), 0x8000000000000000ull, 0, 0, 4, 5, 6);
-  assert(out.gpr[5] == 0x8000000000000000ull && cr0(out) == 0x8u);
+  assert(out.gpr[5] == 0x8000000000000000ull && cr0(out) == 0x2u);
   // Non-record form leaves CR0 alone.
   out = h.run(md(0, 4, 5, 0, 0, false), 0x8000000000000000ull, 0, 0, 4, 5, 6);
   assert(cr0(out) == 0u);

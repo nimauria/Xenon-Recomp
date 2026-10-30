@@ -148,8 +148,13 @@ struct alignas(64) CpuState {
   void set_vector_saturated() noexcept { vscr |= vscr_bits::SAT; }
   void clear_vector_saturated() noexcept { vscr &= ~vscr_bits::SAT; }
 
+  // Record forms ("add.", "addic.", "rlwinm.", ...) compare the low 32 bits of
+  // the result with zero: titles run with 32-bit mode CR0 semantics, as xenia's
+  // UpdateCR (Truncate to INT32) and XenonRecomp's compare<int32_t> both do.
+  // Code relies on it: a word loaded with lwz is zero-extended, so 0xFFFFFFFF
+  // decremented by "addic. -1" must read as negative, not as 0x0_FFFFFFFE.
   void update_cr0_signed(std::uint64_t result) noexcept {
-    const auto signed_result = static_cast<std::int64_t>(result);
+    const auto signed_result = static_cast<std::int32_t>(static_cast<std::uint32_t>(result));
     const std::uint8_t field = static_cast<std::uint8_t>(
         (signed_result < 0 ? 0x8u : signed_result > 0 ? 0x4u : 0x2u) |
         (xer_so() ? 0x1u : 0u));

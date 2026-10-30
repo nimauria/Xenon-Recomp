@@ -433,6 +433,26 @@ int main() {
   assert(state.xer_ca());            // 6 <u 7 -> carry set
   assert((state.cr >> 28) == 0b0100u);  // CR0 = GT (6 is positive, nonzero)
 
+  // Real AC6 repro: the mode manager's tick loads a countdown word with lwz
+  // (zero-extended) and decrements it with "addic. -1", calling its update
+  // only while CR0 is not GT. Record forms compare the low 32 bits, so once the
+  // word holds 0xFFFFFFFF the result 0x0_FFFFFFFE is negative. Comparing all
+  // 64 bits called it positive, skipped the update forever and left AC6 on a
+  // black screen after the downloadable-content check.
+  state = {};
+  state.gpr[4] = 0xFFFFFFFFull;
+  state.lr = kReturn;
+  const auto wrapped_result =
+      addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call);
+  assert(wrapped_result.handled);
+  assert(state.gpr[6] == 0xFFFFFFFEull);  // the register keeps its 64-bit value
+  assert((state.cr >> 28) == 0b1000u);    // CR0 = LT: low word 0xFFFFFFFE is -2
+  state = {};
+  state.gpr[4] = 0x1'00000001ull;  // low word 1: the high word must not matter
+  state.lr = kReturn;
+  assert(addic_context.try_dynamic_fallback(kCode + 0x700u, CompiledLookupKind::Call).handled);
+  assert((state.cr >> 28) == 0b0010u);  // CR0 = EQ: low word 0
+
   // Real AC6 repro, part four: the entire VMX/VMX128 vector unit - the
   // largest single gap this interpreter has ever had - had no case here at
   // all, starting with "lvx128" (AC6's own compiled code executes this

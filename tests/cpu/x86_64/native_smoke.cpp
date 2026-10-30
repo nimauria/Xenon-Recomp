@@ -115,7 +115,10 @@ int main(){
   smoke_addo_rc(s,mem,rt);
   assert(s.gpr[12]==0x8000000000000000ull);
   assert(s.xer_ov() && s.xer_so());
-  assert(s.cr_field(0)==0x9u); // LT | SO
+  assert(s.cr_field(0)==0x3u); // EQ | SO: CR0 reads the low word, which is 0
+  s.xer=0; s.gpr[13]=0x7FFFFFFFull; s.gpr[14]=1;
+  smoke_addo_rc(s,mem,rt);
+  assert(s.cr_field(0)==0x8u); // LT: low word 0x80000000 is negative
 
   // Sign/move FP instructions do not modify FPSCR, but Rc snapshots it into CR1.
   s.fpscr=fpscr_bits::OX|fpscr_bits::OE; aot::recompute_fpscr_summaries(s);

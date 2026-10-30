@@ -11,6 +11,7 @@ using namespace xenon::cpu;
 FN(edge_addc); FN(edge_adde); FN(edge_addme); FN(edge_addze);
 FN(edge_subfc); FN(edge_subfe); FN(edge_neg_o); FN(edge_divd_o);
 FN(edge_srawi); FN(edge_sradi); FN(edge_cmpw); FN(edge_cmpld);
+FN(edge_addic_record);
 #undef FN
 
 int main() {
@@ -103,6 +104,23 @@ int main() {
   state.gpr[4] = 1;
   edge_cmpld(state, memory, runtime);
   assert(state.cr_field(2) == 0x4u);  // unsigned GT
+
+  // Record forms set CR0 from the low 32 bits. A word loaded with lwz is
+  // zero-extended, so 0xFFFFFFFF - 1 is 0x0_FFFFFFFE in the register but -2
+  // to CR0 (AC6's mode manager counts down this way and stalled on a black
+  // screen when the 64-bit value read as positive).
+  state.xer = 0;
+  state.gpr[3] = 0x00000000FFFFFFFFull;
+  edge_addic_record(state, memory, runtime);
+  assert(state.gpr[5] == 0x00000000FFFFFFFEull);
+  assert(state.cr_field(0) == 0x8u);  // LT
+  state.gpr[3] = 0x0000000100000001ull;  // low word 1, high word set
+  edge_addic_record(state, memory, runtime);
+  assert(state.cr_field(0) == 0x2u);  // EQ: the high word does not count
+  state.xer = xer_bits::SO;
+  state.gpr[3] = 2;
+  edge_addic_record(state, memory, runtime);
+  assert(state.cr_field(0) == 0x5u);  // GT | SO
 
   std::cout << "xenon_cpu_integer_edges: ok\n";
   return 0;

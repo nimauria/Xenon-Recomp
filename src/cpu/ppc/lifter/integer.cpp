@@ -15,9 +15,13 @@ ValueId emit_binary(ir::Builder& b, Op op, ValueId a, ValueId c, Type t = Type::
   return b.emit(op, t, args);
 }
 
+// Record forms compare the low 32 bits of the result (see
+// CpuState::update_cr0_signed).
 void emit_cr0(ir::Builder& b, ValueId v) {
-  auto zero = b.constant_i64(0);
-  const ValueId compare[] = {v, zero};
+  const ValueId wide[] = {v};
+  auto low = b.emit(Op::Truncate, Type::I32, wide);
+  auto zero = b.constant_i32(0);
+  const ValueId compare[] = {low, zero};
   auto lt = b.emit(Op::CompareSlt, Type::I1, compare);
   auto gt = b.emit(Op::CompareSgt, Type::I1, compare);
   auto eq = b.emit(Op::CompareEq, Type::I1, compare);

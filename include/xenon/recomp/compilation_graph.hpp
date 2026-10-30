@@ -15,7 +15,8 @@ namespace xenon::recomp::graph {
 struct Versions {
   std::string decoder{"ppc-decoder-1"};
   std::string analysis{"cfg-9"};
-  std::string semantics{"cpu-8"};
+  // cpu-9: record forms set CR0 from the low 32 bits of the result.
+  std::string semantics{"cpu-9"};
   std::string ir{"xenon-ir-1"};
   std::string codegen{"cpp-aot-10"};
 };

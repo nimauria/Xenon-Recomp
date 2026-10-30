@@ -56,6 +56,12 @@ bool overflow64(std::uint64_t x, std::uint64_t y, bool carry_in) {
   return sx == sy && sr != sx;
 }
 
+// CR0 LT/GT/EQ for a record form: the low 32 bits of the result, signed.
+unsigned cr0_compare(std::uint64_t result) {
+  const auto low = static_cast<std::int32_t>(static_cast<std::uint32_t>(result));
+  return low < 0 ? 0x8u : low > 0 ? 0x4u : 0x2u;
+}
+
 struct Harness {
   AddressSpace memory;
   NullRuntimeServices runtime;
@@ -111,8 +117,8 @@ void test_add_carry_family() {
         assert(h.state.xer_ca() == carry64(a, b, false));
         assert(((h.state.xer & xer_bits::OV) != 0u) == overflow64(a, b, false));
         assert(((h.state.xer & xer_bits::SO) != 0u) == overflow64(a, b, false));
-        assert(h.state.cr_field(0) == (((a + b) >> 63) ? 0x8u : (a + b) != 0u ? 0x4u : 0x2u) +
-                                          (((h.state.xer & xer_bits::SO) != 0u) ? 1u : 0u));
+        assert(h.state.cr_field(0) ==
+               cr0_compare(a + b) + (((h.state.xer & xer_bits::SO) != 0u) ? 1u : 0u));
         // adde r3,r4,r5 : a + b + CA
         h.run({xo31(138, 3, 4, 5, true, false)}, [&](CpuState& s) {
           s.gpr[4] = a; s.gpr[5] = b; s.set_xer_ca(ca);
