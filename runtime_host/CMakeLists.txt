@@ -14,6 +14,8 @@ add_executable(xenon_runtime_host
   src/host_setup.hpp
   src/content_source.cpp
   src/content_source.hpp
+  src/crash_report.cpp
+  src/crash_report.hpp
   src/launch_config.cpp
   src/launch_config.hpp
   src/status_writer.cpp

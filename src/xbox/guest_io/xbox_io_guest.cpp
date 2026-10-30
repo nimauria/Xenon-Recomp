@@ -10,8 +10,10 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/fault.hpp"
 
@@ -24,6 +26,82 @@ constexpr std::uint32_t kDirectoryInfoBaseSize = 0x40u;
 constexpr std::uint32_t kNetworkOpenInfoSize = 56u;
 constexpr std::uint32_t kStandardInfoSize = 24u;
 constexpr std::uint32_t kMaxTransferBytes = 256u * 1024u * 1024u;
+
+[[nodiscard]] std::string_view status_name(Status value) noexcept {
+  switch (value) {
+    case status::Unsuccessful: return "unsuccessful";
+    case status::NotImplemented: return "not implemented";
+    case status::InvalidInfoClass: return "invalid info class";
+    case status::InfoLengthMismatch: return "info length mismatch";
+    case status::AccessViolation: return "access violation";
+    case status::InvalidHandle: return "invalid handle";
+    case status::InvalidParameter: return "invalid parameter";
+    case status::NoSuchFile: return "no such file";
+    case status::EndOfFile: return "end of file";
+    case status::AccessDenied: return "access denied";
+    case status::BufferTooSmall: return "buffer too small";
+    case status::ObjectTypeMismatch: return "object type mismatch";
+    case status::ObjectNameInvalid: return "object name invalid";
+    case status::ObjectNameNotFound: return "object name not found";
+    case status::ObjectNameCollision: return "object name collision";
+    case status::SharingViolation: return "sharing violation";
+    case status::DeletePending: return "delete pending";
+    case status::InsufficientResources: return "insufficient resources";
+    case status::FileIsDirectory: return "file is a directory";
+    case status::NotSupported: return "not supported";
+    case status::NotSameDevice: return "not same device";
+    case status::DirectoryNotEmpty: return "directory not empty";
+    case status::NotADirectory: return "not a directory";
+    case status::Cancelled: return "cancelled";
+    default: return {};
+  }
+}
+
+[[nodiscard]] constexpr bool is_error_status(Status value) noexcept {
+  return (value & 0xC0000000u) == 0xC0000000u;
+}
+
+// Every failed guest file operation goes to the run's filesystem.log: a file
+// the game cannot open or read is the usual reason it stops on a load.
+void report_io_failure(std::string_view operation, std::string_view detail, Status result) {
+  char code[16];
+  std::snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(result));
+  std::string entry(operation);
+  entry.append(" failed: ").append(detail).append(" -> ").append(code);
+  if (const auto name = status_name(result); !name.empty()) entry.append(" (").append(name).append(")");
+  xenon::logging::Logger::instance().record(xenon::logging::Level::Warning, "filesystem", entry);
+}
+
+// Reading past the end is how titles find a file's end, not a failure.
+void report_read_failure(std::string_view operation, Handle file, std::uint32_t length,
+                         const std::optional<std::uint64_t>& offset, Status result) {
+  if (!is_error_status(result) || result == status::EndOfFile) return;
+  char detail[96];
+  if (offset) {
+    std::snprintf(detail, sizeof(detail), "handle 0x%08X, %u bytes at offset %llu",
+                  static_cast<unsigned>(file), static_cast<unsigned>(length),
+                  static_cast<unsigned long long>(*offset));
+  } else {
+    std::snprintf(detail, sizeof(detail), "handle 0x%08X, %u bytes at the file pointer",
+                  static_cast<unsigned>(file), static_cast<unsigned>(length));
+  }
+  report_io_failure(operation, detail, result);
+}
+
+[[nodiscard]] std::string describe_open(Handle root, std::string_view path, std::uint32_t access,
+                                        std::uint32_t disposition, std::uint32_t options) {
+  char numbers[96];
+  std::snprintf(numbers, sizeof(numbers), " (access 0x%08X, disposition %u, options 0x%08X)",
+                static_cast<unsigned>(access), static_cast<unsigned>(disposition),
+                static_cast<unsigned>(options));
+  std::string text = "'" + std::string(path) + "'";
+  if (root) {
+    char handle[32];
+    std::snprintf(handle, sizeof(handle), " under handle 0x%08X", static_cast<unsigned>(root));
+    text += handle;
+  }
+  return text + numbers;
+}
 
 [[nodiscard]] constexpr std::uint32_t align_up(std::uint32_t value,
                                                 std::uint32_t alignment) {
@@ -226,6 +304,12 @@ Status GuestIoBridge::nt_create_file(
   Handle handle = kInvalidHandle;
   IoStatusBlock iosb{};
   const auto result = facade_.create_file(request, handle, iosb);
+  if (is_error_status(result)) {
+    report_io_failure("NtCreateFile",
+                      describe_open(request.root_directory, request.path, desired_access,
+                                    creation_disposition, create_options),
+                      result);
+  }
   try {
     memory_.write32_be(handle_out, handle);
   } catch (const memory::MemoryFault&) {
@@ -269,6 +353,7 @@ Status GuestIoBridge::nt_read_file(
   IoStatusBlock iosb{};
   const auto result = facade_.read_file(file_handle, bytes, offset, iosb,
                                         event_handle, apc_context);
+  report_read_failure("NtReadFile", file_handle, buffer_length, offset, result);
   if ((iosb.status == status::Success || result == status::Pending) &&
       iosb.information != 0) {
     try {
@@ -330,6 +415,7 @@ Status GuestIoBridge::nt_read_file_scatter(
   IoStatusBlock iosb{};
   const auto result = facade_.read_file(file_handle, bytes, offset, iosb,
                                         event_handle, apc_context);
+  report_read_failure("NtReadFileScatter", file_handle, length, offset, result);
   std::uint32_t remaining = iosb.information;
   std::uint32_t source_offset = 0;
   try {
@@ -845,7 +931,12 @@ Status GuestIoBridge::nt_query_full_attributes_file(
   IoStatusBlock iosb{};
   auto result = facade_.query_full_attributes_file(attrs.root_directory, path,
                                                    value, iosb);
-  if (result != status::Success) return result;
+  if (result != status::Success) {
+    if (is_error_status(result)) {
+      report_io_failure("NtQueryFullAttributesFile", "'" + path + "'", result);
+    }
+    return result;
+  }
   std::uint32_t bytes = 0;
   return serialize_network_open_information(value, file_information,
                                             kNetworkOpenInfoSize, bytes);

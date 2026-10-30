@@ -8,6 +8,7 @@
 
 #include "xenon/core/json.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -240,6 +241,13 @@ void StatusWriter::write_capability_report(core::XenonSession& session) {
 }
 
 void StatusWriter::write_fatal(const std::string& message, LaunchFailureCategory category) {
+  {
+    std::string entry = message;
+    if (category != LaunchFailureCategory::None) {
+      entry += " [" + std::string(launch_failure_category_name(category)) + "]";
+    }
+    logging::Logger::instance().record(logging::Level::Fatal, "runtime", entry);
+  }
   core::JsonValue root = core::JsonValue::make_object();
   root.set("available", true);
   root.set("pid", static_cast<double>(current_process_id()));

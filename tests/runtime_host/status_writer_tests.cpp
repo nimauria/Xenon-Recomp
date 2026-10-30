@@ -17,6 +17,7 @@
 #include "launch_config.hpp"
 #include "xenon/core/json.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 
 namespace {
 
@@ -95,6 +96,23 @@ int main() {
     assert(!std::filesystem::exists(std::filesystem::path(status.status_path()).string() + ".tmp"));
   }
   std::cout << "  [PASS] repeated status publishes replace the existing JSON\n";
+
+  // Test 3b: a fatal launch failure is also written to the run's runtime.log,
+  // with its category.
+  {
+    const auto errors = session_dir / "errors" / "2026-10-30_21-30-00";
+    assert(xenon::logging::Logger::instance().set_error_directory(errors.string()));
+    xenon::runtime_host::StatusWriter status(session_dir.string(), launch);
+    status.write_fatal("Required base content could not be mounted",
+                       xenon::runtime_host::LaunchFailureCategory::ContentMountFailed);
+    status.write_fatal("Something went wrong");
+    xenon::logging::Logger::instance().set_error_directory("");
+    const auto log = read_file(errors / "runtime.log");
+    assert(log.find(" fatal: Required base content could not be mounted [ContentMountFailed]") !=
+           std::string::npos);
+    assert(log.find(" fatal: Something went wrong") != std::string::npos);
+  }
+  std::cout << "  [PASS] write_fatal() is written to runtime.log\n";
 
   // Test 4: every category name is distinct and non-empty (guards against a
   // future enum entry silently falling through to the same default string).

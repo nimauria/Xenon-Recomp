@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -24,6 +25,7 @@ std::atomic<bool> g_enabled{enabled_from_environment()};
 // written yet in this process and is truncated by its first record.
 std::mutex g_mutex;
 std::unordered_map<std::string, std::uint64_t> g_written;
+std::string g_directory;
 
 }  // namespace
 
@@ -31,6 +33,22 @@ bool probe_logs_enabled() noexcept { return g_enabled.load(std::memory_order_rel
 
 void set_probe_logs_enabled(bool enabled) noexcept {
   g_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void set_probe_log_directory(const std::string& directory) {
+  std::scoped_lock lock(g_mutex);
+  if (directory == g_directory) return;
+  if (!directory.empty()) {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+  }
+  g_directory = directory;
+  g_written.clear();
+}
+
+std::string probe_log_directory() {
+  std::scoped_lock lock(g_mutex);
+  return g_directory;
 }
 
 void append_probe_log(const char* file_name, const char* format, ...) {
@@ -50,7 +68,15 @@ void append_probe_log(const char* file_name, const char* format, ...) {
   if (written >= kProbeLogByteLimit) return;
   // Binary mode keeps the file the size the cap counts; Windows text mode
   // would add a carriage return before every newline.
-  FILE* file = std::fopen(file_name, first ? "wb" : "ab");
+  const auto path = g_directory.empty()
+                        ? std::filesystem::path(file_name)
+                        : std::filesystem::path(g_directory) / file_name;
+#if defined(_WIN32)
+  FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), first ? L"wb" : L"ab") != 0) file = nullptr;
+#else
+  FILE* file = std::fopen(path.c_str(), first ? "wb" : "ab");
+#endif
   if (!file) return;
   if (written + length > kProbeLogByteLimit) {
     std::fputs("[probe log truncated: per-run limit reached]\n", file);

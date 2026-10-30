@@ -11,9 +11,22 @@
 #include <limits>
 #include <optional>
 #include <utility>
+#include <cstdio>
+#include <string>
 #include <vector>
 
+#include "xenon/logging/logger.hpp"
+
 namespace xenon::audio {
+namespace {
+
+std::string hex_address(cpu::GuestAddress address) {
+  char text[16];
+  std::snprintf(text, sizeof(text), "0x%08X", static_cast<unsigned>(address));
+  return text;
+}
+
+}  // namespace
 
 XmaDecoder::XmaDecoder(memory::AddressSpace& memory)
     : memory_(memory), mmio_bridge_(std::make_shared<MmioBridge>()) {
@@ -411,9 +424,17 @@ bool XmaDecoder::merge_hardware_progress(
   if (progressed.error_set &&
       !(initial.error_set && initial.error_status == progressed.error_status)) {
     decode_errors_[progressed.error_status & 15u].fetch_add(1, std::memory_order_relaxed);
+    xenon::logging::Logger::instance().record(
+        xenon::logging::Level::Warning, "audio",
+        "XMA context " + hex_address(context) + " entered decode error status " +
+            std::to_string(progressed.error_status));
   }
   if (progressed.parser_error_set && !initial.parser_error_set) {
     parser_errors_.fetch_add(1, std::memory_order_relaxed);
+    xenon::logging::Logger::instance().record(
+        xenon::logging::Level::Warning, "audio",
+        "XMA context " + hex_address(context) + " entered parser error status " +
+            std::to_string(progressed.parser_error_status));
   }
   XmaContextData fresh{};
   if (!read_context(context, fresh)) return false;

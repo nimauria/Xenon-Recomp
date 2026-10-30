@@ -1,5 +1,7 @@
 #include "memory/guest/address_space_internal.hpp"
 
+#include "xenon/logging/logger.hpp"
+
 namespace xenon::memory {
 
 bool AddressSpace::range_is_allocatable(GuestAddress base, std::uint32_t size,
@@ -178,11 +180,33 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
                             std::optional<std::uint32_t> requested_page_size,
                             VirtualAllocationOptions options) {
   std::lock_guard lock(mutex_);
+  const char* failure = "no free range is large enough";
+  if (allocate_locked(size, alignment, protect, top_down, out_address, requested_page_size,
+                      options, failure)) {
+    return true;
+  }
+  // A guest allocation the title expected to succeed is a common cause of a
+  // stop much later, so every failure goes to the run's memory.log.
+  char entry[256];
+  std::snprintf(entry, sizeof(entry),
+                "guest allocation of %u bytes (alignment 0x%X, page size %u, %s%s) failed: %s",
+                size, alignment, requested_page_size.value_or(kBasePageSize),
+                top_down ? "top-down" : "bottom-up", options.commit ? ", commit" : ", reserve only",
+                failure);
+  xenon::logging::Logger::instance().record(xenon::logging::Level::Warning, "memory", entry);
+  return false;
+}
+
+bool AddressSpace::allocate_locked(std::uint32_t size, std::uint32_t alignment, Protect protect,
+                                   bool top_down, GuestAddress& out_address,
+                                   std::optional<std::uint32_t> requested_page_size,
+                                   VirtualAllocationOptions options, const char*& failure) {
   const std::uint32_t _orig_size = size, _orig_alignment = alignment;
   if (!initialized_ || !size) {
     xenon::logging::append_probe_log("allocate_early_fail_diag.log",
                                      "EARLY FAIL: initialized_=%d size=%u\n", initialized_ ? 1 : 0,
                                      size);
+    failure = !initialized_ ? "the address space is not initialized" : "the size is zero";
     return false;
   }
   const std::uint32_t page_size = requested_page_size.value_or(kBasePageSize);
@@ -196,6 +220,7 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
   if (!region) {
     xenon::logging::append_probe_log("allocate_early_fail_diag.log",
                                      "NO REGION FAIL: page_size=%u\n", page_size);
+    failure = "no virtual region uses that page size";
     return false;
   }
   alignment = std::max(alignment ? alignment : page_size, page_size);
@@ -203,6 +228,7 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
     xenon::logging::append_probe_log("allocate_early_fail_diag.log",
                                      "BAD ALIGNMENT FAIL: alignment=%u (orig=%u)\n", alignment,
                                      _orig_alignment);
+    failure = "the alignment is not a power of two";
     return false;
   }
   size = align_up(size, page_size);
@@ -254,7 +280,10 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
          candidate + size - 1u <= region->end; candidate += alignment) {
       const auto first = static_cast<std::uint32_t>(candidate) >> kPageShift;
       const auto count = size >> kPageShift;
-      if (!page_index_in_bounds(first, count)) return false;
+      if (!page_index_in_bounds(first, count)) {
+        failure = "a page index fell outside the page table";
+        return false;
+      }
       bool free = true;
       for (std::uint32_t i = 0; i < count; ++i) {
         if (pages_[first + i].state != PageState::Free) { free = false; break; }
@@ -265,6 +294,7 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
           xenon::logging::append_probe_log("allocate_early_fail_diag.log",
                                            "RESERVE_PAGES FAIL: addr=0x%08X size=%u\n",
                                            (unsigned)out_address, size);
+          failure = "reserving the pages failed";
           return false;
         }
         if (!options.commit) return true;
@@ -274,6 +304,7 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
           xenon::logging::append_probe_log("allocate_early_fail_diag.log",
                                            "COMMIT_PAGES FAIL: addr=0x%08X size=%u\n",
                                            (unsigned)out_address, size);
+          failure = "committing the pages failed";
         }
         return committed;
       }
@@ -285,17 +316,26 @@ bool AddressSpace::allocate(std::uint32_t size, std::uint32_t alignment, Protect
       if (candidate < region->base) break;
       const auto first = static_cast<std::uint32_t>(candidate) >> kPageShift;
       const auto count = size >> kPageShift;
-      if (!page_index_in_bounds(first, count)) return false;
+      if (!page_index_in_bounds(first, count)) {
+        failure = "a page index fell outside the page table";
+        return false;
+      }
       bool free = true;
       for (std::uint32_t i = 0; i < count; ++i) {
         if (pages_[first + i].state != PageState::Free) { free = false; break; }
       }
       if (free) {
         out_address = static_cast<GuestAddress>(candidate);
-        if (!reserve_pages(out_address, size, protect, false)) return false;
-        return !options.commit ||
-               commit_pages(out_address, size, protect,
-                            options.zero_initialize);
+        if (!reserve_pages(out_address, size, protect, false)) {
+          failure = "reserving the pages failed";
+          return false;
+        }
+        if (!options.commit) return true;
+        if (!commit_pages(out_address, size, protect, options.zero_initialize)) {
+          failure = "committing the pages failed";
+          return false;
+        }
+        return true;
       }
       if (candidate < region->base + alignment) break;
     }

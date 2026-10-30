@@ -30,11 +30,13 @@
 #endif
 
 #include "content_source.hpp"
+#include "crash_report.hpp"
 #include "launch_config.hpp"
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #if defined(XENON_RUNTIME_HAS_MEMORY) && XENON_RUNTIME_HAS_MEMORY
 #include "xenon/memory/host_vm.hpp"
@@ -68,6 +70,10 @@ int main(int argc, char** argv) {
   if (const auto error_logs = open_error_logs(launch.session_dir); !error_logs.empty()) {
     std::cout << "[runtime_host] Error logs (one file per subsystem): " << error_logs.string()
               << std::endl;
+    // A host crash ends the process before any of the above can report it;
+    // probes (when on) belong to the same run.
+    install_crash_report(error_logs);
+    xenon::logging::set_probe_log_directory((error_logs / "probes").string());
   } else {
     std::cout << "[runtime_host] Error logs could not be created under " << launch.session_dir
               << std::endl;
@@ -419,6 +425,10 @@ int main(int argc, char** argv) {
     // concurrently with this final write.
     std::scoped_lock console_log_lock(xenon::core::XenonSession::console_log_mutex());
     std::cout << "[runtime_host] Session ended: " << session.last_error() << std::endl;
+  }
+  if (session.state() == xenon::core::SessionState::Failed) {
+    xenon::logging::Logger::instance().record(xenon::logging::Level::Error, "runtime",
+                                              "session failed: " + session.last_error());
   }
   return session.state() == xenon::core::SessionState::Failed ? 1 : 0;
 }

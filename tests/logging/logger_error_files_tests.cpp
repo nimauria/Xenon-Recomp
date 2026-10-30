@@ -70,6 +70,59 @@ int main() {
   logger.log(Level::Error, "gpu", "not written anywhere");
   assert(read_lines(directory / "gpu.log").size() == 3u);
 
+  // record() writes the file only: the sink (and so the console) never sees
+  // it, and it shares the level filter.
+  const auto recorded = root / "errors" / "2026-10-30_21-00-00";
+  assert(logger.set_error_directory(recorded.string()));
+  assert(logger.error_directory() == recorded.string());
+  int sink_calls = 0;
+  logger.set_sink([&](Level, std::string_view, std::string_view) { ++sink_calls; });
+  logger.record(Level::Error, "guest", "trap 0 at 0x82001234");
+  logger.record(Level::Info, "guest", "below the minimum");
+  assert(sink_calls == 0);
+  auto guest = read_lines(recorded / "guest.log");
+  assert(guest.size() == 1u && guest[0].find(" error: trap 0 at 0x82001234") != std::string::npos);
+  logger.log(Level::Error, "guest", "through log()");
+  assert(sink_calls == 1 && read_lines(recorded / "guest.log").size() == 2u);
+
+  // A repeated entry is written kRepeatsWritten times, then once per
+  // kRepeatInterval more, saying how many there have been. A different
+  // message, level or category counts separately.
+  const auto repeats = Logger::kRepeatsWritten + 2u * Logger::kRepeatInterval;
+  for (std::uint64_t i = 0; i < repeats; ++i) {
+    logger.record(Level::Warning, "audio", "underrun");
+  }
+  logger.record(Level::Error, "audio", "underrun");
+  logger.record(Level::Warning, "audio", "a different problem");
+  const auto audio = read_lines(recorded / "audio.log");
+  assert(audio.size() == Logger::kRepeatsWritten + 2u + 2u);
+  const auto first_summary = audio[Logger::kRepeatsWritten];
+  assert(first_summary.find(" warning: underrun (repeated " +
+                            std::to_string(Logger::kRepeatsWritten + Logger::kRepeatInterval) +
+                            " times)") != std::string::npos);
+  assert(audio[Logger::kRepeatsWritten + 1u].find(
+             "(repeated " + std::to_string(repeats) + " times)") != std::string::npos);
+  assert(audio[Logger::kRepeatsWritten + 2u].find(" error: underrun") != std::string::npos);
+  assert(audio.back().find(" warning: a different problem") != std::string::npos);
+  // A new run starts counting again.
+  assert(logger.set_error_directory(recorded.string()));
+  logger.record(Level::Warning, "audio", "underrun");
+  assert(read_lines(recorded / "audio.log").back().find("repeated") == std::string::npos);
+
+  // Each category file stops at its byte limit, and says so once.
+  const auto limited = root / "errors" / "2026-10-30_21-10-00";
+  assert(logger.set_error_directory(limited.string(), Level::Warning, 400u));
+  for (int i = 0; i < 50; ++i) {
+    logger.record(Level::Error, "filesystem", "NtCreateFile failed: 'game:\\file" +
+                                                  std::to_string(i) + ".bin'");
+  }
+  const auto filesystem_limited = read_lines(limited / "filesystem.log");
+  assert(filesystem_limited.size() >= 2u && filesystem_limited.size() < 10u);
+  assert(filesystem_limited.back().find("reached its size limit") != std::string::npos);
+  assert(std::filesystem::file_size(limited / "filesystem.log") <= 400u + 128u);
+  logger.record(Level::Error, "gpu", "another category is unaffected");
+  assert(read_lines(limited / "gpu.log").size() == 1u);
+
   logger.set_error_directory("");
   logger.set_sink({});
   std::filesystem::remove_all(root);

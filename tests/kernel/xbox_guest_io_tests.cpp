@@ -13,6 +13,7 @@
 #include "xenon/filesystem/host_path_device.hpp"
 #include "xenon/filesystem/virtual_file_system.hpp"
 #include "xenon/kernel/xbox_io_guest.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
 
 namespace fs = xenon::filesystem;
@@ -351,7 +352,63 @@ void test_directory_and_volume_marshalling() {
 
 }  // namespace
 
+// A file the game cannot open, query or read is the usual reason a load
+// stops, so each failure goes to the run's filesystem.log with the path or
+// handle and the status; success and reading at end of file do not.
+void test_failures_are_written_to_the_filesystem_log() {
+  TempDirectory temp;
+  write_file(temp.path() / "data.bin", "abc");
+  const auto errors = temp.path() / "errors";
+  auto& logger = xenon::logging::Logger::instance();
+  logger.set_sink([](xenon::logging::Level, std::string_view, std::string_view) {});
+  assert(logger.set_error_directory(errors.string()));
+
+  memory::AddressSpace mem(memory::GuestTranslationMode::Compact);
+  assert(mem.initialize());
+  assert(mem.commit_fixed(kGuestBase, 0x10000u, memory::kReadWrite));
+  kernel::KernelIoManager io(make_vfs(temp.path()));
+  xbox::GuestIoBridge bridge(mem, io);
+
+  const auto file = open_guest_file(bridge, mem, "game:\\data.bin", xbox::access::GenericRead,
+                                    xbox::create_option::SynchronousIoNonAlert);
+  auto status = bridge.nt_read_file(file, kernel::kInvalidHandle, 0, 0, kIosb, kBuffer, 3, 0);
+  assert(status == xbox::status::Success);
+  status = bridge.nt_read_file(file, kernel::kInvalidHandle, 0, 0, kIosb, kBuffer, 3, 0);
+  assert(status == xbox::status::EndOfFile);
+  assert(!std::filesystem::exists(errors / "filesystem.log"));
+
+  write_ansi(mem, kAnsi, kPath, "game:\\missing\\level01.pak");
+  write_object_attributes(mem, kernel::kInvalidHandle, kAnsi);
+  status = bridge.nt_create_file(kHandleOut, xbox::access::GenericRead, kObjectAttributes, kIosb,
+                                 0, 0, xbox::share::All, 1,
+                                 xbox::create_option::SynchronousIoNonAlert);
+  assert(status != xbox::status::Success);
+  status = bridge.nt_query_full_attributes_file(kObjectAttributes, kInfo);
+  assert(status != xbox::status::Success);
+  status = bridge.nt_read_file(0x0BADF00Du, kernel::kInvalidHandle, 0, 0, kIosb, kBuffer, 16, 0);
+  assert(status == xbox::status::InvalidHandle);
+
+  std::ifstream log(errors / "filesystem.log");
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(log, line);) lines.push_back(line);
+  assert(lines.size() == 3u);
+  assert(lines[0].find(" warning: NtCreateFile failed: 'game:\\missing\\level01.pak' (access ") !=
+         std::string::npos);
+  assert(lines[0].find("disposition 1") != std::string::npos);
+  assert(lines[0].find(" -> 0xC000003") != std::string::npos);
+  assert(lines[1].find("NtQueryFullAttributesFile failed: 'game:\\missing\\level01.pak' -> ") !=
+         std::string::npos);
+  assert(lines[2].find("NtReadFile failed: handle 0x0BADF00D, 16 bytes at the file pointer -> "
+                       "0xC0000008 (invalid handle)") != std::string::npos);
+
+  assert(io.close(file) == kernel::KernelIoCode::Success);
+  log.close();
+  logger.set_error_directory("");
+  logger.set_sink({});
+}
+
 int main() {
+  test_failures_are_written_to_the_filesystem_log();
   test_create_read_write_query_and_rooted_open();
   test_byte_offset_high_dword_is_ignored_and_pointer_sentinels();
   test_async_apc_memory_fault_and_scatter();

@@ -1,6 +1,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include "xenon/core/frame_dump.hpp"
 #include "xenon/gpu/display_vblank.hpp"
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -288,6 +290,16 @@ void XenonSession::present_front_buffer(std::uint64_t& last_presented_generation
     // detiling and uploading the scan-out costs tens of milliseconds, and
     // repeating it every vsync for an unchanged frame starved ring work. A
     // present that did not succeed is retried at the next vsync.
+    if (front_buffer.base_address != 0 && !texture &&
+        front_buffer.generation != last_presented_generation) {
+      // Nothing reaches the screen while this lasts.
+      char entry[128];
+      std::snprintf(entry, sizeof(entry),
+                    "front buffer at 0x%08X has a fetch constant that does not decode to a "
+                    "texture; the frame cannot be presented",
+                    static_cast<unsigned>(front_buffer.base_address));
+      logging::Logger::instance().record(logging::Level::Error, "gpu", entry);
+    }
     if (front_buffer.base_address != 0 && texture &&
         front_buffer.generation != last_presented_generation) {
       gpu::PresentationFrame frame{};
@@ -307,6 +319,13 @@ void XenonSession::present_front_buffer(std::uint64_t& last_presented_generation
       if (status == gpu::PresentStatus::Error || status == gpu::PresentStatus::Unsupported ||
           status == gpu::PresentStatus::SurfaceLost) {
         auto message = gpu_->last_error();
+        logging::Logger::instance().record(
+            logging::Level::Error, "gpu",
+            std::string("present failed (") +
+                (status == gpu::PresentStatus::Error         ? "error"
+                 : status == gpu::PresentStatus::Unsupported ? "unsupported"
+                                                             : "surface lost") +
+                "): " + message);
         std::scoped_lock lock(gpu_present_error_mutex_);
         gpu_present_error_ = std::move(message);
       }

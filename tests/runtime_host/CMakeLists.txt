@@ -33,6 +33,15 @@ if(XENON_BUILD_TESTS AND TARGET xenon_runtime_host)
   target_compile_features(xenon_status_writer_tests PRIVATE cxx_std_20)
   xenon_enable_test_asserts(xenon_status_writer_tests)
   add_test(NAME xenon_status_writer_tests COMMAND xenon_status_writer_tests)
+  add_executable(xenon_runtime_host_crash_report_tests
+    crash_report_tests.cpp
+    ${XENON_SOURCE_DIR}/runtime_host/src/crash_report.cpp
+    ${XENON_SOURCE_DIR}/runtime_host/src/crash_report.hpp
+  )
+  target_include_directories(xenon_runtime_host_crash_report_tests PRIVATE ${XENON_SOURCE_DIR}/runtime_host/src)
+  target_compile_features(xenon_runtime_host_crash_report_tests PRIVATE cxx_std_20)
+  xenon_enable_test_asserts(xenon_runtime_host_crash_report_tests)
+  add_test(NAME xenon_runtime_host_crash_report_tests COMMAND xenon_runtime_host_crash_report_tests)
   if(WIN32 AND XENON_RUNTIME_HOST_STACK_RESERVE)
     add_executable(xenon_runtime_host_stack_tests host_stack_tests.cpp)
     xenon_enable_test_asserts(xenon_runtime_host_stack_tests)

@@ -6,6 +6,7 @@
 #include "core/session/session_internal.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/cpu/call_trace.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -292,6 +293,18 @@ XenonSession::GuestDispatchOutcome XenonSession::dispatch_guest_thread(
     crash_message = "Unhandled unknown exception during guest execution";
   }
 
+  if (crashed) {
+    std::ostringstream report;
+    report << "guest thread " << tracked_thread_id << " (entry 0x" << std::hex << std::uppercase
+           << entry << ") stopped with 0x" << crash_exit_code << ": " << crash_message;
+    logging::Logger::instance().record(logging::Level::Error, "guest", report.str());
+  } else if (result.reason == cpu::FlowReason::Trap) {
+    std::ostringstream report;
+    report << "guest thread " << tracked_thread_id << " (entry 0x" << std::hex << std::uppercase
+           << entry << ") ended on trap 0x" << result.detail << " at 0x" << result.next_address
+           << " lr=0x" << state.lr;
+    logging::Logger::instance().record(logging::Level::Error, "guest", report.str());
+  }
   outcome.crashed = crashed;
   outcome.crash_message = std::move(crash_message);
   outcome.crash_exit_code = crash_exit_code;

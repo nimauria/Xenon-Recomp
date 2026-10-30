@@ -43,6 +43,32 @@ void test_each_file_is_capped(const std::filesystem::path& file) {
   assert(text.ends_with("[probe log truncated: per-run limit reached]\n"));
 }
 
+// The runtime host sends a run's probes to its run folder: a bare file name
+// then lands there (created if missing), and a new run starts every file
+// afresh.
+void test_probes_follow_the_directory(const std::filesystem::path& directory) {
+  xenon::logging::set_probe_logs_enabled(true);
+  const auto run = directory / "errors" / "2026-10-30_21-00-00" / "probes";
+  xenon::logging::set_probe_log_directory(run.string());
+  assert(xenon::logging::probe_log_directory() == run.string());
+  xenon::logging::append_probe_log("routed_diag.log", "in the run %d\n", 1);
+  assert(read_file(run / "routed_diag.log") == "in the run 1\n");
+  assert(!std::filesystem::exists("routed_diag.log"));
+
+  xenon::logging::set_probe_log_directory(run.string());  // unchanged: keeps appending
+  xenon::logging::append_probe_log("routed_diag.log", "still %d\n", 2);
+  assert(read_file(run / "routed_diag.log") == "in the run 1\nstill 2\n");
+
+  const auto next = directory / "errors" / "2026-10-30_21-05-00" / "probes";
+  xenon::logging::set_probe_log_directory(next.string());
+  xenon::logging::append_probe_log("routed_diag.log", "next run\n");
+  assert(read_file(next / "routed_diag.log") == "next run\n");
+  assert(read_file(run / "routed_diag.log") == "in the run 1\nstill 2\n");
+
+  xenon::logging::set_probe_log_directory("");
+  assert(xenon::logging::probe_log_directory().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -53,6 +79,7 @@ int main() {
   test_disabled_probes_write_nothing(directory / "disabled_diag.log");
   test_first_record_of_a_run_replaces_an_earlier_file(directory / "fresh_diag.log");
   test_each_file_is_capped(directory / "capped_diag.log");
+  test_probes_follow_the_directory(directory);
   xenon::logging::set_probe_logs_enabled(false);
   std::filesystem::remove_all(directory);
   std::cout << "All probe log tests passed!\n";

@@ -4,6 +4,7 @@
 
 #include "xenon/core/import_classification.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/xam/content_graph.hpp"
 
 namespace xenon::core {
@@ -191,6 +192,10 @@ bool XenonSession::resolve_xex_imports() {
 
     unresolved_imports_.push_back(
         UnresolvedImport{import.module, import.symbol, import.ordinal});
+    logging::Logger::instance().record(
+        logging::Level::Warning, "kernel",
+        std::string(import.is_variable() ? "unresolved variable import: " : "unresolved import: ") +
+            import.module + " '" + import.symbol + "' ordinal " + std::to_string(import.ordinal));
     if (config_.enable_export_diagnostics) {
       std::scoped_lock console_log_lock(console_log_mutex());
       std::cout << "[XenonSession] Unresolved "

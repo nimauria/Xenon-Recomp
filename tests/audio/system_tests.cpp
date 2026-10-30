@@ -7,6 +7,8 @@
 #include <thread>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -14,6 +16,7 @@
 #include <vector>
 
 #include "xenon/audio/system.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/memory/types.hpp"
 
 using namespace xenon;
@@ -188,11 +191,25 @@ int main() {
 
   // With an active client but no queued frame, silence is consumed and still
   // advances XAudioGetRenderDriverTic while incrementing the underrun counter.
+  // The underrun is audible, so it is also written to the run's audio.log.
   const auto underruns = audio.underrun_count();
+  const auto audio_log_directory =
+      std::filesystem::temp_directory_path() / "xenon_audio_underrun_log";
+  std::filesystem::remove_all(audio_log_directory);
+  assert(xenon::logging::Logger::instance().set_error_directory(audio_log_directory.string()));
   std::array<float, 64 * 2> silence{};
   fake->pump(silence);
   assert(audio.render_driver_tic() == 320);
   assert(audio.underrun_count() == underruns + 1);
+  {
+    std::ifstream audio_log(audio_log_directory / "audio.log");
+    std::string line;
+    assert(std::getline(audio_log, line));
+    assert(line.find(" warning: underrun: a render client was active") != std::string::npos);
+    assert(!std::getline(audio_log, line));
+  }
+  xenon::logging::Logger::instance().set_error_directory("");
+  std::filesystem::remove_all(audio_log_directory);
 
   // Generic voices are additive with the render-driver path rather than being
   // disabled whenever a render client exists.

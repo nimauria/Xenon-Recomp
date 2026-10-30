@@ -6,11 +6,13 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/time.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::core {
@@ -120,15 +122,21 @@ bool XenonSession::is_recognized_import_thunk(cpu::GuestAddress target) {
 cpu::ExecutionResult XenonSession::syscall(std::uint32_t level,
                                           cpu::CpuState& state,
                                           cpu::MemoryPort& /*memory*/) {
-  // Handle Xbox syscalls
-  // For now, just return
+  // Titles reach the hypervisor only through kernel exports; a direct sc
+  // from game code is unexpected, so it is reported rather than modelled.
+  logging::Logger::instance().record(logging::Level::Warning, "guest", [&] {
+    std::ostringstream entry;
+    entry << "syscall level " << level << " at 0x" << std::hex << std::uppercase << state.cia
+          << " r0=0x" << state.gpr[0];
+    return entry.str();
+  }());
   return {cpu::FlowReason::Syscall, state.cia + 4, level};
 }
 
 cpu::ExecutionResult XenonSession::trap(std::uint32_t trap_code,
                                        cpu::CpuState& state,
                                        cpu::MemoryPort& /*memory*/) {
-  // Handle traps
+  // Handle traps (the dispatch loop the trap ends records it in guest.log)
   if (config_.enable_logging) {
     std::scoped_lock console_log_lock(console_log_mutex());
     std::cout << "[XenonSession] Trap: code=" << trap_code
@@ -148,6 +156,8 @@ std::uint64_t XenonSession::read_spr(std::uint32_t spr,
   // section, so a title that actually depends on one shows up as a real,
   // diagnosable gap rather than a silently-wrong constant zero.
   unsupported_spr_reads_.fetch_add(1u, std::memory_order_relaxed);
+  logging::Logger::instance().record(logging::Level::Warning, "cpu",
+                                     "unsupported SPR read: spr=" + std::to_string(spr));
   logging::Logger::instance().log_if_enabled(
       logging::Level::Debug, "cpu", [spr] {
         return "unsupported SPR read: spr=" + std::to_string(spr);
@@ -161,6 +171,8 @@ void XenonSession::write_spr(std::uint32_t spr, std::uint64_t value,
   // still has nowhere real to go (no per-SPR storage/semantics modeled),
   // but it is now an accounted, logged gap instead of a silent no-op.
   unsupported_spr_writes_.fetch_add(1u, std::memory_order_relaxed);
+  logging::Logger::instance().record(logging::Level::Warning, "cpu",
+                                     "unsupported SPR write: spr=" + std::to_string(spr));
   logging::Logger::instance().log_if_enabled(
       logging::Level::Debug, "cpu", [spr, value] {
         return "unsupported SPR write: spr=" + std::to_string(spr) +

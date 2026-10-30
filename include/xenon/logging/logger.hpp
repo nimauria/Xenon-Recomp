@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace xenon::logging {
@@ -78,7 +79,23 @@ class Logger {
   // a category become '_' in its file name; an empty category goes to
   // general.log. Returns false (keeping no files) if `directory` cannot be
   // created; an empty path closes every file.
-  bool set_error_directory(const std::string& directory, Level min_level = Level::Warning);
+  //
+  // A problem hit every frame must not fill the disk or bury the rest of the
+  // file: an entry identical to an earlier one (same category, level and
+  // message) is written for its first kRepeatsWritten occurrences, then once
+  // per kRepeatInterval further ones with "(repeated N times)" appended. A
+  // category file stops at `file_byte_limit` with a final line saying so.
+  bool set_error_directory(const std::string& directory, Level min_level = Level::Warning,
+                           std::uint64_t file_byte_limit = kErrorFileByteLimit);
+  [[nodiscard]] std::string error_directory() const;
+  static constexpr std::uint64_t kRepeatsWritten = 20u;
+  static constexpr std::uint64_t kRepeatInterval = 1000u;
+  static constexpr std::uint64_t kErrorFileByteLimit = std::uint64_t{64} << 20;
+
+  // Writes one entry to its category's error file only - not to the sink or
+  // the console - for problems a caller already prints in its own form.
+  // Same level filter, repeat handling and size limit as log().
+  void record(Level level, std::string_view category, std::string_view message);
   // Lines written to the per-category error files so far.
   [[nodiscard]] std::uint64_t error_file_lines() const noexcept {
     return error_file_lines_.load(std::memory_order_relaxed);
@@ -110,15 +127,25 @@ class Logger {
  private:
   Logger() = default;
 
+  struct ErrorFile {
+    std::ofstream stream;
+    std::uint64_t bytes{};
+  };
+  void write_error_file(Level level, std::string_view category, std::string_view message);
+
   std::atomic<Level> min_level_{Level::Warning};
   std::atomic<std::uint64_t> call_count_{0};
   std::mutex sink_mutex_;
   std::mutex stream_mutex_;
   Sink sink_;
-  std::mutex error_file_mutex_;
+  mutable std::mutex error_file_mutex_;
   std::string error_directory_;
-  std::map<std::string, std::unique_ptr<std::ofstream>, std::less<>> error_files_;
+  std::map<std::string, std::unique_ptr<ErrorFile>, std::less<>> error_files_;
+  // Occurrences of each distinct entry this run, keyed by
+  // "<level>\n<category>\n<message>".
+  std::unordered_map<std::string, std::uint64_t> error_repeats_;
   Level error_file_level_{Level::Warning};
+  std::uint64_t error_file_byte_limit_{kErrorFileByteLimit};
   std::atomic<std::uint64_t> error_file_lines_{0};
 };
 

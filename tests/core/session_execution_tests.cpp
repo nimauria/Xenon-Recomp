@@ -4,6 +4,8 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/logger.hpp"
 
 namespace {
 
@@ -354,10 +357,55 @@ void test_crash_reports_pump_state() {
          std::string::npos);
 }
 
+std::vector<std::string> read_lines(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);) lines.push_back(line);
+  return lines;
+}
+
+// A guest thread that faults, runs off the compiled code or ends on a trap
+// is written to the run's guest.log; one that finishes cleanly is not.
+void test_guest_failures_are_written_to_the_guest_log() {
+  const auto directory = std::filesystem::temp_directory_path() / "xenon_guest_log_tests";
+  std::filesystem::remove_all(directory);
+  auto& logger = xenon::logging::Logger::instance();
+  assert(logger.set_error_directory(directory.string()));
+  {
+    SessionHarness harness(&halt);
+    assert(harness.run() == 0u);
+  }
+  assert(!std::filesystem::exists(directory / "guest.log"));
+  std::ostringstream quiet;
+  auto* const previous = std::cout.rdbuf(quiet.rdbuf());
+  {
+    SessionHarness harness(&read_unmapped);
+    assert(harness.run() != 0u);
+  }
+  {
+    SessionHarness harness(&invalid_branch);
+    assert(harness.run() != 0u);
+  }
+  {
+    SessionHarness harness(&trap);
+    assert(harness.run() == 0x1234u);
+  }
+  std::cout.rdbuf(previous);
+  const auto lines = read_lines(directory / "guest.log");
+  assert(lines.size() == 3u);
+  assert(lines[0].find(" error: guest thread ") != std::string::npos &&
+         lines[0].find(") stopped with 0x") != std::string::npos);
+  assert(lines[1].find("0xDEAD0000 is not compiled or fallback-executable") != std::string::npos);
+  assert(lines[2].find(") ended on trap 0x1234") != std::string::npos);
+  logger.set_error_directory("");
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
   assert(xenon::cpu::flow_reason_name(FlowReason::Branch) == "Branch");
+  test_guest_failures_are_written_to_the_guest_log();
   test_branch_dispatches_to_compiled_target();
   test_trap_remains_failure();
   test_halt_is_clean_terminal();
