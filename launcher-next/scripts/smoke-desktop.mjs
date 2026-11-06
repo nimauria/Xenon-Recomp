@@ -246,7 +246,7 @@ assert.ok(
 );
 await page.screenshot({ path: "build/library-carousel.png", fullPage: true });
 await page
-  .getByRole("button", { name: "Module settings", exact: true })
+  .getByRole("button", { name: "Module defaults", exact: true })
   .click();
 await page
   .getByRole("heading", {
