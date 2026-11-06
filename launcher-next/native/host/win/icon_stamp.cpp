@@ -31,7 +31,9 @@ int wmain(int argc,wchar_t **argv) {
   bool success=true;
   for(unsigned i=0;i<count&&success;++i){const auto at=6+16*i;success=UpdateResourceW(handle,RT_ICON,MAKEINTRESOURCEW(i+1),0,bytes.data()+dword(bytes,at+12),dword(bytes,at+8))!=FALSE;}
   if(success)success=UpdateResourceW(handle,RT_GROUP_ICON,MAKEINTRESOURCEW(1),0,group.data(),static_cast<DWORD>(group.size()))!=FALSE;
-  if(!EndUpdateResourceW(handle,!success)||!success)throw std::runtime_error("Could not write Xenon bootstrap icon");
+  const auto update_error=GetLastError();
+  if(!EndUpdateResourceW(handle,!success))throw std::runtime_error("Could not commit Xenon bootstrap icon: Win32 "+std::to_string(GetLastError()));
+  if(!success)throw std::runtime_error("Could not write Xenon bootstrap icon: Win32 "+std::to_string(update_error));
   std::cout<<"Xenon icon embedded in CEF bootstrap\n";return 0;
  }catch(const std::exception &error){std::cerr<<error.what()<<'\n';return 1;}
 }
