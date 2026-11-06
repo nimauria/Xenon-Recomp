@@ -123,6 +123,9 @@ std::string redact_support_text(std::string value, const std::vector<std::string
 }
 fs::path create_support_bundle(const fs::path &storage, const Json &state) {
   std::vector<std::string> private_values{text(storage)};
+  private_values.push_back(state.value("runtimeHostPath", ""));
+  if (state.contains("session"))
+    private_values.push_back(state.at("session").value("runtimeHost", ""));
   for (const auto *key : {"USERPROFILE", "HOME"})
     if (const auto *value = std::getenv(key))
       private_values.emplace_back(value);

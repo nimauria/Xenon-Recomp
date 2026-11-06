@@ -35,6 +35,13 @@ const output = resolve(
 );
 await mkdir(output, { recursive: true });
 const plans = [
+  [
+    "runtime-connection",
+    "smoke-runtime-connection.mjs",
+    false,
+    false,
+    [fixtureHost],
+  ],
   ["refinements", "smoke-refinements.mjs", true, "demo"],
   ["demo", "smoke-demo.mjs", true, "demo"],
   ["game-settings", "smoke-game-settings.mjs"],

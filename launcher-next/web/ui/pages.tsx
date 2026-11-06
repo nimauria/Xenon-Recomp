@@ -7,6 +7,11 @@ import type { Game, Module, Profile } from "../../contracts/launcher";
 import { playtime, activityTime } from "../activity";
 import { GameMedia } from "./GameMedia";
 import { HomeAttention } from "./HomeAttention";
+const RuntimeConnection = lazy(() =>
+  import("./RuntimeConnection").then((module) => ({
+    default: module.RuntimeConnection,
+  })),
+);
 const GameSettings = lazy(() =>
   import("./GameSettings").then((module) => ({ default: module.GameSettings })),
 );
@@ -1516,6 +1521,11 @@ export function Settings() {
               label.toLowerCase().includes(query.toLowerCase()),
             )) && <LanguageSettings />}
         {category === "general" && !query && <LegacyMigration />}
+        {category === "runtime" && !query && (
+          <Suspense fallback={null}>
+            <RuntimeConnection />
+          </Suspense>
+        )}
         {category === "input" && !query && <InputSettings />}
         {visible.some((d) => d.category === "network") &&
           !featureEnabled(state, "settings.network") && (

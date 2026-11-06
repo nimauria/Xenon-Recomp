@@ -26,6 +26,7 @@ import type {
 } from "../../contracts/launcher";
 import { connect } from "../backend";
 import { isActiveJob } from "../jobs";
+import { sessionActive } from "../session";
 import { navigationGroups } from "../navigation";
 import { applyAppearance, resolveAppearance } from "../appearance";
 import { ThemeBackdrop } from "./ThemeBackdrop";
@@ -299,8 +300,14 @@ export function App() {
   }, [state?.community?.presence.requestedEnabled]);
   const hasPendingJobs =
     state?.jobs?.some((job) => isActiveJob(job) || job.cleaningUp) ?? false;
+  const hasRuntimeSession = sessionActive(state?.session?.state);
   useEffect(() => {
-    if (!state?.capabilities.runtime && !hasPendingJobs && page !== "Captures")
+    if (
+      !state?.capabilities.runtime &&
+      !hasRuntimeSession &&
+      !hasPendingJobs &&
+      page !== "Captures"
+    )
       return;
     let active = true,
       pending = false;
@@ -324,7 +331,7 @@ export function App() {
       active = false;
       clearInterval(timer);
     };
-  }, [state?.capabilities.runtime, hasPendingJobs, page]);
+  }, [state?.capabilities.runtime, hasRuntimeSession, hasPendingJobs, page]);
   useEffect(() => {
     let active = true;
     let unsubscribe: (() => void) | undefined;
@@ -583,7 +590,7 @@ export function App() {
               {state.capabilities.runtime
                 ? state.session?.fixture
                   ? t("ui.9246b3d83911")
-                  : t("ui.ddd9818abacf")
+                  : t("runtime.configured")
                 : t("ui.98b1024757db")}
             </small>
             {state.capabilities.networkFixture && (

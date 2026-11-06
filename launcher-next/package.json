@@ -25,6 +25,7 @@
     "test:crash": "node scripts/smoke-crash.mjs",
     "desktop:package": "node scripts/package.mjs",
     "test:game-settings": "node scripts/smoke-game-settings.mjs",
+    "test:real-runtime": "node scripts/smoke-real-runtime.mjs",
     "test:acceptance": "node scripts/validate-desktop.mjs",
     "benchmark:startup": "node scripts/benchmark-startup.mjs",
     "demo": "node scripts/demo.mjs",

@@ -173,11 +173,15 @@ LauncherService::LauncherService(
     persist(state_);
   }
   load_online_state();
-  if (!safe_mode_ && !fixture_host.empty()) {
+  fixture_runtime_mode_ = !fixture_host.empty();
+  if (!safe_mode_ && fixture_runtime_mode_) {
     runtime_ = fixture_runtime(std::move(fixture_host), storage_);
     host_services_ = fixture_host_services(storage_);
-  } else
+  } else {
     host_services_ = unavailable_host_services();
+    runtime_ = fixture_runtime_mode_ ? fixture_runtime(std::move(fixture_host), storage_)
+                                     : configured_runtime(state_);
+  }
   recover_install_jobs();
   recover_migrations();
   job_worker_ = std::thread([this] { jobs_worker(); });
@@ -240,6 +244,8 @@ void LauncherService::load() {
   }
 }
 void LauncherService::validate(const Json &state) const {
+  if (state.contains("runtimeHostPath") && !state.at("runtimeHostPath").is_string())
+    throw std::runtime_error("Invalid saved runtime host path");
   if (state.at("schemaVersion") != 1 || !state.at("revision").is_number_integer())
     throw std::runtime_error("Unsupported launcher state version");
   for (const auto *key : {"profiles", "games", "modules", "notifications", "history", "jobs"})
@@ -407,18 +413,27 @@ Json LauncherService::project() const {
         supported && (status == "failed" || status == "cancelled" || status == "interrupted");
   }
   result["mode"] = "native";
-  result["capabilities"] = {{"runtime", runtime_ && runtime_->available()},
+  result["runtimeConnection"] = {
+      {"configuredPath", state_.value("runtimeHostPath", "")},
+      {"effectivePath", runtime_ ? path_string(runtime_->executable()) : ""},
+      {"source", fixture_runtime_mode_ ? "fixture" : !runtime_override_.empty() ? "command-line"
+                 : !state_.value("runtimeHostPath", "").empty() ? "saved" : "beside-launcher"},
+      {"available", runtime_ && runtime_->available()},
+      {"fixture", runtime_ && runtime_->fixture()},
+      {"locked", safe_mode_ || fixture_runtime_mode_ || !runtime_override_.empty()},
+      {"protocolVersion", 1}};
+  result["capabilities"] = {{"runtime", !safe_mode_ && runtime_ && runtime_->available()},
                             {"importContent", true},
                             {"modules", true},
                             {"captures", true},
                             {"online", http_ != nullptr},
                             {"networkFixture", http_ && http_->fixture()}};
   project_online(result);
-  if (!runtime_)
+  if (!runtime_ || (!runtime_->available() && !result.value("session", Json::object()).contains("sessionId")))
     result["session"] = {{"state", "unavailable"}, {"fixture", false}};
   else if (result.contains("session") &&
            result["session"].value("sessionId", "") == dismissed_session_)
-    result["session"] = {{"state", "idle"}, {"fixture", true}};
+    result["session"] = {{"state", "idle"}, {"fixture", runtime_->fixture()}};
   for (auto &profile : result["profiles"])
     profile["effectiveRuntimeSettings"] = profile_runtime_values(
         Json::object(), effective_profile_settings(profile, state_["settings"]), true);
@@ -545,7 +560,9 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
                  {"logVerbose", settings.value("developer/verboseLogging", false)},
                  {"moduleSettings", Json::object()},
                  {"runtimeApiRequirements", Json::object()},
-                 {"fixture", true}};
+                 {"fixture", runtime_ && runtime_->fixture()},
+                 {"headlessMode", false},
+                 {"profileXuid", "16140901064495857665"}};
   for (const auto &pair : {std::pair{"gamePath", "gameRoot"}, std::pair{"savePath", "savePath"},
                            std::pair{"screenshotPath", "screenshotsPath"}}) {
     const auto override_path = profile.value(pair.first, "");
@@ -580,6 +597,11 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
     config["moduleCompatibility"] = compatibility;
   }
   config["inputRouting"] = host_services_->snapshot().at("input").at("users");
+  config["inputModuleApiVersion"] = 1;
+  config["inputUserSources"] = Json::array();
+  for (const auto &route : config["inputRouting"])
+    config["inputUserSources"].push_back({{"userIndex", route.at("index")},
+                                           {"sources", route.at("sources")}});
   config["dlc"] = game.value("dlc", Json::array());
   return config;
 }
@@ -739,6 +761,8 @@ void LauncherService::refresh_module_presentations(Json &next) {
 }
 Json LauncherService::execute(const std::string &command, const Json &payload) {
   auto next = state_;
+  bool runtime_changed = false;
+  std::unique_ptr<IRuntimeAdapter> replacement_runtime;
   std::string cancel_requested;
   const auto action =
       command == "launcher.action" ? payload.at("action").get<std::string>() : command;
@@ -755,7 +779,24 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
   if (action.starts_with("modules.") && data.contains("id") && action != "modules.checkUpdate" &&
       action != "modules.downloadUpdate")
     require_module_idle(next, data.at("id").get<std::string>());
-  if (action == "profiles.create" || action == "profiles.update" ||
+  if (action == "runtime.configure") {
+    if (safe_mode_ || fixture_runtime_mode_ || !runtime_override_.empty())
+      throw std::runtime_error("Runtime selection is locked by safe mode or startup options");
+    if (runtime_) {
+      const auto status = runtime_->status().value("state", "idle");
+      if (status != "idle" && status != "stopped" && status != "failed" && status != "unavailable")
+        throw std::runtime_error("Stop the active session before changing the runtime host");
+    }
+    const auto path = data.at("path").get<std::string>();
+    validate_launcher_path(path);
+    if (!path.empty() && (!fs::u8path(path).is_absolute() || !fs::is_regular_file(fs::u8path(path))))
+      throw std::runtime_error("Choose an existing runtime host executable");
+    next["runtimeHostPath"] = path.empty() ? "" : path_string(fs::absolute(fs::u8path(path)).lexically_normal());
+    replacement_runtime = configured_runtime(next);
+    next["session"] = replacement_runtime ? replacement_runtime->status()
+                                            : Json{{"state", "unavailable"}, {"fixture", false}};
+    runtime_changed = true;
+  } else if (action == "profiles.create" || action == "profiles.update" ||
       action == "profiles.duplicate") {
     const auto id = data.value("id", "");
     Json profile = action == "profiles.create"
@@ -1473,6 +1514,9 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     std::ofstream(storage_ / "startup.log", std::ios::app)
         << "Launcher interface ready; bridge protocol 1\n";
   } else if (action == "session.launch") {
+    if (safe_mode_) throw std::runtime_error("Restart normally before launching a game from safe mode");
+    if (next.value("developmentDemo", false) && !fixture_runtime_mode_)
+      throw std::runtime_error("Developer demos require the explicit fixture host");
     if (!runtime_ || !runtime_->available())
       throw std::runtime_error("The Xenon runtime adapter is not connected");
     require_library_idle(next, data.at("gameId"));
@@ -1496,6 +1540,10 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
   next["revision"] = state_["revision"].get<int64_t>() + 1;
   persist(next);
   state_ = std::move(next);
+  if (runtime_changed) {
+    runtime_ = std::move(replacement_runtime);
+    dismissed_session_.clear();
+  }
   if (!cancel_requested.empty() && running_job_ == cancel_requested && cancel_job_)
     cancel_job_->store(true);
   jobs_changed_.notify_one();

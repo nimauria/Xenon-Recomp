@@ -6,6 +6,8 @@ Converted means an equivalent launcher flow exists; the evidence column identifi
 
 Disposition counts: Adapter seam: 46; Converted: 137; Partial: 0. These counts are not a completion percentage.
 
+These are the standalone migration dispositions. Production session integration has now begun; current live-host evidence and remaining provider stages are tracked separately in [INTEGRATION.md](INTEGRATION.md).
+
 | Legacy declaration | Replacement | Disposition | Evidence / remaining gate |
 |---|---|---|---|
 | `runtimeCapabilities` | Snapshot capabilities/session/history; native launch configuration; session.launch/stop/dismiss and history.clear | Adapter seam | runtime_adapter_tests.cpp; smoke-desktop.mjs; smoke-profiles.mjs. Separate fixture host verified. Live Xenon is deliberately a later integration milestone. |

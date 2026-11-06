@@ -4,6 +4,7 @@ int main(int argc, char **argv) {
   try {
     xenon::launcher_next::LauncherService service(
         argc > 1 ? std::filesystem::u8path(argv[1]) : xenon::launcher_next::default_storage());
+    if (argc > 2) service.configure_runtime({}, std::filesystem::u8path(argv[2]));
     std::string line;
     while (std::getline(std::cin, line)) {
       try {

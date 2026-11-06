@@ -5,6 +5,15 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 process.chdir(root);
 const buildOnly = process.argv.includes("--build-only");
+const runtimeOption = process.argv.indexOf("--runtime-host");
+const runtimeValue =
+  process.argv.find((arg) => arg.startsWith("--runtime-host="))?.slice(15) ||
+  (runtimeOption >= 0
+    ? process.argv[runtimeOption + 1]
+    : process.env.XENON_RUNTIME_HOST);
+if (runtimeOption >= 0 && (!runtimeValue || runtimeValue.startsWith("--")))
+  throw Error("Supply a runtime host executable");
+const runtimeHost = runtimeValue ? resolve(runtimeValue) : undefined;
 const cefOption = process.argv.indexOf("--cef-root");
 const cef =
   cefOption >= 0
@@ -22,6 +31,7 @@ if (process.platform === "win32") {
       ...(buildOnly ? ["-BuildOnly"] : []),
       "-CefRoot",
       cef,
+      ...(runtimeHost ? ["-RuntimeHost", runtimeHost] : []),
     ],
     { stdio: "inherit", windowsHide: true },
   );
@@ -53,6 +63,10 @@ if (process.platform === "win32") {
       process.platform === "darwin"
         ? "build/native/desktop/XenonLauncher.app/Contents/MacOS/XenonLauncher"
         : "build/native/desktop/xenon_launcher_next";
-    execFileSync(resolve(exe), [], { stdio: "inherit" });
+    execFileSync(
+      resolve(exe),
+      runtimeHost ? ["--runtime-host=" + runtimeHost] : [],
+      { stdio: "inherit" },
+    );
   }
 }

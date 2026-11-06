@@ -696,6 +696,8 @@ public:
                     fs::u8path(args->GetSwitchValue("fixture-network").ToString()))
               : xenon::launcher_next::platform_http());
       service->configure_update_installation(directory);
+      service->configure_runtime(executable_directory(), args->HasSwitch("runtime-host")
+          ? fs::u8path(args->GetSwitchValue("runtime-host").ToString()) : fs::path{});
       CefRegisterSchemeHandlerFactory("xenon", "app", new Assets(directory / "web", service));
       auto client = CefRefPtr<Client>(new Client(service));
       CefBrowserSettings browser_settings;
@@ -748,6 +750,7 @@ int run(CefMainArgs args, void *sandbox) {
   const bool offline = args_line->HasSwitch("offline");
   const auto network_fixture = args_line->GetSwitchValue("fixture-network").ToString();
   const auto runtime_fixture = args_line->GetSwitchValue("fixture-host").ToString();
+  const auto production_runtime = args_line->GetSwitchValue("runtime-host").ToString();
   const auto cache = storage / "cef-cache";
   CefString(&settings.root_cache_path) = xenon::launcher_next::path_string(cache);
   settings.log_severity = LOGSEVERITY_WARNING;
@@ -782,6 +785,8 @@ int run(CefMainArgs args, void *sandbox) {
       arguments.push_back("--fixture-network=" + network_fixture);
     if (!runtime_fixture.empty())
       arguments.push_back("--fixture-host=" + runtime_fixture);
+    if (!production_runtime.empty())
+      arguments.push_back("--runtime-host=" + production_runtime);
     if (!xenon::launcher_next::launch_detached(fs::u8path(executable_path.ToString()), arguments))
       return 1;
   }

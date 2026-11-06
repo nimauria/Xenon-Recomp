@@ -22,8 +22,8 @@ Json community_information() {
 }
 Json presence_activity(const std::string &page, const Json &session, bool show_title) {
   const auto state = session.value("state", "idle");
-  const bool active = state == "preparing" || state == "validating" || state == "starting" ||
-                      state == "running" || state == "stopping";
+  const bool active = state != "idle" && state != "unavailable" && state != "stopped" &&
+                      state != "failed" && state != "exited" && state != "crashed";
   std::string details = page == "Home"       ? "Viewing Xenon activity"
                         : page == "Modules"  ? "Managing Xenon modules"
                         : page == "Profiles" ? "Managing launcher profiles"

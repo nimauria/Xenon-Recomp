@@ -40,7 +40,7 @@ Browser preview uses its own localStorage. Native imports, package installation,
 
 The original registry/catalogue schema, cached/bundled entries, native HTTPS, verified release downloads, module updates/install/rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings → General, with backups and unchanged originals.
 
-Open gates include native-message translation, macOS build/runtime acceptance, broader platform/accessibility checks and production runtime integration. Optional Discord presence has an opt-in local IPC provider. See the status record for implementation versus verification.
+The production session bridge can now use the real Xenon runtime host. Settings → Runtime selects a host; an explicit `--runtime-host` or a host beside the launcher is also supported. See [INTEGRATION.md](INTEGRATION.md) for running, verified evidence and the remaining preparation/content/live-service work. Native-message translation, Mac and broader accessibility/distribution checks remain open. Optional Discord presence has an opt-in local IPC provider.
 
 ## Native builds and validation
 

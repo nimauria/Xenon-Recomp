@@ -1,11 +1,8 @@
 import type { Game, Snapshot, Profile } from "../contracts/launcher";
 import { isActiveJob } from "./jobs";
+import { sessionActive as activeSession } from "./session";
 export function gamePolicy(state: Snapshot, game: Game, busy: boolean) {
-  const sessionActive =
-    !!state.session &&
-    ["preparing", "starting", "validating", "running", "stopping"].includes(
-      state.session.state,
-    );
+  const sessionActive = !!state.session && activeSession(state.session.state);
   const ownSession =
     sessionActive &&
     (state.session?.gameId === game.id || !state.session?.gameId);

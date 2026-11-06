@@ -2,6 +2,7 @@ import { t, tText } from "./localization";
 import type { LauncherIntent, Snapshot } from "../contracts/launcher";
 import definitions from "../contracts/settings.json";
 import { navigationGroups } from "./navigation";
+import { sessionActive } from "./session";
 export interface SearchResult {
   id: string;
   group: string;
@@ -96,10 +97,7 @@ export function commandResults(
       data: { url: "https://discord.gg/zVGw3HADgA" },
     },
   });
-  if (
-    state.session &&
-    ["starting", "running", "stopping"].includes(state.session.state)
-  )
+  if (state.session && sessionActive(state.session.state))
     add({
       id: "session:stop",
       group: tText("Session"),

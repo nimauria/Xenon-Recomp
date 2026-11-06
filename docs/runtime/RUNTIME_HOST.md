@@ -2,6 +2,8 @@
 
 ## Overview
 
+The current Qt-free launcher implements this contract in [`launcher-next/native/adapters/runtime_adapter.cpp`](../../launcher-next/native/adapters/runtime_adapter.cpp). Host selection, live verification and remaining preparation/content/service work are recorded in [the integration status](../../launcher-next/INTEGRATION.md). Qt `RuntimeBridge` names below refer to the retired launcher implementation, not a runtime dependency.
+
 `xenon_runtime_host` is the only process that ever creates a `XenonSession`
 and executes guest code. The launcher (`xenon_launcher`) never runs a game
 itself — pressing Play spawns a detached `xenon_runtime_host` process and

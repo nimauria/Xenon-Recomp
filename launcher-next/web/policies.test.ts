@@ -1,6 +1,21 @@
 import { it, expect } from "vitest";
 import { initialState } from "./backend";
 import { gamePolicy, profilePolicy } from "./policies";
+import { sessionActive } from "./session";
+it("keeps loading, ready and paused Xenon sessions active until a terminal state", () => {
+  for (const state of [
+    "initializing",
+    "ready",
+    "loading",
+    "loading-game",
+    "paused",
+    "running",
+    "stopping",
+  ])
+    expect(sessionActive(state)).toBe(true);
+  for (const state of ["idle", "unavailable", "failed", "stopped", undefined])
+    expect(sessionActive(state)).toBe(false);
+});
 it("keeps menu and inline availability aligned with session and profile ownership", () => {
   const state = initialState(),
     game = {

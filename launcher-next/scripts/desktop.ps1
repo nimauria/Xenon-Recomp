@@ -1,4 +1,4 @@
-param([switch]$BuildOnly, [string]$CefRoot, [string]$Version=$env:XENON_NEXT_VERSION)
+param([switch]$BuildOnly, [string]$CefRoot, [string]$Version=$env:XENON_NEXT_VERSION, [string]$RuntimeHost=$env:XENON_RUNTIME_HOST)
 $ErrorActionPreference = 'Stop'
 $launcherRoot = Split-Path $PSScriptRoot -Parent
 if (-not $CefRoot) {
@@ -36,5 +36,9 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Desktop configure failed' }
   & $cmake --build $buildDirectory --parallel 2
   if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed. Close any running launcher before rebuilding.' }
-  if (-not $BuildOnly) { & (Join-Path $buildDirectory 'desktop/xenon_launcher_next.exe') }
+  if (-not $BuildOnly) {
+    $launcherRuntimeArguments = @()
+    if($RuntimeHost) { $launcherRuntimeArguments += "--runtime-host=$RuntimeHost" }
+    & (Join-Path $buildDirectory 'desktop/xenon_launcher_next.exe') @launcherRuntimeArguments
+  }
 } finally { Pop-Location }

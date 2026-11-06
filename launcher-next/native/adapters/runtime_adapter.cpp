@@ -1,5 +1,6 @@
 #include "runtime_adapter.hpp"
 #include "platform/desktop.hpp"
+#include "platform/file_path.hpp"
 #include <chrono>
 #include <fstream>
 #include <stdexcept>
@@ -14,22 +15,36 @@ std::int64_t epoch() {
 bool terminal(const std::string &state) { return state == "stopped" || state == "failed"; }
 class FileRuntime final : public IRuntimeAdapter {
 public:
-  FileRuntime(fs::path executable, fs::path storage)
+  FileRuntime(fs::path executable, fs::path storage, bool fixture)
       : executable_(fs::absolute(std::move(executable))),
-        storage_(fs::absolute(std::move(storage))) {
+        storage_(fs::absolute(std::move(storage))), fixture_(fixture) {
     if (fs::exists(storage_ / "active-session.json")) {
       const auto record = read_document(storage_ / "active-session.json");
       const auto directory = fs::u8path(record.at("sessionDir").get<std::string>());
       const auto root = fs::weakly_canonical(storage_ / "sessions");
       if (fs::weakly_canonical(directory).parent_path() != root)
         throw std::runtime_error("Saved session directory is outside launcher storage");
-      session_ = record;
+      const bool same_provider =
+          record.value("providerFixture", record.value("fixture", true)) == fixture_ &&
+          (record.value("runtimeHost", "").empty() ||
+           fs::u8path(record.at("runtimeHost").get<std::string>()) == executable_);
+      if (!same_provider && !terminal(record.value("state", "starting")) &&
+          process_running(
+              {record.value("pid", std::uint64_t{}), record.value("created", std::uint64_t{})}))
+        throw std::runtime_error("Stop the saved runtime session before changing its provider");
+      if (same_provider)
+        session_ = record;
     }
   }
-  bool available() const override { return fs::is_regular_file(executable_); }
+  bool available() const override {
+    std::error_code error;
+    return fs::is_regular_file(io_path(executable_), error);
+  }
+  bool fixture() const override { return fixture_ || session_.value("fixture", false); }
+  const fs::path &executable() const override { return executable_; }
   Json status() override {
     if (session_.empty())
-      return {{"state", "idle"}, {"fixture", true}};
+      return {{"state", "idle"}, {"fixture", fixture_}};
     auto state = session_.value("state", "starting");
     const auto directory = fs::u8path(session_.at("sessionDir").get<std::string>());
     try {
@@ -42,7 +57,13 @@ public:
               reported == "stopping" || terminal(reported)) {
             state = reported;
             session_["state"] = state;
+            session_["fixture"] = fixture_ || report.value("fixture", false);
             session_["lastError"] = report.value("lastError", "");
+            for (const auto *key : {"phaseMessage", "errorCategory", "nativeExtension"})
+              if (report.contains(key))
+                session_[key] = report.at(key);
+              else
+                session_.erase(key);
             if (!session_.contains("runningAtEpochMs")) {
               const auto reported_start = report.contains("runningAtEpochMs") &&
                                                   report.at("runningAtEpochMs").is_number_integer()
@@ -86,24 +107,22 @@ public:
       metadata_pending_ = false;
     }
     const auto log = directory / "log.txt";
-    if (fs::is_regular_file(log)) {
-      const auto size = fs::file_size(log);
-      std::ifstream input(log, std::ios::binary);
-      if (size > 65536)
-        input.seekg(static_cast<std::streamoff>(size - 65536));
-      session_["logTail"] = std::string(std::istreambuf_iterator<char>(input), {});
+    try {
+      session_["logTail"] = read_text_tail(log, 65536);
+    } catch (const std::exception &) { /* Keep the last complete tail during transient I/O. */
     }
     return session_;
   }
   Json launch(Json configuration) override {
     if (!available())
-      throw std::runtime_error("Fixture runtime executable is missing");
+      throw std::runtime_error("Runtime host executable is missing");
     if (!session_.empty() && !terminal(status().value("state", "idle")))
       throw std::runtime_error("A runtime session is already active");
     const auto id = make_id();
     const auto directory = storage_ / "sessions" / id;
     fs::create_directories(directory);
     configuration["configVersion"] = 1;
+    configuration["fixture"] = fixture_;
     configuration["sessionId"] = id;
     const auto utf8 = directory.u8string();
     configuration["sessionDir"] = std::string(utf8.begin(), utf8.end());
@@ -119,7 +138,9 @@ public:
                 {"primaryMediaId", configuration.value("primaryMediaId", "")},
                 {"title", configuration.value("title", "")},
                 {"state", "starting"},
-                {"fixture", true},
+                {"fixture", fixture_},
+                {"providerFixture", fixture_},
+                {"runtimeHost", configuration_path()},
                 {"pid", process.pid},
                 {"created", process.created},
                 {"startedAtEpochMs", epoch()},
@@ -145,12 +166,20 @@ public:
   }
 
 private:
+  std::string configuration_path() const {
+    const auto utf8 = executable_.u8string();
+    return {utf8.begin(), utf8.end()};
+  }
   fs::path executable_, storage_;
+  bool fixture_;
   Json session_ = Json::object();
   bool metadata_pending_ = false;
 };
 } // namespace
 std::unique_ptr<IRuntimeAdapter> fixture_runtime(fs::path executable, fs::path storage) {
-  return std::make_unique<FileRuntime>(std::move(executable), std::move(storage));
+  return std::make_unique<FileRuntime>(std::move(executable), std::move(storage), true);
+}
+std::unique_ptr<IRuntimeAdapter> runtime_host(fs::path executable, fs::path storage) {
+  return std::make_unique<FileRuntime>(std::move(executable), std::move(storage), false);
 }
 } // namespace xenon::launcher_next

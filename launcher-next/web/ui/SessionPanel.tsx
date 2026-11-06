@@ -20,6 +20,14 @@ export function SessionPanel() {
         </span>
         {session.fixture && <small>{t("ui.5203ba38197c")}</small>}
         {session.lastError && <p role="alert">{tText(session.lastError)}</p>}
+        {session.phaseMessage && <small>{session.phaseMessage}</small>}
+        {session.errorCategory && <small>{session.errorCategory}</small>}
+        {session.logTail && (
+          <details>
+            <summary>{t("runtime.logs")}</summary>
+            <pre className="session-log">{session.logTail}</pre>
+          </details>
+        )}
       </div>
       {active ? (
         <button

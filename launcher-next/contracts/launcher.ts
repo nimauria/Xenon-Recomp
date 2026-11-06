@@ -329,6 +329,15 @@ export interface Snapshot {
     online?: boolean;
     networkFixture?: boolean;
   };
+  runtimeConnection?: {
+    configuredPath: string;
+    effectivePath: string;
+    source: "fixture" | "command-line" | "saved" | "beside-launcher";
+    available: boolean;
+    fixture: boolean;
+    locked: boolean;
+    protocolVersion: number;
+  };
   settings?: Record<string, unknown>;
   modules?: Module[];
   notifications?: Notification[];
@@ -380,6 +389,8 @@ export interface Snapshot {
     fixture: boolean;
     lastError?: string;
     logTail?: string;
+    phaseMessage?: string;
+    errorCategory?: string;
     startedAtEpochMs?: number;
     endedAtEpochMs?: number;
   };

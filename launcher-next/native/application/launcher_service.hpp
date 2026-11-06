@@ -33,6 +33,8 @@ public:
   void observe_changes(std::function<void(std::int64_t)> observer);
   Json presentation_settings() const;
   void configure_update_installation(const std::filesystem::path &installation);
+  void configure_runtime(const std::filesystem::path &installation,
+                         const std::filesystem::path &explicit_host = {});
   std::filesystem::path prepare_update_installation(ProcessIdentity parent);
   void update_handoff_failed(const std::string &message);
   std::optional<std::filesystem::path> asset_path(const std::string &category,
@@ -52,6 +54,7 @@ private:
   Json project() const;
   Json community_state() const;
   Json launch_configuration(const Json &state, const std::string &game_id) const;
+  std::unique_ptr<IRuntimeAdapter> configured_runtime(const Json &state) const;
   void enqueue_install(Json &next, const std::filesystem::path &source);
   void recover_install_jobs();
   void jobs_worker() noexcept;
@@ -96,6 +99,8 @@ private:
   Json state_;
   bool safe_mode_ = false;
   std::unique_ptr<IRuntimeAdapter> runtime_;
+  std::filesystem::path runtime_installation_, runtime_override_;
+  bool fixture_runtime_mode_ = false;
   std::unique_ptr<IHostServices> host_services_;
   std::string dismissed_session_;
   mutable std::mutex mutex_;

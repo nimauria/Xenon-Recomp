@@ -1552,7 +1552,22 @@
       "home.attention.failed": "Failed operations",
       "home.attention.failed.action": "Review failed jobs",
       "home.attention.sources": "Games with missing sources",
-      "home.attention.sources.action": "Review library"
+      "home.attention.sources.action": "Review library",
+      "runtime.connection": "Xenon runtime",
+      "runtime.description": "The launcher starts Xenon in a separate process. Selecting a host does not start a game.",
+      "runtime.available": "Runtime host found. Xenon checks the game and module when you press Play.",
+      "runtime.missing": "No runtime host found. Select a build of xenon_runtime_host.",
+      "runtime.fixture": "Explicit test host active.",
+      "runtime.executable": "Runtime host executable",
+      "runtime.auto": "Automatic: host beside the launcher",
+      "runtime.browse": "Choose runtime host",
+      "runtime.save": "Save runtime host",
+      "runtime.reset": "Use automatic discovery",
+      "runtime.locked": "Selection is locked in safe mode, fixture mode or by --runtime-host.",
+      "runtime.active": "Stop the current session before changing the runtime host.",
+      "runtime.services": "Live input, filesystem and network management have separate integration status.",
+      "runtime.logs": "Runtime log",
+      "runtime.configured": "Host selected"
     },
     "fr": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -2479,7 +2494,22 @@
       "home.attention.failed": "Opérations échouées",
       "home.attention.failed.action": "Voir les tâches échouées",
       "home.attention.sources": "Jeux avec des sources manquantes",
-      "home.attention.sources.action": "Voir la bibliothèque"
+      "home.attention.sources.action": "Voir la bibliothèque",
+      "runtime.connection": "Runtime Xenon",
+      "runtime.description": "Le lanceur démarre Xenon dans un processus distinct. Choisir un hôte ne démarre pas de jeu.",
+      "runtime.available": "Hôte du runtime trouvé. Xenon vérifie le jeu et le module au lancement.",
+      "runtime.missing": "Aucun hôte du runtime trouvé. Choisissez une version de xenon_runtime_host.",
+      "runtime.fixture": "Hôte de test explicite actif.",
+      "runtime.executable": "Exécutable de l’hôte du runtime",
+      "runtime.auto": "Automatique : hôte à côté du lanceur",
+      "runtime.browse": "Choisir l’hôte du runtime",
+      "runtime.save": "Enregistrer l’hôte du runtime",
+      "runtime.reset": "Utiliser la détection automatique",
+      "runtime.locked": "La sélection est verrouillée en mode sans échec, en mode test ou par --runtime-host.",
+      "runtime.active": "Arrêtez la session avant de changer l’hôte du runtime.",
+      "runtime.services": "La gestion des entrées, du système de fichiers et du réseau a un état d’intégration distinct.",
+      "runtime.logs": "Journal du runtime",
+      "runtime.configured": "Hôte sélectionné"
     },
     "de": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -3406,7 +3436,22 @@
       "home.attention.failed": "Fehlgeschlagene Vorgänge",
       "home.attention.failed.action": "Fehlgeschlagene Aufgaben ansehen",
       "home.attention.sources": "Spiele mit fehlenden Quellen",
-      "home.attention.sources.action": "Bibliothek ansehen"
+      "home.attention.sources.action": "Bibliothek ansehen",
+      "runtime.connection": "Xenon-Laufzeit",
+      "runtime.description": "Der Launcher startet Xenon als separaten Prozess. Die Auswahl eines Hosts startet kein Spiel.",
+      "runtime.available": "Laufzeit-Host gefunden. Xenon prüft Spiel und Modul beim Start.",
+      "runtime.missing": "Kein Laufzeit-Host gefunden. Wählen Sie einen Build von xenon_runtime_host.",
+      "runtime.fixture": "Expliziter Test-Host aktiv.",
+      "runtime.executable": "Programmdatei des Laufzeit-Hosts",
+      "runtime.auto": "Automatisch: Host neben dem Launcher",
+      "runtime.browse": "Laufzeit-Host auswählen",
+      "runtime.save": "Laufzeit-Host speichern",
+      "runtime.reset": "Automatische Erkennung verwenden",
+      "runtime.locked": "Die Auswahl ist im abgesicherten Modus, im Testmodus oder durch --runtime-host gesperrt.",
+      "runtime.active": "Beenden Sie die Sitzung, bevor Sie den Laufzeit-Host ändern.",
+      "runtime.services": "Die Verwaltung von Eingabe, Dateisystem und Netzwerk hat einen eigenen Integrationsstatus.",
+      "runtime.logs": "Laufzeitprotokoll",
+      "runtime.configured": "Host ausgewählt"
     },
     "es": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -4333,7 +4378,22 @@
       "home.attention.failed": "Operaciones fallidas",
       "home.attention.failed.action": "Ver tareas fallidas",
       "home.attention.sources": "Juegos con fuentes ausentes",
-      "home.attention.sources.action": "Ver biblioteca"
+      "home.attention.sources.action": "Ver biblioteca",
+      "runtime.connection": "Runtime de Xenon",
+      "runtime.description": "El lanzador inicia Xenon en un proceso separado. Seleccionar un host no inicia un juego.",
+      "runtime.available": "Host del runtime encontrado. Xenon comprueba el juego y el módulo al pulsar Jugar.",
+      "runtime.missing": "No se encontró el host del runtime. Selecciona una compilación de xenon_runtime_host.",
+      "runtime.fixture": "Host de pruebas explícito activo.",
+      "runtime.executable": "Ejecutable del host del runtime",
+      "runtime.auto": "Automático: host junto al lanzador",
+      "runtime.browse": "Elegir host del runtime",
+      "runtime.save": "Guardar host del runtime",
+      "runtime.reset": "Usar detección automática",
+      "runtime.locked": "La selección está bloqueada en modo seguro, en modo de prueba o por --runtime-host.",
+      "runtime.active": "Detén la sesión antes de cambiar el host del runtime.",
+      "runtime.services": "La gestión de entrada, archivos y red tiene un estado de integración independiente.",
+      "runtime.logs": "Registro del runtime",
+      "runtime.configured": "Host seleccionado"
     }
   },
   "sources": {
@@ -14394,6 +14454,111 @@
       "original": "Review library",
       "locations": [
         "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "runtime.connection": {
+      "original": "Xenon runtime",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.description": {
+      "original": "The launcher starts Xenon in a separate process. Selecting a host does not start a game.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.available": {
+      "original": "Runtime host found. Xenon checks the game and module when you press Play.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.missing": {
+      "original": "No runtime host found. Select a build of xenon_runtime_host.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.fixture": {
+      "original": "Explicit test host active.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.executable": {
+      "original": "Runtime host executable",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.auto": {
+      "original": "Automatic: host beside the launcher",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.browse": {
+      "original": "Choose runtime host",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.save": {
+      "original": "Save runtime host",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.reset": {
+      "original": "Use automatic discovery",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.locked": {
+      "original": "Selection is locked in safe mode, fixture mode or by --runtime-host.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.active": {
+      "original": "Stop the current session before changing the runtime host.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.services": {
+      "original": "Live input, filesystem and network management have separate integration status.",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.logs": {
+      "original": "Runtime log",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "runtime.configured": {
+      "original": "Host selected",
+      "locations": [
+        "web/ui/RuntimeConnection.tsx",
+        "web/ui/SessionPanel.tsx"
       ]
     }
   }

@@ -128,7 +128,7 @@ Status labels:
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
 | Networking | Experimental | Xenon Network client foundation, offline by default. There is no hosted service and no XAM/XNet mapping. This is not Xbox Live. |
-| Desktop launcher | Under active development | Qt-free CEF + React launcher in `launcher-next`, with library, per-game settings, modules, profiles, themes and diagnostics. Runtime integration is a separate milestone. |
+| Desktop launcher | Under active development | Qt-free CEF + React launcher in `launcher-next`, with library, per-game settings, modules, profiles, themes and diagnostics. Production session transport is connected; preparation and live service integration remain in progress. |
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
@@ -195,7 +195,7 @@ EXECUTION (xenon_runtime_host)
 Important boundaries:
 
 - The CPU, GPU, kernel, XEX loader and devices share **one guest memory** (Memory V2). No subsystem keeps a private copy of guest RAM.
-- The launcher never executes guest code. It starts `xenon_runtime_host` for each session and talks to it through a file-based launch, status and stop contract ([`RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md)). The current standalone launcher uses CEF; its production Xenon adapter is the next integration milestone.
+- The launcher never executes guest code. It starts `xenon_runtime_host` for each session and talks to it through a file-based launch, status and stop contract ([`RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md)). The CEF launcher's production session transport and remaining framework work are tracked in [`INTEGRATION.md`](launcher-next/INTEGRATION.md).
 - Vulkan and D3D12 contain no Xbox command processor. They consume the frontend's normalised state.
 
 Source ownership, CMake targets and dependency rules are documented in [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md).
