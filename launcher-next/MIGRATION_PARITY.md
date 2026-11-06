@@ -1,10 +1,10 @@
 # Legacy launcher parity audit
 
-29 October 2026. Each of the 183 invokable declarations in LEGACY_INVENTORY.md has a disposition below. This is a code and coverage audit, not a claim that migration is complete.
+6 November 2026. Each of the 183 invokable declarations in LEGACY_INVENTORY.md has a disposition below. This is a code and coverage audit, not a claim that migration is complete.
 
 Converted means an equivalent launcher flow exists; the evidence column identifies its coverage family. Adapter seam means the launcher contract/UI is present and explicitly tested with a fixture; real Xenon integration remains the agreed later milestone. Partial and Open entries still block full launcher parity. Shared responsive, accessibility, performance, platform and packaging gates remain in MIGRATION_STATUS.md.
 
-Disposition counts: Adapter seam: 46; Converted: 130; Partial: 7. These counts are not a completion percentage.
+Disposition counts: Adapter seam: 46; Converted: 137; Partial: 0. These counts are not a completion percentage.
 
 | Legacy declaration | Replacement | Disposition | Evidence / remaining gate |
 |---|---|---|---|
@@ -21,11 +21,11 @@ Disposition counts: Adapter seam: 46; Converted: 130; Partial: 7. These counts a
 | `dismissNotification` | Native notifications.push/read/readAll/dismiss/clear; App inbox, actions and transient toast | Converted | profile_settings_tests.cpp; smoke-shell.mjs. None in this action family; see global acceptance gates. |
 | `clearNotifications` | Native notifications.push/read/readAll/dismiss/clear; App inbox, actions and transient toast | Converted | profile_settings_tests.cpp; smoke-shell.mjs. None in this action family; see global acceptance gates. |
 | `executeNotificationAction` | Native notifications.push/read/readAll/dismiss/clear; App inbox, actions and transient toast | Converted | profile_settings_tests.cpp; smoke-shell.mjs. None in this action family; see global acceptance gates. |
-| `recoveryDirectory` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. Repeated unclean-exit counter and broader clean-machine failure cases remain global gates. |
-| `acknowledgeRecovery` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. Repeated unclean-exit counter and broader clean-machine failure cases remain global gates. |
-| `markLauncherReady` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. Repeated unclean-exit counter and broader clean-machine failure cases remain global gates. |
-| `restartInSafeMode` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. Repeated unclean-exit counter and broader clean-machine failure cases remain global gates. |
-| `restartNormally` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. Repeated unclean-exit counter and broader clean-machine failure cases remain global gates. |
+| `recoveryDirectory` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. recovery_tests.cpp; smoke-unclean-recovery.mjs; translated native fallback smoke. Clean-machine acceptance remains global. |
+| `acknowledgeRecovery` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. recovery_tests.cpp; smoke-unclean-recovery.mjs; translated native fallback smoke. Clean-machine acceptance remains global. |
+| `markLauncherReady` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. recovery_tests.cpp; smoke-unclean-recovery.mjs; translated native fallback smoke. Clean-machine acceptance remains global. |
+| `restartInSafeMode` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. recovery_tests.cpp; smoke-unclean-recovery.mjs; translated native fallback smoke. Clean-machine acceptance remains global. |
+| `restartNormally` | Native recovery metadata, application.ready/restart, support storage and startup recovery window | Converted | smoke-startup-failure.mjs; smoke-crash.mjs; smoke-restart.mjs. recovery_tests.cpp; smoke-unclean-recovery.mjs; translated native fallback smoke. Clean-machine acceptance remains global. |
 | `requestLauncherUpdateCheck` | updates.check/download/install; jobs.cancel; launcherUpdate snapshot; separate native replacement helper | Converted | network_jobs_tests.cpp; launcher_update_tests.cpp; smoke-updater.mjs. Automatic replacement is Windows-only, matching the legacy installer. Linux/macOS use manual replacement for now. |
 | `requestLauncherUpdateDownload` | updates.check/download/install; jobs.cancel; launcherUpdate snapshot; separate native replacement helper | Converted | network_jobs_tests.cpp; launcher_update_tests.cpp; smoke-updater.mjs. Automatic replacement is Windows-only, matching the legacy installer. Linux/macOS use manual replacement for now. |
 | `requestLauncherUpdateInstall` | updates.check/download/install; jobs.cancel; launcherUpdate snapshot; separate native replacement helper | Converted | network_jobs_tests.cpp; launcher_update_tests.cpp; smoke-updater.mjs. Automatic replacement is Windows-only, matching the legacy installer. Linux/macOS use manual replacement for now. |
@@ -72,7 +72,7 @@ Disposition counts: Adapter seam: 46; Converted: 130; Partial: 7. These counts a
 | `inputUsers` | IHostServices; runtimeServices.input DTO; queued input operations; Settings player routing/binding controls | Adapter seam | host_services_tests.cpp; smoke-services.mjs. Fixture routing and vibration records are explicit. Live device discovery, hardware rumble and Xenon routing await the real provider. |
 | `inputProfiles` | IHostServices; runtimeServices.input DTO; queued input operations; Settings player routing/binding controls | Adapter seam | host_services_tests.cpp; smoke-services.mjs. Fixture routing and vibration records are explicit. Live device discovery, hardware rumble and Xenon routing await the real provider. |
 | `inputDiagnostics` | IHostServices; runtimeServices.input DTO; queued input operations; Settings player routing/binding controls | Adapter seam | host_services_tests.cpp; smoke-services.mjs. Fixture routing and vibration records are explicit. Live device discovery, hardware rumble and Xenon routing await the real provider. |
-| `pollFrontendActions` | Foreground browser Gamepad API and keyboard command handling in App | Partial | Packaged keyboard checks in smoke-desktop.mjs. Native input action polling, spatial focus and device-specific glyphs still require conformance. |
+| `pollFrontendActions` | Foreground standard Gamepad API, spatial and virtual-collection focus, edge/repeat rules, device-family glyphs, menu/dialog ownership and keyboard commands | Converted | controller.test.ts; smoke-controller-menus.mjs. Physical-device/provider routing remains later integration acceptance. |
 | `inputModuleApiInfo` | IHostServices; runtimeServices.input DTO; queued input operations; Settings player routing/binding controls | Adapter seam | host_services_tests.cpp; smoke-services.mjs. Fixture routing and vibration records are explicit. Live device discovery, hardware rumble and Xenon routing await the real provider. |
 | `inputProfileStorePath` | Provider-owned persistence rather than a renderer file path; fixture-services.json in the fixture provider | Adapter seam | host_services_tests.cpp. Live provider chooses its profile store during Xenon integration. |
 | `refreshInputDevices` | IHostServices; runtimeServices.input DTO; queued input operations; Settings player routing/binding controls | Adapter seam | host_services_tests.cpp; smoke-services.mjs. Fixture routing and vibration records are explicit. Live device discovery, hardware rumble and Xenon routing await the real provider. |
@@ -141,12 +141,12 @@ Disposition counts: Adapter seam: 46; Converted: 130; Partial: 7. These counts a
 | `sessionHistory` | Snapshot capabilities/session/history; native launch configuration; session.launch/stop/dismiss and history.clear | Adapter seam | runtime_adapter_tests.cpp; smoke-desktop.mjs; smoke-profiles.mjs. Separate fixture host verified. Live Xenon is deliberately a later integration milestone. |
 | `sessionState` | Snapshot capabilities/session/history; native launch configuration; session.launch/stop/dismiss and history.clear | Adapter seam | runtime_adapter_tests.cpp; smoke-desktop.mjs; smoke-profiles.mjs. Separate fixture host verified. Live Xenon is deliberately a later integration milestone. |
 | `clearSessionHistory` | Snapshot capabilities/session/history; native launch configuration; session.launch/stop/dismiss and history.clear | Adapter seam | runtime_adapter_tests.cpp; smoke-desktop.mjs; smoke-profiles.mjs. Separate fixture host verified. Live Xenon is deliberately a later integration milestone. |
-| `communityInfo` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
-| `discordPresenceState` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
-| `openDiscordCommunity` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
-| `openProjectCommunity` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
-| `setCommunityPage` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
-| `refreshDiscordPresence` | Community links and disabled/unavailable Rich Presence controls; native opt-in validation | Partial | profile_settings_tests.cpp. Legacy SDK-enabled Rich Presence provider is not ported. No dormant opt-in is retained without a provider. |
+| `communityInfo` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
+| `discordPresenceState` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
+| `openDiscordCommunity` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
+| `openProjectCommunity` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
+| `setCommunityPage` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
+| `refreshDiscordPresence` | community.info/state/refresh, community links, remembered page and optional local Discord IPC provider | Converted | presence_tests.cpp; explicit native-owned consent, no connection before opt-in, safe-mode suppression, acknowledgement/reconnect/clear-on-shutdown. Live Discord publication requires an opted-in desktop client; never enabled in automated acceptance. |
 | `moduleEntries` | Modules controls, native folder/ZIP imports, enable/remove/verify, typed schema and settings commands | Converted | module_settings_tests.cpp; module_lifecycle_tests.cpp; install_jobs_tests.cpp; smoke-module-lifecycle.mjs. Owned uninstall and manifest/API declarations are covered. Binary ABI validation requires the later live adapter; external module folders are preserved. |
 | `moduleActions` | Modules controls, native folder/ZIP imports, enable/remove/verify, typed schema and settings commands | Converted | module_settings_tests.cpp; module_lifecycle_tests.cpp; install_jobs_tests.cpp; smoke-module-lifecycle.mjs. Owned uninstall and manifest/API declarations are covered. Binary ABI validation requires the later live adapter; external module folders are preserved. |
 | `modulePageActions` | Modules controls, native folder/ZIP imports, enable/remove/verify, typed schema and settings commands | Converted | module_settings_tests.cpp; module_lifecycle_tests.cpp; install_jobs_tests.cpp; smoke-module-lifecycle.mjs. Owned uninstall and manifest/API declarations are covered. Binary ABI validation requires the later live adapter; external module folders are preserved. |
@@ -208,13 +208,13 @@ The 55 source components are accounted for below. Reusable Qt controls are inten
 | EmptyState.qml | context.tsx Empty | Converted; shared acceptance gates remain |
 | FilesystemPage.qml | RuntimeServices.tsx | Converted; shared acceptance gates remain |
 | FooterBar.qml | App.tsx footer | Converted; shared acceptance gates remain |
-| GamePropertiesDialog.qml | pages.tsx GameProperties | Partial; related action/metadata or menu parity remains in the method audit |
+| GamePropertiesDialog.qml | pages.tsx GameProperties | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | GameTile.qml | GameCollection.tsx / GameCarousel.tsx | Converted; shared acceptance gates remain |
 | HelpPopover.qml | App.tsx help dialog | Converted; shared acceptance gates remain |
 | HomePage.qml | pages.tsx Activity | Converted; shared acceptance gates remain |
-| LibraryPage.qml | pages.tsx Library | Partial; related action/metadata or menu parity remains in the method audit |
+| LibraryPage.qml | pages.tsx Library | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | Main.qml | App.tsx and native/host/main.cpp | Converted; shared acceptance gates remain |
-| ModuleCatalogDialog.qml | ModuleCatalogue.tsx | Partial; related action/metadata or menu parity remains in the method audit |
+| ModuleCatalogDialog.qml | ModuleCatalogue.tsx | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | ModuleSettingsDialog.qml | pages.tsx ModuleSettings | Converted; shared acceptance gates remain |
 | ModulesPage.qml | pages.tsx Modules | Converted; shared acceptance gates remain |
 | NavigationGuard.qml | context.tsx Modal and App navigation | Converted; shared acceptance gates remain |
@@ -222,10 +222,10 @@ The 55 source components are accounted for below. Reusable Qt controls are inten
 | NotificationCenter.qml | App.tsx notification inbox | Converted; shared acceptance gates remain |
 | ProfileAvatar.qml | pages.tsx profile editor/card | Converted; shared acceptance gates remain |
 | ProfileEditorDialog.qml | pages.tsx ProfileEditor | Converted; shared acceptance gates remain |
-| ProfileMenu.qml | App.tsx active-profile selector | Partial; related action/metadata or menu parity remains in the method audit |
+| ProfileMenu.qml | App.tsx active-profile selector and profile action menus | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | ProfilesPage.qml | pages.tsx Profiles | Converted; shared acceptance gates remain |
 | ProfileStore.qml | native profile persistence and web/profile.ts | Converted; shared acceptance gates remain |
-| QuickCenter.qml | App.tsx commands, notifications and help controls | Partial; related action/metadata or menu parity remains in the method audit |
+| QuickCenter.qml | App.tsx commands, notifications and help controls | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | RecoveryDialog.qml | App.tsx recovery modal and native startup fallback | Converted; shared acceptance gates remain |
 | SettingsPage.qml | pages.tsx Settings / AppearanceSettings.tsx | Converted; shared acceptance gates remain |
 | Sidebar.qml | App.tsx navigation | Converted; shared acceptance gates remain |
@@ -235,7 +235,7 @@ The 55 source components are accounted for below. Reusable Qt controls are inten
 | ThemeBackdrop.qml | ThemeBackdrop.tsx | Converted; shared acceptance gates remain |
 | Toast.qml | App.tsx transient toast | Converted; shared acceptance gates remain |
 | TopBar.qml | App.tsx header | Converted; shared acceptance gates remain |
-| XActionMenu.qml | Semantic HTML controls, context.tsx Modal and web/style.css | Partial; related action/metadata or menu parity remains in the method audit |
+| XActionMenu.qml | ActionMenu.tsx, semantic HTML, context.tsx Modal and web/style.css | Converted; native/CEF workflow checks and shared acceptance gates apply |
 | XButton.qml | Semantic HTML controls, context.tsx Modal and web/style.css | Qt control retired; HTML/CSS replacement exists |
 | XComboBox.qml | Semantic HTML controls, context.tsx Modal and web/style.css | Qt control retired; HTML/CSS replacement exists |
 | XConfirmDialog.qml | Semantic HTML controls, context.tsx Modal and web/style.css | Qt control retired; HTML/CSS replacement exists |
@@ -257,3 +257,5 @@ The 55 source components are accounted for below. Reusable Qt controls are inten
 ## Property families
 
 The legacy Q_PROPERTY getters/setters are carried by the versioned snapshot rather than copied as Qt bindings: runtime/session/capabilities and logs; recovery; profile IDs and limits; theme/accent/corner/background catalogues; notification counts; settings and configured paths; and host-service DTOs. Qt version is deliberately retired. All 32 properties now have individual destinations and remaining gates in [MIGRATION_PROPERTIES.md](MIGRATION_PROPERTIES.md). Dedicated architecture/platform presentation, community provider diagnostics and default/configured-path reconciliation remain explicitly open.
+
+Per-game settings added on 6 November: GameSettings.tsx and library.settings.save provide Graphics, Audio, Controls and manifest-defined Game Options with sparse inheritance, game/module identity isolation, atomic validation, active-session locks, reset and real launch-configuration projection. Covered by game_settings_tests.cpp and smoke-game-settings.mjs.

@@ -9,7 +9,7 @@
 | runtimeStatus | Snapshot runtime capability and session status; SessionPanel | Adapter seam; real Xenon later |
 | testMode | Explicit session/provider `fixture` flags; production never enables them automatically | Converted; native and desktop lifecycle checks |
 | safeMode | `recovery.safeMode`, startup argument and restart controls | Converted; restart/crash checks |
-| recoveryState | `recovery.previousUncleanExit`, startup fallback and recovery UI | Partial; repeated unclean-exit counter policy remains |
+| recoveryState | Owned bootstrap/ready/stopped markers, consecutive-unclean threshold, bounded incident logs, automatic safe mode and file-loaded recovery copy | Converted; native threshold/ownership tests and CEF crash/restart checks |
 | themeId | `ui/theme`, converted appearance catalogue and theme resolver | Converted; palette/asset smoke checks |
 | accentId | `ui/accent`, appearance catalogue and CSS variables | Converted; appearance tests |
 | cornerStyle | `ui/cornerStyle` and original corner catalogue | Converted; appearance tests |
@@ -21,8 +21,8 @@
 | systemHighContrast | CEF `forced-colors` query/listener, appearance resolver and CSS | Converted; desktop emulation; real screen-reader/OS matrix remains |
 | currentSession | Snapshot `session` and separate runtime adapter | Adapter seam; fixture launch/stop/reattach tested |
 | sessionState | `session.state` and persistent session panel | Adapter seam; live provider later |
-| communityInfo | Community description and HTTPS project/Discord actions in Settings | Partial; consolidate remaining legacy metadata/diagnostics |
-| discordPresenceState | Disabled/unavailable provider UI and native rejection of dormant opt-in | Partial; optional legacy SDK provider is not ported |
+| communityInfo | community.info/state DTO, canonical description/links and Settings actions | Converted; native provider contract tests |
+| discordPresenceState | Optional local Discord IPC, native-owned opt-in, status/acknowledgement, safe suppression and privacy controls | Converted; recording-transport protocol/privacy/restart tests |
 | notificationUnreadCount | Native notification records, derived unread inbox count and badges | Converted; shell smoke checks |
 | hostArchitecture | Native `application.architecture`, About and Support diagnostics | Converted; compile-target architecture checked in native/desktop fixtures |
 | platformName | Native `application.platform`, About, Support and package metadata | Converted; Windows exercised; other platform builds remain global gates |
@@ -37,4 +37,4 @@
 | defaultScreenshotsPath | One resolver for Settings, capture scan/resources/open/delete and launch configuration | Converted; blank/custom/reset image decoding and profile/global launch precedence exercised |
 | cachePath | Queued verified copy of managed artwork/downloads, atomic reference switch, cancel/retry/reset/recovery; prior copies retained; actual paths shown | Converted for managed cache; browser cache follows launcher data. Wider permission/disk/drive-failure acceptance remains global |
 
-The path rows deliberately distinguish legacy settings retained for migration from working relocation behaviour. Native file-picker interaction, platform builds, accessibility and performance remain shared gates in [MIGRATION_STATUS.md](MIGRATION_STATUS.md). No property is counted complete merely because its old value survives in legacy metadata.
+The path rows deliberately distinguish legacy settings retained for migration from working relocation behaviour. Actual Windows multi-file picker registration passed; remaining picker modes, platform builds, accessibility and performance remain shared gates in [MIGRATION_STATUS.md](MIGRATION_STATUS.md). No property is counted complete merely because its old value survives in legacy metadata.

@@ -16,7 +16,7 @@
 | settings.network | Old default was false. Fields remain disabled unless a provider advertises `networkConfiguration`; native setting changes reject unsupported configuration. Current unavailable and status-fixture providers both advertise false. The category explains this and links to network status. |
 | settings.filesystem | Links to filesystem tools, whose mount/link/path operations are disabled without the filesystem provider |
 | settings.updates | Native catalogue/module/launcher HTTPS updates; manual replacement outside supported packaged Windows installations |
-| settings.community | Community links, with Rich Presence explicitly unavailable and dormant opt-in rejected |
+| settings.community | Community links and optional local Discord IPC; off by default, fresh explicit consent, optional title sharing and safe-mode suppression |
 | settings.accessibility | Converted text scale, contrast, motion and input preferences; broader device/screen-reader acceptance remains |
 | settings.developer | Developer preferences and diagnostics link when developer mode is enabled |
 | settings.about | Native compiled version, platform and architecture |
