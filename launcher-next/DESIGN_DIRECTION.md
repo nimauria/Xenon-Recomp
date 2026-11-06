@@ -20,7 +20,7 @@ Set this direction during migration so every converted page uses the same hierar
 - Downloads is the operation centre; its progress remains reachable from the application shell.
 - Settings and Support stay at the bottom of navigation. Developer filesystem/network tools remain an optional group.
 
-Navigation order: Browse (Home, Library, Captures), Manage (Modules, Profiles), Activity (Downloads, Updates), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences. Downloads owns operations and ready packages; Updates owns release discovery and launcher/module update actions.
+Navigation order: Browse (Home, Library, Discover, Captures), Manage (Modules, Profiles), Activity (Downloads, Updates), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences. Discover owns catalogue browsing, Modules owns installed module management, Downloads owns operations and ready packages, and Updates owns release discovery and update actions. See [REFINEMENTS.md](REFINEMENTS.md) for the current pass and scoped follow-ups.
 
 ## Shared visual rules
 

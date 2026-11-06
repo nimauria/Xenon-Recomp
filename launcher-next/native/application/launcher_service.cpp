@@ -1342,7 +1342,7 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     const auto page = data.at("page").get<std::string>();
     static const std::set<std::string> pages{"Home",     "Library",    "Modules",  "Profiles",
                                              "Settings", "Support",    "Captures", "Downloads", "Updates",
-                                             "Network",  "Filesystem", "Developer"};
+                                             "Network",  "Filesystem", "Developer", "Discover"};
     if (!pages.contains(page))
       throw std::runtime_error("Unknown navigation destination");
     if (next.value("lastPage", "") == page)

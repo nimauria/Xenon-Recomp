@@ -96,6 +96,9 @@ int main() {
       act("settings.set", {{"key", "general/restoreLastPage"}, {"value", true}});
       check(service.snapshot()["preferences"]["startPage"] == "Captures",
             "Remembered-page setting takes precedence over profile startup");
+      check(act("navigation.remember", {{"page", "Discover"}}).at("ok") &&
+                service.snapshot()["preferences"]["startPage"] == "Discover",
+            "Discover must be a persisted native navigation destination");
       act("notifications.clear", Json::object());
       act("settings.set", {{"key", "audio/masterVolume"}, {"value", .2}});
       act("settings.set", {{"key", "audio/muteUnfocused"}, {"value", true}});

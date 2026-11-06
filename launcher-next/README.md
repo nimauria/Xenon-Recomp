@@ -125,6 +125,8 @@ Demo files stay below `build/demo/`; normal launcher data is separate. No sample
 
 Updates is a dedicated page for launcher/module releases. Download and Install controls remain visible with explanations when unavailable. Downloads also lists verified packages that are ready to install, including packages whose old job records were cleared.
 
+Discover exposes catalogue search and platform/installed/downloaded filters as a normal page. Home's Needs attention shortcuts lead to ready packages, updates, failed jobs and missing sources. See [REFINEMENTS.md](REFINEMENTS.md) for current changes and recommended next slices.
+
 ## Per-game settings and repeatable acceptance
 
 Every selected game has **Game settings**, also available in its action menu. Graphics, Audio, Controls and Game Options are saved for that game only. Unchecked overrides inherit active-profile/launcher values; game options inherit module defaults. Saving is atomic, changes apply on the next launch, and settings for the active game are locked. The separate **Module defaults** control intentionally changes shared defaults.

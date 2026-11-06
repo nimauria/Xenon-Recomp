@@ -1530,7 +1530,29 @@
       "install.readyPackages": "Ready to install",
       "install.readyFilter": "Ready to install",
       "install.verified": "Download verified",
-      "demo.banner": "Developer demo · Fictional sample data and test services. Your normal library is separate."
+      "demo.banner": "Developer demo · Fictional sample data and test services. Your normal library is separate.",
+      "discover.title": "Discover",
+      "discover.catalogue": "Module catalogue",
+      "discover.description": "Browse game modules. A platform package does not confirm game compatibility.",
+      "discover.show": "Show modules",
+      "discover.filter.all": "All modules",
+      "discover.filter.platform": "Packages for this platform",
+      "discover.filter.installed": "Installed modules",
+      "discover.filter.ready": "Downloaded packages",
+      "discover.reset": "Reset filters",
+      "discover.offline": "Offline: showing cached modules. Verified downloads can still be installed.",
+      "discover.installed": "Installed",
+      "discover.platform": "Platform package listed",
+      "discover.noPackage": "No package for this platform",
+      "home.attention": "Needs attention",
+      "home.attention.ready": "Packages ready",
+      "home.attention.ready.action": "Review downloads",
+      "home.attention.updates": "Updates available",
+      "home.attention.updates.action": "Review updates",
+      "home.attention.failed": "Failed operations",
+      "home.attention.failed.action": "Review failed jobs",
+      "home.attention.sources": "Games with missing sources",
+      "home.attention.sources.action": "Review library"
     },
     "fr": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -2435,7 +2457,29 @@
       "install.readyPackages": "Prêt à installer",
       "install.readyFilter": "Prêt à installer",
       "install.verified": "Téléchargement vérifié",
-      "demo.banner": "Démo de développement · Données fictives et services de test. Votre bibliothèque habituelle est séparée."
+      "demo.banner": "Démo de développement · Données fictives et services de test. Votre bibliothèque habituelle est séparée.",
+      "discover.title": "Découvrir",
+      "discover.catalogue": "Catalogue des modules",
+      "discover.description": "Parcourez les modules de jeux. Un paquet pour votre plateforme ne garantit pas la compatibilité du jeu.",
+      "discover.show": "Afficher les modules",
+      "discover.filter.all": "Tous les modules",
+      "discover.filter.platform": "Paquets pour cette plateforme",
+      "discover.filter.installed": "Modules installés",
+      "discover.filter.ready": "Paquets téléchargés",
+      "discover.reset": "Réinitialiser les filtres",
+      "discover.offline": "Hors ligne : affichage des modules en cache. Les téléchargements vérifiés peuvent toujours être installés.",
+      "discover.installed": "Installé",
+      "discover.platform": "Paquet répertorié pour cette plateforme",
+      "discover.noPackage": "Aucun paquet pour cette plateforme",
+      "home.attention": "À vérifier",
+      "home.attention.ready": "Paquets prêts",
+      "home.attention.ready.action": "Voir les téléchargements",
+      "home.attention.updates": "Mises à jour disponibles",
+      "home.attention.updates.action": "Voir les mises à jour",
+      "home.attention.failed": "Opérations échouées",
+      "home.attention.failed.action": "Voir les tâches échouées",
+      "home.attention.sources": "Jeux avec des sources manquantes",
+      "home.attention.sources.action": "Voir la bibliothèque"
     },
     "de": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -3340,7 +3384,29 @@
       "install.readyPackages": "Bereit zur Installation",
       "install.readyFilter": "Bereit zur Installation",
       "install.verified": "Download geprüft",
-      "demo.banner": "Entwicklerdemo · Fiktive Beispieldaten und Testdienste. Deine normale Bibliothek ist getrennt."
+      "demo.banner": "Entwicklerdemo · Fiktive Beispieldaten und Testdienste. Deine normale Bibliothek ist getrennt.",
+      "discover.title": "Entdecken",
+      "discover.catalogue": "Modulkatalog",
+      "discover.description": "Spielmodule durchsuchen. Ein Paket für diese Plattform bestätigt keine Spielkompatibilität.",
+      "discover.show": "Module anzeigen",
+      "discover.filter.all": "Alle Module",
+      "discover.filter.platform": "Pakete für diese Plattform",
+      "discover.filter.installed": "Installierte Module",
+      "discover.filter.ready": "Heruntergeladene Pakete",
+      "discover.reset": "Filter zurücksetzen",
+      "discover.offline": "Offline: Zwischengespeicherte Module werden angezeigt. Verifizierte Downloads können weiterhin installiert werden.",
+      "discover.installed": "Installiert",
+      "discover.platform": "Plattformpaket aufgeführt",
+      "discover.noPackage": "Kein Paket für diese Plattform",
+      "home.attention": "Handlungsbedarf",
+      "home.attention.ready": "Bereite Pakete",
+      "home.attention.ready.action": "Downloads ansehen",
+      "home.attention.updates": "Updates verfügbar",
+      "home.attention.updates.action": "Updates ansehen",
+      "home.attention.failed": "Fehlgeschlagene Vorgänge",
+      "home.attention.failed.action": "Fehlgeschlagene Aufgaben ansehen",
+      "home.attention.sources": "Spiele mit fehlenden Quellen",
+      "home.attention.sources.action": "Bibliothek ansehen"
     },
     "es": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -4245,7 +4311,29 @@
       "install.readyPackages": "Listo para instalar",
       "install.readyFilter": "Listo para instalar",
       "install.verified": "Descarga verificada",
-      "demo.banner": "Demo de desarrollo · Datos ficticios y servicios de prueba. Tu biblioteca normal está separada."
+      "demo.banner": "Demo de desarrollo · Datos ficticios y servicios de prueba. Tu biblioteca normal está separada.",
+      "discover.title": "Descubrir",
+      "discover.catalogue": "Catálogo de módulos",
+      "discover.description": "Explora módulos de juegos. Un paquete para esta plataforma no garantiza la compatibilidad del juego.",
+      "discover.show": "Mostrar módulos",
+      "discover.filter.all": "Todos los módulos",
+      "discover.filter.platform": "Paquetes para esta plataforma",
+      "discover.filter.installed": "Módulos instalados",
+      "discover.filter.ready": "Paquetes descargados",
+      "discover.reset": "Restablecer filtros",
+      "discover.offline": "Sin conexión: se muestran los módulos en caché. Los paquetes verificados aún se pueden instalar.",
+      "discover.installed": "Instalado",
+      "discover.platform": "Paquete listado para esta plataforma",
+      "discover.noPackage": "No hay paquete para esta plataforma",
+      "home.attention": "Requiere atención",
+      "home.attention.ready": "Paquetes preparados",
+      "home.attention.ready.action": "Ver descargas",
+      "home.attention.updates": "Actualizaciones disponibles",
+      "home.attention.updates.action": "Ver actualizaciones",
+      "home.attention.failed": "Operaciones fallidas",
+      "home.attention.failed.action": "Ver tareas fallidas",
+      "home.attention.sources": "Juegos con fuentes ausentes",
+      "home.attention.sources.action": "Ver biblioteca"
     }
   },
   "sources": {
@@ -14174,6 +14262,138 @@
       "original": "Developer demo · Fictional sample data and test services. Your normal library is separate.",
       "locations": [
         "web/ui/App.tsx"
+      ]
+    },
+    "discover.title": {
+      "original": "Discover",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.catalogue": {
+      "original": "Module catalogue",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.description": {
+      "original": "Browse game modules. A platform package does not confirm game compatibility.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.show": {
+      "original": "Show modules",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.filter.all": {
+      "original": "All modules",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.filter.platform": {
+      "original": "Packages for this platform",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.filter.installed": {
+      "original": "Installed modules",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.filter.ready": {
+      "original": "Downloaded packages",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.reset": {
+      "original": "Reset filters",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.offline": {
+      "original": "Offline: showing cached modules. Verified downloads can still be installed.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.installed": {
+      "original": "Installed",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.platform": {
+      "original": "Platform package listed",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "discover.noPackage": {
+      "original": "No package for this platform",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "home.attention": {
+      "original": "Needs attention",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.ready": {
+      "original": "Packages ready",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.ready.action": {
+      "original": "Review downloads",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.updates": {
+      "original": "Updates available",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.updates.action": {
+      "original": "Review updates",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.failed": {
+      "original": "Failed operations",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.failed.action": {
+      "original": "Review failed jobs",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.sources": {
+      "original": "Games with missing sources",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
+      ]
+    },
+    "home.attention.sources.action": {
+      "original": "Review library",
+      "locations": [
+        "web/ui/HomeAttention.tsx"
       ]
     }
   }

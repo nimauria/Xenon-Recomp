@@ -15,6 +15,11 @@ export function CommandPalette({
   const [selected, select] = useState(0);
   const results = commandResults(state, query);
   useEffect(() => select(0), [query]);
+  useEffect(() => {
+    document
+      .getElementById(`command-option-${selected}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selected, query]);
   return (
     <Modal title={t("ui.fa8a81ce45d6")} close={close}>
       <label>

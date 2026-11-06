@@ -1,6 +1,7 @@
 import type { Page } from "../../contracts/launcher";
 const paths: Record<Page | "Menu", string> = {
   Home: "M3 11 12 3l9 8M5 10v11h5v-7h4v7h5V10",
+  Discover: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M16 8l-3 6-5 2 3-6z",
   Library: "M4 4h6v16H4zM14 4h6v16h-6zM7 8h0M17 8h0",
   Captures: "M3 7h5l2-3h4l2 3h5v13H3zM16 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0",
   Modules: "M12 2 3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10",

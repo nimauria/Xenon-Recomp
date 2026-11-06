@@ -20,7 +20,8 @@ export interface LauncherContext {
   state: Snapshot;
   busy: boolean;
   query: string;
-  navigate: (page: Page) => void;
+  setQuery: (query: string) => void;
+  navigate: (page: Page, targetId?: string, section?: string) => void;
   openGame: (id: string) => void;
   libraryBrowse: LibraryBrowse;
   setLibraryBrowse: Dispatch<SetStateAction<LibraryBrowse>>;

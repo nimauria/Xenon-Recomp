@@ -49,7 +49,7 @@ export function commandResults(
     keywords: "catalog registry discover install packages",
     priority: 70,
     quick: true,
-    intent: { type: "navigate", page: "Modules", section: "catalog" },
+    intent: { type: "navigate", page: "Discover" },
   });
   if (state.capabilities.online) {
     add({

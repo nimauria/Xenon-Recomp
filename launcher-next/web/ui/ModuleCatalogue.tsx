@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Modal, Empty, useLauncher } from "./context";
 import { CoverImage } from "./CoverImage";
 import { installBlock, updatePackages } from "../updates";
+import { catalogueEntries, type CatalogueFilter } from "../catalogue";
 const descriptions: Record<string, string> = {
   idle: "Check GitHub for a published release.",
   checking: "Checking releases…",
@@ -233,25 +234,64 @@ export function UpdatesPanel({
   );
 }
 export function ModuleCatalogue({ close }: { close: () => void }) {
-  const { state, busy, action } = useLauncher();
-  const [query, setQuery] = useState("");
-  const [history, setHistory] = useState<string>();
-  const catalog = state.catalog;
-  const entries = (catalog?.entries ?? []).filter((entry) =>
-    `${entry.name} ${entry.description} ${entry.publisher}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
   return (
     <Modal title={t("ui.7d9e69313fa6")} close={close}>
+      <CatalogueContent />
+    </Modal>
+  );
+}
+export function Discover() {
+  return (
+    <section className="card discover" aria-label={t("discover.catalogue")}>
+      <p>{t("discover.description")}</p>
+      <CatalogueContent fullPage />
+    </section>
+  );
+}
+function CatalogueContent({ fullPage = false }: { fullPage?: boolean }) {
+  const {
+    state,
+    busy,
+    action,
+    query: pageQuery,
+    setQuery: setPageQuery,
+  } = useLauncher();
+  const [localQuery, setQuery] = useState("");
+  const query = fullPage ? pageQuery : localQuery;
+  const [filter, setFilter] = useState<CatalogueFilter>("all");
+  const [history, setHistory] = useState<string>();
+  const catalog = state.catalog;
+  const entries = catalogueEntries(state, query, filter);
+  const installed = new Set(state.modules?.map((module) => module.id));
+  return (
+    <>
       <div className="actions">
-        <input
-          type="search"
-          aria-label={t("ui.123997597a9c")}
-          placeholder={t("ui.a67f6147d439")}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
+        {!fullPage && (
+          <input
+            type="search"
+            aria-label={t("ui.123997597a9c")}
+            placeholder={t("ui.a67f6147d439")}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        )}
+        <label>
+          {t("discover.show")}
+          <select
+            value={filter}
+            onChange={(event) =>
+              setFilter(event.target.value as CatalogueFilter)
+            }
+          >
+            {(["all", "platform", "installed", "ready"] as const).map(
+              (value) => (
+                <option key={value} value={value}>
+                  {t(`discover.filter.${value}`)}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
         <button
           disabled={
             busy || !state.capabilities.online || catalog?.state === "loading"
@@ -260,7 +300,21 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
         >
           {t("ui.4bc465d2f66c")}
         </button>
+        {(query || filter !== "all") && (
+          <button
+            onClick={() => {
+              setFilter("all");
+              if (fullPage) setPageQuery("");
+              else setQuery("");
+            }}
+          >
+            {t("discover.reset")}
+          </button>
+        )}
       </div>
+      {!state.capabilities.online && (
+        <p role="status">{t("discover.offline")}</p>
+      )}
       <p role="status">
         {catalog?.state === "loading"
           ? t("ui.602169ad67e9")
@@ -283,58 +337,72 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
       {!entries.length && (
         <Empty title={t("ui.ecee6d9c672d")}>{t("ui.82250b05afa4")}</Empty>
       )}
-      {entries.map((entry) => (
-        <article
-          className="card catalog-entry"
-          key={entry.id}
-          aria-label={entry.name}
-        >
-          <CoverImage
-            source={
-              entry.launcher?.tileArt?.startsWith("xenon://")
-                ? entry.launcher.tileArt
-                : undefined
-            }
-            label={entry.name}
-            className="catalog-cover"
-          />
-          <div>
-            <h3>{entry.name}</h3>
-            <p>{entry.description}</p>
-            <small>
-              {entry.publisher}
-              {entry.verified ? t("ui.637fe328ab16") : ""}
-            </small>
-            <UpdateControls
-              id={entry.id}
-              name={entry.name}
-              supported={!!entry.assetName}
+      <div className={fullPage ? "discover-grid" : undefined}>
+        {entries.map((entry) => (
+          <article
+            className="card catalog-entry"
+            key={entry.id}
+            aria-label={entry.name}
+          >
+            <CoverImage
+              source={
+                entry.launcher?.tileArt?.startsWith("xenon://")
+                  ? entry.launcher.tileArt
+                  : undefined
+              }
+              label={entry.name}
+              className="catalog-cover"
             />
-            {!entry.assetName && (
-              <p>
-                {t("ui.85a63e8b5ea3")}
-                {entry.hostKey}.
-              </p>
-            )}
-            <div className="actions">
-              <button
-                disabled={busy}
-                onClick={() =>
-                  void action("system.openUrl", { url: entry.repositoryUrl })
-                }
-              >
-                {t("ui.d6e6cdd8433d")}
-              </button>
-              <button onClick={() => setHistory(entry.id)}>
-                {t("ui.c665338a9287")}
-              </button>
+            <div>
+              <h3>{entry.name}</h3>
+              <div className="catalog-badges">
+                {installed.has(entry.id) && (
+                  <span>{t("discover.installed")}</span>
+                )}
+                <span>
+                  {t(
+                    entry.assetName
+                      ? "discover.platform"
+                      : "discover.noPackage",
+                  )}
+                </span>
+              </div>
+              <p>{entry.description}</p>
+              <small>
+                {entry.publisher}
+                {entry.verified ? t("ui.637fe328ab16") : ""}
+              </small>
+              <UpdateControls
+                id={entry.id}
+                name={entry.name}
+                supported={!!entry.assetName}
+              />
+              {!entry.assetName && (
+                <p>
+                  {t("ui.85a63e8b5ea3")}
+                  {entry.hostKey}.
+                </p>
+              )}
+              <div className="actions">
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void action("system.openUrl", { url: entry.repositoryUrl })
+                  }
+                >
+                  {t("ui.d6e6cdd8433d")}
+                </button>
+                <button onClick={() => setHistory(entry.id)}>
+                  {t("ui.c665338a9287")}
+                </button>
+              </div>
             </div>
-          </div>
-        </article>
-      ))}
+          </article>
+        ))}
+      </div>
       {history && (
         <UpdateHistory id={history} close={() => setHistory(undefined)} />
       )}
-    </Modal>
+    </>
   );
 }

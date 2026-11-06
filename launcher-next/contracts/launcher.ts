@@ -4,6 +4,7 @@ export const protocolVersion = 1 as const;
 export type Page =
   | "Library"
   | "Home"
+  | "Discover"
   | "Modules"
   | "Profiles"
   | "Captures"

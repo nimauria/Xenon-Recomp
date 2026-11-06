@@ -35,6 +35,7 @@ const output = resolve(
 );
 await mkdir(output, { recursive: true });
 const plans = [
+  ["refinements", "smoke-refinements.mjs", true, "demo"],
   ["demo", "smoke-demo.mjs", true, "demo"],
   ["game-settings", "smoke-game-settings.mjs"],
   ["desktop", "smoke-desktop.mjs"],

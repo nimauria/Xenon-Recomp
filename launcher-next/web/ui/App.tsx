@@ -1,6 +1,6 @@
 import { useControllerNavigation, controllerGlyphs } from "../controller";
 import { ActionMenu } from "./ActionMenu";
-import { UpdatesPanel } from "./ModuleCatalogue";
+import { UpdatesPanel, Discover } from "./ModuleCatalogue";
 import {
   t,
   tText,
@@ -9,7 +9,14 @@ import {
   setLanguage,
   language,
 } from "../localization";
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+} from "react";
 import type {
   Page,
   Snapshot,
@@ -36,7 +43,11 @@ import {
   Support,
   RuntimeTools,
 } from "./pages";
-import { CommandPalette } from "./CommandPalette";
+const CommandPalette = lazy(() =>
+  import("./CommandPalette").then((module) => ({
+    default: module.CommandPalette,
+  })),
+);
 export function App() {
   useLocalization();
   useEffect(() => {
@@ -83,6 +94,9 @@ export function App() {
     setLanguage(String(state?.settings?.["general/language"] ?? "auto"));
   }, [state?.settings?.["general/language"]]);
   const [page, setPage] = useState<Page>("Library");
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [page]);
   const pageRef = useRef<Page>(page);
   pageRef.current = page;
   const pageHistory = useRef<Page[]>([]);
@@ -483,6 +497,7 @@ export function App() {
         state,
         busy,
         query,
+        setQuery,
         navigate,
         action,
         pick,
@@ -694,6 +709,7 @@ export function App() {
               </div>
             )}
             {page === "Library" && <Library />}
+            {page === "Discover" && <Discover />}
             {page === "Modules" && <Modules />}
             {page === "Profiles" && <Profiles />}
             {page === "Settings" && <Settings />}
@@ -727,10 +743,12 @@ export function App() {
           </footer>
         </section>
         {palette && (
-          <CommandPalette
-            close={() => setPalette(false)}
-            execute={executeIntent}
-          />
+          <Suspense fallback={null}>
+            <CommandPalette
+              close={() => setPalette(false)}
+              execute={executeIntent}
+            />
+          </Suspense>
         )}
         {notifications && (
           <Modal

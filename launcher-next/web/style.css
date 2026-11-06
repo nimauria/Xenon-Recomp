@@ -1544,3 +1544,22 @@ header select {
   background: var(--panel);
   color: var(--accent);
 }
+
+.attention-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: .75rem;
+}
+.attention-items button {
+  display: grid;
+  gap: .35rem;
+  text-align: start;
+  padding: 1rem;
+}
+.attention-items strong { font-size: 1.5rem; }
+.attention-items small { color: var(--muted); }
+.catalog-badges { display: flex; gap: .5rem; flex-wrap: wrap; margin-block: .5rem; }
+.catalog-badges span { padding: .2rem .5rem; border: 1px solid var(--line); border-radius: var(--control-radius, .5rem); font-size: .8rem; }
+.discover > p { max-width: 75ch; }
+.discover-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); gap: 1rem; }
+.discover-grid .catalog-entry { margin: 0; align-content: start; }

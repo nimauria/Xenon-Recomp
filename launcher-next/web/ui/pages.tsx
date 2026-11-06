@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, lazy, Suspense } from "react";
 import type { Game, Module, Profile } from "../../contracts/launcher";
 import { playtime, activityTime } from "../activity";
 import { GameMedia } from "./GameMedia";
+import { HomeAttention } from "./HomeAttention";
 const GameSettings = lazy(() =>
   import("./GameSettings").then((module) => ({ default: module.GameSettings })),
 );
@@ -143,6 +144,7 @@ export function Library() {
           {t("ui.955303856d4b")}
           <select
             value={view}
+            disabled={busy}
             onChange={(e) => {
               void action("settings.set", {
                 key: "library/viewMode",
@@ -1796,6 +1798,7 @@ export function Activity() {
           <span>{t("ui.c6bae554de5a")}</span>
         </div>
       </div>
+      <HomeAttention />
       <HomeShelf
         title={t("ui.d97d51d37092")}
         games={games.filter((game) => game.favorite)}
@@ -1859,8 +1862,32 @@ export function Activity() {
 }
 export { Captures } from "./Captures";
 export function Downloads() {
-  const { state, query, action, busy } = useLauncher();
-  const [filter, setFilter] = useState("All");
+  const {
+    state,
+    query,
+    setQuery,
+    action,
+    busy,
+    navigationIntent,
+    clearNavigationIntent,
+  } = useLauncher();
+  const [filter, setFilter] = useState(
+    navigationIntent?.page === "Downloads" &&
+      ["failed", "ready"].includes(navigationIntent.section ?? "")
+      ? (navigationIntent.section ?? "All")
+      : "All",
+  );
+  useEffect(() => {
+    if (navigationIntent?.page !== "Downloads") return;
+    if (
+      navigationIntent.section &&
+      ["failed", "ready"].includes(navigationIntent.section)
+    ) {
+      setFilter(navigationIntent.section);
+      setQuery("");
+    }
+    clearNavigationIntent();
+  }, [navigationIntent]);
   const ready = updatePackages(state).filter(
     (p) =>
       p.value?.state === "ready-to-install" &&

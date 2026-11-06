@@ -49,6 +49,7 @@ const pages = [
   "Profiles",
   "Captures",
   "Downloads",
+  "Discover",
   "Updates",
   "Settings",
   "Support",

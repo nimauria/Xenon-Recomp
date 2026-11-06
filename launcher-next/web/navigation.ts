@@ -5,7 +5,7 @@ export const navigationGroups: {
   bottom?: boolean;
   developer?: boolean;
 }[] = [
-  { label: "Browse", pages: ["Home", "Library", "Captures"] },
+  { label: "Browse", pages: ["Home", "Library", "Discover", "Captures"] },
   { label: "Manage", pages: ["Modules", "Profiles"] },
   { label: "Activity", pages: ["Downloads", "Updates"] },
   {
