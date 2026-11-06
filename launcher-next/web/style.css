@@ -1537,3 +1537,10 @@ header select {
 .game-setting small { display:block; color:var(--muted); }
 .ready-package { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; }
 .install-hint { color:var(--muted); font-size:.875rem; }
+.demo-banner {
+  padding: .7rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--control-radius, .5rem);
+  background: var(--panel);
+  color: var(--accent);
+}

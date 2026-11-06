@@ -20,7 +20,7 @@ Set this direction during migration so every converted page uses the same hierar
 - Downloads is the operation centre; its progress remains reachable from the application shell.
 - Settings and Support stay at the bottom of navigation. Developer filesystem/network tools remain an optional group.
 
-Navigation order: Browse (Home, Library, Captures), Manage (Modules, Profiles), Activity (Downloads), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences.
+Navigation order: Browse (Home, Library, Captures), Manage (Modules, Profiles), Activity (Downloads, Updates), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences. Downloads owns operations and ready packages; Updates owns release discovery and launcher/module update actions.
 
 ## Shared visual rules
 
@@ -34,7 +34,7 @@ A coherent Xenon interface takes priority over reproducing individual applicatio
 
 During migration: establish shell/navigation, shared controls, game presentation and theme application; keep converting the existing functions and testing their actual native behaviour.
 
-After parity: assess genuinely new additions such as custom tags/saved collections, richer dashboard shelves, save backups or mod management. These remain separate from the current conversion checklist.
+After standalone migration, refine pages, navigation and quality of life before connecting real Xenon providers. The first slice adds per-game Graphics/Audio/Controls/Game Options, explicit install actions and a populated opt-in developer demo. Assess saved collections, richer dashboard shelves, save backups or mod management separately; they are not existing capabilities.
 
 ## References reviewed
 
@@ -42,4 +42,4 @@ After parity: assess genuinely new additions such as custom tags/saved collectio
 - GOG GALAXY's library filtering, sorting, visual customisation and saved views: https://www.gog.com/galaxy
 - COGBox's documented box carousel, per-game settings and controller navigation: https://github.com/Shagg88/COGBox
 
-COGBox's README is the product reference; its implementation has not been fully audited. Reference ideas do not establish that an equivalent Xenon capability has been implemented or verified.
+COGBox's README and per-game settings source were reviewed for hierarchy and behaviour; its implementation has not been fully audited. Reference ideas do not establish that an equivalent Xenon capability has been implemented or verified.

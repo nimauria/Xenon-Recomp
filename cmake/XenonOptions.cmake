@@ -3,8 +3,8 @@
 
 option(XENON_BUILD_TESTS "Build Xenon Recomp tests" ON)
 option(XENON_BUILD_BENCHMARKS "Build Xenon Memory V2 benchmarks" ON)
-option(XENON_BUILD_LAUNCHER "Build the locally retained legacy Qt launcher" OFF)
-option(XENON_BUILD_INSTALLER "Configure production installer/package generation" OFF)
+option(XENON_BUILD_LAUNCHER "Build the Qt-free CEF launcher (requires launcher-next web assets and CEF_ROOT)" OFF)
+option(XENON_BUILD_INSTALLER "Retired legacy installer option; use launcher-next packaging" OFF)
 option(XENON_ENABLE_MEMORY "Build the production Xenon memory subsystem" ON)
 set(XENON_MEMORY_DIRECT_APERTURE_QUALIFIED_DEFAULT OFF)
 # Phase 6 keeps compact translation as Auto/default. Repeated paired Release

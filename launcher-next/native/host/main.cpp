@@ -728,6 +728,9 @@ int run(CefMainArgs args, void *sandbox) {
   if (result >= 0)
     return result;
   CefSettings settings;
+#ifdef _WIN32
+  settings.chrome_app_icon_id = 1;
+#endif
   auto args_line = CefCommandLine::CreateCommandLine();
 #ifdef _WIN32
   args_line->InitFromString(GetCommandLineW());

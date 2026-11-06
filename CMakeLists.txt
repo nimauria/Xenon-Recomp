@@ -52,51 +52,16 @@ if(XENON_BUILD_TESTS OR XENON_BUILD_BENCHMARKS)
 endif()
 
 # -----------------------------------------------------------------------------
-# Launcher UI. Kept isolated from the runtime so Qt does not leak into Xenon
-# core, CPU, memory, graphics, or game-module interfaces.
+# Qt-free desktop launcher. The standalone build under launcher-next remains
+# the preferred UI workflow; runtime integration is a separate adapter milestone.
 if(XENON_BUILD_LAUNCHER)
-  add_subdirectory(launcher)
+  set(XENON_NEXT_BUILD_DESKTOP ON CACHE BOOL "Build the CEF desktop launcher" FORCE)
+  add_subdirectory(launcher-next)
 endif()
-
-# RuntimeBridge locates xenon_runtime_host next to the launcher executable at
-# runtime (see docs/runtime/RUNTIME_HOST.md). Pin the host's output directory to the
-# launcher's own so this holds for a plain dev build, not only after
-# `cmake --install` places both under the same bin/. xenon_launcher's own
-# output directory is left untouched (scripts such as
-# launcher/scripts/build-launcher.ps1 expect it at build/<preset>/launcher/).
-if(TARGET xenon_runtime_host AND TARGET xenon_launcher)
-  set_target_properties(xenon_runtime_host PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
-  # A launcher-only build still has to be a usable launcher. RuntimeBridge
-  # discovers the host beside xenon_launcher, so make it an explicit runtime
-  # companion rather than relying on an all-target build to happen first.
-  add_dependencies(xenon_launcher xenon_runtime_host)
-endif()
-
-# PreparationService follows the same side-by-side contract for xenon-prepare.
-# Without this dependency a successful `--target xenon_launcher` build can
-# render the UI but cannot prepare a title on first Play.
-if(TARGET xenon-prepare AND TARGET xenon_launcher AND
-   XENON_ENABLE_MEMORY AND XENON_ENABLE_KERNEL)
-  set_target_properties(xenon-prepare PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xenon_launcher>")
-  add_dependencies(xenon_launcher xenon-prepare)
-elseif(TARGET xenon_launcher AND NOT XENON_BUILD_RUNTIME_HOST)
-  message(STATUS
-    "Xenon preparation companion disabled for the launcher UI-only target")
-endif()
-# RuntimeBridge tests (xenon_runtime_host_fixture, xenon_runtime_bridge_tests)
-# are declared inside launcher/CMakeLists.txt itself, in the same directory
-# scope find_package(Qt6 ...) ran in - Qt6::Core etc. are imported targets
-# only visible within that subdirectory's scope tree, not back up here.
 
 # -----------------------------------------------------------------------------
 # Production installer/package generation. Kept last so every installable
 # target and dependency runtime has been resolved before CPack is configured.
 if(XENON_BUILD_INSTALLER)
-  if(NOT TARGET xenon_launcher)
-    message(FATAL_ERROR
-      "XENON_BUILD_INSTALLER requires Qt 6.6+ and a built xenon_launcher target")
-  endif()
-  include(Packaging)
+  message(FATAL_ERROR "The legacy installer is retired. Package the standalone launcher with npm run desktop:package in launcher-next.")
 endif()

@@ -2,11 +2,13 @@ import { t, tText, tCount, language } from "../localization";
 import { LanguageSettings } from "./LanguageSettings";
 import { ActionMenu, type MenuRequest } from "./ActionMenu";
 import { gamePolicy, profilePolicy } from "../policies";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, lazy, Suspense } from "react";
 import type { Game, Module, Profile } from "../../contracts/launcher";
 import { playtime, activityTime } from "../activity";
 import { GameMedia } from "./GameMedia";
-import { GameSettings } from "./GameSettings";
+const GameSettings = lazy(() =>
+  import("./GameSettings").then((module) => ({ default: module.GameSettings })),
+);
 import { updatePackages } from "../updates";
 import { InstallPackageButton } from "./ModuleCatalogue";
 import { GameAddons } from "./GameAddons";
@@ -403,13 +405,15 @@ export function Library() {
         </Modal>
       )}
       {settingsGame && (
-        <GameSettings
-          key={settingsGame.id}
-          game={
-            state.games.find((g) => g.id === settingsGame.id) ?? settingsGame
-          }
-          close={() => setSettingsGame(undefined)}
-        />
+        <Suspense fallback={<p role="status">{t("ui.5474eef8d0f1")}</p>}>
+          <GameSettings
+            key={settingsGame.id}
+            game={
+              state.games.find((g) => g.id === settingsGame.id) ?? settingsGame
+            }
+            close={() => setSettingsGame(undefined)}
+          />
+        </Suspense>
       )}
       {properties && (
         <GameProperties

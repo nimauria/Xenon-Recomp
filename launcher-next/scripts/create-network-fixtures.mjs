@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { writeFixtureZip } from "./zip-fixture.mjs";
 export const fixtureModule = "test.catalogue.module";
+export const fixturePlatform = `${process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
 export const registry =
   "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/";
 export const releaseApi =
@@ -27,7 +28,9 @@ export async function createNetworkFixtures(folder) {
     releaseAssets: {
       "windows-x64": "fixture-windows-x64.xenonmod.zip",
       "linux-x64": "fixture-linux-x64.xenonmod.zip",
+      "linux-arm64": "fixture-linux-arm64.xenonmod.zip",
       "macos-arm64": "fixture-macos-arm64.xenonmod.zip",
+      "macos-x64": "fixture-macos-x64.xenonmod.zip",
     },
     launcher: { tileArt: "assets/test.catalogue.module/cover.png" },
     dlc: [],
@@ -68,7 +71,7 @@ export async function publishFixture(folder, version, validDigest = true) {
   const mapping = JSON.parse(
     await readFile(resolve(folder, "responses.json"), "utf8"),
   );
-  const asset = "fixture-windows-x64.xenonmod.zip";
+  const asset = `fixture-${fixturePlatform}.xenonmod.zip`;
   await writeFixtureZip(resolve(folder, "module.zip"), {
     "module/module.json": JSON.stringify({
       id: fixtureModule,

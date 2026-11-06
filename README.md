@@ -128,7 +128,7 @@ Status labels:
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
 | Networking | Experimental | Xenon Network client foundation, offline by default. There is no hosted service and no XAM/XNet mapping. This is not Xbox Live. |
-| Qt launcher | Under active development | Qt 6 Quick/QML library, modules, profiles, settings, diagnostics and runtime-host supervision. Built in Linux CI. |
+| Desktop launcher | Under active development | Qt-free CEF + React launcher in `launcher-next`, with library, per-game settings, modules, profiles, themes and diagnostics. Runtime integration is a separate milestone. |
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
@@ -195,7 +195,7 @@ EXECUTION (xenon_runtime_host)
 Important boundaries:
 
 - The CPU, GPU, kernel, XEX loader and devices share **one guest memory** (Memory V2). No subsystem keeps a private copy of guest RAM.
-- The launcher never executes guest code. It starts `xenon_runtime_host` for each session and talks to it through a file-based launch, status and stop contract ([`RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md)). Qt is a launcher-only dependency.
+- The launcher never executes guest code. It starts `xenon_runtime_host` for each session and talks to it through a file-based launch, status and stop contract ([`RUNTIME_HOST.md`](docs/runtime/RUNTIME_HOST.md)). The current standalone launcher uses CEF; its production Xenon adapter is the next integration milestone.
 - Vulkan and D3D12 contain no Xbox command processor. They consume the frontend's normalised state.
 
 Source ownership, CMake targets and dependency rules are documented in [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md).
@@ -315,7 +315,7 @@ Optional components:
 | Vulkan SDK | Vulkan backend (the target is skipped if the SDK is not found) |
 | Windows SDK | Direct3D 12 backend and XInput |
 | DXC | Shader compilation to DXIL/SPIR-V |
-| Qt 6.6+ | The launcher (skipped if Qt is not found) |
+| Node.js 22.12+ and the pinned CEF SDK | Building the standalone desktop launcher; neither Node nor Qt is required by the packaged application |
 | SDL3 | Optional SDL3 input backend |
 | Mesa `llvmpipe`, Vulkan validation layers | Running Vulkan tests on a machine without a GPU ([`TESTING.md`](docs/development/TESTING.md)) |
 
@@ -326,9 +326,9 @@ Native dependencies are resolved by one managed layer ([`DEPENDENCIES.md`](docs/
 ```text
 linux-x64-debug        development build with tests
 linux-x64-sanitizers   reduced build under ASan/UBSan
-linux-x64-release      managed dependencies + installer packaging
+linux-x64-release      managed runtime dependencies
 windows-x64-debug      development build with tests
-windows-x64-release    managed dependencies + installer packaging
+windows-x64-release    managed runtime dependencies
 ```
 
 Linux:
@@ -347,23 +347,23 @@ cmake --build build/windows-x64-debug
 ctest --test-dir build/windows-x64-debug --output-on-failure
 ```
 
-To include the launcher, pass the Qt installation prefix when configuring, for example `-DCMAKE_PREFIX_PATH=/path/to/Qt/6.x.x/gcc_64`. [`TESTING.md`](docs/development/TESTING.md) also covers the source-ownership audit (`tools/development/build_accountability.py`), headless Vulkan, and syntax-checking D3D12 code from Linux.
+Build the launcher separately using [`launcher-next/README.md`](launcher-next/README.md). Root `XENON_BUILD_LAUNCHER=ON` also selects this Qt-free launcher and requires its built web assets and `CEF_ROOT`. [`TESTING.md`](docs/development/TESTING.md) covers the runtime source-ownership audit, headless Vulkan and D3D12 syntax checks.
 
 A full debug test run takes a while. Several tests build generated projects against the Xenon tree.
 
 <details>
-<summary>Launcher-only Windows build</summary>
+<summary>Standalone launcher build</summary>
 
 ```powershell
-cmake -S . -B build\launcher-ui -G Ninja `
-  -DCMAKE_BUILD_TYPE=Debug `
-  -DCMAKE_PREFIX_PATH="C:\Qt\6.x.x\msvc2022_64" `
-  -DXENON_BUILD_LAUNCHER=ON
-
-cmake --build build\launcher-ui --target xenon_launcher
+cd launcher-next
+npm ci
+npm run cef:fetch
+npm run desktop:build
+npm run test:acceptance
+npm run desktop:package -- --skip-build
 ```
 
-Windows CI currently builds with `-DXENON_BUILD_LAUNCHER=OFF`, so the launcher's CI coverage comes from Linux.
+The launcher workflow builds and tests Windows, Linux and macOS separately from the runtime workflow. See the migration status for platforms actually verified so far.
 
 </details>
 
@@ -393,14 +393,14 @@ XENON_AUDIO_FFMPEG_ROOT              XENON_PREFER_BUNDLED_FFMPEG
 <details>
 <summary>Release presets and packaging</summary>
 
-The `*-release` presets force managed, pinned dependencies and enable the installer pipeline:
+The standalone launcher has its own packaging entry point:
 
 ```text
-windows-x64-release -> runtime + launcher -> NSIS installer + portable ZIP
-linux-x64-release   -> runtime + launcher -> Debian package + portable TGZ
+cd launcher-next
+npm run desktop:package
 ```
 
-This machinery exists for release engineering only. Tag-triggered publication is gated by the repository variable `XENON_PRODUCTION_RELEASES_ENABLED`, which stays off during development. See [`RELEASE_PACKAGING.md`](docs/development/RELEASE_PACKAGING.md).
+Windows produces a portable ZIP; Linux/macOS produce a tar.gz with checksum and dependency notices. These packages contain the standalone launcher; runtime integration is a separate milestone. Publication requires a `launcher-vX.Y.Z` tag and repository variable `XENON_LAUNCHER_RELEASES_ENABLED=true`. See [`launcher-next/README.md`](launcher-next/README.md). The old combined Qt installer pipeline is retired.
 
 </details>
 
@@ -408,13 +408,14 @@ This machinery exists for release engineering only. Tag-triggered publication is
 
 ## Testing and CI
 
-Every push to `development-restructure` runs three GitHub Actions workflows. The badges at the top of this page show their latest results:
+Runtime changes use the following workflows; launcher changes additionally have a separate desktop matrix. The badges at the top of this page show runtime workflow results:
 
 | Workflow | What it does |
 | --- | --- |
 | [Windows MSVC / CL](https://github.com/nimauria/Xenon-Recomp/actions/workflows/windows.yml?query=branch%3Adevelopment-restructure) | MSVC build with D3D12 and the runtime host, the full CTest suite, and the source-ownership audit |
-| [Linux](https://github.com/nimauria/Xenon-Recomp/actions/workflows/linux.yml?query=branch%3Adevelopment-restructure) | GCC build with Vulkan (on llvmpipe), the runtime host and the launcher, the full CTest suite, and the audit |
+| [Linux](https://github.com/nimauria/Xenon-Recomp/actions/workflows/linux.yml?query=branch%3Adevelopment-restructure) | GCC build with Vulkan (on llvmpipe), the runtime host, the full CTest suite, and the audit |
 | [Overall CI](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml?query=branch%3Adevelopment-restructure) | Coverage-asset checks, focused ASan/UBSan tests, and agreement of the Windows and Linux results for the same commit |
+| [Launcher desktop](.github/workflows/release-launcher.yml) | Separate Windows/Linux/macOS launcher builds, native/frontend/desktop checks and package artifacts; remote results remain unverified until run |
 
 CI does not skip or filter failing tests. For historical context: on 9 October 2026, Linux passed 149 of 149 tests and Windows passed 147 of 148. The one Windows failure was `xenon_backend_capability_tests`, the D3D12 capability test, which reported DirectX debug-layer messages. Because Overall CI requires both platforms to pass, it failed as well. The badges are the current source of truth.
 
@@ -497,7 +498,7 @@ Xenon Launcher is intended to become the main way users manage their recompiled 
 
 **Existing launcher infrastructure:**
 
-- a Qt 6 library keyed by Title ID, with move-or-keep import, multi-disc and multi-region media, and accumulated play time;
+- a Qt-free library with move-or-keep import, multi-disc and multi-region media, per-game settings and accumulated play time;
 - preparation progress and cancellation, driven through the same `xenon-prepare` worker that is used from the command line;
 - module discovery, a GitHub-backed module catalogue, and package installation and updates;
 - DLC handling and module settings schemas;
@@ -632,7 +633,7 @@ Engineering principles:
 - **Keep title knowledge in modules.** Never add hard-coded game checks to the runtime to make one title work. A fix found through one game should become a reusable correction.
 - **Keep one memory truth.** CPU, GPU, DMA, XEX loading, kernel services and devices agree on guest-memory ownership and coherency.
 - **Keep native backends native.** Vulkan and D3D12 consume canonical Xenon state rather than implementing divergent Xbox semantics.
-- **Preserve layer boundaries.** Qt belongs to the launcher, game patches belong to modules, and host APIs do not leak into guest-semantic layers.
+- **Preserve layer boundaries.** CEF belongs to the launcher, game patches belong to modules, and host APIs do not leak into guest-semantic layers.
 - **Fail visibly.** Unsupported commands, formats, imports or states produce clear diagnostics instead of plausible but wrong results.
 - **Make changes testable.** New behaviour comes with focused tests where practical.
 - **Record research provenance.** Work informed by third-party research says so in [`RESEARCH_PROVENANCE.md`](docs/development/RESEARCH_PROVENANCE.md).
@@ -658,7 +659,7 @@ AI tools have played a part in accelerating progress on this project. Every AI-a
 | Graphics | [GPU V1](docs/graphics/GPU_V1.md) · [Native backends](docs/graphics/NATIVE_BACKENDS.md) · [Temporal rendering](docs/graphics/TEMPORAL_RENDERING.md) · [Validation log](docs/graphics/VALIDATION.md) |
 | Audio, input, files | [Audio V1](docs/audio/AUDIO_V1.md) · [Input V2](docs/input/INPUT_V2.md) · [Input module API](docs/modules/INPUT_API_V1.md) · [Filesystem](docs/filesystem/FILESYSTEM_V1.md) · [Content services](docs/modules/CONTENT_SERVICES.md) |
 | Network | [Xenon Network client](docs/network/XENON_NETWORK_V1.md) |
-| Launcher | [Launcher](launcher/README.md) · [Launcher backend](launcher/BACKEND.md) |
+| Launcher | [Launcher](launcher-next/README.md) · [Migration status](launcher-next/MIGRATION_STATUS.md) · [Contracts](launcher-next/contracts/launcher.ts) |
 | Provenance | [Research provenance](docs/development/RESEARCH_PROVENANCE.md) · [Third-party notices](THIRD_PARTY_NOTICES.md) |
 | Project | [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) |
 

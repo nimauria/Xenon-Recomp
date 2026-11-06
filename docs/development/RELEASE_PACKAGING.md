@@ -1,5 +1,7 @@
 # Production release and installer pipeline
 
+> **Retired combined Qt pipeline:** this document preserves the old design. Root installer generation is disabled. The current standalone CEF launcher uses [`launcher-next/README.md`](../../launcher-next/README.md) and [its desktop workflow](../../.github/workflows/release-launcher.yml). Runtime integration and combined distribution remain separate work; the instructions below are historical.
+
 Xenon's public distribution model is **install the package and run it**. An end
 user must not be asked to install Qt, SDL3, FFmpeg, DXC, the Vulkan SDK, Visual
 C++ redistributables, or other development tooling manually.

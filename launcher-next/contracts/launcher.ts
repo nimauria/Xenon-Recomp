@@ -254,6 +254,7 @@ export interface Community {
   };
 }
 export interface Snapshot {
+  developmentDemo?: boolean;
   community?: Community;
   cache?: {
     configuredPath: string;

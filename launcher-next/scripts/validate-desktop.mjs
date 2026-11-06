@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 import { chromium } from "playwright-core";
 import { createNetworkFixtures } from "./create-network-fixtures.mjs";
+import { createDemo } from "./demo.mjs";
 process.chdir(fileURLToPath(new URL("../", import.meta.url)));
 const build = resolve(process.env.XENON_TEST_BUILD || "build/native");
 const desktop = resolve(
@@ -34,6 +35,7 @@ const output = resolve(
 );
 await mkdir(output, { recursive: true });
 const plans = [
+  ["demo", "smoke-demo.mjs", true, "demo"],
   ["game-settings", "smoke-game-settings.mjs"],
   ["desktop", "smoke-desktop.mjs"],
   ["controller", "smoke-controller-menus.mjs"],
@@ -80,7 +82,10 @@ for (const [name, script, host, network, extra = []] of plans) {
   const args = ["--data-dir=" + data, "--remote-debugging-port=" + port];
   const scriptArgs = [...extra];
   if (host) args.push("--fixture-host=" + fixtureHost);
-  if (network) {
+  if (network === "demo") {
+    const demo = await createDemo(directory);
+    args.push("--fixture-network=" + demo.network);
+  } else if (network) {
     const folder = join(directory, "network");
     await createNetworkFixtures(folder);
     args.push("--fixture-network=" + folder);

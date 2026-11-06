@@ -1529,7 +1529,8 @@
       "install.noModuleUpdates": "Module releases will appear here after checking the catalogue.",
       "install.readyPackages": "Ready to install",
       "install.readyFilter": "Ready to install",
-      "install.verified": "Download verified"
+      "install.verified": "Download verified",
+      "demo.banner": "Developer demo · Fictional sample data and test services. Your normal library is separate."
     },
     "fr": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -2433,7 +2434,8 @@
       "install.noModuleUpdates": "Les versions des modules apparaîtront ici après vérification du catalogue.",
       "install.readyPackages": "Prêt à installer",
       "install.readyFilter": "Prêt à installer",
-      "install.verified": "Téléchargement vérifié"
+      "install.verified": "Téléchargement vérifié",
+      "demo.banner": "Démo de développement · Données fictives et services de test. Votre bibliothèque habituelle est séparée."
     },
     "de": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -3337,7 +3339,8 @@
       "install.noModuleUpdates": "Modulversionen erscheinen hier nach der Katalogprüfung.",
       "install.readyPackages": "Bereit zur Installation",
       "install.readyFilter": "Bereit zur Installation",
-      "install.verified": "Download geprüft"
+      "install.verified": "Download geprüft",
+      "demo.banner": "Entwicklerdemo · Fiktive Beispieldaten und Testdienste. Deine normale Bibliothek ist getrennt."
     },
     "es": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -4241,7 +4244,8 @@
       "install.noModuleUpdates": "Las versiones de los módulos aparecerán aquí después de comprobar el catálogo.",
       "install.readyPackages": "Listo para instalar",
       "install.readyFilter": "Listo para instalar",
-      "install.verified": "Descarga verificada"
+      "install.verified": "Descarga verificada",
+      "demo.banner": "Demo de desarrollo · Datos ficticios y servicios de prueba. Tu biblioteca normal está separada."
     }
   },
   "sources": {
@@ -14164,6 +14168,12 @@
       "locations": [
         "web/ui/ModuleCatalogue.tsx",
         "web/ui/pages.tsx"
+      ]
+    },
+    "demo.banner": {
+      "original": "Developer demo · Fictional sample data and test services. Your normal library is separate.",
+      "locations": [
+        "web/ui/App.tsx"
       ]
     }
   }

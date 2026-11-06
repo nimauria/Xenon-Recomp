@@ -6,7 +6,7 @@ Language selects the display language or the system default. The choice is store
 as `general/language` in native launcher settings and survives renderer reloads and
 restarts. Browser preview has its own settings.
 
-The catalogue currently has 838 UI/recovery entries translated into all four languages.
+The catalogue currently has 851 UI/recovery entries translated into all four languages.
 It also inventories 654 native strings; 52 have translations. This inventory is
 not proof that every native message has been converted. Native notification
 headings and matching error/status labels are connected; many native message

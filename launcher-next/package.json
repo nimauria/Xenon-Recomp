@@ -27,6 +27,8 @@
     "test:game-settings": "node scripts/smoke-game-settings.mjs",
     "test:acceptance": "node scripts/validate-desktop.mjs",
     "benchmark:startup": "node scripts/benchmark-startup.mjs",
+    "demo": "node scripts/demo.mjs",
+    "demo:fresh": "node scripts/demo.mjs --fresh",
     "test:library": "node scripts/smoke-library.mjs",
     "test:media": "node scripts/smoke-media-activity.mjs",
     "test:modules": "node scripts/smoke-module-lifecycle.mjs",

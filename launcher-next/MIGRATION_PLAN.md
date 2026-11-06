@@ -2,6 +2,8 @@
 
 Status: proposed implementation plan, 28 October 2026. This document does not claim the migration has been implemented or validated.
 
+Current evidence is in [MIGRATION_STATUS.md](MIGRATION_STATUS.md). The agreed 6 November sequence is standalone migration and acceptance, then launcher page/feature/QoL refinement, then real Xenon integration. Keep this original plan as the baseline inventory rather than treating its historical findings as current status.
+
 ## Outcome and scope
 
 Build a fully functional standalone Xenon launcher with CEF, React, TypeScript, CSS and Vite. Remove Qt and QML from the final launcher, including backend Qt dependencies, build helpers, deployment and tests. Keep native launcher services in C++. Windows and Linux are release targets; preserve a viable macOS architecture and establish an early macOS build smoke test rather than discovering platform assumptions at the end.

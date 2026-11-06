@@ -58,7 +58,9 @@ if(WIN32)
   target_compile_features(xenon_launcher_icon_tool PRIVATE cxx_std_20)
   add_dependencies(xenon_launcher_next xenon_launcher_icon_tool)
   set_property(TARGET xenon_launcher_next APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/win/xenon-app-icon.ico")
+  set_property(TARGET xenon_launcher_next APPEND PROPERTY LINK_DEPENDS "$<TARGET_FILE:xenon_launcher_icon_tool>")
   add_custom_command(TARGET xenon_launcher_next POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_BINARY_DIR}/bootstrap.exe" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe"
-    COMMAND "$<TARGET_FILE:xenon_launcher_icon_tool>" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe" "${CMAKE_CURRENT_SOURCE_DIR}/win/xenon-app-icon.ico")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_BINARY_DIR}/bootstrap.exe" "${CMAKE_CURRENT_BINARY_DIR}/branded-bootstrap.tmp"
+    COMMAND "$<TARGET_FILE:xenon_launcher_icon_tool>" "${CMAKE_CURRENT_BINARY_DIR}/branded-bootstrap.tmp" "${CMAKE_CURRENT_SOURCE_DIR}/win/xenon-app-icon.ico"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/branded-bootstrap.tmp" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe")
 endif()

@@ -664,6 +664,11 @@ export function App() {
             </label>
           </header>
           <main id="content" tabIndex={-1} aria-busy={busy}>
+            {state.developmentDemo && (
+              <p className="demo-banner" role="status">
+                {t("demo.banner")}
+              </p>
+            )}
             <SessionPanel />
             <div className="heading">
               <div>

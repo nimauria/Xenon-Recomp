@@ -18,6 +18,7 @@ export function gamePolicy(state: Snapshot, game: Game, busy: boolean) {
       !busy &&
       !sessionActive &&
       !!state.capabilities.runtime &&
+      (!game.moduleId || !!module) &&
       module?.enabled !== false &&
       !module?.compatibility?.issues.length,
     favorite: !busy,

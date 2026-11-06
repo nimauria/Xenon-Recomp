@@ -14,9 +14,6 @@ on:
 permissions:
   contents: read
 
-env:
-  QT_VERSION: "6.10.3"
-
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -32,10 +29,6 @@ jobs:
             libxcb-keysyms1-dev libxcb-xkb-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libxcb-sync-dev libxcb-randr0-dev libgl1-mesa-dev mesa-vulkan-drivers \
             vulkan-validationlayers
-      - name: Install Qt SDK
-        run: |
-          python3 -m pip install --user --upgrade aqtinstall
-          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
       - uses: actions/cache@v5
         with:
           path: .xenon/deps
@@ -47,12 +40,12 @@ jobs:
       - name: Configure
         run: |
           python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-debug
-          cmake --preset linux-x64-debug -DCMAKE_PREFIX_PATH="$HOME/Qt/$QT_VERSION/gcc_64"
+          cmake --preset linux-x64-debug -DXENON_BUILD_LAUNCHER=OFF
           grep -q 'set(CMAKE_CXX_COMPILER_ID "GNU")' build/linux-x64-debug/CMakeFiles/*/CMakeCXXCompiler.cmake
       - name: Build
         run: cmake --build build/linux-x64-debug --parallel 4
-      - name: Require Vulkan, runtime host, and launcher targets
-        run: cmake --build build/linux-x64-debug --target xenon_graphics_vulkan xenon_runtime_host xenon_launcher
+      - name: Require Vulkan and runtime host targets
+        run: cmake --build build/linux-x64-debug --target xenon_graphics_vulkan xenon_runtime_host
       - name: Test
         run: ctest --test-dir build/linux-x64-debug --output-on-failure --parallel 2 --timeout 900 --output-junit ctest-results.xml
       - name: Keep CTest results for the coverage audit

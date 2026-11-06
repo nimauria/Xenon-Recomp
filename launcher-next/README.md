@@ -40,7 +40,7 @@ Browser preview uses its own localStorage. Native imports, package installation,
 
 The original registry/catalogue schema, cached/bundled entries, native HTTPS, verified release downloads, module updates/install/rollback and update history are connected. Captures use an asynchronous bounded index and virtualized thumbnails with zoom/navigation. Copied legacy data can be reviewed and imported under Settings → General, with backups and unchanged originals.
 
-Open gates include optional community-provider features, remaining property/recovery acceptance, native-message translation, broader platform/accessibility checks and production runtime integration. A converted page is not evidence of parity.
+Open gates include native-message translation, macOS build/runtime acceptance, broader platform/accessibility checks and production runtime integration. Optional Discord presence has an opt-in local IPC provider. See the status record for implementation versus verification.
 
 ## Native builds and validation
 
@@ -115,7 +115,15 @@ Profile names use pinned Unicode 17.0 data in both native and preview validation
 
 All 23 old frontend feature names and current provider gating are recorded in [FEATURE_PARITY.md](FEATURE_PARITY.md). Runtime network status, runtime network configuration and the launcher's own update transport have separate availability.
 
-The [initial library performance baseline](PERFORMANCE.md) records isolated 0/100/1,000/10,000-entry desktop measurements, the runner, and limits. It does not close platform, cold-startup, total-memory or physical-input acceptance gates.
+The [performance record](PERFORMANCE.md) includes process-startup samples and isolated 0/100/1,000/10,000-entry library measurements, runners and limits. Platform, total-memory and physical-input acceptance remain open.
+
+## Populated developer demo
+
+After building the desktop, run `npm run demo` for a persistent sample library, or `npm run demo:fresh` for a new isolated copy. Four fictional games, two profiles, original Xenon artwork, captures, notifications and sample jobs make the pages reviewable. Local verified packages exercise download, install and update actions; the explicit test host exercises sessions without running Xenon or a game. A visible banner identifies the demo.
+
+Demo files stay below `build/demo/`; normal launcher data is separate. No sample library is shipped or automatically added to a normal launch. Use `npm run demo -- --prepare-only` to generate the samples without opening a window.
+
+Updates is a dedicated page for launcher/module releases. Download and Install controls remain visible with explanations when unavailable. Downloads also lists verified packages that are ready to install, including packages whose old job records were cleared.
 
 ## Per-game settings and repeatable acceptance
 
