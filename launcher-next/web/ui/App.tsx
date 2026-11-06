@@ -1,5 +1,6 @@
 import { useControllerNavigation, controllerGlyphs } from "../controller";
 import { ActionMenu } from "./ActionMenu";
+import { UpdatesPanel } from "./ModuleCatalogue";
 import {
   t,
   tText,
@@ -694,6 +695,7 @@ export function App() {
             {page === "Home" && <Activity />}
             {page === "Captures" && <Captures />}
             {page === "Downloads" && <Downloads />}
+            {page === "Updates" && <UpdatesPanel showModules />}
             {page === "Support" && <Support />}
             {(["Developer", "Network", "Filesystem"] as Page[]).includes(
               page,
@@ -751,7 +753,7 @@ export function App() {
               .map((n) => (
                 <article className="card" key={n.id}>
                   <h3>{n.programTitle ? tText(n.title) : n.title}</h3>
-                  <p>{n.message}</p>
+                  <p>{n.programTitle ? tText(n.message) : n.message}</p>
                   <small>
                     {new Date(Number(n.time)).toLocaleString(language())}
                     {(n.repeatCount ?? 1) > 1
@@ -805,7 +807,7 @@ export function App() {
             <strong>
               {toast.programTitle ? tText(toast.title) : toast.title}
             </strong>
-            <p>{toast.message}</p>
+            <p>{toast.programTitle ? tText(toast.message) : toast.message}</p>
             <div className="actions">
               {toast.action && (
                 <button

@@ -6,6 +6,8 @@ const paths: Record<Page | "Menu", string> = {
   Modules: "M12 2 3 7v10l9 5 9-5V7zM3 7l9 5 9-5M12 12v10",
   Profiles: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0M4 22v-3a8 8 0 0 1 16 0v3",
   Downloads: "M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5",
+  Updates:
+    "M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M18 17a7 7 0 0 1-12 1l-2-3",
   Settings:
     "M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0",
   Support: "M3 14v-3a9 9 0 0 1 18 0v3M3 12h4v7H3zM17 12h4v7h-4zM19 19v3h-7",

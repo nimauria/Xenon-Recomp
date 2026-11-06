@@ -1527,3 +1527,13 @@ header select {
 }
 .action-menu button {display:block;width:100%;text-align:start;border:0;background:transparent;}
 .action-menu button:focus-visible,.action-menu button:hover {background:var(--surface-hover,var(--panel));}
+.game-settings-tabs { display:flex; gap:.35rem; overflow-x:auto; margin-block:1rem; }
+.game-settings-tabs [aria-selected="true"] { border-color:var(--accent); background:var(--panel); }
+.game-settings-panel { min-width:0; display:grid; gap:.75rem; }
+.game-setting { min-width:0; padding:.85rem; border:1px solid var(--line); border-radius:var(--control-radius, .5rem); }
+.game-setting legend { font-weight:600; padding-inline:.35rem; }
+.game-setting p { margin-block:.25rem .75rem; }
+.game-setting input:not([type="checkbox"]),.game-setting select { max-width:100%; margin-block:.4rem; }
+.game-setting small { display:block; color:var(--muted); }
+.ready-package { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; }
+.install-hint { color:var(--muted); font-size:.875rem; }

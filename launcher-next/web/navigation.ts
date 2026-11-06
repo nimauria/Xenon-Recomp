@@ -7,7 +7,7 @@ export const navigationGroups: {
 }[] = [
   { label: "Browse", pages: ["Home", "Library", "Captures"] },
   { label: "Manage", pages: ["Modules", "Profiles"] },
-  { label: "Activity", pages: ["Downloads"] },
+  { label: "Activity", pages: ["Downloads", "Updates"] },
   {
     label: "Developer tools",
     pages: ["Network", "Filesystem", "Developer"],

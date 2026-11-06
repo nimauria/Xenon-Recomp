@@ -2,6 +2,7 @@ import { t, tText, language } from "../localization";
 import { useState } from "react";
 import { Modal, Empty, useLauncher } from "./context";
 import { CoverImage } from "./CoverImage";
+import { installBlock, updatePackages } from "../updates";
 const descriptions: Record<string, string> = {
   idle: "Check GitHub for a published release.",
   checking: "Checking releases…",
@@ -20,18 +21,63 @@ const descriptions: Record<string, string> = {
     "The downloaded package is verified and ready to install.",
   error: "The operation could not finish.",
 };
-export function UpdateControls({
+export function InstallPackageButton({
   id,
   name,
   launcher = false,
+  supported = true,
 }: {
   id: string;
   name: string;
   launcher?: boolean;
+  supported?: boolean;
+}) {
+  const { state, busy, action } = useLauncher();
+  const value = launcher ? state.launcherUpdate : state.moduleUpdates?.[id];
+  const reason = installBlock(value, launcher, supported);
+  const hint = reason ? "install.reason." + reason : "";
+  return (
+    <button
+      className="primary"
+      disabled={busy || !value?.canInstall || !supported}
+      title={hint ? t(hint) : undefined}
+      onClick={() => {
+        if (
+          window.confirm(
+            launcher
+              ? t("ui.b3544960eb55", { arg0: value?.release?.version })
+              : t("ui.8989db5eff99", {
+                  arg0: name,
+                  arg1: value?.release?.version,
+                }),
+          )
+        )
+          void action(
+            launcher ? "updates.install" : "modules.installDownloaded",
+            { id },
+          );
+      }}
+    >
+      {t("ui.7d10ba698d22")}
+    </button>
+  );
+}
+export function UpdateControls({
+  id,
+  name,
+  launcher = false,
+  supported = true,
+}: {
+  id: string;
+  name: string;
+  launcher?: boolean;
+  supported?: boolean;
 }) {
   const { state, busy, action } = useLauncher();
   const value = launcher ? state.launcherUpdate : state.moduleUpdates?.[id];
   const release = value?.release;
+  const reason = installBlock(value, launcher, supported);
+  const reasonKey = reason ? "install.reason." + reason : "";
   return (
     <section
       className="update-controls"
@@ -52,7 +98,9 @@ export function UpdateControls({
             : ""}
         </p>
       )}
-      {value?.lastError && <p className="update-error">{tText(value.lastError)}</p>}
+      {value?.lastError && (
+        <p className="update-error">{tText(value.lastError)}</p>
+      )}
       <div className="actions">
         <button
           disabled={busy || !value?.canCheck}
@@ -64,9 +112,9 @@ export function UpdateControls({
         >
           {t("ui.f26f3275e735")}
         </button>
-        {value?.canDownload && (
+        {
           <button
-            disabled={busy}
+            disabled={busy || !value?.canDownload || !supported}
             onClick={() =>
               void action(
                 launcher ? "updates.download" : "modules.downloadUpdate",
@@ -76,31 +124,13 @@ export function UpdateControls({
           >
             {t("ui.f808eebbf4fb")}
           </button>
-        )}
-        {value?.canInstall && (
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => {
-              if (
-                window.confirm(
-                  launcher
-                    ? t("ui.b3544960eb55", { arg0: release?.version })
-                    : t("ui.8989db5eff99", {
-                        arg0: name,
-                        arg1: release?.version,
-                      }),
-                )
-              )
-                void action(
-                  launcher ? "updates.install" : "modules.installDownloaded",
-                  { id },
-                );
-            }}
-          >
-            {t("ui.7d10ba698d22")}
-          </button>
-        )}
+        }
+        <InstallPackageButton
+          id={id}
+          name={name}
+          launcher={launcher}
+          supported={supported}
+        />
         {release && (
           <button
             disabled={busy}
@@ -110,6 +140,7 @@ export function UpdateControls({
           </button>
         )}
       </div>
+      {reasonKey && <p className="install-hint">{t(reasonKey)}</p>}
       {launcher && value?.state === "ready-to-install" && !value.canInstall && (
         <p>{t("ui.6fd04b3dc33e")}</p>
       )}
@@ -160,7 +191,11 @@ export function UpdateHistory({
     </Modal>
   );
 }
-export function UpdatesPanel() {
+export function UpdatesPanel({
+  showModules = false,
+}: {
+  showModules?: boolean;
+}) {
   const { state, busy, action } = useLauncher();
   const [history, setHistory] = useState(false);
   return (
@@ -177,6 +212,22 @@ export function UpdatesPanel() {
         <button onClick={() => setHistory(true)}>{t("ui.c665338a9287")}</button>
       </div>
       {!state.capabilities.online && <p>{t("ui.cbe84cdaa82e")}</p>}
+      {showModules && (
+        <section aria-label={t("install.moduleUpdates")}>
+          <h3>{t("install.moduleUpdates")}</h3>
+          {updatePackages(state)
+            .filter((p) => !p.launcher)
+            .map((p) => (
+              <article className="card" key={p.id} aria-label={p.name}>
+                <h4>{p.name}</h4>
+                <UpdateControls id={p.id} name={p.name} />
+              </article>
+            ))}
+          {!Object.keys(state.moduleUpdates ?? {}).length && (
+            <p>{t("install.noModuleUpdates")}</p>
+          )}
+        </section>
+      )}
       {history && <UpdateHistory close={() => setHistory(false)} />}
     </section>
   );
@@ -254,9 +305,12 @@ export function ModuleCatalogue({ close }: { close: () => void }) {
               {entry.publisher}
               {entry.verified ? t("ui.637fe328ab16") : ""}
             </small>
-            {entry.assetName ? (
-              <UpdateControls id={entry.id} name={entry.name} />
-            ) : (
+            <UpdateControls
+              id={entry.id}
+              name={entry.name}
+              supported={!!entry.assetName}
+            />
+            {!entry.assetName && (
               <p>
                 {t("ui.85a63e8b5ea3")}
                 {entry.hostKey}.

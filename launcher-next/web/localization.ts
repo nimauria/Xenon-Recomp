@@ -19,9 +19,21 @@ let catalog: Catalogue = fallback,
   selected = "auto",
   revision = 0;
 const listeners = new Set<() => void>();
-let originalKeys = new Map(
-  Object.entries(fallback.sources).map(([key, value]) => [value.original, key]),
-);
+function originalMessageKeys(...sources: Catalogue["sources"][]) {
+  const result = new Map<string, string>();
+  for (const source of sources)
+    for (const [key, value] of Object.entries(source)) {
+      const previous = result.get(value.original);
+      if (
+        !previous ||
+        previous.startsWith("native.") ||
+        !key.startsWith("native.")
+      )
+        result.set(value.original, key);
+    }
+  return result;
+}
+let originalKeys = originalMessageKeys(fallback.sources);
 const own = <T>(record: Record<string, T>, key: string): T | undefined =>
   Object.hasOwn(record, key) ? record[key] : undefined;
 export function resolveLanguage(
@@ -179,12 +191,7 @@ export async function loadLocalization() {
   } catch {
     catalog = fallback;
   }
-  originalKeys = new Map(
-    [
-      ...Object.entries(fallback.sources),
-      ...Object.entries(catalog.sources),
-    ].map(([key, value]) => [value.original, key]),
-  );
+  originalKeys = originalMessageKeys(fallback.sources, catalog.sources);
   changed();
 }
 export function translationCoverage(id: string) {

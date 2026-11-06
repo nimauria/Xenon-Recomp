@@ -82,6 +82,11 @@ describe("launcher localisation", () => {
     expect(t("language.choose")).toBe("Choose your display language");
     expect(tText("Library")).toBe("Bibliothèque");
     expect(t("missing.key")).toBe("[missing.key]");
+    const duplicate = "native.testDuplicate";
+    (c.translations.en as Record<string,string>)[duplicate] = "Library";
+    (c.sources as Record<string,{original:string;locations:string[]}>)[duplicate] = {original:"Library",locations:[]};
+    external(c);await loadLocalization();
+    expect(tText("Library")).toBe("Bibliothèque");
   });
   it("keeps bundled text available for malformed or missing external catalogues", async () => {
     for (const bad of [

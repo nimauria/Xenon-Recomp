@@ -6,6 +6,7 @@ import {
   type Transport,
 } from "../contracts/launcher";
 import definitions from "../contracts/settings.json";
+import { validateGameSettings } from "./gameSettings";
 import { profileNameKey, trimProfileName } from "./profileNames";
 import {
   normalizeProfile,
@@ -48,6 +49,7 @@ const pages = [
   "Profiles",
   "Captures",
   "Downloads",
+  "Updates",
   "Settings",
   "Support",
   "Network",
@@ -172,9 +174,15 @@ export class PreviewTransport implements Transport {
         next.notifications ??= [];
         next.history ??= [];
         if (action === "settings.set") {
-          if (data.key === "general/language" &&
-              (typeof data.value !== "string" || (data.value !== "auto" && !/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(data.value))))
-            throw new Error("Choose an available language or the system default");
+          if (
+            data.key === "general/language" &&
+            (typeof data.value !== "string" ||
+              (data.value !== "auto" &&
+                !/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(data.value)))
+          )
+            throw new Error(
+              "Choose an available language or the system default",
+            );
           if (
             data.key === "community/discordRichPresence" &&
             data.value !== false
@@ -271,6 +279,22 @@ export class PreviewTransport implements Transport {
           if (action === "profiles.duplicate")
             next.profiles.push({ ...edited, id: crypto.randomUUID(), name });
           else Object.assign(profile, edited);
+        } else if (action === "library.settings.save") {
+          const game = next.games.find((g) => g.id === data.id);
+          if (!game) throw Error("Unknown game");
+          if ((game.moduleId ?? "") !== data.moduleId)
+            throw Error("The game's module changed; reopen game settings");
+          const checked = validateGameSettings(
+            data.runtimeOverrides,
+            data.moduleOverrides,
+            next.modules?.find((m) => m.id === game.moduleId),
+          );
+          game.runtimeOverrides = structuredClone(checked.runtime);
+          if (game.moduleId)
+            game.moduleOverrides = {
+              ...game.moduleOverrides,
+              [game.moduleId]: structuredClone(checked.module),
+            };
         } else if (action === "navigation.remember") {
           if (!pages.includes(String(data.page)))
             throw new Error("Unknown navigation destination");

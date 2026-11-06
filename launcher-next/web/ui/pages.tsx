@@ -6,6 +6,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { Game, Module, Profile } from "../../contracts/launcher";
 import { playtime, activityTime } from "../activity";
 import { GameMedia } from "./GameMedia";
+import { GameSettings } from "./GameSettings";
+import { updatePackages } from "../updates";
+import { InstallPackageButton } from "./ModuleCatalogue";
 import { GameAddons } from "./GameAddons";
 import { GameCollection } from "./GameCollection";
 import { GameCarousel } from "./GameCarousel";
@@ -42,6 +45,7 @@ export function Library() {
   const [gameMenu, setGameMenu] = useState<MenuRequest>();
   const [importPaths, setImportPaths] = useState<string[]>([]);
   const [moduleSettings, setModuleSettings] = useState<Module>();
+  const [settingsGame, setSettingsGame] = useState<Game>();
   const view = String(state.settings?.["library/viewMode"] ?? "Focused");
   useEffect(() => {
     if (
@@ -255,8 +259,14 @@ export function Library() {
                       run: () => setProperties(game),
                     },
                     {
+                      id: "settings",
+                      label: t("gameSettings.menu"),
+                      disabled: !policy?.edit,
+                      run: () => setSettingsGame(game),
+                    },
+                    {
                       id: "module",
-                      label: t("ui.f547b8100033"),
+                      label: t("gameSettings.moduleDefaults"),
                       disabled: !policy?.moduleSettings,
                       run: () =>
                         setModuleSettings(
@@ -316,6 +326,12 @@ export function Library() {
                 <button onClick={() => setProperties(game)}>
                   {t("ui.ae43692b2a31")}
                 </button>
+                <button
+                  disabled={!policy?.edit}
+                  onClick={() => setSettingsGame(game)}
+                >
+                  {t("gameSettings.menu")}
+                </button>
                 {game.moduleId &&
                   state.modules?.some((m) => m.id === game.moduleId) && (
                     <button
@@ -325,7 +341,7 @@ export function Library() {
                         )
                       }
                     >
-                      {t("ui.f547b8100033")}
+                      {t("gameSettings.moduleDefaults")}
                     </button>
                   )}
               </div>
@@ -385,6 +401,15 @@ export function Library() {
             </button>
           </div>
         </Modal>
+      )}
+      {settingsGame && (
+        <GameSettings
+          key={settingsGame.id}
+          game={
+            state.games.find((g) => g.id === settingsGame.id) ?? settingsGame
+          }
+          close={() => setSettingsGame(undefined)}
+        />
       )}
       {properties && (
         <GameProperties
@@ -1832,6 +1857,12 @@ export { Captures } from "./Captures";
 export function Downloads() {
   const { state, query, action, busy } = useLauncher();
   const [filter, setFilter] = useState("All");
+  const ready = updatePackages(state).filter(
+    (p) =>
+      p.value?.state === "ready-to-install" &&
+      p.name.toLowerCase().includes(query.toLowerCase()) &&
+      ["All", "completed", "ready"].includes(filter),
+  );
   const jobs =
     state.jobs
       ?.filter(
@@ -1851,13 +1882,16 @@ export function Downloads() {
             {[
               "All",
               "Active",
+              "ready",
               "completed",
               "failed",
               "cancelled",
               "interrupted",
             ].map((f) => (
               <option key={f} value={f}>
-                {tText(f[0].toUpperCase() + f.slice(1))}
+                {f === "ready"
+                  ? t("install.readyFilter")
+                  : tText(f[0].toUpperCase() + f.slice(1))}
               </option>
             ))}
           </select>
@@ -1874,7 +1908,35 @@ export function Downloads() {
           {t("ui.2a16b4f86f58")}
         </button>
       </div>
-      {!jobs.length ? (
+      {ready.length > 0 && (
+        <section aria-label={t("install.readyPackages")}>
+          <h2>{t("install.readyPackages")}</h2>
+          {ready.map((p) => (
+            <article
+              className="card ready-package"
+              key={p.id}
+              aria-label={p.name}
+            >
+              <div>
+                <h3>{p.name}</h3>
+                <p>
+                  {p.value?.downloadVersion ?? p.value?.release?.version} ·{" "}
+                  {t("install.verified")}
+                </p>
+              </div>
+              <InstallPackageButton
+                id={p.id}
+                name={p.name}
+                launcher={p.launcher}
+              />
+              {p.launcher && !p.value?.canInstall && (
+                <p>{t("ui.6fd04b3dc33e")}</p>
+              )}
+            </article>
+          ))}
+        </section>
+      )}
+      {!jobs.length && !ready.length ? (
         <Empty title={t("ui.09ef53392a44")}>{t("ui.28371a884422")}</Empty>
       ) : (
         jobs.map((j) => (
