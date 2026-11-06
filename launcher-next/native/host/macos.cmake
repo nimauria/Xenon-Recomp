@@ -33,8 +33,12 @@ endforeach()
 add_custom_target(xenon_launcher_next_assets ALL
   COMMAND ${CMAKE_COMMAND} -E make_directory "${XENON_MAC_APP}/Contents/Resources/licenses"
   COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/dist" "${XENON_MAC_APP}/Contents/Resources/web"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/dist/licenses" "${XENON_MAC_APP}/Contents/Resources/licenses"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/settings.json" "${XENON_MAC_APP}/Contents/Resources/settings-schema.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/module-catalog-fallback.json" "${XENON_MAC_APP}/Contents/Resources/module-catalog-fallback.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_ROOT}/LICENSE.txt" "${XENON_MAC_APP}/Contents/Resources/CEF-LICENSE.txt"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/unicode/LICENSE.txt" "${XENON_MAC_APP}/Contents/Resources/licenses/Unicode-LICENSE.txt")
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/unicode/LICENSE.txt" "${XENON_MAC_APP}/Contents/Resources/licenses/Unicode-LICENSE.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/picosha2/LICENSE" "${XENON_MAC_APP}/Contents/Resources/licenses/PicoSHA2-LICENSE.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/miniz/LICENSE" "${XENON_MAC_APP}/Contents/Resources/licenses/miniz-LICENSE.txt"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/nlohmann/LICENSE.MIT" "${XENON_MAC_APP}/Contents/Resources/licenses/nlohmann-JSON-LICENSE.txt")
 add_dependencies(xenon_launcher_next xenon_launcher_next_assets)

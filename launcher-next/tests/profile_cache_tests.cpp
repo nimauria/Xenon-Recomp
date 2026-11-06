@@ -1,4 +1,5 @@
 #include "application/launcher_service.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "core/cache_storage.hpp"
 #include "core/file_transfer.hpp"
@@ -85,6 +86,15 @@ int main() {
              storage = root / "state", network = root / "network",
              destination = root / "chosen cache";
   try {
+    auto deep = root / "long-path";
+    for (unsigned i=0;i<4;++i) deep /= std::string(70, 'a'+i);
+    fs::create_directories(io_path(deep / "source"));
+    std::ofstream(io_path(deep / "source/package.zip"), std::ios::binary) << "long path payload";
+    write_document(deep / "source/metadata.json", {{"value", "long path JSON"}});
+    const auto copied = copy_library_content(deep / "source", deep / "copied", []{}, [](auto,auto){});
+    verify_library_content(deep / "copied", copied, []{});
+    check(read_document(deep / "copied/metadata.json").at("value") == "long path JSON",
+          "Managed content and atomic JSON must support paths beyond MAX_PATH");
     check(!path_within(root / "Cache-other/file", root / "Cache"),
           "Containment must compare path components rather than text prefixes");
     check(path_within(root / "Cache/file", root / "Cache/"),
@@ -331,7 +341,7 @@ int main() {
                 restored.asset_path("catalog-tile", id).has_value(),
             "Restart must retain the active cache and its artwork");
     }
-    fs::remove_all(root);
+    fs::remove_all(io_path(root));
     std::cout << "Unicode identity/create/copy/import/migration, cache copy/cancel/retry/reset, "
                  "package-reference continuity, unrelated preservation and interrupted cleanup "
                  "ownership passed\n";

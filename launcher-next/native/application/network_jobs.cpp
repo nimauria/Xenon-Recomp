@@ -1,4 +1,5 @@
 #include "launcher_service.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "core/releases.hpp"
 #include "core/module_presentation.hpp"
@@ -66,7 +67,7 @@ void LauncherService::load_online_state() {
   if (!state_.contains("catalog")) {
     state_["catalog"] = {
         {"state", "idle"}, {"entries", Json::array()}, {"lastError", ""}, {"lastChecked", ""}};
-    if (fs::is_regular_file(storage_ / "module-catalog-fallback.json"))
+    if (fs::is_regular_file(io_path(storage_ / "module-catalog-fallback.json")))
       try {
         state_["catalog"]["entries"].push_back(
             catalog_entry(read_document(storage_ / "module-catalog-fallback.json"),
@@ -307,10 +308,10 @@ void LauncherService::cleanup_download(const Json &job) {
     throw std::runtime_error("Invalid download identity");
   const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
   const auto directory = cache_root(storage_, location) / "downloads" / id;
-  if (!fs::exists(directory))
+  if (!fs::exists(io_path(directory)))
     return;
   check_cache_location(storage_, location);
-  if (fs::weakly_canonical(directory) != directory ||
+  if (normal_path(fs::weakly_canonical(io_path(directory))) != directory ||
       read_document(directory / "owner.json", 4096) != download_owner(id))
     throw std::runtime_error("Download ownership changed; temporary files were retained");
   {
@@ -322,7 +323,7 @@ void LauncherService::cleanup_download(const Json &job) {
       return;
   }
   check_transfer_tree(directory);
-  fs::remove_all(directory);
+  fs::remove_all(io_path(directory));
 }
 void LauncherService::run_network(const Json &job,
                                   const std::shared_ptr<std::atomic_bool> &cancel) {
@@ -459,11 +460,13 @@ void LauncherService::run_network(const Json &job,
     const auto location = job.value("_cacheLocation", cache_location(storage_, Json::object()));
     check_cache_location(storage_, location, true);
     const auto directory = cache_root(storage_, location) / "downloads" / id;
-    fs::create_directories(directory.parent_path());
+    fs::create_directories(io_path(directory.parent_path()));
     if (redirected_path(directory.parent_path()) ||
-        fs::weakly_canonical(directory.parent_path()) != directory.parent_path())
+        normal_path(fs::weakly_canonical(io_path(directory.parent_path()))) !=
+            directory.parent_path())
       throw std::runtime_error("Download cache was redirected");
-    if (!fs::create_directory(directory) || fs::weakly_canonical(directory) != directory)
+    if (!fs::create_directory(io_path(directory)) ||
+        normal_path(fs::weakly_canonical(io_path(directory))) != directory)
       throw std::runtime_error("Could not create a fresh download directory");
     write_document(directory / "owner.json", download_owner(id));
     const auto partial = directory / "package.part", complete = directory / "package.zip";
@@ -472,7 +475,7 @@ void LauncherService::run_network(const Json &job,
     update_job(id, {{"phase", "Downloading package"}, {"progress", 1}});
     HttpResponse response;
     {
-      std::ofstream output(partial, std::ios::binary);
+      std::ofstream output(io_path(partial), std::ios::binary);
       if (!output)
         throw std::runtime_error("Could not create a download file");
       response = http_->get(
@@ -508,7 +511,7 @@ void LauncherService::run_network(const Json &job,
     hash.finish();
     if (picosha2::get_hash_hex_string(hash) != expected)
       throw std::runtime_error("The downloaded package failed SHA-256 verification");
-    fs::rename(partial, complete);
+    fs::rename(io_path(partial), io_path(complete));
     const auto module_id = job.at("moduleId").get<std::string>();
     complete_job(id, [&](Json &next) {
       auto &value = update(next, module_id);

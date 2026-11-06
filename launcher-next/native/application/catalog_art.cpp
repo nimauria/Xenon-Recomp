@@ -1,4 +1,5 @@
 #include "launcher_service.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "core/cache_storage.hpp"
 #include "core/file_transfer.hpp"
@@ -17,10 +18,10 @@ void LauncherService::cache_catalog_art(Json &entry,
   check_cache_location(storage_, location, true);
   const auto root = cache_root(storage_, location) / "catalog-art";
   std::error_code directory_error;
-  fs::create_directories(root, directory_error);
+  fs::create_directories(io_path(root), directory_error);
   if (directory_error)
     return;
-  if (redirected_path(root) || fs::weakly_canonical(root) != root)
+  if (redirected_path(root) || normal_path(fs::weakly_canonical(io_path(root))) != root)
     throw std::runtime_error("Artwork cache was redirected");
   const auto valid =
       std::regex("^assets/[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._/-]*\\.(?:png|jpg|jpeg|webp)$",
@@ -38,18 +39,18 @@ void LauncherService::cache_catalog_art(Json &entry,
     auto partial = root / (filename + "." + make_id() + ".part");
     try {
       std::uintmax_t used = 0;
-      for (const auto &item : fs::directory_iterator(root))
+      for (const auto &item : fs::directory_iterator(io_path(root)))
         if (item.is_regular_file())
           used += item.file_size();
       if (used > 256ull * 1024 * 1024)
         throw std::runtime_error("Artwork cache is full");
       std::string etag;
       const auto meta = root / (filename + ".json");
-      if (fs::is_regular_file(target) && fs::is_regular_file(meta))
+      if (fs::is_regular_file(io_path(target)) && fs::is_regular_file(io_path(meta)))
         etag = read_document(meta, 4096).value("etag", "");
       HttpResponse response;
       {
-        std::ofstream output(partial, std::ios::binary);
+        std::ofstream output(io_path(partial), std::ios::binary);
         if (!output)
           throw std::runtime_error("Could not create artwork cache file");
         response = http_->get(url, {20ull * 1024 * 1024,
@@ -66,24 +67,24 @@ void LauncherService::cache_catalog_art(Json &entry,
           throw std::runtime_error("Could not flush artwork");
       }
       if (response.status == 304) {
-        fs::remove(partial);
+        fs::remove(io_path(partial));
       } else if (response.status >= 200 && response.status < 300) {
-        fs::rename(partial, target);
+        fs::rename(io_path(partial), io_path(target));
         write_document(meta, {{"etag", response.etag}});
       } else
         throw std::runtime_error("Artwork download failed");
     } catch (const OperationCancelled &) {
       std::error_code error;
-      fs::remove(partial, error);
+      fs::remove(io_path(partial), error);
       throw;
     } catch (const std::exception &) {
       std::error_code error;
-      fs::remove(partial, error);
+      fs::remove(io_path(partial), error);
     }
-    if (fs::is_regular_file(target)) {
+    if (fs::is_regular_file(io_path(target))) {
       entry["launcher"][file_key] = filename;
       entry["launcher"][version_key] =
-          std::to_string(fs::last_write_time(target).time_since_epoch().count());
+          std::to_string(fs::last_write_time(io_path(target)).time_since_epoch().count());
     }
   }
 }

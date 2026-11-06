@@ -26,6 +26,7 @@
         "label": "Downloads",
         "value": "Downloads"
       },
+      { "label": "Updates", "value": "Updates" },
       {
         "label": "Modules",
         "value": "Modules"

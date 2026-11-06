@@ -8,6 +8,8 @@
 #include "core/module_manifest.hpp"
 #include "core/releases.hpp"
 #include "core/settings.hpp"
+#include "core/game_settings.hpp"
+#include "platform/file_path.hpp"
 #include "core/support_bundle.hpp"
 #include "core/dlc_catalog.hpp"
 #include "core/game_media.hpp"
@@ -511,7 +513,7 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
   const auto source = game.value("contentPath", "");
   if (!fs::exists(fs::u8path(source)))
     throw std::runtime_error("Game source is missing");
-  const auto settings = effective_profile_settings(profile, state.at("settings"));
+  const auto settings = effective_game_settings(game, profile, state.at("settings"));
   Json config = {{"gameId", game_id},
                  {"title", game.at("title")},
                  {"contentPath", source},
@@ -564,7 +566,7 @@ Json LauncherService::launch_configuration(const Json &state, const std::string 
     config["moduleName"] = module.at("name");
     config["modulePath"] = module.at("path");
     config["moduleVersion"] = module.at("version");
-    config["moduleSettings"] = module_settings_values(module.at("schema"), module.at("settings"));
+    config["moduleSettings"] = effective_game_module_settings(game, module);
     require_module_idle(state, module_id);
     const auto definition = manifest(fs::u8path(module.at("path").get<std::string>()));
     if (module_identity(definition) != module_id)
@@ -628,11 +630,11 @@ std::optional<fs::path> LauncherService::asset_path(const std::string &category,
   if (!capture_extension(file))
     return {};
   std::error_code error;
-  const auto canonical = fs::weakly_canonical(file, error);
+  const auto canonical = normal_path(fs::weakly_canonical(io_path(file), error));
   const auto relative = canonical.lexically_relative(root);
-  if (fs::is_symlink(file) || error || relative.empty() || *relative.begin() == ".." ||
-      (!nested && canonical.parent_path() != root) || !fs::is_regular_file(file, error) ||
-      fs::file_size(file, error) > 20 * 1024 * 1024)
+  if (fs::is_symlink(io_path(file)) || error || relative.empty() || *relative.begin() == ".." ||
+      (!nested && canonical.parent_path() != root) || !fs::is_regular_file(io_path(file), error) ||
+      fs::file_size(io_path(file), error) > 20 * 1024 * 1024)
     return {};
   return file;
 }
@@ -993,6 +995,21 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     if (!item(next["games"], data.at("id")).value("managedCopies", Json::array()).empty())
       throw std::runtime_error("Delete managed files before removing this library entry");
     remove_item(next["games"], data.at("id"));
+  } else if (action == "library.settings.save") {
+    require_library_idle(next, data.at("id"));
+    auto &game = item(next["games"], data.at("id"));
+    const auto module_id = game.value("moduleId", "");
+    if (data.value("moduleId", "") != module_id)
+      throw std::runtime_error("The game's module changed; reopen game settings");
+    game["runtimeOverrides"] = game_runtime_values(data.at("runtimeOverrides"));
+    const auto module_values = data.value("moduleOverrides", Json::object());
+    if (!module_id.empty()) {
+      const auto &module = item(next["modules"], module_id);
+      auto overrides = game.value("moduleOverrides", Json::object());
+      overrides[module_id] = game_module_values(module.at("schema"), module_values);
+      game["moduleOverrides"] = std::move(overrides);
+    } else if (!module_values.empty())
+      throw std::runtime_error("Select a module before changing game options");
   } else if (action == "library.update") {
     auto &game = item(next["games"], data.at("id"));
     if (data.contains("title")) {
@@ -1324,7 +1341,7 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
   } else if (action == "navigation.remember" || action == "community.setPage") {
     const auto page = data.at("page").get<std::string>();
     static const std::set<std::string> pages{"Home",     "Library",    "Modules",  "Profiles",
-                                             "Settings", "Support",    "Captures", "Downloads",
+                                             "Settings", "Support",    "Captures", "Downloads", "Updates",
                                              "Network",  "Filesystem", "Developer"};
     if (!pages.contains(page))
       throw std::runtime_error("Unknown navigation destination");

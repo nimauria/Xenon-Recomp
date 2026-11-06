@@ -1,4 +1,5 @@
 #include "file_transfer.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "picosha2/picosha2.h"
 #include <algorithm>
@@ -19,14 +20,15 @@ std::string text(const fs::path &path) {
   return {value.begin(), value.end()};
 }
 std::string stamp(const fs::path &path) {
-  return std::to_string(fs::last_write_time(path).time_since_epoch().count());
+  return std::to_string(fs::last_write_time(io_path(path)).time_since_epoch().count());
 }
 void plain(const fs::path &path) {
-  if (redirected_path(path) || (!fs::is_directory(path) && !fs::is_regular_file(path)))
+  if (redirected_path(path) ||
+      (!fs::is_directory(io_path(path)) && !fs::is_regular_file(io_path(path))))
     throw std::runtime_error("Content contains a link or unsupported filesystem entry");
 }
 std::string digest(const fs::path &path, const std::function<void()> &check) {
-  std::ifstream stream(path, std::ios::binary);
+  std::ifstream stream(io_path(path), std::ios::binary);
   if (!stream)
     throw std::runtime_error("Cannot read content for verification");
   picosha2::hash256_one_by_one hash;
@@ -52,10 +54,10 @@ fs::path relative_path(const nlohmann::json &entry) {
 }
 } // namespace
 bool redirected_path(const fs::path &path) {
-  if (fs::is_symlink(fs::symlink_status(path)))
+  if (fs::is_symlink(fs::symlink_status(io_path(path))))
     return true;
 #ifdef _WIN32
-  const auto attributes = GetFileAttributesW(path.c_str());
+  const auto attributes = GetFileAttributesW(io_path(path).c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES)
     throw std::runtime_error("Cannot inspect content attributes");
   return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
@@ -87,11 +89,11 @@ bool path_within(const fs::path &path, const fs::path &root) {
 void check_transfer_tree(const fs::path &path) {
   plain(path);
   std::size_t count = 0;
-  if (fs::is_directory(path))
-    for (const auto &entry : fs::recursive_directory_iterator(path)) {
+  if (fs::is_directory(io_path(path)))
+    for (const auto &entry : fs::recursive_directory_iterator(io_path(path))) {
       if (++count > 50010)
         throw std::runtime_error("Content exceeds 50,000 entries");
-      plain(entry.path());
+      plain(normal_path(entry.path()));
     }
 }
 nlohmann::json
@@ -99,7 +101,7 @@ copy_library_content(const fs::path &source, const fs::path &destination,
                      const std::function<void()> &check,
                      const std::function<void(std::uint64_t, std::uint64_t)> &progress) {
   plain(source);
-  const bool folder = fs::is_directory(source);
+  const bool folder = fs::is_directory(io_path(source));
   const auto base = folder ? source : source.parent_path();
   nlohmann::json manifest = {{"folder", folder},
                              {"files", nlohmann::json::array()},
@@ -114,10 +116,10 @@ copy_library_content(const fs::path &source, const fs::path &destination,
     const auto relative = path.lexically_relative(base);
     if (std::distance(relative.begin(), relative.end()) > 64)
       throw std::runtime_error("Content exceeds the directory depth limit");
-    if (fs::is_directory(path))
+    if (fs::is_directory(io_path(path)))
       manifest["directories"].push_back(text(relative));
     else {
-      const auto size = fs::file_size(path);
+      const auto size = fs::file_size(io_path(path));
       if (size > maximum_bytes - total)
         throw std::runtime_error("Content exceeds 512 GiB");
       total += size;
@@ -126,23 +128,24 @@ copy_library_content(const fs::path &source, const fs::path &destination,
     }
   };
   if (folder)
-    for (const auto &entry : fs::recursive_directory_iterator(source))
-      inspect(entry.path());
+    for (const auto &entry : fs::recursive_directory_iterator(io_path(source)))
+      inspect(normal_path(entry.path()));
   else
     inspect(source);
-  if (!fs::create_directory(destination))
+  if (!fs::create_directory(io_path(destination)))
     throw std::runtime_error("Content staging must be a new directory");
   for (const auto &directory : manifest["directories"])
-    fs::create_directories(destination / fs::u8path(directory.get<std::string>()));
+    fs::create_directories(io_path(destination / fs::u8path(directory.get<std::string>())));
   std::array<char, 256 * 1024> buffer{};
   for (auto &entry : manifest["files"]) {
     check();
     const auto relative = relative_path(entry), input_path = base / relative,
                output_path = destination / relative;
-    if (fs::weakly_canonical(input_path) != input_path || redirected_path(input_path))
+    if (normal_path(fs::weakly_canonical(io_path(input_path))) != input_path ||
+        redirected_path(input_path))
       throw std::runtime_error("The source was redirected during transfer");
-    std::ifstream input(input_path, std::ios::binary);
-    std::ofstream output(output_path, std::ios::binary);
+    std::ifstream input(io_path(input_path), std::ios::binary);
+    std::ofstream output(io_path(output_path), std::ios::binary);
     if (!input || !output)
       throw std::runtime_error("Cannot copy content");
     picosha2::hash256_one_by_one hash;
@@ -193,19 +196,19 @@ copy_library_sources(const std::vector<fs::path> &sources, const fs::path &desti
       plain(path);
       if (++count > 50000)
         throw std::runtime_error("Content exceeds 50,000 entries");
-      if (fs::is_regular_file(path)) {
-        const auto size = fs::file_size(path);
+      if (fs::is_regular_file(io_path(path))) {
+        const auto size = fs::file_size(io_path(path));
         if (size > maximum_bytes - total)
           throw std::runtime_error("Content exceeds 512 GiB");
         total += size;
       }
     };
     inspect(source);
-    if (fs::is_directory(source))
-      for (const auto &entry : fs::recursive_directory_iterator(source))
-        inspect(entry.path());
+    if (fs::is_directory(io_path(source)))
+      for (const auto &entry : fs::recursive_directory_iterator(io_path(source)))
+        inspect(normal_path(entry.path()));
   }
-  if (!fs::create_directory(destination))
+  if (!fs::create_directory(io_path(destination)))
     throw std::runtime_error("Content staging must be a new directory");
   nlohmann::json result = {{"folder", true},
                            {"files", nlohmann::json::array()},
@@ -219,14 +222,14 @@ copy_library_sources(const std::vector<fs::path> &sources, const fs::path &desti
     const bool folder = manifest.at("folder").get<bool>();
     const auto prefix = folder ? source.filename() : fs::path{};
     const auto target = destination / source.filename();
-    if (fs::exists(target))
+    if (fs::exists(io_path(target)))
       throw std::runtime_error("Selected add-on sources collide in managed storage");
     if (folder) {
-      fs::rename(part, target);
+      fs::rename(io_path(part), io_path(target));
       result["directories"].push_back(text(prefix));
     } else {
-      fs::rename(part / source.filename(), target);
-      fs::remove(part);
+      fs::rename(io_path(part / source.filename()), io_path(target));
+      fs::remove(io_path(part));
     }
     for (auto entry : manifest.at("files")) {
       if (folder)
@@ -241,22 +244,22 @@ copy_library_sources(const std::vector<fs::path> &sources, const fs::path &desti
 }
 void verify_library_content(const fs::path &destination, const nlohmann::json &manifest,
                             const std::function<void()> &check) {
-  if (fs::weakly_canonical(destination) != destination)
+  if (normal_path(fs::weakly_canonical(io_path(destination))) != destination)
     throw std::runtime_error("Managed content was redirected");
   check_transfer_tree(destination);
   std::set<std::string> expected, actual;
   for (const auto &entry : manifest.at("files")) {
     check();
     const auto relative = relative_path(entry), file = destination / relative;
-    if (!expected.insert(text(relative)).second || !fs::is_regular_file(file) ||
-        fs::file_size(file) != entry.at("size").get<std::uint64_t>() ||
+    if (!expected.insert(text(relative)).second || !fs::is_regular_file(io_path(file)) ||
+        fs::file_size(io_path(file)) != entry.at("size").get<std::uint64_t>() ||
         digest(file, check) != entry.at("sha256").get<std::string>())
       throw std::runtime_error("Managed content no longer matches its import receipt");
   }
-  for (const auto &entry : fs::recursive_directory_iterator(destination)) {
+  for (const auto &entry : fs::recursive_directory_iterator(io_path(destination))) {
     check();
     if (entry.is_regular_file())
-      actual.insert(text(entry.path().lexically_relative(destination)));
+      actual.insert(text(normal_path(entry.path()).lexically_relative(destination)));
   }
   if (actual != expected)
     throw std::runtime_error("Managed content contains files absent from its import receipt");
@@ -275,12 +278,13 @@ bool remove_transferred_source(const fs::path &source, const fs::path &destinati
     const auto relative = relative_path(entry), input = base / relative,
                output = destination / relative;
     std::error_code error;
-    if (!fs::exists(input, error) && !error)
+    if (!fs::exists(io_path(input), error) && !error)
       continue;
     try {
-      if (fs::weakly_canonical(input) != input || fs::weakly_canonical(output) != output ||
-          redirected_path(input) || redirected_path(output) ||
-          fs::file_size(input) != entry.at("size").get<std::uint64_t>() ||
+      if (normal_path(fs::weakly_canonical(io_path(input))) != input ||
+          normal_path(fs::weakly_canonical(io_path(output))) != output || redirected_path(input) ||
+          redirected_path(output) ||
+          fs::file_size(io_path(input)) != entry.at("size").get<std::uint64_t>() ||
           stamp(input) != entry.at("modified").get<std::string>() ||
           digest(output, check) != entry.at("sha256").get<std::string>() ||
           digest(input, check) != entry.at("sha256").get<std::string>()) {
@@ -288,8 +292,8 @@ bool remove_transferred_source(const fs::path &source, const fs::path &destinati
         continue;
       }
       if (stamp(input) != entry.at("modified").get<std::string>() ||
-          fs::file_size(input) != entry.at("size").get<std::uint64_t>() ||
-          !fs::remove(input, error) || error)
+          fs::file_size(io_path(input)) != entry.at("size").get<std::uint64_t>() ||
+          !fs::remove(io_path(input), error) || error)
         retained = true;
     } catch (const OperationCancelled &) {
       throw;
@@ -306,11 +310,11 @@ bool remove_transferred_source(const fs::path &source, const fs::path &destinati
       check();
       const auto path = relative.empty() ? source : source / fs::u8path(relative);
       std::error_code error;
-      if (fs::exists(path, error)) {
-        if (fs::weakly_canonical(path) != path || redirected_path(path) ||
-            !fs::is_empty(path, error) || error)
+      if (fs::exists(io_path(path), error)) {
+        if (normal_path(fs::weakly_canonical(io_path(path))) != path || redirected_path(path) ||
+            !fs::is_empty(io_path(path), error) || error)
           retained = true;
-        else if (!fs::remove(path, error) || error)
+        else if (!fs::remove(io_path(path), error) || error)
           retained = true;
       }
     }

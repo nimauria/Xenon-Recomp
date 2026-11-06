@@ -8,6 +8,7 @@ export type Page =
   | "Profiles"
   | "Captures"
   | "Downloads"
+  | "Updates"
   | "Settings"
   | "Support"
   | "Network"
@@ -43,6 +44,8 @@ export interface Dlc {
   catalogId?: string;
 }
 export interface Game {
+  runtimeOverrides?: Record<string, unknown>;
+  moduleOverrides?: Record<string, Record<string, unknown>>;
   playCount?: number;
   totalPlayTimeMs?: number;
   fixtureActivity?: {

@@ -5,6 +5,10 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#include <cmath>
+#endif
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -129,6 +133,77 @@ std::optional<Json> registry_value(const std::string &key) {
 }
 #endif
 } // namespace
+std::string legacy_macos_key(const std::string &key) {
+  // QSettings' native preference format rotates slash, dot and middle dot.
+  // This is a format adapter; no Qt library is linked or invoked.
+  std::string result;
+  for (std::size_t i = 0; i < key.size(); ++i) {
+    if (key[i] == '/')
+      result += '.';
+    else if (key[i] == '.')
+      result += "\xC2\xB7";
+    else if (i + 1 < key.size() && static_cast<unsigned char>(key[i]) == 0xC2 &&
+             static_cast<unsigned char>(key[i + 1]) == 0xB7) {
+      result += '/';
+      ++i;
+    } else
+      result += key[i];
+  }
+  return result;
+}
+#ifdef __APPLE__
+namespace {
+std::optional<Json> mac_value(const std::string &key) {
+  const auto spelling = legacy_macos_key(key);
+  const auto name =
+      CFStringCreateWithBytes(kCFAllocatorDefault, reinterpret_cast<const UInt8 *>(spelling.data()),
+                              spelling.size(), kCFStringEncodingUTF8, false);
+  if (!name)
+    throw std::runtime_error("Invalid previous launcher preference key");
+  const auto value = CFPreferencesCopyValue(name, CFSTR("com.project-xenon.Xenon Launcher"),
+                                            kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+  CFRelease(name);
+  if (!value)
+    return {};
+  struct Release {
+    CFPropertyListRef value;
+    ~Release() { CFRelease(value); }
+  } release{value};
+  const auto type = CFGetTypeID(value);
+  if (type == CFBooleanGetTypeID())
+    return Json(CFBooleanGetValue(static_cast<CFBooleanRef>(value)) != 0);
+  if (type == CFNumberGetTypeID()) {
+    const auto number = static_cast<CFNumberRef>(value);
+    if (CFNumberIsFloatType(number)) {
+      double result = 0;
+      if (CFNumberGetValue(number, kCFNumberDoubleType, &result) && std::isfinite(result))
+        return Json(result);
+    } else {
+      std::int64_t result = 0;
+      if (CFNumberGetValue(number, kCFNumberSInt64Type, &result))
+        return Json(result);
+    }
+  }
+  if (type == CFStringGetTypeID()) {
+    const auto string = static_cast<CFStringRef>(value);
+    const auto length = CFStringGetLength(string);
+    if (length > 16 * 1024 * 1024)
+      throw std::runtime_error("Oversized previous launcher preference");
+    const auto bytes = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+    std::vector<char> text(bytes);
+    if (!CFStringGetCString(string, text.data(), bytes, kCFStringEncodingUTF8))
+      throw std::runtime_error("Invalid previous launcher preference text");
+    std::string result(text.data());
+    if (result.starts_with("@Variant(") || result.starts_with("@ByteArray("))
+      return {};
+    if (result.starts_with("@@"))
+      result.erase(0, 1);
+    return Json(result);
+  }
+  return {};
+}
+} // namespace
+#endif
 Json read_legacy_ini(const fs::path &path) {
   if (!fs::exists(path))
     return Json::object();
@@ -165,6 +240,10 @@ std::optional<Json> LegacyStorage::value(const std::string &key) const {
   if (registry)
     return registry_value(key);
 #endif
+#ifdef __APPLE__
+  if (mac_preferences)
+    return mac_value(key);
+#endif
   return {};
 }
 LegacyStorage legacy_storage(const fs::path &folder) {
@@ -189,8 +268,10 @@ LegacyStorage legacy_storage(const fs::path &folder) {
     if (!home)
       throw std::runtime_error("Cannot locate the previous launcher data");
 #ifdef __APPLE__
-    throw std::runtime_error("Automatic macOS settings discovery is pending. Choose a copied "
-                             "legacy data folder instead.");
+    result.app = fs::u8path(home) / "Library/Application Support/Project Xenon/Xenon Launcher";
+    result.library = fs::u8path(home) / "Documents/Xenon Launcher";
+    result.screenshots = fs::u8path(home) / "Pictures/Xenon";
+    result.mac_preferences = true;
 #else
     const auto *data = std::getenv("XDG_DATA_HOME"), *config = std::getenv("XDG_CONFIG_HOME");
     result.app = (data ? fs::u8path(data) : fs::u8path(home) / ".local/share") / "Project Xenon" /

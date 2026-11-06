@@ -1,4 +1,5 @@
 #include "launcher_service.hpp"
+#include "platform/file_path.hpp"
 #include "core/archive.hpp"
 #include "core/module_settings.hpp"
 #include "core/module_manifest.hpp"
@@ -35,7 +36,7 @@ Json &job_row(Json &state, const std::string &id) {
   throw std::runtime_error("Operation no longer exists");
 }
 std::string modified(const fs::path &path) {
-  return std::to_string(fs::last_write_time(path).time_since_epoch().count());
+  return std::to_string(fs::last_write_time(io_path(path)).time_since_epoch().count());
 }
 struct JobPaths {
   fs::path root, stage, installed;
@@ -46,7 +47,7 @@ struct JobPaths {
       throw std::runtime_error("Invalid installation identity");
     root = fs::u8path(job.at("_root").get<std::string>());
     if (!root.is_absolute() || root.lexically_normal() != root ||
-        fs::weakly_canonical(root) != root)
+        normal_path(fs::weakly_canonical(io_path(root))) != root)
       throw std::runtime_error("Installation location changed; retry the package");
     stage = root / ".xenon-staging" / id;
     installed = root / ("xenon-" + id);
@@ -56,21 +57,22 @@ Json owner(const Json &job) {
   return {{"owner", "xenon-launcher-next-module-install"}, {"jobId", job.at("id")}};
 }
 void remove_owned(const fs::path &directory, const Json &job) {
-  if (!fs::exists(directory))
+  if (!fs::exists(io_path(directory)))
     return;
-  if (fs::weakly_canonical(directory) != directory || fs::is_symlink(directory))
+  if (normal_path(fs::weakly_canonical(io_path(directory))) != directory ||
+      fs::is_symlink(directory))
     throw std::runtime_error("Staging directory was redirected; it was left untouched");
   const auto marker = directory / "owner.json";
-  if (!fs::exists(marker)) {
-    if (fs::is_empty(directory)) {
-      fs::remove(directory);
+  if (!fs::exists(io_path(marker))) {
+    if (fs::is_empty(io_path(directory))) {
+      fs::remove(io_path(directory));
       return;
     }
     throw std::runtime_error("Unrecognised installation directory was left untouched");
   }
   if (read_document(marker, 4096) != owner(job))
     throw std::runtime_error("Installation ownership changed; files were left untouched");
-  fs::remove_all(directory);
+  fs::remove_all(io_path(directory));
 }
 bool referenced(const Json &state, const fs::path &directory) {
   const auto contains = [&](const Json &module) {
@@ -90,7 +92,7 @@ bool referenced(const Json &state, const fs::path &directory) {
 void move_installation(const fs::path &source, const fs::path &destination) {
   for (unsigned attempt = 0;; ++attempt) {
     std::error_code error;
-    fs::rename(source, destination, error);
+    fs::rename(io_path(source), io_path(destination), error);
     if (!error)
       return;
 #ifdef _WIN32
@@ -109,8 +111,9 @@ void move_installation(const fs::path &source, const fs::path &destination) {
 }
 } // namespace
 void LauncherService::enqueue_install(Json &next, const fs::path &input) {
-  const auto source = fs::weakly_canonical(fs::absolute(input));
-  if (!fs::is_regular_file(source) || fs::file_size(source) > 512ull * 1024 * 1024)
+  const auto source = normal_path(fs::weakly_canonical(io_path(fs::absolute(input))));
+  if (!fs::is_regular_file(io_path(source)) ||
+      fs::file_size(io_path(source)) > 512ull * 1024 * 1024)
     throw std::runtime_error("Choose a module ZIP smaller than 512 MiB");
   unsigned pending = 0;
   for (const auto &job : next["jobs"])
@@ -136,8 +139,8 @@ void LauncherService::enqueue_install(Json &next, const fs::path &input) {
     rows.erase(old);
   }
   const auto requested = launcher_destination(storage_, next["settings"], "paths/modules");
-  fs::create_directories(requested);
-  const auto root = fs::weakly_canonical(requested);
+  fs::create_directories(io_path(requested));
+  const auto root = normal_path(fs::weakly_canonical(io_path(requested)));
   next["jobs"].push_back({{"id", make_id()},
                           {"kind", "module.install"},
                           {"title", "Install " + path_string(source.filename())},
@@ -148,7 +151,7 @@ void LauncherService::enqueue_install(Json &next, const fs::path &input) {
                           {"createdAt", time_now()},
                           {"_source", path_string(source)},
                           {"_root", path_string(root)},
-                          {"_size", fs::file_size(source)},
+                          {"_size", fs::file_size(io_path(source))},
                           {"_modified", modified(source)}});
 }
 void LauncherService::recover_install_jobs() {
@@ -323,15 +326,16 @@ void LauncherService::run_install(const Json &job,
       throw OperationCancelled();
   };
   check();
-  if (!fs::is_regular_file(source) ||
-      fs::file_size(source) != job.at("_size").get<std::uintmax_t>() ||
+  if (!fs::is_regular_file(io_path(source)) ||
+      fs::file_size(io_path(source)) != job.at("_size").get<std::uintmax_t>() ||
       modified(source) != job.at("_modified").get<std::string>())
     throw std::runtime_error(
         "The source package changed or moved. Retry to use its current contents.");
-  fs::create_directories(paths.root);
-  fs::create_directories(paths.stage.parent_path());
-  if (fs::weakly_canonical(paths.stage.parent_path()) != paths.stage.parent_path() ||
-      !fs::create_directory(paths.stage))
+  fs::create_directories(io_path(paths.root));
+  fs::create_directories(io_path(paths.stage.parent_path()));
+  if (normal_path(fs::weakly_canonical(io_path(paths.stage.parent_path()))) !=
+          paths.stage.parent_path() ||
+      !fs::create_directory(io_path(paths.stage)))
     throw std::runtime_error("Cannot create a fresh package staging directory");
   write_document(paths.stage / "owner.json", owner(job));
   auto last = Clock::time_point{};
@@ -355,8 +359,8 @@ void LauncherService::run_install(const Json &job,
   picosha2::hash256_one_by_one package_hash;
   {
     progress("Copying package", 1);
-    std::ifstream input(source, std::ios::binary);
-    std::ofstream output(archive, std::ios::binary);
+    std::ifstream input(io_path(source), std::ios::binary);
+    std::ofstream output(io_path(archive), std::ios::binary);
     if (!input || !output)
       throw std::runtime_error("Cannot copy the module package into staging");
     std::array<char, 256 * 1024> buffer{};
@@ -399,20 +403,20 @@ void LauncherService::run_install(const Json &job,
                    }});
   progress("Checking manifest", 92);
   std::vector<fs::path> candidates;
-  for (const auto &entry : fs::recursive_directory_iterator(payload)) {
+  for (const auto &entry : fs::recursive_directory_iterator(io_path(payload))) {
     check();
-    const auto name = path_string(entry.path().filename());
+    const auto name = path_string(normal_path(entry.path()).filename());
     if (entry.is_regular_file() &&
         (name == "xenon-module.json" || name == "module.json" || name == "manifest.json"))
-      if (std::find(candidates.begin(), candidates.end(), entry.path().parent_path()) ==
-          candidates.end())
-        candidates.push_back(entry.path().parent_path());
+      if (std::find(candidates.begin(), candidates.end(),
+                    normal_path(entry.path()).parent_path()) == candidates.end())
+        candidates.push_back(normal_path(entry.path()).parent_path());
   }
   if (candidates.size() != 1)
     throw std::runtime_error("Package must contain exactly one module root");
   Json definition;
   for (const auto *name : {"xenon-module.json", "module.json", "manifest.json"})
-    if (fs::is_regular_file(candidates[0] / name)) {
+    if (fs::is_regular_file(io_path(candidates[0] / name))) {
       definition = read_document(candidates[0] / name);
       break;
     }
@@ -429,7 +433,7 @@ void LauncherService::run_install(const Json &job,
       throw std::runtime_error("The module version does not match its release metadata");
   }
   const auto relative = candidates[0].lexically_relative(paths.stage);
-  fs::remove(archive);
+  fs::remove(io_path(archive));
   check();
   {
     std::lock_guard lock(mutex_);
@@ -444,7 +448,7 @@ void LauncherService::run_install(const Json &job,
     persist(committing);
     state_ = std::move(committing);
   }
-  if (fs::exists(paths.installed))
+  if (fs::exists(io_path(paths.installed)))
     throw std::runtime_error("The generated installation location already exists");
   // The durable committing record makes this short, uncancellable phase recoverable.
   // Filesystem retries run without holding the state mutex or the command worker.
@@ -469,7 +473,7 @@ void LauncherService::run_install(const Json &job,
     state_ = std::move(next);
   } catch (...) {
     std::error_code ignored;
-    fs::rename(paths.installed, paths.stage, ignored);
+    fs::rename(io_path(paths.installed), io_path(paths.stage), ignored);
     throw;
   }
 }

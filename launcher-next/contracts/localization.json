@@ -1478,7 +1478,58 @@
       "presence.connected": "Connected to Discord",
       "presence.published": "Rich Presence published to Discord",
       "presence.queued": "Presence update queued",
-      "presence.disconnected": "Discord presence disconnected"
+      "presence.disconnected": "Discord presence disconnected",
+      "gameSettings.menu": "Game settings",
+      "gameSettings.title": "Settings · {title}",
+      "gameSettings.graphics": "Graphics",
+      "gameSettings.audio": "Audio",
+      "gameSettings.controls": "Controls",
+      "gameSettings.options": "Game options",
+      "gameSettings.categories": "Game settings categories",
+      "gameSettings.explanation": "These settings apply only to this game. Enable an override to replace the inherited value.",
+      "gameSettings.profile": "Inherited from the launcher and profile: {name}",
+      "gameSettings.override": "Customize {label}",
+      "gameSettings.inherited": "Using launcher/profile default",
+      "gameSettings.moduleDefault": "Using module default",
+      "gameSettings.moduleDefaults": "Module defaults",
+      "gameSettings.save": "Save game settings",
+      "gameSettings.resetTab": "Reset this category",
+      "gameSettings.resetAll": "Use defaults for this game",
+      "gameSettings.noOptions": "The selected module has no game options. Graphics, audio and controls are still available.",
+      "gameSettings.staleOptions": "Some saved options are no longer provided by this module. Reset this category before saving.",
+      "gameSettings.moduleChanged": "The game’s module changed. Close and reopen these settings to use the new module.",
+      "gameSettings.runtimeLater": "Settings are saved locally. Running a game requires the Xenon runtime connection.",
+      "gameSettings.nextLaunch": "Saved changes apply the next time this game starts. Other games and module defaults stay unchanged.",
+      "gameSettings.hint.runtime.graphicsBackend": "Choose the renderer for this game.",
+      "gameSettings.hint.graphics.shaderCache": "Keep compiled shaders to reduce repeated compilation.",
+      "gameSettings.hint.graphics.shaderCacheMode": "Keep the shader cache between sessions or only for the current session.",
+      "gameSettings.hint.input.preferredDevice": "Choose the preferred input device for this game.",
+      "gameSettings.hint.input.deadzone": "Set how far an analogue stick must move before registering input (0–0.5).",
+      "gameSettings.hint.input.rumble": "Enable controller vibration for this game.",
+      "gameSettings.hint.audio.masterVolume": "Set the game’s audio level from 0 (muted) to 1 (full volume).",
+      "gameSettings.hint.audio.muteUnfocused": "Mute game audio while its window is not focused.",
+      "gameSettings.hint.audio.latencyProfile": "Choose the balance between audio latency and playback stability.",
+      "recovery.native0": "Xenon could not load the interface",
+      "recovery.native1": "Your launcher data has been preserved. Check renderer.log in the launcher data directory.",
+      "recovery.native2": "The interface stopped repeatedly. Try safe mode or restart the launcher.",
+      "recovery.native3": "The packaged web assets could not be opened.",
+      "recovery.native4": "The launcher could not start",
+      "recovery.native5": "Saved data has been kept. Close another launcher using this data folder, or review the startup log and any saved-data backup before trying again.",
+      "recovery.native6": "Data folder:",
+      "recovery.native7": "Retry startup",
+      "recovery.native8": "Safe mode does not reset or replace saved data.",
+      "install.reason.unsupported": "No installable package is published for this platform.",
+      "install.reason.busy": "Wait for the current operation to finish.",
+      "install.reason.installed": "This release is already installed.",
+      "install.reason.manual": "Automatic launcher installation is available in the packaged Windows launcher.",
+      "install.reason.unavailable": "The release needs a matching package and a SHA-256 digest before it can be installed.",
+      "install.reason.check": "Check for a published release, then download its verified package to enable Install.",
+      "install.reason.download": "Download and verify this release before installing it.",
+      "install.moduleUpdates": "Module updates",
+      "install.noModuleUpdates": "Module releases will appear here after checking the catalogue.",
+      "install.readyPackages": "Ready to install",
+      "install.readyFilter": "Ready to install",
+      "install.verified": "Download verified"
     },
     "fr": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -2331,7 +2382,58 @@
       "presence.connected": "Connecté à Discord",
       "presence.published": "Rich Presence publié sur Discord",
       "presence.queued": "Mise à jour de présence en attente",
-      "presence.disconnected": "Présence Discord déconnectée"
+      "presence.disconnected": "Présence Discord déconnectée",
+      "gameSettings.menu": "Paramètres du jeu",
+      "gameSettings.title": "Paramètres · {title}",
+      "gameSettings.graphics": "Graphismes",
+      "gameSettings.audio": "Audio",
+      "gameSettings.controls": "Commandes",
+      "gameSettings.options": "Options du jeu",
+      "gameSettings.categories": "Catégories des paramètres du jeu",
+      "gameSettings.explanation": "Ces paramètres ne s’appliquent qu’à ce jeu. Activez une valeur personnalisée pour remplacer la valeur héritée.",
+      "gameSettings.profile": "Hérité du lanceur et du profil : {name}",
+      "gameSettings.override": "Personnaliser : {label}",
+      "gameSettings.inherited": "Valeur par défaut du lanceur/profil",
+      "gameSettings.moduleDefault": "Valeur par défaut du module",
+      "gameSettings.moduleDefaults": "Valeurs par défaut du module",
+      "gameSettings.save": "Enregistrer les paramètres du jeu",
+      "gameSettings.resetTab": "Réinitialiser cette catégorie",
+      "gameSettings.resetAll": "Utiliser les valeurs par défaut pour ce jeu",
+      "gameSettings.noOptions": "Le module sélectionné ne propose aucune option de jeu. Les graphismes, l’audio et les commandes restent disponibles.",
+      "gameSettings.staleOptions": "Certaines options enregistrées ne sont plus fournies par ce module. Réinitialisez cette catégorie avant d’enregistrer.",
+      "gameSettings.moduleChanged": "Le module du jeu a changé. Fermez et rouvrez ces paramètres pour utiliser le nouveau module.",
+      "gameSettings.runtimeLater": "Les paramètres sont enregistrés localement. L’exécution d’un jeu nécessite la connexion au moteur Xenon.",
+      "gameSettings.nextLaunch": "Les modifications enregistrées s’appliquent au prochain lancement de ce jeu. Les autres jeux et les valeurs par défaut du module restent inchangés.",
+      "gameSettings.hint.runtime.graphicsBackend": "Choisissez le moteur de rendu pour ce jeu.",
+      "gameSettings.hint.graphics.shaderCache": "Conservez les shaders compilés pour limiter les recompilations.",
+      "gameSettings.hint.graphics.shaderCacheMode": "Conservez le cache des shaders entre les sessions ou seulement pour la session actuelle.",
+      "gameSettings.hint.input.preferredDevice": "Choisissez le périphérique de commande préféré pour ce jeu.",
+      "gameSettings.hint.input.deadzone": "Réglez le déplacement minimal du stick analogique avant détection (0–0,5).",
+      "gameSettings.hint.input.rumble": "Activez les vibrations de la manette pour ce jeu.",
+      "gameSettings.hint.audio.masterVolume": "Réglez le volume du jeu de 0 (muet) à 1 (volume maximal).",
+      "gameSettings.hint.audio.muteUnfocused": "Coupez le son du jeu lorsque sa fenêtre n’est pas active.",
+      "gameSettings.hint.audio.latencyProfile": "Choisissez l’équilibre entre la latence audio et la stabilité de lecture.",
+      "recovery.native0": "Xenon n’a pas pu charger l’interface",
+      "recovery.native1": "Les données du lanceur ont été conservées. Consultez renderer.log dans le dossier de données du lanceur.",
+      "recovery.native2": "L’interface s’est arrêtée plusieurs fois. Essayez le mode sans échec ou redémarrez le lanceur.",
+      "recovery.native3": "Les fichiers de l’interface fournis n’ont pas pu être ouverts.",
+      "recovery.native4": "Le lanceur n’a pas pu démarrer",
+      "recovery.native5": "Les données enregistrées ont été conservées. Fermez tout autre lanceur utilisant ce dossier, ou consultez le journal de démarrage et les sauvegardes avant de réessayer.",
+      "recovery.native6": "Dossier de données :",
+      "recovery.native7": "Réessayer le démarrage",
+      "recovery.native8": "Le mode sans échec ne réinitialise ni ne remplace les données enregistrées.",
+      "install.reason.unsupported": "Aucun paquet installable n’est publié pour cette plateforme.",
+      "install.reason.busy": "Attendez la fin de l’opération en cours.",
+      "install.reason.installed": "Cette version est déjà installée.",
+      "install.reason.manual": "L’installation automatique du lanceur est disponible dans la version Windows empaquetée.",
+      "install.reason.unavailable": "La version doit fournir un paquet compatible et une empreinte SHA-256 avant l’installation.",
+      "install.reason.check": "Recherchez une version publiée, puis téléchargez son paquet vérifié pour activer Installer.",
+      "install.reason.download": "Téléchargez et vérifiez cette version avant de l’installer.",
+      "install.moduleUpdates": "Mises à jour des modules",
+      "install.noModuleUpdates": "Les versions des modules apparaîtront ici après vérification du catalogue.",
+      "install.readyPackages": "Prêt à installer",
+      "install.readyFilter": "Prêt à installer",
+      "install.verified": "Téléchargement vérifié"
     },
     "de": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -3184,7 +3286,58 @@
       "presence.connected": "Mit Discord verbunden",
       "presence.published": "Rich Presence auf Discord veröffentlicht",
       "presence.queued": "Präsenzaktualisierung wartet",
-      "presence.disconnected": "Discord-Präsenz getrennt"
+      "presence.disconnected": "Discord-Präsenz getrennt",
+      "gameSettings.menu": "Spieleinstellungen",
+      "gameSettings.title": "Einstellungen · {title}",
+      "gameSettings.graphics": "Grafik",
+      "gameSettings.audio": "Audio",
+      "gameSettings.controls": "Steuerung",
+      "gameSettings.options": "Spieloptionen",
+      "gameSettings.categories": "Kategorien der Spieleinstellungen",
+      "gameSettings.explanation": "Diese Einstellungen gelten nur für dieses Spiel. Aktiviere einen eigenen Wert, um den geerbten Wert zu ersetzen.",
+      "gameSettings.profile": "Vom Launcher und Profil geerbt: {name}",
+      "gameSettings.override": "{label} anpassen",
+      "gameSettings.inherited": "Launcher-/Profilstandard wird verwendet",
+      "gameSettings.moduleDefault": "Modulstandard wird verwendet",
+      "gameSettings.moduleDefaults": "Modulstandards",
+      "gameSettings.save": "Spieleinstellungen speichern",
+      "gameSettings.resetTab": "Diese Kategorie zurücksetzen",
+      "gameSettings.resetAll": "Standards für dieses Spiel verwenden",
+      "gameSettings.noOptions": "Das gewählte Modul hat keine Spieloptionen. Grafik, Audio und Steuerung sind weiterhin verfügbar.",
+      "gameSettings.staleOptions": "Einige gespeicherte Optionen werden vom Modul nicht mehr angeboten. Setze diese Kategorie vor dem Speichern zurück.",
+      "gameSettings.moduleChanged": "Das Spielmodul wurde geändert. Schließe diese Einstellungen und öffne sie erneut.",
+      "gameSettings.runtimeLater": "Einstellungen werden lokal gespeichert. Zum Spielen wird die Xenon-Laufzeitverbindung benötigt.",
+      "gameSettings.nextLaunch": "Gespeicherte Änderungen gelten beim nächsten Start dieses Spiels. Andere Spiele und Modulstandards bleiben unverändert.",
+      "gameSettings.hint.runtime.graphicsBackend": "Wähle den Renderer für dieses Spiel.",
+      "gameSettings.hint.graphics.shaderCache": "Behalte kompilierte Shader, um erneute Kompilierung zu reduzieren.",
+      "gameSettings.hint.graphics.shaderCacheMode": "Behalte den Shader-Cache über Sitzungen hinweg oder nur für die aktuelle Sitzung.",
+      "gameSettings.hint.input.preferredDevice": "Wähle das bevorzugte Eingabegerät für dieses Spiel.",
+      "gameSettings.hint.input.deadzone": "Lege fest, wie weit ein Analogstick für eine Eingabe bewegt werden muss (0–0,5).",
+      "gameSettings.hint.input.rumble": "Aktiviere Controller-Vibration für dieses Spiel.",
+      "gameSettings.hint.audio.masterVolume": "Stelle die Spiellautstärke von 0 (stumm) bis 1 (volle Lautstärke) ein.",
+      "gameSettings.hint.audio.muteUnfocused": "Schalte den Spielton stumm, wenn das Spielfenster nicht aktiv ist.",
+      "gameSettings.hint.audio.latencyProfile": "Wähle die Balance zwischen Audiolatenz und stabiler Wiedergabe.",
+      "recovery.native0": "Xenon konnte die Oberfläche nicht laden",
+      "recovery.native1": "Deine Launcher-Daten wurden erhalten. Prüfe renderer.log im Datenordner des Launchers.",
+      "recovery.native2": "Die Oberfläche wurde wiederholt beendet. Versuche den abgesicherten Modus oder starte den Launcher neu.",
+      "recovery.native3": "Die mitgelieferten Oberflächendateien konnten nicht geöffnet werden.",
+      "recovery.native4": "Der Launcher konnte nicht gestartet werden",
+      "recovery.native5": "Gespeicherte Daten wurden erhalten. Schließe andere Launcher mit diesem Datenordner oder prüfe vor dem nächsten Versuch das Startprotokoll und vorhandene Sicherungen.",
+      "recovery.native6": "Datenordner:",
+      "recovery.native7": "Start erneut versuchen",
+      "recovery.native8": "Der abgesicherte Modus setzt gespeicherte Daten nicht zurück und ersetzt sie nicht.",
+      "install.reason.unsupported": "Für diese Plattform ist kein installierbares Paket veröffentlicht.",
+      "install.reason.busy": "Warte, bis der aktuelle Vorgang abgeschlossen ist.",
+      "install.reason.installed": "Diese Version ist bereits installiert.",
+      "install.reason.manual": "Die automatische Launcher-Installation ist im Windows-Paket verfügbar.",
+      "install.reason.unavailable": "Für die Installation werden ein passendes Paket und eine SHA-256-Prüfsumme benötigt.",
+      "install.reason.check": "Suche nach einer veröffentlichten Version und lade das geprüfte Paket herunter, um Installieren zu aktivieren.",
+      "install.reason.download": "Lade diese Version vor der Installation herunter und prüfe sie.",
+      "install.moduleUpdates": "Modulaktualisierungen",
+      "install.noModuleUpdates": "Modulversionen erscheinen hier nach der Katalogprüfung.",
+      "install.readyPackages": "Bereit zur Installation",
+      "install.readyFilter": "Bereit zur Installation",
+      "install.verified": "Download geprüft"
     },
     "es": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -4037,7 +4190,58 @@
       "presence.connected": "Conectado con Discord",
       "presence.published": "Rich Presence publicado en Discord",
       "presence.queued": "Actualización de presencia en cola",
-      "presence.disconnected": "Presencia de Discord desconectada"
+      "presence.disconnected": "Presencia de Discord desconectada",
+      "gameSettings.menu": "Ajustes del juego",
+      "gameSettings.title": "Ajustes · {title}",
+      "gameSettings.graphics": "Gráficos",
+      "gameSettings.audio": "Audio",
+      "gameSettings.controls": "Controles",
+      "gameSettings.options": "Opciones del juego",
+      "gameSettings.categories": "Categorías de ajustes del juego",
+      "gameSettings.explanation": "Estos ajustes se aplican solo a este juego. Activa un valor personalizado para sustituir el valor heredado.",
+      "gameSettings.profile": "Heredado del lanzador y del perfil: {name}",
+      "gameSettings.override": "Personalizar {label}",
+      "gameSettings.inherited": "Se usa el valor del lanzador/perfil",
+      "gameSettings.moduleDefault": "Se usa el valor predeterminado del módulo",
+      "gameSettings.moduleDefaults": "Valores predeterminados del módulo",
+      "gameSettings.save": "Guardar ajustes del juego",
+      "gameSettings.resetTab": "Restablecer esta categoría",
+      "gameSettings.resetAll": "Usar valores predeterminados para este juego",
+      "gameSettings.noOptions": "El módulo seleccionado no tiene opciones de juego. Los gráficos, el audio y los controles siguen disponibles.",
+      "gameSettings.staleOptions": "El módulo ya no ofrece algunas opciones guardadas. Restablece esta categoría antes de guardar.",
+      "gameSettings.moduleChanged": "El módulo del juego ha cambiado. Cierra y vuelve a abrir estos ajustes para usar el nuevo módulo.",
+      "gameSettings.runtimeLater": "Los ajustes se guardan localmente. Para ejecutar un juego se necesita la conexión con el motor Xenon.",
+      "gameSettings.nextLaunch": "Los cambios guardados se aplican al iniciar este juego de nuevo. Los demás juegos y los valores predeterminados del módulo no cambian.",
+      "gameSettings.hint.runtime.graphicsBackend": "Elige el motor gráfico para este juego.",
+      "gameSettings.hint.graphics.shaderCache": "Conserva los sombreadores compilados para reducir las recompilaciones.",
+      "gameSettings.hint.graphics.shaderCacheMode": "Conserva la caché de sombreadores entre sesiones o solo durante la sesión actual.",
+      "gameSettings.hint.input.preferredDevice": "Elige el dispositivo de entrada preferido para este juego.",
+      "gameSettings.hint.input.deadzone": "Ajusta cuánto debe moverse la palanca analógica para detectar la entrada (0–0,5).",
+      "gameSettings.hint.input.rumble": "Activa la vibración del mando para este juego.",
+      "gameSettings.hint.audio.masterVolume": "Ajusta el volumen del juego de 0 (silencio) a 1 (volumen máximo).",
+      "gameSettings.hint.audio.muteUnfocused": "Silencia el juego cuando su ventana no tenga el foco.",
+      "gameSettings.hint.audio.latencyProfile": "Elige el equilibrio entre la latencia de audio y la estabilidad de reproducción.",
+      "recovery.native0": "Xenon no pudo cargar la interfaz",
+      "recovery.native1": "Los datos del lanzador se han conservado. Revisa renderer.log en la carpeta de datos del lanzador.",
+      "recovery.native2": "La interfaz se ha detenido repetidamente. Prueba el modo seguro o reinicia el lanzador.",
+      "recovery.native3": "No se pudieron abrir los archivos de la interfaz incluidos.",
+      "recovery.native4": "No se pudo iniciar el lanzador",
+      "recovery.native5": "Se han conservado los datos guardados. Cierra otros lanzadores que usen esta carpeta o revisa el registro de inicio y las copias de seguridad antes de intentarlo de nuevo.",
+      "recovery.native6": "Carpeta de datos:",
+      "recovery.native7": "Volver a intentar el inicio",
+      "recovery.native8": "El modo seguro no restablece ni sustituye los datos guardados.",
+      "install.reason.unsupported": "No hay ningún paquete instalable publicado para esta plataforma.",
+      "install.reason.busy": "Espera a que termine la operación actual.",
+      "install.reason.installed": "Esta versión ya está instalada.",
+      "install.reason.manual": "La instalación automática del lanzador está disponible en el paquete para Windows.",
+      "install.reason.unavailable": "La versión necesita un paquete compatible y una suma SHA-256 antes de poder instalarse.",
+      "install.reason.check": "Busca una versión publicada y descarga su paquete verificado para activar Instalar.",
+      "install.reason.download": "Descarga y verifica esta versión antes de instalarla.",
+      "install.moduleUpdates": "Actualizaciones de módulos",
+      "install.noModuleUpdates": "Las versiones de los módulos aparecerán aquí después de comprobar el catálogo.",
+      "install.readyPackages": "Listo para instalar",
+      "install.readyFilter": "Listo para instalar",
+      "install.verified": "Descarga verificada"
     }
   },
   "sources": {
@@ -13612,6 +13816,354 @@
       "locations": [
         "web/ui/pages.tsx",
         "native/core/presence.cpp"
+      ]
+    },
+    "gameSettings.menu": {
+      "original": "Game settings",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.title": {
+      "original": "Settings · {title}",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.graphics": {
+      "original": "Graphics",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.audio": {
+      "original": "Audio",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.controls": {
+      "original": "Controls",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.options": {
+      "original": "Game options",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.categories": {
+      "original": "Game settings categories",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.explanation": {
+      "original": "These settings apply only to this game. Enable an override to replace the inherited value.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.profile": {
+      "original": "Inherited from the launcher and profile: {name}",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.override": {
+      "original": "Customize {label}",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.inherited": {
+      "original": "Using launcher/profile default",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.moduleDefault": {
+      "original": "Using module default",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.moduleDefaults": {
+      "original": "Module defaults",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.save": {
+      "original": "Save game settings",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.resetTab": {
+      "original": "Reset this category",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.resetAll": {
+      "original": "Use defaults for this game",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.noOptions": {
+      "original": "The selected module has no game options. Graphics, audio and controls are still available.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.staleOptions": {
+      "original": "Some saved options are no longer provided by this module. Reset this category before saving.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.moduleChanged": {
+      "original": "The game’s module changed. Close and reopen these settings to use the new module.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.runtimeLater": {
+      "original": "Settings are saved locally. Running a game requires the Xenon runtime connection.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.nextLaunch": {
+      "original": "Saved changes apply the next time this game starts. Other games and module defaults stay unchanged.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.runtime.graphicsBackend": {
+      "original": "Choose the renderer for this game.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.graphics.shaderCache": {
+      "original": "Keep compiled shaders to reduce repeated compilation.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.graphics.shaderCacheMode": {
+      "original": "Keep the shader cache between sessions or only for the current session.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.input.preferredDevice": {
+      "original": "Choose the preferred input device for this game.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.input.deadzone": {
+      "original": "Set how far an analogue stick must move before registering input (0–0.5).",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.input.rumble": {
+      "original": "Enable controller vibration for this game.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.audio.masterVolume": {
+      "original": "Set the game’s audio level from 0 (muted) to 1 (full volume).",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.audio.muteUnfocused": {
+      "original": "Mute game audio while its window is not focused.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "gameSettings.hint.audio.latencyProfile": {
+      "original": "Choose the balance between audio latency and playback stability.",
+      "locations": [
+        "web/ui/GameSettings.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "recovery.native0": {
+      "original": "Xenon could not load the interface",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native1": {
+      "original": "Your launcher data has been preserved. Check renderer.log in the launcher data directory.",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native2": {
+      "original": "The interface stopped repeatedly. Try safe mode or restart the launcher.",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native3": {
+      "original": "The packaged web assets could not be opened.",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native4": {
+      "original": "The launcher could not start",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native5": {
+      "original": "Saved data has been kept. Close another launcher using this data folder, or review the startup log and any saved-data backup before trying again.",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native6": {
+      "original": "Data folder:",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native7": {
+      "original": "Retry startup",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "recovery.native8": {
+      "original": "Safe mode does not reset or replace saved data.",
+      "locations": [
+        "native/host/main.cpp"
+      ]
+    },
+    "install.reason.unsupported": {
+      "original": "No installable package is published for this platform.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.busy": {
+      "original": "Wait for the current operation to finish.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.installed": {
+      "original": "This release is already installed.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.manual": {
+      "original": "Automatic launcher installation is available in the packaged Windows launcher.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.unavailable": {
+      "original": "The release needs a matching package and a SHA-256 digest before it can be installed.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.check": {
+      "original": "Check for a published release, then download its verified package to enable Install.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.reason.download": {
+      "original": "Download and verify this release before installing it.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.moduleUpdates": {
+      "original": "Module updates",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.noModuleUpdates": {
+      "original": "Module releases will appear here after checking the catalogue.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.readyPackages": {
+      "original": "Ready to install",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.readyFilter": {
+      "original": "Ready to install",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
+      ]
+    },
+    "install.verified": {
+      "original": "Download verified",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx",
+        "web/ui/pages.tsx"
       ]
     }
   }

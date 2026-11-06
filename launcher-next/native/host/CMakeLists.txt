@@ -37,6 +37,7 @@ add_custom_target(xenon_launcher_next_assets ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/settings.json" "$<TARGET_FILE_DIR:xenon_launcher_next>/settings-schema.json")
 add_dependencies(xenon_launcher_next xenon_launcher_next_assets xenon_launcher_updater)
 add_custom_command(TARGET xenon_launcher_next_assets POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/dist/licenses" "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/module-catalog-fallback.json" "$<TARGET_FILE_DIR:xenon_launcher_next>/module-catalog-fallback.json"
   COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/native/third_party/unicode/LICENSE.txt" "$<TARGET_FILE_DIR:xenon_launcher_next>/licenses/Unicode-LICENSE.txt"
@@ -52,5 +53,12 @@ add_custom_command(TARGET xenon_launcher_next POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/contracts/settings.json" "$<TARGET_FILE_DIR:xenon_launcher_next>/settings-schema.json"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_ROOT}/LICENSE.txt" "$<TARGET_FILE_DIR:xenon_launcher_next>/CEF-LICENSE.txt")
 if(WIN32)
-  add_custom_command(TARGET xenon_launcher_next POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_BINARY_DIR}/bootstrap.exe" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe")
+  add_executable(xenon_launcher_icon_tool win/icon_stamp.cpp)
+  target_compile_definitions(xenon_launcher_icon_tool PRIVATE UNICODE _UNICODE)
+  target_compile_features(xenon_launcher_icon_tool PRIVATE cxx_std_20)
+  add_dependencies(xenon_launcher_next xenon_launcher_icon_tool)
+  set_property(TARGET xenon_launcher_next APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/win/xenon-app-icon.ico")
+  add_custom_command(TARGET xenon_launcher_next POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CEF_BINARY_DIR}/bootstrap.exe" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe"
+    COMMAND "$<TARGET_FILE:xenon_launcher_icon_tool>" "$<TARGET_FILE_DIR:xenon_launcher_next>/xenon_launcher_next.exe" "${CMAKE_CURRENT_SOURCE_DIR}/win/xenon-app-icon.ico")
 endif()

@@ -1,3 +1,4 @@
+#include "platform/file_path.hpp"
 #include "launcher_service.hpp"
 #include "core/cache_storage.hpp"
 #include "core/file_transfer.hpp"
@@ -28,8 +29,8 @@ Json LauncherService::prepare_cache_relocation(const Json &next, const Json &dat
   const auto source = cache_location(storage_, next);
   const auto source_root = cache_root(storage_, source);
   const auto parent = configured.empty() ? storage_ : fs::u8path(configured).lexically_normal();
-  if (!fs::is_directory(parent) || redirected_path(parent) ||
-      fs::weakly_canonical(parent) != parent)
+  if (!fs::is_directory(io_path(parent)) || redirected_path(parent) ||
+      normal_path(fs::weakly_canonical(io_path(parent))) != parent)
     throw std::runtime_error("Choose an existing cache folder without links or junctions");
   if (parent != storage_ && (within(parent, storage_) || within(storage_, parent)))
     throw std::runtime_error(
@@ -51,7 +52,7 @@ Json LauncherService::prepare_cache_relocation(const Json &next, const Json &dat
 void LauncherService::cleanup_cache_relocation(const Json &job) {
   const auto target = job.at("_data").at("target");
   const auto root = cache_root(storage_, target);
-  if (root == storage_ || !fs::exists(root))
+  if (root == storage_ || !fs::exists(io_path(root)))
     return;
   {
     std::lock_guard lock(mutex_);
@@ -90,21 +91,21 @@ void LauncherService::cleanup_cache_relocation(const Json &job) {
   }
   // Persistence may have committed before an observer/process failure. Never remove its active
   // root.
-  if (fs::is_regular_file(storage_ / "state.json")) {
+  if (fs::is_regular_file(io_path(storage_ / "state.json"))) {
     const auto saved = read_document(storage_ / "state.json");
     if (cache_root(storage_, cache_location(storage_, saved)) == root)
       return;
   }
-  if (redirected_path(root) || fs::weakly_canonical(root) != root ||
-      fs::weakly_canonical(root.parent_path()) != root.parent_path())
+  if (redirected_path(root) || normal_path(fs::weakly_canonical(io_path(root))) != root ||
+      normal_path(fs::weakly_canonical(io_path(root.parent_path()))) != root.parent_path())
     throw std::runtime_error("Cache cleanup location was redirected; files were kept");
-  if (fs::is_empty(root)) {
-    fs::remove(root);
+  if (fs::is_empty(io_path(root))) {
+    fs::remove(io_path(root));
     return;
   }
   check_cache_location(storage_, target);
   check_transfer_tree(root);
-  fs::remove_all(root);
+  fs::remove_all(io_path(root));
 }
 void LauncherService::run_cache_relocation(const Json &job,
                                            const std::shared_ptr<std::atomic_bool> &cancel) {
@@ -123,7 +124,7 @@ void LauncherService::run_cache_relocation(const Json &job,
     for (const auto *component : {"catalog-art", "downloads"}) {
       check();
       const auto original = source_root / component;
-      if (!fs::exists(original))
+      if (!fs::exists(io_path(original)))
         continue;
       check_transfer_tree(original);
       const auto receipt = copy_library_content(

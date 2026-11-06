@@ -1,5 +1,6 @@
 #include "application/launcher_service.hpp"
 #include "core/recovery.hpp"
+#include "core/localization.hpp"
 #include <fstream>
 #include <iostream>
 using namespace xenon::launcher_next;
@@ -12,6 +13,29 @@ int main() {
   const auto root = fs::temp_directory_path() / ("xenon-recovery-" + make_id());
   try {
     fs::create_directories(root);
+    const auto catalogue = root / "copy.json", locale_state = root / "locale.json";
+    write_document(
+        catalogue,
+        {{"schema", "xenon.localization"},
+         {"version", 1},
+         {"translations", {{"en", {{"test", "Edited English"}}}, {"fr", {{"test", "Francais"}}}}},
+         {"sources",
+          {{"native.duplicate", {{"original", "Original"}}},
+           {"test", {{"original", "Original"}}}}}});
+    write_document(locale_state, {{"settings", {{"general/language", "fr-CA"}}}});
+    const auto before = read_document(locale_state);
+    check(NativeCopy(catalogue, locale_state, "de").original("Original") == "Francais",
+          "Native recovery reads the selected regional language and ignores untranslated duplicate "
+          "inventory entries");
+    check(read_document(locale_state)==before,"Native recovery must not modify saved settings");
+    write_document(locale_state, {{"settings", {{"general/language", "auto"}}}});
+    check(NativeCopy(catalogue, locale_state, "fr_FR.UTF-8").text("test", "fallback") == "Francais",
+          "Native system language resolution");
+    check(NativeCopy(catalogue, locale_state, "es").text("test", "fallback") == "Edited English",
+          "Missing native translations use editable English");
+    std::ofstream(catalogue, std::ios::trunc) << "invalid";
+    check(NativeCopy(catalogue, locale_state, "fr").text("test", "fallback") == "fallback",
+          "Malformed native catalogues cannot prevent recovery");
     {
       RecoveryState first(root, false);
       check(!first.safe_mode(), "First launch must be normal");

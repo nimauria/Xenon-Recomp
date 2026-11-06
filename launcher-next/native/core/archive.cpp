@@ -1,4 +1,5 @@
 #include "archive.hpp"
+#include "platform/file_path.hpp"
 #include <fstream>
 #include <miniz/miniz.h>
 #include <set>
@@ -56,16 +57,17 @@ void extract_package(const fs::path &source, const fs::path &destination,
       throw OperationCancelled();
   };
   check_cancel();
-  if (!fs::is_regular_file(source) || fs::file_size(source) > 512ull * 1024 * 1024)
+  if (!fs::is_regular_file(io_path(source)) ||
+      fs::file_size(io_path(source)) > 512ull * 1024 * 1024)
     throw std::runtime_error("Choose a module ZIP smaller than 512 MiB");
-  if (fs::exists(destination) && !fs::is_empty(destination))
+  if (fs::exists(io_path(destination)) && !fs::is_empty(io_path(destination)))
     throw std::runtime_error("Package staging folder must be empty");
-  fs::create_directories(destination);
-  std::ifstream input(source, std::ios::binary);
+  fs::create_directories(io_path(destination));
+  std::ifstream input(io_path(source), std::ios::binary);
   mz_zip_archive zip{};
   zip.m_pRead = read_at;
   zip.m_pIO_opaque = &input;
-  if (!mz_zip_reader_init(&zip, fs::file_size(source), 0))
+  if (!mz_zip_reader_init(&zip, fs::file_size(io_path(source)), 0))
     throw std::runtime_error("Invalid ZIP package");
   try {
     const auto count = mz_zip_reader_get_num_files(&zip);
@@ -124,11 +126,11 @@ void extract_package(const fs::path &source, const fs::path &destination,
       mz_zip_reader_get_filename(&zip, i, name.data(), static_cast<mz_uint>(name.size()));
       const auto target = destination / fs::u8path(name.data());
       if (stat.m_is_directory) {
-        fs::create_directories(target);
+        fs::create_directories(io_path(target));
         continue;
       }
-      fs::create_directories(target.parent_path());
-      std::ofstream output(target, std::ios::binary);
+      fs::create_directories(io_path(target.parent_path()));
+      std::ofstream output(io_path(target), std::ios::binary);
       ExtractOutput destination_output{output, control, completed, total, {}};
       const auto extracted =
           output && mz_zip_reader_extract_to_callback(&zip, i, extract_at, &destination_output, 0);
@@ -149,8 +151,8 @@ void extract_package(const fs::path &source, const fs::path &destination,
   }
 }
 void write_zip(const fs::path &destination, const std::map<std::string, std::string> &files) {
-  fs::create_directories(destination.parent_path());
-  std::ofstream output(destination, std::ios::binary);
+  fs::create_directories(io_path(destination.parent_path()));
+  std::ofstream output(io_path(destination), std::ios::binary);
   if (!output)
     throw std::runtime_error("Could not create ZIP file");
   mz_zip_archive zip{};
