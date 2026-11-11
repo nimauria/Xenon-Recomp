@@ -9,8 +9,14 @@
 //     to call_trace.log, each stamped t= host milliseconds on the probe logs'
 //     steady clock. "@r4:64" also dumps 64 bytes at r4 as big-endian
 //     words and floats, once on entry and once on return; several dumps may
-//     follow one address ("823AD0D8@r3:32@r4:256"), and "@A2700180:64"
-//     dumps a fixed guest address.
+//     follow one address ("823AD0D8@r3:32@r4:256"), "@A2700180:64"
+//     dumps a fixed guest address, and "@[r3+14]:256" dumps 256 bytes at the
+//     pointer stored at r3+0x14 (a buffer a descriptor argument points to).
+//     "@watch[r3+4]:256" (or "@watchr4:64", "@watch<hex>:64") is not dumped:
+//     the first call it resolves on arms the physical write watch
+//     (xenon/cpu/memory_port.hpp, arm_write_watch) on those bytes - a buffer
+//     whose address is known only while the title runs - and logs where.
+//     One watch per run; its stores go to write_watch_diag.log.
 //   XENON_CALL_TRACE_LIMIT  records logged per function (default 64); later
 //     calls are counted, and every XENON_CALL_TRACE_EVERY-th (default 1000)
 //     is still logged.

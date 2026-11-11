@@ -61,6 +61,81 @@ void set_write_traps(std::span<const GuestAddress> addresses) noexcept;
 // <windows.h> and file I/O out of this header.
 void debug_signal_write_trap(GuestAddress address, std::uint64_t value);
 
+// Opt-in physical write watch for investigations.
+// XENON_WRITE_WATCH=<physical hex>[:<length hex>] (length 16 if omitted)
+// reports every guest store that overlaps the range - any width, vector
+// stores, block writes and fills included, through whichever virtual alias
+// the guest used - in the probe log write_watch_diag.log (with the guest
+// cia/lr and the host stack, which names the translated function), up to
+// XENON_WRITE_WATCH_REPORTS (decimal, default kMaxWriteWatchReports) of them;
+// the log goes beside the probe logs, which need not be enabled. With no
+// watch set, a store pays one relaxed load.
+inline constexpr std::uint32_t kMaxWriteWatchReports = 256;
+
+// The report limit: XENON_WRITE_WATCH_REPORTS, read once, or the default.
+[[nodiscard]] std::uint32_t write_watch_report_limit() noexcept;
+
+namespace write_watch_detail {
+inline std::atomic<std::uint32_t> length{0};
+inline std::atomic<std::uint32_t> base{0};
+}  // namespace write_watch_detail
+
+[[nodiscard]] inline bool write_watch_hit(std::uint32_t physical, std::uint32_t size) noexcept {
+  const auto length = write_watch_detail::length.load(std::memory_order_relaxed);
+  if (length == 0u) [[likely]] return false;
+  const auto base = write_watch_detail::base.load(std::memory_order_relaxed);
+  return std::uint64_t(physical) < std::uint64_t(base) + length &&
+         std::uint64_t(base) < std::uint64_t(physical) + size;
+}
+
+// Replaces the watched range; a zero length turns the watch off.
+void set_write_watch(std::uint32_t physical, std::uint32_t length) noexcept;
+
+// Extends the watch to stores the accessors above never see - those of
+// separately compiled game code, which inlines them - by write-protecting the
+// watched pages in the host physical view and the guest aperture's physical
+// aliases (Windows). Called once guest memory exists; without a watch it only
+// records where guest memory is, for arm_write_watch().
+void guard_write_watch_pages(std::byte* physical_base, std::byte* aperture_base) noexcept;
+
+// The guest page table (fast_memory page entries) a report reads the storing
+// thread's guest stack through: each report walks the r1 back chain and lists
+// the saved return addresses - the guest call stack, which names the caller
+// that the guest cia/lr alone do not. Set once guest memory exists.
+void set_write_watch_page_table(std::byte* physical_base,
+                                const std::atomic<std::uint64_t>* page_table,
+                                std::uint32_t page_count, std::uint32_t page_shift) noexcept;
+
+// Forgets `page_table` if it is the one set (its address space is going).
+void release_write_watch_page_table(const std::atomic<std::uint64_t>* page_table) noexcept;
+
+// One big-endian guest word read through that page table without faulting;
+// false when the page is not mapped readable RAM or no table is set.
+[[nodiscard]] bool write_watch_read_guest32(GuestAddress address, std::uint32_t& value) noexcept;
+
+// The guest call stack from `r1`: the return address saved in each frame
+// along the back chain (the Xbox ABI saves LR at -8 from the caller's stack
+// pointer), innermost first, at most `capacity` of them.
+[[nodiscard]] std::size_t write_watch_guest_backtrace(GuestAddress r1, GuestAddress* out,
+                                                      std::size_t capacity) noexcept;
+
+// Sets the watch while the title runs, on a range found only then - the
+// buffer a traced call points to (XENON_CALL_TRACE "@watch[...]") - and, once
+// guest memory exists, guards its pages as guard_write_watch_pages() does.
+// `alias` is the guest address the range was found at: when it is a virtual
+// mapping (below 0xA0000000) its pages are guarded too, since the title's
+// stores through it reach neither the physical view nor the physical aliases.
+// The guarded range is kept for the rest of the run: returns false, changing
+// nothing, when a guarded watch is already set or `length` is zero.
+[[nodiscard]] bool arm_write_watch(std::uint32_t physical, std::uint32_t length,
+                                   GuestAddress alias = 0) noexcept;
+
+// Reports one watched store: `data` is what was stored, in guest byte order
+// (at most its first 16 bytes are shown); a fill passes its one byte with
+// `fill` set.
+void debug_signal_write_watch(GuestAddress address, std::uint32_t physical, std::uint32_t size,
+                              const void* data, std::uint32_t data_size, bool fill = false);
+
 // The guest registers of the thread the calling host thread is running, so a
 // trapped store also reports the guest cia/lr (the host stack alone cannot
 // name the guest instruction when the interpreter executed it). Set for the
@@ -1283,6 +1358,10 @@ inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
   }
   const bool host_little = std::endian::native == std::endian::little;
   const bool swap = little_endian ? !host_little : host_little;
+  if (write_watch_hit(resolved.physical_address, sizeof(T))) [[unlikely]] {
+    const auto stored = byteswap_if(value, swap);
+    debug_signal_write_watch(address, resolved.physical_address, sizeof(T), &stored, sizeof(T));
+  }
   const bool reservation_participant =
       begin_write(resolved.physical_address, sizeof(T));
   detail::atomic_store_relaxed<T>(resolved.ptr, byteswap_if(value, swap));
@@ -1319,8 +1398,11 @@ XENON_CPU_FORCEINLINE void MemoryAccessContext::write_value(GuestAddress address
   }
   if (ptr) [[likely]] {
     const bool host_little = std::endian::native == std::endian::little;
-    detail::atomic_store_relaxed<T>(ptr,
-                                    byteswap_if(value, little_endian ? !host_little : host_little));
+    const auto stored = byteswap_if(value, little_endian ? !host_little : host_little);
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, sizeof(T))) [[unlikely]]
+      debug_signal_write_watch(address, physical, sizeof(T), &stored, sizeof(T));
+    detail::atomic_store_relaxed<T>(ptr, stored);
     native_note_store(physical_page);
     return;
   }
@@ -1379,6 +1461,9 @@ inline void MemoryAccessContext::write8(GuestAddress address,
                                         std::uint8_t value) {
   std::uint32_t physical_page{};
   if (auto* ptr = native_ram<1u, 1u>(address, fast_memory::kWrite, physical_page)) [[likely]] {
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, 1u)) [[unlikely]]
+      debug_signal_write_watch(address, physical, 1u, &value, 1u);
     detail::atomic_store_relaxed<std::uint8_t>(ptr, value);
     native_note_store(physical_page);
     return;
@@ -1393,6 +1478,8 @@ inline void MemoryAccessContext::write8_checked(GuestAddress address,
     slow_->write8(address, value);
     return;
   }
+  if (write_watch_hit(resolved.physical_address, 1u)) [[unlikely]]
+    debug_signal_write_watch(address, resolved.physical_address, 1u, &value, 1u);
   const bool reservation_participant = begin_write(resolved.physical_address, 1);
   detail::atomic_store_relaxed<std::uint8_t>(resolved.ptr, value);
   complete_write(resolved.physical_address, 1, reservation_participant,
@@ -1418,6 +1505,9 @@ inline void MemoryAccessContext::write128(GuestAddress address,
     std::uint64_t lo{}, hi{};
     std::memcpy(&lo, value.bytes.data(), sizeof(lo));
     std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
+    const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+    if (write_watch_hit(physical, 16u)) [[unlikely]]
+      debug_signal_write_watch(address, physical, 16u, value.bytes.data(), 16u);
     detail::atomic_store_relaxed<std::uint64_t>(ptr, lo);
     detail::atomic_store_relaxed<std::uint64_t>(ptr + 8u, hi);
     native_note_store(physical_page);
@@ -1436,6 +1526,8 @@ inline void MemoryAccessContext::write128_checked(GuestAddress address,
   std::uint64_t lo{}, hi{};
   std::memcpy(&lo, value.bytes.data(), sizeof(lo));
   std::memcpy(&hi, value.bytes.data() + 8u, sizeof(hi));
+  if (write_watch_hit(resolved.physical_address, 16u)) [[unlikely]]
+    debug_signal_write_watch(address, resolved.physical_address, 16u, value.bytes.data(), 16u);
   const bool reservation_participant = begin_write(resolved.physical_address, 16);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr, lo);
   detail::atomic_store_relaxed<std::uint64_t>(resolved.ptr + 8u, hi);
@@ -1500,6 +1592,11 @@ inline void MemoryAccessContext::write_bytes(
     const auto chunk = std::min<std::size_t>(remaining.size(), page_remaining);
     Resolved resolved{};
     if (resolve_fast(cursor, chunk, true, 1u, resolved)) {
+      if (write_watch_hit(resolved.physical_address, static_cast<std::uint32_t>(chunk)))
+          [[unlikely]]
+        debug_signal_write_watch(cursor, resolved.physical_address,
+                                 static_cast<std::uint32_t>(chunk), remaining.data(),
+                                 static_cast<std::uint32_t>(chunk));
       const bool reservation_participant =
           begin_write(resolved.physical_address, static_cast<std::uint32_t>(chunk));
       detail::atomic_copy_to_guest(resolved.ptr, remaining.first(chunk));
@@ -1527,6 +1624,8 @@ inline void MemoryAccessContext::fill_bytes(GuestAddress address,
     const auto chunk = (std::min)(remaining, page_remaining);
     Resolved resolved{};
     if (resolve_fast(cursor, chunk, true, 1u, resolved)) {
+      if (write_watch_hit(resolved.physical_address, chunk)) [[unlikely]]
+        debug_signal_write_watch(cursor, resolved.physical_address, chunk, &value, 1u, true);
       const bool reservation_participant =
           begin_write(resolved.physical_address, chunk);
       detail::atomic_fill_guest(resolved.ptr, chunk, value);

@@ -77,7 +77,10 @@ AddressSpace::AddressSpace(GuestTranslationMode mode)
   }
 }
 
-AddressSpace::~AddressSpace() = default;
+AddressSpace::~AddressSpace() {
+  // Reports must not read the guest stack through a table that is gone.
+  xenon::cpu::release_write_watch_page_table(hot_pages_.data());
+}
 
 bool AddressSpace::direct_aperture_active() const noexcept {
   return initialized_ && guest_aperture_ && guest_aperture_->active();
@@ -103,6 +106,11 @@ bool AddressSpace::initialize() {
   }
   initialized_ = true;
   reset();
+  xenon::cpu::guard_write_watch_pages(
+      physical_->data(),
+      guest_aperture_ && guest_aperture_->active() ? guest_aperture_->base() : nullptr);
+  xenon::cpu::set_write_watch_page_table(physical_->data(), hot_pages_.data(), kPageCount,
+                                         kPageShift);
   return true;
 }
 
