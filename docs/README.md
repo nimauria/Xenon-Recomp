@@ -5,10 +5,10 @@ from the project owner's testing; this documentation update did not rerun AC6.
 
 ## Current runtime milestone
 
-Ace Combat 6 loads through the main menu into the first cutscene. Audio is
-fully working in that tested sequence. Cutscene frame rate/pacing is actively
-being fixed. Gameplay, sustained play and full-title compatibility remain
-unconfirmed; no commercial title is confirmed playable.
+Ace Combat 6 loads through the main menu into the first mission. Audio is
+fully working in that tested sequence. An FPS issue is actively being fixed.
+Sustained gameplay and full-title compatibility remain unconfirmed; no
+commercial title is confirmed playable.
 
 The [root README](../README.md#current-milestone-project-gracemeria) is the
 current compatibility summary. [Audio V1](audio/AUDIO_V1.md#current-validation-boundary)
@@ -46,7 +46,11 @@ Superseded conversion checklists and retired Qt packaging instructions have
 been removed; current packaging is in the [launcher guide](../launcher-next/README.md#distribution-and-self-updating).
 
 The [root documentation table](../README.md#documentation) links the maintained
-subsystem references, build instructions and launcher integration documents.
+subsystem references, module distribution guide, build instructions and
+launcher integration documents. Game modules and their exported packages are
+maintained in the shared [Xenon-Modules repository](https://github.com/nimauria/Xenon-Modules);
+the launcher reads the indexed `games/` payloads directly rather than separate
+game repositories or GitHub Releases.
 Version numbers such as Memory V2 or GPU V1 identify document/subsystem
 generations; they do not by themselves mean a document is obsolete.
 

@@ -4,7 +4,8 @@ Xenon is a solo-led, experimental project that is still changing quickly. There 
 
 ## Before you start
 
-- Read the [README](README.md) for the project's current state and the [documentation guide](docs/README.md) for references and plans. AC6 reaches its first cutscene after the main menu with working audio; cutscene pacing is under repair and no commercial title is confirmed playable.
+- Read the [README](README.md) for the project's current state and the [documentation guide](docs/README.md) for references and plans. AC6 reaches its first mission after the main menu with working audio; an FPS issue is under repair and no commercial title is confirmed playable.
+- Game module source and exported packages are maintained in the shared [Xenon-Modules repository](https://github.com/nimauria/Xenon-Modules). See the [module distribution guide](docs/modules/GITHUB_MODULE_RELEASES.md) before changing launcher/module integration.
 - Read [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) for source ownership, CMake targets and dependency rules, plus the subsystem document under [`docs/`](docs/) for the area you are changing.
 - For a large or architectural change, open an issue first so the approach can be agreed before you write the code.
 

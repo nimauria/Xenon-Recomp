@@ -1,33 +1,51 @@
 # Game modules from the shared repository
 
-Game modules live in [Xenon-Modules](https://github.com/nimauria/Xenon-Modules)
-under games/<contributor>/<game>/. For example:
+Game module development and exported packages live in the shared
+[Xenon-Modules](https://github.com/nimauria/Xenon-Modules) repository:
 
-~~~text
+```text
+development/<contributor>/<project>/   Source, hooks, tools and tests
+games/<contributor>/<game>/             Exported launcher payload
+```
+
+For example:
+
+```text
+development/nimauria/project-gracemeria/
 games/nimauria/project-gracemeria/
-games/nimauria/gears-of-war/
-games/nimauria/gears-of-war-2/
-games/another-contributor/their-game/
-~~~
+```
 
-Only Gracemeria is included in this migration; other names illustrate the layout.
-Game folders contain installable module DLLs, details, artwork, licences and
-required runtime data. Developer source, tests and build tools are excluded.
-Hooks compiled into prebuilt DLLs need no separate source files. Gracemeria
-currently retains exported preparation inputs until a tested DLL is available.
+Development files stay under `development/` and are not downloaded by the
+launcher. An exported game directory contains its catalogue metadata,
+`xenon-module.json`, the explicit `package-files.json` list, generated
+`package.json` hashes and any permitted runtime data, artwork or native module
+binary. Commercial game content and game-derived native output remain local to
+the user.
 
-The launcher reads version-2 catalog.json, each entry.json and generated
-package.json from Xenon-Modules main. It fetches the selected game's indexed
-files, verifies every size and SHA-256 and assembles a local staging archive.
-No GitHub Release, tag, uploaded ZIP or separate game repository is needed.
-File changes expose updates even without a version bump. IDs stay stable.
+The launcher reads the version-2 catalogue and exported game payloads directly
+from the `main` branch. It fetches the indexed files, verifies every declared
+size and SHA-256 digest, and stages the selected module locally. Modules do
+not need a separate game repository, GitHub Release, tag or uploaded ZIP.
+Changed files are visible through their digests even when the module version
+does not change.
 
-Contributors declare installable paths in package-files.json, run
-node scripts/sync-packages.mjs and node scripts/validate-catalog.mjs, then submit
-a PR to Xenon-Modules. Failed updates preserve installations; previous versions
-and their file digests remain available for rollback. Commercial content and
-game-derived native output stay local to the user.
+To publish a reviewed package, module contributors work in `development/`,
+declare the export inputs in `project.json`, then run the repository's export
+and validation scripts:
 
-Launcher self-updates still use Xenon-Recomp releases. This guide retains its
-old filename for existing links. Ship the updated launcher before switching the
-public catalogue to version 2.
+```powershell
+node scripts/export-module.mjs development/<contributor>/<project>
+node scripts/export-module.mjs development/<contributor>/<project> --check
+node scripts/validate-catalog.mjs --publish
+node --test tests/workspace.test.mjs
+```
+
+For a tested prebuilt native module, pass its project-relative binary and host
+platform to the export command. The exporter places it under
+`bin/windows-x64/` (or the selected platform) and omits preparation hook
+source that is already compiled into the DLL. Additional runtime dependencies
+must be declared in the module project manifest.
+
+The launcher itself continues to update from Xenon-Recomp releases. Module
+installation and module updates use the shared Xenon-Modules catalogue and
+per-file digest verification.
