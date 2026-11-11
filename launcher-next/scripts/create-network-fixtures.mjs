@@ -2,13 +2,12 @@ import { mkdir, writeFile, readFile, copyFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { writeFixtureZip } from "./zip-fixture.mjs";
 export const fixtureModule = "test.catalogue.module";
 export const fixturePlatform = `${process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
 export const registry =
   "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/";
 export const releaseApi =
-  "https://api.github.com/repos/fixture/catalogue-module/releases?per_page=30";
+  registry + "games/fixture/catalogue-module/package.json";
 export async function createNetworkFixtures(folder) {
   await mkdir(folder, { recursive: true });
   const entry = {
@@ -71,42 +70,39 @@ export async function publishFixture(folder, version, validDigest = true) {
   const mapping = JSON.parse(
     await readFile(resolve(folder, "responses.json"), "utf8"),
   );
-  const asset = `fixture-${fixturePlatform}.xenonmod.zip`;
-  await writeFixtureZip(resolve(folder, "module.zip"), {
-    "module/module.json": JSON.stringify({
+  const files = {
+    "xenon-module.json": JSON.stringify({
       id: fixtureModule,
       name: "Fixture catalogue module",
       version,
       settings: [{ id: "example", type: "bool", defaultValue: true }],
     }),
-    "module/data.txt": "test-only fixture",
-  });
-  const bytes = await readFile(resolve(folder, "module.zip"));
-  const url = `https://github.com/fixture/catalogue-module/releases/download/v${version}/${asset}`;
-  mapping[url] = { file: "module.zip" };
+    "data.txt": "test-only fixture",
+  };
+  const rows = [];
+  for (const [path, content] of Object.entries(files).sort(([a], [b]) =>
+    a < b ? -1 : 1,
+  )) {
+    const file = "source-" + path;
+    await writeFile(resolve(folder, file), content);
+    rows.push({
+      path,
+      size: Buffer.byteLength(content),
+      sha256: validDigest
+        ? createHash("sha256").update(content).digest("hex")
+        : "0".repeat(64),
+    });
+    mapping[registry + "games/fixture/catalogue-module/" + path] = { file };
+  }
   await writeFile(
     resolve(folder, "releases.json"),
-    JSON.stringify([
-      {
-        tag_name: `v${version}`,
-        name: `Fixture ${version}`,
-        body: "Fixture release notes.",
-        draft: false,
-        prerelease: false,
-        assets: [
-          {
-            name: asset,
-            browser_download_url: url,
-            size: bytes.length,
-            digest:
-              "sha256:" +
-              (validDigest
-                ? createHash("sha256").update(bytes).digest("hex")
-                : "0".repeat(64)),
-          },
-        ],
-      },
-    ]),
+    JSON.stringify({
+      schema: "xenon.repository-package",
+      version: 1,
+      moduleId: fixtureModule,
+      moduleVersion: version,
+      files: rows,
+    }),
   );
   await writeFile(resolve(folder, "responses.json"), JSON.stringify(mapping));
 }

@@ -74,7 +74,7 @@ try {
     false,
   );
   await orbital
-    .getByRole("button", { name: "Download release", exact: true })
+    .getByRole("button", { name: "Download module files", exact: true })
     .click();
   await until((s) => s.moduleUpdates["demo.orbital"].canInstall);
   await nav("Downloads");

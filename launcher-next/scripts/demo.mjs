@@ -182,49 +182,67 @@ export async function createDemo(folder) {
       dlc: [],
     });
     const zip = join(network, id + ".zip");
-    await writeFixtureZip(zip, {
-      "module/module.json": JSON.stringify({ ...manifest, version }),
-      "module/art.png": await readFile(image),
-      "module/demo.txt":
-        "Fictional metadata/artwork sample; no executable module.",
-    });
-    const bytes = await readFile(zip),
-      digest = createHash("sha256").update(bytes).digest("hex"),
-      url = `https://github.com/fixture/${key}/releases/download/v${version}/${assetName}`;
+    const payload = {
+      "xenon-module.json": JSON.stringify({ ...manifest, version }),
+      "art.png": await readFile(image),
+      "demo.txt": "Fictional metadata/artwork sample; no executable module.",
+    };
+    await writeFixtureZip(zip, payload);
+    const bytes = await readFile(zip);
+    const archiveDigest = createHash("sha256").update(bytes).digest("hex");
+    const files = [];
+    for (const [path, content] of Object.entries(payload).sort(([a], [b]) =>
+      a < b ? -1 : 1,
+    )) {
+      const data = Buffer.from(content);
+      const file = id + "-source-" + path;
+      await writeFile(join(network, file), data);
+      files.push({
+        path,
+        size: data.length,
+        sha256: createHash("sha256").update(data).digest("hex"),
+      });
+      mapping[registry + "games/fixture/" + key + "/" + path] = { file };
+    }
+    const digest = createHash("sha256")
+      .update(
+        files
+          .map((f) => f.path + "\n" + f.size + "\n" + f.sha256 + "\n")
+          .join(""),
+      )
+      .digest("hex");
     const release = {
       version,
+      source: "repository",
       name: title + " demo " + version,
-      notes: "Developer sample release notes. Metadata and artwork only.",
-      url: `https://github.com/fixture/${key}/releases/tag/v${version}`,
+      notes: "Developer sample module files. Metadata and artwork only.",
+      url:
+        "https://github.com/nimauria/Xenon-Modules/tree/main/games/fixture/" +
+        key,
       prerelease: false,
-      publishedAt: new Date(now).toISOString(),
-      asset: { name: assetName, url, size: bytes.length, sha256: digest },
-    };
-    const releaseFile = id + "-releases.json";
-    await json(join(network, releaseFile), [
-      {
-        tag_name: "v" + version,
-        name: release.name,
-        body: release.notes,
-        draft: false,
-        prerelease: false,
-        assets: [
-          {
-            name: assetName,
-            browser_download_url: url,
-            size: bytes.length,
-            digest: "sha256:" + digest,
-          },
-        ],
+      _files: files,
+      asset: {
+        name: "repository-files",
+        size: files.reduce((s, f) => s + f.size, 0),
+        sha256: digest,
       },
-    ]);
+    };
+    const packageFile = id + "-package.json";
+    await json(join(network, packageFile), {
+      schema: "xenon.repository-package",
+      version: 1,
+      moduleId: id,
+      moduleVersion: version,
+      files,
+    });
+    mapping[registry + "games/fixture/" + key + "/package.json"] = {
+      file: packageFile,
+    };
     mapping[registry + "modules/" + id + ".json"] = { file: id + ".json" };
     mapping[registry + entry.launcher.tileArt] = { file: id + "-art.png" };
     await copyFile(image, join(network, id + "-art.png"));
-    mapping[
-      `https://api.github.com/repos/fixture/${key}/releases?per_page=30`
-    ] = { file: releaseFile };
-    mapping[url] = { file: id + ".zip" };
+    if (i === 1 || i === 2)
+      modules.find((module) => module.id === id).repositoryDigest = digest;
     moduleUpdates[id] = {
       state:
         i === 3
@@ -250,6 +268,7 @@ export async function createDemo(folder) {
         _downloadId: jobId,
         downloadVersion: version,
         downloadDigest: digest,
+        _archiveDigest: archiveDigest,
       });
       jobs.push({
         id: jobId,

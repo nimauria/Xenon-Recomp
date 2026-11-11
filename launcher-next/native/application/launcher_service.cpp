@@ -1186,10 +1186,12 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
     const auto &release = value.at("release");
     if (value.value("downloadVersion", "") != release.value("version", "") ||
         value.value("downloadDigest", "") != release.at("asset").value("sha256", ""))
-      throw std::runtime_error("Download and verify the selected release before installing");
+      throw std::runtime_error("Download and verify the selected module files before installing");
     enqueue_install(next, fs::u8path(value.at("_packagePath").get<std::string>()));
     auto &job = next["jobs"].back();
-    job["_sha256"] = value.at("downloadDigest");
+    job["_sha256"] = value.value("_archiveDigest", value.at("downloadDigest").get<std::string>());
+    if (release.value("source", "") == "repository")
+      job["_repositoryDigest"] = value.at("downloadDigest");
     job["_expectedModuleId"] = id;
     job["moduleId"] = id;
     job["_expectedVersion"] = release.at("version");
@@ -1252,7 +1254,7 @@ Json LauncherService::execute(const std::string &command, const Json &payload) {
       throw std::runtime_error("This operation cannot be retried");
     if (job.value("kind", "") == "module.install") {
       enqueue_install(next, fs::u8path(job.at("_source").get<std::string>()));
-      for (const auto *key : {"_sha256", "_expectedModuleId", "_expectedVersion"})
+      for (const auto *key : {"_sha256", "_expectedModuleId", "_expectedVersion", "_repositoryDigest"})
         if (job.contains(key))
           next["jobs"].back()[key] = job.at(key);
     } else if (migration_job_kind(job.value("kind", "")))

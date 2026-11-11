@@ -169,6 +169,10 @@ CLAUDE.md
 !/docs/modules/CONTENT_IDENTITY.md
 !/docs/modules/CONTENT_SERVICES.md
 !/docs/modules/INPUT_API_V1.md
+!/docs/modules/GITHUB_MODULE_RELEASES.md
+
+# Separate local checkout of the shared module payload repository.
+/module-repositories/
 !/docs/network/XENON_NETWORK_V1.md
 !/docs/platforms/HOST_PORTABILITY_V1.md
 !/docs/recomp/COMPILATION_GRAPH_GEN10.md

@@ -430,7 +430,7 @@ void LauncherService::run_install(const Json &job,
   if (job.contains("_expectedVersion")) {
     const auto version = Version::parse(definition.value("version", ""));
     if (!version || version->normalized != job.at("_expectedVersion").get<std::string>())
-      throw std::runtime_error("The module version does not match its release metadata");
+      throw std::runtime_error("The module version does not match its package metadata");
   }
   const auto relative = candidates[0].lexically_relative(paths.stage);
   fs::remove(io_path(archive));
@@ -461,6 +461,8 @@ void LauncherService::run_install(const Json &job,
       if (module.at("id") == module_id) {
         module["_installRoot"] = path_string(paths.installed);
         module["_installOwnerId"] = id;
+        if (job.contains("_repositoryDigest"))
+          module["repositoryDigest"] = job.at("_repositoryDigest");
       }
     auto &completed = job_row(next, id);
     completed["state"] = "completed";

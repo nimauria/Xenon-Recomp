@@ -73,7 +73,7 @@ await entry
   .getByRole("button", { name: "Check for updates", exact: true })
   .click();
 await entry
-  .getByRole("button", { name: "Download release", exact: true })
+  .getByRole("button", { name: "Download module files", exact: true })
   .click();
 await entry
   .getByRole("button", { name: "Install verified package", exact: true })
@@ -96,12 +96,15 @@ await until(
   (state) => state.moduleUpdates[fixtureModule]?.release?.version === "2.0.0",
 );
 await entry
-  .getByRole("button", { name: "Download release", exact: true })
+  .getByRole("button", { name: "Download module files", exact: true })
   .click();
 await entry
-  .getByText("The downloaded package failed SHA-256 verification", {
-    exact: true,
-  })
+  .getByText(
+    "Repository file failed SHA-256 verification; check for updates and retry",
+    {
+      exact: true,
+    },
+  )
   .waitFor();
 assert.equal(
   (await snapshot()).modules.find((module) => module.id === fixtureModule)
@@ -118,7 +121,7 @@ await until(
       "0".repeat(64) && !state.moduleUpdates[fixtureModule]?.busy,
 );
 await entry
-  .getByRole("button", { name: "Download release", exact: true })
+  .getByRole("button", { name: "Download module files", exact: true })
   .click();
 await entry
   .getByRole("button", { name: "Install verified package", exact: true })
@@ -133,14 +136,12 @@ await until(
     "2.0.0",
 );
 await page.getByRole("button", { name: "Close dialog", exact: true }).click();
-const module = page
-  .locator(".cards > article")
-  .filter({
-    has: page.getByRole("heading", {
-      name: "Fixture catalogue module",
-      exact: true,
-    }),
-  });
+const module = page.locator(".cards > article").filter({
+  has: page.getByRole("heading", {
+    name: "Fixture catalogue module",
+    exact: true,
+  }),
+});
 page.once("dialog", (dialog) => dialog.accept());
 await module.getByRole("button", { name: "Roll back", exact: true }).click();
 await until(

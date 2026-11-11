@@ -11,6 +11,11 @@ struct Version {
   int compare(const Version &other) const;
 };
 std::string host_key();
+inline constexpr auto module_repository = "nimauria/Xenon-Modules";
+inline constexpr auto module_registry =
+    "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/";
+void centralize_module_entry(Json &entry);
+Json repository_package(const Json &source, const Json &entry);
 Json catalog_paths(const Json &document);
 Json catalog_entry(const Json &source, const std::string &path,
                    const std::string &host = host_key());

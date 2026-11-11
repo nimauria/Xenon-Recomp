@@ -1463,6 +1463,7 @@ export function Settings() {
     (d) =>
       d.category !== "internal" &&
       d.key !== "general/language" &&
+      d.key !== "updates/modulePrerelease" &&
       (query ||
         category !== "appearance" ||
         (![

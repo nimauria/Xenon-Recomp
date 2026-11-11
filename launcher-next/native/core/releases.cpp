@@ -1,5 +1,6 @@
 #include "releases.hpp"
 #include "platform/http.hpp"
+#include "picosha2/picosha2.h"
 #include <algorithm>
 #include <regex>
 #include <set>
@@ -98,10 +99,13 @@ std::string host_key() {
 #endif
 }
 Json catalog_paths(const Json &document) {
-  if (document.at("schema") != "xenon.module-catalog" || document.at("version") != 1 ||
+  if (document.at("schema") != "xenon.module-catalog" ||
+      (document.at("version") != 1 && document.at("version") != 2) ||
       !document.at("modules").is_array() || document.at("modules").size() > 256)
     throw std::runtime_error("Unsupported module catalogue schema");
-  const std::regex pattern("^modules/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$");
+  const std::regex pattern(document.at("version") == 2
+                               ? "^games/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]*/entry\\.json$"
+                               : "^modules/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$");
   std::set<std::string> seen;
   for (const auto &value : document.at("modules")) {
     const auto path = value.get<std::string>();
@@ -111,9 +115,27 @@ Json catalog_paths(const Json &document) {
   }
   return document.at("modules");
 }
+void centralize_module_entry(Json &entry) {
+  const auto id = entry.at("id").get<std::string>();
+  if (id.size() > 128 || !std::regex_match(id, std::regex("^[a-z0-9]+(?:[._-][a-z0-9]+)+$")))
+    throw std::runtime_error("Invalid module catalogue identity");
+  auto source = entry.value("sourcePath", "");
+  if (source.empty()) {
+    source = "games/" + entry.at("repository").get<std::string>();
+  }
+  std::transform(source.begin(), source.end(), source.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  if (source.find("..") != std::string::npos ||
+      !std::regex_match(source, std::regex("^games/[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]*$")))
+    throw std::runtime_error("Invalid module source folder");
+  entry["sourcePath"] = source;
+  entry["repository"] = module_repository;
+  entry["repositoryUrl"] =
+      "https://github.com/" + std::string(module_repository) + "/tree/main/" + source;
+}
 Json catalog_entry(const Json &source, const std::string &path, const std::string &host) {
-  if (source.at("schema") != "xenon.module-entry" || source.at("version") != 1 ||
-      source.at("type") != "game")
+  if (source.at("schema") != "xenon.module-entry" ||
+      (source.at("version") != 1 && source.at("version") != 2) || source.at("type") != "game")
     throw std::runtime_error("Unsupported module entry schema");
   const auto id = source.at("id").get<std::string>(), name = source.at("name").get<std::string>(),
              description = source.at("description").get<std::string>();
@@ -127,33 +149,55 @@ Json catalog_entry(const Json &source, const std::string &path, const std::strin
       repo.at("owner").get<std::string>() + "/" + repo.at("name").get<std::string>();
   if (!repository_ok(repository))
     throw std::runtime_error("Invalid module repository");
+  if (source.at("version") == 2 &&
+      (repository != module_repository ||
+       path != source.at("sourcePath").get<std::string>() + "/entry.json"))
+    throw std::runtime_error("Module source must be in the shared modules repository");
   const auto &publisher = source.at("publisher");
   if (!publisher.at("name").is_string() || publisher.at("name").get<std::string>().empty() ||
       !publisher.at("verified").is_boolean())
     throw std::runtime_error("Invalid module publisher");
-  const auto &assets = source.at("releaseAssets");
-  if (!assets.is_object() || assets.empty())
-    throw std::runtime_error("Missing module package declarations");
-  for (auto entry = assets.begin(); entry != assets.end(); ++entry)
-    if (!std::regex_match(entry.key(), std::regex("^[a-z0-9]+-[a-z0-9_]+$")) ||
-        !entry.value().is_string() || entry.value().get<std::string>().size() > 200 ||
-        !std::regex_match(entry.value().get<std::string>(),
-                          std::regex("^[A-Za-z0-9][A-Za-z0-9._-]*$")))
-      throw std::runtime_error("Invalid module package name");
-  Json value = {{"id", id},
-                {"name", name},
-                {"description", description},
-                {"repository", repository},
-                {"repositoryUrl", "https://github.com/" + repository},
-                {"publisher", publisher.at("name")},
-                {"verified", publisher.at("verified")},
-                {"hostKey", host},
-                {"assetName", assets.value(host, "")},
-                {"entryPath", path},
-                {"launcher", source.value("launcher", Json::object())},
-                {"game", source.value("game", Json::object())},
-                {"dlc", source.value("dlc", Json::array())},
-                {"tags", source.value("tags", Json::array())}};
+  const auto assets = source.value("releaseAssets", Json::object());
+  const auto platforms = source.value("platforms", Json::array());
+  if (source.at("version") == 1) {
+    if (!assets.is_object() || assets.empty())
+      throw std::runtime_error("Missing module package declarations");
+    for (auto entry = assets.begin(); entry != assets.end(); ++entry)
+      if (!std::regex_match(entry.key(), std::regex("^[a-z0-9]+-[a-z0-9_]+$")) ||
+          !entry.value().is_string() || entry.value().get<std::string>().size() > 200 ||
+          !std::regex_match(entry.value().get<std::string>(),
+                            std::regex("^[A-Za-z0-9][A-Za-z0-9._-]*$")))
+        throw std::runtime_error("Invalid module package name");
+  } else {
+    if (!platforms.is_array() || platforms.empty() || platforms.size() > 32)
+      throw std::runtime_error("Missing module platforms");
+    std::set<std::string> seen;
+    for (const auto &platform : platforms) {
+      const auto key = platform.get<std::string>();
+      if (!std::regex_match(key, std::regex("^[a-z0-9]+-[a-z0-9_]+$")) || !seen.insert(key).second)
+        throw std::runtime_error("Invalid module platform");
+    }
+  }
+  Json value = {
+      {"id", id},
+      {"name", name},
+      {"description", description},
+      {"repository", repository},
+      {"repositoryUrl", "https://github.com/" + repository},
+      {"publisher", publisher.at("name")},
+      {"verified", publisher.at("verified")},
+      {"hostKey", host},
+      {"assetName", source.at("version") == 1
+                        ? assets.value(host, "")
+                        : (std::find(platforms.begin(), platforms.end(), host) != platforms.end()
+                               ? "repository-files"
+                               : "")},
+      {"sourcePath", source.value("sourcePath", "games/" + repository)},
+      {"entryPath", path},
+      {"launcher", source.value("launcher", Json::object())},
+      {"game", source.value("game", Json::object())},
+      {"dlc", source.value("dlc", Json::array())},
+      {"tags", source.value("tags", Json::array())}};
   if (!value["launcher"].is_object() || !value["game"].is_object() || !value["dlc"].is_array() ||
       value["dlc"].size() > 2048)
     throw std::runtime_error("Invalid module display metadata");
@@ -163,7 +207,42 @@ Json catalog_entry(const Json &source, const std::string &path, const std::strin
       field = metadata.erase(field);
     else
       ++field;
+  centralize_module_entry(value);
   return value;
+}
+Json repository_package(const Json &source, const Json &entry) {
+  if (source.at("schema") != "xenon.repository-package" || source.at("version") != 1 ||
+      source.at("moduleId") != entry.at("id") || !source.at("files").is_array() ||
+      source.at("files").empty() || source.at("files").size() > 20000 ||
+      !Version::parse(source.at("moduleVersion").get<std::string>()))
+    throw std::runtime_error("Invalid repository module package");
+  std::set<std::string> paths;
+  std::string identity;
+  std::uint64_t total = 0;
+  for (const auto &file : source.at("files")) {
+    if (!file.at("size").is_number_integer())
+      throw std::runtime_error("Invalid repository module file size");
+    const auto path = file.at("path").get<std::string>();
+    const auto size = file.at("size").get<std::uint64_t>();
+    const auto digest = sha256_digest(file.at("sha256").get<std::string>());
+    if (path.size() > 240 || path.find("..") != std::string::npos ||
+        !std::regex_match(
+            path, std::regex("^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$")) ||
+        !paths.insert(path).second || digest.empty() || size > 128ull * 1024 * 1024 ||
+        (total += size) > 128ull * 1024 * 1024)
+      throw std::runtime_error("Invalid repository module file");
+    identity += path + '\n' + std::to_string(size) + '\n' + digest + '\n';
+  }
+  if (!paths.contains("xenon-module.json"))
+    throw std::runtime_error("Repository package has no module manifest");
+  const auto digest = picosha2::hash256_hex_string(identity.begin(), identity.end());
+  return {{"version", Version::parse(source.at("moduleVersion").get<std::string>())->normalized},
+          {"source", "repository"},
+          {"url", entry.at("repositoryUrl")},
+          {"notes", ""},
+          {"prerelease", false},
+          {"_files", source.at("files")},
+          {"asset", {{"name", "repository-files"}, {"sha256", digest}, {"size", total}}}};
 }
 std::string sha256_digest(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),

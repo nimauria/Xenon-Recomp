@@ -1,3 +1,4 @@
+#include "repository_fixture.hpp"
 #include "application/launcher_service.hpp"
 #include "platform/file_path.hpp"
 #include "core/archive.hpp"
@@ -87,12 +88,14 @@ int main() {
              destination = root / "chosen cache";
   try {
     auto deep = root / "long-path";
-    for (unsigned i=0;i<4;++i) deep /= std::string(70, 'a'+i);
+    for (unsigned i = 0; i < 4; ++i)
+      deep /= std::string(70, 'a' + i);
     fs::create_directories(io_path(deep / "source"));
     std::ofstream(io_path(deep / "source/package.zip"), std::ios::binary) << "long path payload";
     write_document(deep / "source/metadata.json", {{"value", "long path JSON"}});
-    const auto copied = copy_library_content(deep / "source", deep / "copied", []{}, [](auto,auto){});
-    verify_library_content(deep / "copied", copied, []{});
+    const auto copied =
+        copy_library_content(deep / "source", deep / "copied", [] {}, [](auto, auto) {});
+    verify_library_content(deep / "copied", copied, [] {});
     check(read_document(deep / "copied/metadata.json").at("value") == "long path JSON",
           "Managed content and atomic JSON must support paths beyond MAX_PATH");
     check(!path_within(root / "Cache-other/file", root / "Cache"),
@@ -148,27 +151,10 @@ int main() {
          {"releaseAssets", {{host_key(), asset}}},
          {"launcher", {{"tileArt", "assets/test.cache.module/cover.png"}}}});
     std::ofstream(network / "cover.png") << "cached artwork bytes";
-    write_zip(network / "package.zip",
-              {{"module/module.json", Json({{"id", id}, {"version", "1.0.0"}}).dump()},
-               {"module/payload.bin", "package bytes"}});
-    const auto bytes = read(network / "package.zip"),
-               digest = picosha2::hash256_hex_string(bytes.begin(), bytes.end());
-    const std::string url = "https://github.com/fixture/cache/releases/download/v1.0.0/" + asset;
-    write_document(network / "releases.json",
-                   Json::array({{{"tag_name", "v1.0.0"},
-                                 {"draft", false},
-                                 {"prerelease", false},
-                                 {"assets", Json::array({{{"name", asset},
-                                                          {"browser_download_url", url},
-                                                          {"size", bytes.size()},
-                                                          {"digest", "sha256:" + digest}}})}}}));
-    write_document(network / "responses.json",
-                   {{base + "catalog.json", {{"file", "catalog.json"}}},
+    Json mapping = {{base + "catalog.json", {{"file", "catalog.json"}}},
                     {base + "modules/" + id + ".json", {{"file", "entry.json"}}},
-                    {base + "assets/test.cache.module/cover.png", {{"file", "cover.png"}}},
-                    {"https://api.github.com/repos/fixture/cache/releases?per_page=30",
-                     {{"file", "releases.json"}}},
-                    {url, {{"file", "package.zip"}}}});
+                    {base + "assets/test.cache.module/cover.png", {{"file", "cover.png"}}}};
+    repository_fixture(network, mapping, base + "games/fixture/cache", id, "1.0.0");
     Json saved;
     fs::path new_root, orphan, foreign;
     {
@@ -258,8 +244,8 @@ int main() {
       new_root = cache_root(storage, saved.at("cache"));
       const auto moved_package =
           fs::u8path(saved.at("moduleUpdates").at(id).at("_packagePath").get<std::string>());
-      check(new_root.parent_path() == destination && read(moved_package) == bytes &&
-                fs::exists(original_package),
+      check(new_root.parent_path() == destination &&
+                read(moved_package) == read(original_package) && fs::exists(original_package),
             "Copied package bytes and original must be preserved");
       const auto artwork = service.asset_path("catalog-tile", id);
       check(artwork.has_value() && artwork->parent_path() == new_root / "catalog-art",

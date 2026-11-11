@@ -1567,7 +1567,15 @@
       "runtime.active": "Stop the current session before changing the runtime host.",
       "runtime.services": "Live input, filesystem and network management have separate integration status.",
       "runtime.logs": "Runtime log",
-      "runtime.configured": "Host selected"
+      "runtime.configured": "Host selected",
+      "modules.source.idle": "Check the modules repository for current files.",
+      "modules.source.checking": "Checking module files…",
+      "modules.source.available": "Module files are available to install.",
+      "modules.source.changed": "The module files have changed. An update is available.",
+      "modules.source.current": "The installed module files are current.",
+      "modules.source.version": "Module version: ",
+      "modules.source.open": "View module files",
+      "modules.source.download": "Download module files"
     },
     "fr": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -2509,7 +2517,15 @@
       "runtime.active": "Arrêtez la session avant de changer l’hôte du runtime.",
       "runtime.services": "La gestion des entrées, du système de fichiers et du réseau a un état d’intégration distinct.",
       "runtime.logs": "Journal du runtime",
-      "runtime.configured": "Hôte sélectionné"
+      "runtime.configured": "Hôte sélectionné",
+      "modules.source.idle": "Rechercher les fichiers actuels dans le dépôt des modules.",
+      "modules.source.checking": "Vérification des fichiers du module…",
+      "modules.source.available": "Les fichiers du module sont disponibles pour installation.",
+      "modules.source.changed": "Les fichiers du module ont changé. Une mise à jour est disponible.",
+      "modules.source.current": "Les fichiers installés du module sont à jour.",
+      "modules.source.version": "Version du module : ",
+      "modules.source.open": "Voir les fichiers du module",
+      "modules.source.download": "Télécharger les fichiers du module"
     },
     "de": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -3451,7 +3467,15 @@
       "runtime.active": "Beenden Sie die Sitzung, bevor Sie den Laufzeit-Host ändern.",
       "runtime.services": "Die Verwaltung von Eingabe, Dateisystem und Netzwerk hat einen eigenen Integrationsstatus.",
       "runtime.logs": "Laufzeitprotokoll",
-      "runtime.configured": "Host ausgewählt"
+      "runtime.configured": "Host ausgewählt",
+      "modules.source.idle": "Das Modul-Repository auf aktuelle Dateien prüfen.",
+      "modules.source.checking": "Moduldateien werden geprüft…",
+      "modules.source.available": "Moduldateien stehen zur Installation bereit.",
+      "modules.source.changed": "Die Moduldateien wurden geändert. Ein Update ist verfügbar.",
+      "modules.source.current": "Die installierten Moduldateien sind aktuell.",
+      "modules.source.version": "Modulversion: ",
+      "modules.source.open": "Moduldateien ansehen",
+      "modules.source.download": "Moduldateien herunterladen"
     },
     "es": {
       "ui.e1e2d099ffa0": "Xenon",
@@ -4393,7 +4417,15 @@
       "runtime.active": "Detén la sesión antes de cambiar el host del runtime.",
       "runtime.services": "La gestión de entrada, archivos y red tiene un estado de integración independiente.",
       "runtime.logs": "Registro del runtime",
-      "runtime.configured": "Host seleccionado"
+      "runtime.configured": "Host seleccionado",
+      "modules.source.idle": "Consultar los archivos actuales en el repositorio de módulos.",
+      "modules.source.checking": "Comprobando los archivos del módulo…",
+      "modules.source.available": "Los archivos del módulo están disponibles para instalar.",
+      "modules.source.changed": "Los archivos del módulo han cambiado. Hay una actualización disponible.",
+      "modules.source.current": "Los archivos instalados del módulo están actualizados.",
+      "modules.source.version": "Versión del módulo: ",
+      "modules.source.open": "Ver archivos del módulo",
+      "modules.source.download": "Descargar archivos del módulo"
     }
   },
   "sources": {
@@ -14559,6 +14591,54 @@
       "locations": [
         "web/ui/RuntimeConnection.tsx",
         "web/ui/SessionPanel.tsx"
+      ]
+    },
+    "modules.source.idle": {
+      "original": "Check the modules repository for current files.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.checking": {
+      "original": "Checking module files…",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.available": {
+      "original": "Module files are available to install.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.changed": {
+      "original": "The module files have changed. An update is available.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.current": {
+      "original": "The installed module files are current.",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.version": {
+      "original": "Module version: ",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.open": {
+      "original": "View module files",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
+      ]
+    },
+    "modules.source.download": {
+      "original": "Download module files",
+      "locations": [
+        "web/ui/ModuleCatalogue.tsx"
       ]
     }
   }

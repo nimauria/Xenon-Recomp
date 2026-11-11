@@ -22,6 +22,13 @@ const descriptions: Record<string, string> = {
     "The downloaded package is verified and ready to install.",
   error: "The operation could not finish.",
 };
+const moduleDescriptions: Record<string, string> = {
+  idle: "modules.source.idle",
+  checking: "modules.source.checking",
+  available: "modules.source.available",
+  "update-available": "modules.source.changed",
+  "up-to-date": "modules.source.current",
+};
 export function InstallPackageButton({
   id,
   name,
@@ -86,12 +93,14 @@ export function UpdateControls({
     >
       <p role={value?.busy ? "status" : undefined}>
         {value
-          ? tText(descriptions[value.state] ?? value.state)
+          ? !launcher && moduleDescriptions[value.state]
+            ? t(moduleDescriptions[value.state])
+            : tText(descriptions[value.state] ?? value.state)
           : t("ui.cae41b68a298")}
       </p>
       {release && (
         <p>
-          {t("ui.333771bad487")}
+          {launcher ? t("ui.333771bad487") : t("modules.source.version")}
           <strong>{release.version}</strong>
           {release.prerelease ? t("ui.81511a8a149c") : ""}
           {value?.installedVersion
@@ -123,7 +132,7 @@ export function UpdateControls({
               )
             }
           >
-            {t("ui.f808eebbf4fb")}
+            {launcher ? t("ui.f808eebbf4fb") : t("modules.source.download")}
           </button>
         }
         <InstallPackageButton
@@ -137,7 +146,7 @@ export function UpdateControls({
             disabled={busy}
             onClick={() => void action("system.openUrl", { url: release.url })}
           >
-            {t("ui.6ba4c7ebdff7")}
+            {launcher ? t("ui.6ba4c7ebdff7") : t("modules.source.open")}
           </button>
         )}
       </div>

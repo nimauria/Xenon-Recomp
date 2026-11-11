@@ -1,6 +1,7 @@
 #include "launcher_service.hpp"
 #include "platform/file_path.hpp"
 #include "core/archive.hpp"
+#include "core/releases.hpp"
 #include "core/cache_storage.hpp"
 #include "core/file_transfer.hpp"
 #include "picosha2/picosha2.h"
@@ -23,16 +24,16 @@ void LauncherService::cache_catalog_art(Json &entry,
     return;
   if (redirected_path(root) || normal_path(fs::weakly_canonical(io_path(root))) != root)
     throw std::runtime_error("Artwork cache was redirected");
-  const auto valid =
-      std::regex("^assets/[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._/-]*\\.(?:png|jpg|jpeg|webp)$",
-                 std::regex::icase);
+  const auto valid = std::regex("^(?:assets/[A-Za-z0-9._-]+|modules/[A-Za-z0-9._-]+/assets)/"
+                                "[A-Za-z0-9][A-Za-z0-9._/-]*\\.(?:png|jpg|jpeg|webp)$",
+                                std::regex::icase);
   for (const auto *kind : {"tile", "hero"}) {
     const auto field = std::string(kind) + "Art", file_key = "_" + std::string(kind) + "File",
                version_key = "_" + std::string(kind) + "Version";
     const auto path = entry["launcher"].value(field, "");
     if (path.find("..") != std::string::npos || !std::regex_match(path, valid))
       continue;
-    const auto url = "https://raw.githubusercontent.com/nimauria/Xenon-Modules/main/" + path;
+    const auto url = std::string(module_registry) + path;
     const auto filename = picosha2::hash256_hex_string(url.begin(), url.end()) +
                           fs::u8path(path).extension().string();
     const auto target = root / fs::u8path(filename);
