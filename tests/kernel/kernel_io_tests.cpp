@@ -8,9 +8,11 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "xenon/filesystem/host_path_device.hpp"
+#include "xenon/filesystem/read_only_content_device.hpp"
 #include "xenon/filesystem/virtual_file_system.hpp"
 #include "xenon/kernel/io_manager.hpp"
 #include "xenon/kernel/xbox_io.hpp"
@@ -65,6 +67,90 @@ fs::OpenOptions rw_open(fs::FileAccess extra = fs::FileAccess::None) {
   options.share = fs::ShareAccess::All;
   options.disposition = fs::CreateDisposition::Open;
   return options;
+}
+
+// One file, "colors.dat" = "abc", served from memory, so a ReadOnlyContent-
+// Device can be mounted without a disc image or package.
+class MemoryContentSource final : public fs::ReadOnlyContentSource {
+ public:
+  fs::FsError initialize() override { return fs::FsError::None; }
+  fs::FsError stat(std::string_view path, fs::FileInfo& info) const override {
+    info = {};
+    if (path.empty()) {
+      info.is_directory = true;
+      return fs::FsError::None;
+    }
+    if (path != "colors.dat") return fs::FsError::NotFound;
+    info.size = kData.size();
+    info.read_only = true;
+    return fs::FsError::None;
+  }
+  fs::FsError list(std::string_view, std::vector<fs::DirectoryEntry>& out) const override {
+    out.clear();
+    fs::DirectoryEntry entry{};
+    entry.name = "colors.dat";
+    static_cast<void>(stat("colors.dat", entry.info));
+    out.push_back(entry);
+    return fs::FsError::None;
+  }
+  fs::FsError read_at(std::string_view path, std::uint64_t offset, std::span<std::byte> out,
+                      std::size_t& read) const override {
+    read = 0;
+    if (path != "colors.dat") return fs::FsError::NotFound;
+    for (; offset + read < kData.size() && read < out.size(); ++read)
+      out[read] = static_cast<std::byte>(kData[static_cast<std::size_t>(offset) + read]);
+    return fs::FsError::None;
+  }
+  fs::FsError disk_space(fs::DiskSpace& out) const override {
+    out = {};
+    return fs::FsError::None;
+  }
+
+ private:
+  static constexpr std::string_view kData = "abc";
+};
+
+// AC6 opens its DLC colour names (dlcolorname.dat) GENERIC_READ |
+// GENERIC_WRITE inside the mounted marketplace package. A package grants that
+// handle and fails only writes; a disc refuses the open. Before, both refused,
+// so the game skipped every DLC pack.
+void test_read_only_content_write_access_open() {
+  for (const auto policy : {fs::WriteAccessOpen::Refuse, fs::WriteAccessOpen::GrantAndFailWrites}) {
+    auto vfs = std::make_shared<fs::VirtualFileSystem>();
+    auto device = std::make_shared<fs::ReadOnlyContentDevice>(
+        "\\Device\\Content0", std::make_shared<MemoryContentSource>(), policy);
+    assert(vfs->register_device(device) == fs::FsError::None);
+    assert(vfs->register_symbolic_link("dlc:", device->mount_point()) == fs::FsError::None);
+    kernel::KernelIoManager io(vfs);
+
+    kernel::KernelOpenOptions open{};
+    open.file = rw_open();
+    kernel::Handle handle{};
+    const auto opened = io.open("dlc:\\colors.dat", open, handle);
+    if (policy == fs::WriteAccessOpen::Refuse) {
+      assert(opened.code == kernel::KernelIoCode::AccessDenied);
+      continue;
+    }
+    assert(opened.succeeded());
+    std::array<std::byte, 3> bytes{};
+    assert(io.read(handle, bytes).succeeded());
+    assert(bytes[0] == std::byte{'a'} && bytes[2] == std::byte{'c'});
+    const std::array<std::byte, 1> one{std::byte{'x'}};
+    assert(io.write(handle, one, std::uint64_t{0}).code == kernel::KernelIoCode::AccessDenied);
+    assert(io.resize(handle, 1).code == kernel::KernelIoCode::AccessDenied);
+    assert(io.close(handle) == kernel::KernelIoCode::Success);
+
+    // Still no creating, overwriting or deleting.
+    kernel::KernelOpenOptions create{};
+    create.file = rw_open();
+    create.file.disposition = fs::CreateDisposition::OpenIf;
+    assert(!io.open("dlc:\\new.dat", create, handle).succeeded());
+    create.file.disposition = fs::CreateDisposition::OverwriteIf;
+    assert(!io.open("dlc:\\colors.dat", create, handle).succeeded());
+    kernel::KernelOpenOptions remove{};
+    remove.file = rw_open(fs::FileAccess::Delete);
+    assert(io.open("dlc:\\colors.dat", remove, handle).code == kernel::KernelIoCode::AccessDenied);
+  }
 }
 
 void test_duplicate_handles_share_file_position_and_rights() {
@@ -774,5 +860,6 @@ int main() {
   test_shared_handle_table_is_one_namespace();
   test_xbox_facade_information_volume_and_rooted_attributes();
   test_xbox_facade_directory_query_and_path_validation();
+  test_read_only_content_write_access_open();
   return 0;
 }

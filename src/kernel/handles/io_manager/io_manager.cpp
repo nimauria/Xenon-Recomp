@@ -160,7 +160,8 @@ IoStatus KernelIoManager::open(std::string_view guest_path,
   if (fs_error != filesystem::FsError::None) return from_filesystem_error(fs_error);
 
   if (resolved.device->read_only() &&
-      (filesystem::has_access(options.file.access, filesystem::FileAccess::Write) ||
+      ((filesystem::has_access(options.file.access, filesystem::FileAccess::Write) &&
+        !resolved.device->opens_existing_for_write()) ||
        filesystem::has_access(options.file.access, filesystem::FileAccess::Delete))) {
     return {KernelIoCode::AccessDenied};
   }

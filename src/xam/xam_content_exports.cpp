@@ -466,7 +466,7 @@ bool register_content_exports(core::ExportRegistry& registry, ContentManager& co
       if (result == result::Success && make) result = content_manager.create_content(data, content_id);
       if (result == result::Success) result = content_manager.open_package(*vfs, root_name, content_id);
       if (result == result::Success && license_mask_ptr != 0u) {
-        write_u32_be(ctx.memory, license_mask_ptr, 0u);
+        write_u32_be(ctx.memory, license_mask_ptr, content_manager.license_mask(content_id));
       }
 
       if (overlapped == 0u) {

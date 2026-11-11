@@ -58,6 +58,10 @@ struct ContentData {
   std::uint32_t device_id{storage_device::Invalid};
   std::uint64_t size_bytes{0};
   std::uint64_t title_id{0};
+  // Installed content that came as an STFS package (marketplace DLC): the
+  // package file, mounted read-only when opened. Empty for content kept as
+  // a host directory (saves and everything the title creates).
+  std::filesystem::path package_file{};
 };
 
 // Manages storage devices and content enumeration
@@ -112,6 +116,20 @@ class ContentManager {
   [[nodiscard]] std::optional<ContentData> find_content(std::uint32_t device_id, ContentType type,
                                                         std::uint64_t title_id,
                                                         const std::string& file_name) const;
+
+  // Lists an installed STFS package (data.package_file) as content on its
+  // device, as the console lists the packages under Content/<xuid>/<title>/
+  // <type>/: enumerable, openable read-only, and not deletable or
+  // re-creatable by the title. Returns the content id; one already listed
+  // (same device, type, title and file name) keeps its id.
+  std::uint32_t register_installed_package(ContentData data);
+
+  // The license mask XamContentCreate reports for opened content. An
+  // installed package is the player's purchase, so every license bit is set
+  // (titles hide what a clear bit names: AC6's DLC packs carry a partial
+  // per-colour mask in their STFS header and show only what is licensed).
+  // Content the title created itself carries no license bits.
+  [[nodiscard]] std::uint32_t license_mask(std::uint32_t content_id) const;
 
   // Mounts existing content as "<root_name>:" (XamContentCreate) and
   // unmounts it (XamContentClose). Opening a root name already in use
