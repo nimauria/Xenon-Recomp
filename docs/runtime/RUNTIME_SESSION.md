@@ -526,8 +526,11 @@ proven, and two real defects this work surfaced were fixed.
 - 🔄 Multi-threaded guest execution: threads created through `ExCreateThread`
   and `XamTaskSchedule` run on their own `KernelThread`
   (`src/core/session/threading/`), alongside the GPU-pump and audio-callback
-  threads. Their behaviour under a real title is part of the open
-  investigation in [AC6_RUNTIME_INVESTIGATION.md](AC6_RUNTIME_INVESTIGATION.md).
+  threads. AC6 now loads through the main menu into the first cutscene with
+  working audio; cutscene frame rate/pacing is being fixed (owner report,
+  11 November 2026). The earlier stall notes in
+  [AC6_RUNTIME_INVESTIGATION.md](AC6_RUNTIME_INVESTIGATION.md) are historical;
+  broader gameplay/threading qualification remains open.
 
 ### TODO
 

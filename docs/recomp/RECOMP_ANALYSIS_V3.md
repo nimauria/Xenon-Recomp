@@ -1,5 +1,11 @@
 # Recomp Analysis V3: discovery-quality pass
 
+This records an earlier analysis pass. Its blocked/deferred validation items
+describe that pass, not current game compatibility. Use the
+[current milestone](../../README.md#current-milestone-project-gracemeria)
+for AC6 progress and the [recompilation pipeline](RECOMPILATION_PIPELINE.md)
+for the current preparation workflow.
+
 Builds on [RECOMP_ANALYSIS_V2.md](RECOMP_ANALYSIS_V2.md) (worker pool, parallel
 discovery waves, parallel codegen - unchanged by this pass except where noted).
 This pass strengthens **generic** Xbox 360 static discovery: more of a title's

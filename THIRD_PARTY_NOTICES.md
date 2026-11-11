@@ -79,5 +79,6 @@ components and are not copied from an SDK into the package.
 ## Source availability
 
 Official Xenon binary releases are accompanied by a matching third-party source
-bundle for redistributed LGPL components. See `THIRD_PARTY_SOURCE_OFFER.md` and
-`docs/development/RELEASE_PACKAGING.md`.
+bundle for redistributed LGPL components. See
+[THIRD_PARTY_SOURCE_OFFER.md](THIRD_PARTY_SOURCE_OFFER.md) and the current
+[dependency and packaging boundary](docs/development/DEPENDENCIES.md#packaging-boundary).

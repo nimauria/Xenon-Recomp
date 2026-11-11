@@ -12,6 +12,14 @@ launcher-side wiring. It supersedes any
 assumption that Xenon requires a loose `default.xex` as the only supported
 input.
 
+**Current launcher boundary (11 November 2026):** the worker/cache and runtime
+content-source paths exist. Launcher Next has the production runtime-host
+bridge, but persisted preparation jobs, cached-module registration and
+first-Play handoff remain [integration work](../../launcher-next/INTEGRATION.md#next-integration-stages).
+The legacy library/service details in section 2 describe the retired Qt
+implementation; they do not establish current CEF content identification or
+preparation support.
+
 ## 1. Disc image mounting (already-existing foundation)
 
 Xbox 360 disc images (`.iso`/`.xgd`/`.dvd`) are read directly, with no
@@ -59,7 +67,12 @@ does not implement full multi-partition XGD3/security-sector/video-partition
 parsing. See `gdfx_image_source.hpp`'s own comments for exactly what is and
 isn't modeled.
 
-## 2. Managed game library
+## 2. Historical managed game library integration
+
+This section records the retired Qt launcher's storage and identification
+design. For current CEF library capabilities and integration limits, use the
+[launcher guide](../../launcher-next/README.md) and
+[integration status](../../launcher-next/INTEGRATION.md).
 
 The launcher stores games under one user-configurable **library root**
 (`PathService::libraryRootPath()`, setting key `frontend/paths/libraryRoot`),
@@ -279,10 +292,10 @@ extension, DLC catalogue — `ModuleService`) and the Recomp Driver's
 analysis.json`, see `include/xenon/recomp/module_hint_provider.hpp`) are two
 independent, narrower schemas that predate this pass. The bridge is a fixed
 convention: a module that wants automatic preparation ships its hint package
-at `<installed module directory>/xenon-analysis/`. `PreparationService`
-(`launcher/src/services/preparation_service.cpp`) resolves this path and
-passes it as `xenon-prepare --module`. Each revision directory may also
-hold `hooks/*.cpp`, the routines its instruction hooks name; preparation
+at `<installed module directory>/xenon-analysis/`. Supply this directory as
+`xenon-prepare --module`. The retired Qt `PreparationService` resolved it
+automatically; equivalent CEF job wiring remains integration work. Each
+revision directory may also hold `hooks/*.cpp`, the routines its instruction hooks name; preparation
 compiles them into that disc's module, and their content is part of the
 cache key. One package can carry several revisions (one per supported
 disc), and preparation builds the module for whichever disc the player has.
@@ -293,46 +306,31 @@ running revision, so editing it never forces a re-preparation.
 Project Gracemeria exports its revision profiles this way with
 `gracemeria-export-analysis`. A module that ships its own
 pre-built native extension (`manifest.json`'s `"nativeExtension"` field) does
-not need this at all — `PreparationService::usesAutomaticPreparation()`
-returns false for it, and the existing (pre-existing, unchanged) shipped-
-extension path is used exactly as before.
+not need automatic preparation. The current launcher can pass a validated
+native extension to the runtime host through its existing launch contract.
 
 ## 5. Launcher wiring
 
-- **Import**: `ContentImportService::importGameContent()` no longer requires
-  a compatible module to already be installed (Part 7) —
-  `IContentProbe::identifyGame()` returns success with the disc/title
-  identity even when zero installed modules match (only genuine *ambiguity*
-  between multiple matching modules is a hard failure). The library entry is
-  created with `moduleId` empty, `ready=false`, `status="Module required"`.
-- **Deferred module resolution**: `IContentProbe::matchModule()` re-runs the
-  same matching logic against an already-known identity, without touching
-  the original content source. `ContentImportService::resolvePendingModule()`
-  calls it for one library entry and applies a match via
-  `LibraryService::applyIdentification()`. `LaunchService::ensureModuleResolved()`
-  calls this automatically at the start of every Play attempt
-  (`SessionController::preparePhase()`, before deciding whether automatic
-  preparation is needed) — a module installed after import is picked up on
-  the very next Play press, no re-import required.
-- **First Play / automatic preparation**: `SessionController` already had a
-  `Preparing` session state/UI card (`launcher/qml/LibraryPage.qml`); this
-  pass makes it real for automatic-preparation modules instead of an
-  effectively-instant passthrough:
-  `PreparationService::usesAutomaticPreparation()` →
-  `checkCache()` (fast, bounded, safe on the UI thread — never compiles) →
-  if stale/missing, `beginPreparation()` (spawns `xenon-prepare` via
-  `QProcess`, polls `--status-file`, emits `progress()`/`finished()`
-  signals) → `SessionController` forwards phase/percent/task into
-  `SessionRecord::progress_phase/progress_message/progress_percent`, shown
-  live in the existing session card, and automatically advances to
-  `Validating`/`Starting` on success — **the user never presses Play twice**.
-  Cancelling a pending session while `Preparing` also cancels the worker.
-  `LaunchService::configurationFor()` itself also consults the cache
-  (`PreparationService::checkCache()`) so `validate()`/`startValidated()`
-  resolve the freshly-prepared module correctly even if called independently
-  of the `SessionController` state machine.
-- A module that ships a native extension directly continues to work exactly
-  as before — none of this is on its path.
+The CEF launcher owns authoritative workflows in `native/application/` and
+the runtime transport in `native/adapters/runtime_adapter.cpp` under
+`launcher-next/`. Its library import, package jobs and runtime-host launch
+path exist. They do not yet connect the complete preparation sequence below.
+
+Remaining integration must:
+
+1. Resolve authoritative content identity and the matching installed module's
+   hint package; registration or a local import receipt is not compatibility proof.
+2. Check the artifact cache, then run `xenon-prepare` as a persisted job when
+   missing/stale, using its existing status-file and cancellation contracts.
+3. Register only validated output and hand it to the existing runtime launch
+   path; failed/cancelled preparation must retain the previous valid artifact.
+4. Report preparation and runtime outcomes separately. A successful build is
+   not a successful guest session.
+
+The former Qt `SessionController`/`PreparationService`/`QProcess` sequence is
+retired. It is not the current launcher's production preparation path. See
+[next integration stages](../../launcher-next/INTEGRATION.md#next-integration-stages)
+for acceptance work, including first-Play handoff and real content mounts.
 
 ## 6. Developer / loose-XEX workflow (preserved, Part 22)
 
@@ -345,8 +343,9 @@ a replacement for developer tooling.
 
 ### Runtime handoff
 
-After preparation resolves a fresh `nativeExtensionPath`, the launcher passes
-the original `contentPath` to `xenon_runtime_host`; it does not rewrite an ISO
+For an already prepared module, the current launch contract passes the
+validated `nativeExtensionPath` and original `contentPath` to
+`xenon_runtime_host`; it does not rewrite an ISO
 into a temporary extracted directory. The host reads the base XEX directly
 from the selected source, mounts the matching source as `game:`/`d:`/`dvd:`,
 loads the prepared native module, and only then publishes a Running state. The

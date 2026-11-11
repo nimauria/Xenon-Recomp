@@ -4,7 +4,7 @@ Xenon is a solo-led, experimental project that is still changing quickly. There 
 
 ## Before you start
 
-- Read the [README](README.md) for the project's current state. No commercial title is playable yet, and most work is in runtime correctness.
+- Read the [README](README.md) for the project's current state and the [documentation guide](docs/README.md) for references and plans. AC6 reaches its first cutscene after the main menu with working audio; cutscene pacing is under repair and no commercial title is confirmed playable.
 - Read [`docs/architecture/PROJECT_STRUCTURE.md`](docs/architecture/PROJECT_STRUCTURE.md) for source ownership, CMake targets and dependency rules, plus the subsystem document under [`docs/`](docs/) for the area you are changing.
 - For a large or architectural change, open an issue first so the approach can be agreed before you write the code.
 
@@ -30,7 +30,7 @@ Xenon is a solo-led, experimental project that is still changing quickly. There 
 - **Keep title knowledge in modules.** Never add hard-coded game checks to the runtime to make one title work. A fix found through one game should become a reusable correction, with regression tests.
 - **Keep one memory truth.** CPU, GPU, DMA, XEX loading, kernel services and devices agree on guest-memory ownership and coherency.
 - **Keep native backends native.** Vulkan and D3D12 consume canonical Xenon state rather than implementing divergent Xbox semantics.
-- **Preserve layer boundaries.** Qt belongs to the launcher, game patches belong to modules, and host APIs do not leak into guest-semantic layers.
+- **Preserve layer boundaries.** CEF belongs to the launcher, game patches belong to modules, and host APIs do not leak into guest-semantic layers.
 - **Respect the scope.** Xenon is an Xbox 360 project only. Support for other consoles is out of scope.
 
 ## AI-assisted contributions

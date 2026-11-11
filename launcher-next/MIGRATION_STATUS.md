@@ -1,11 +1,11 @@
 ﻿# Launcher migration status
 
-6 November 2026. Feature implementation and release acceptance are separate. This is not a claim of 100% cross-platform acceptance or complete framework integration. The first production session connection is tracked in [INTEGRATION.md](INTEGRATION.md).
+Evidence recorded 6 November 2026; consolidated 11 November 2026 after removing superseded migration checklists. Feature implementation and release acceptance are separate. This is not a claim of 100% cross-platform acceptance or complete framework integration. The first production session connection is tracked in [INTEGRATION.md](INTEGRATION.md).
 
 ## Implemented
 
 - Separate Qt-free CEF + React/TypeScript project. The legacy launcher remains locally under ignored `../launcher/`; root launcher builds now select this project.
-- All 183 inventoried legacy methods have a disposition: 137 converted launcher flows and 46 explicit runtime-adapter seams, with zero partial method rows. See [MIGRATION_PARITY.md](MIGRATION_PARITY.md), [MIGRATION_PROPERTIES.md](MIGRATION_PROPERTIES.md) and [FEATURE_PARITY.md](FEATURE_PARITY.md). These counts are not a completion percentage.
+- The completed migration audit accounted for 183 legacy methods: 137 converted launcher flows and 46 explicit runtime-adapter seams, with zero partial method rows. The 55 QML components, 32 properties and 23 feature names were mapped to the new UI, versioned snapshots and `web/features.ts`; the Qt-version property was retired. These historical counts are not a completion percentage or proof of connected runtime providers.
 - Original themes, backgrounds, accents, profiles, library/media/DLC, module lifecycle/settings, captures, jobs, notifications, support and recovery have native implementations and desktop checks.
 - Per-game Graphics, Audio, Controls and Game Options: atomic saving, inheritance/reset controls and active-game locks. Resolution is game, then profile, then launcher defaults; module options remain isolated per game.
 - Dedicated Updates navigation, visible install controls with availability explanations and Downloads' Ready to install section. Packages remain reachable after finished job records are cleared.
@@ -16,7 +16,7 @@
 
 ## Evidence
 
-- Production web bundle builds; 37 frontend tests pass. Discover/Home adds a first-class catalogue, real-state attention shortcuts, immediate Downloads filters and keyboard command scrolling. See [REFINEMENTS.md](REFINEMENTS.md).
+- Production web bundle builds; 37 frontend tests pass. Discover/Home adds a first-class catalogue, real-state attention shortcuts, immediate Downloads filters and keyboard command scrolling. Navigation remembers the selected page, resets document scroll before deep links, and preserves the library's own scrolling. The command palette loads on demand.
 - 22 native Release suites pass on Windows and Linux. Linux desktop builds and sandbox-enabled Xvfb startup/four-language package checks have passed in the existing isolated Ubuntu container. The real Windows host consumed the launch configuration and reported the expected invalid-content error, with logs and saved host selection verified; this is not proof of a running game.
 - Windows desktop checks cover 21 scenarios: demo, game settings, desktop, controller, languages, English/French crash recovery, profiles, media, modules, captures, migration, shell, services, library, jobs, network, presentation, cache, DLC and actions. The latest full run passed 19; controller and media then passed fresh isolated reruns. Initial media failure: Windows directory-rename access denied; originals were preserved. First-run controller timing remains worth monitoring.
 - The actual Windows multiple-file chooser has been tested. Folder/save/cancel interaction needs broader acceptance.
@@ -29,14 +29,22 @@ Migration-baseline Windows review package, before the Discover refinement: `buil
 
 Evidence stays in ignored build logs, `build/desktop-validation-*` and benchmark reports. Nothing has been published.
 
+Discover/Home regression checks use `npm run test:acceptance -- refinements demo shell localization controller desktop`, alongside frontend/native suites. The recorded 6 November refinement evidence includes `build/discover-navigation-check.log`, `build/discover-native.log`, `build/discover-linux.log` and `build/refinement-evidence/`. These are earlier results, not a new test run from this documentation cleanup.
+
+## Compatibility boundaries retained from migration
+
+- Legacy getters/settings now use native-owned versioned snapshots and catalogues. Profile/settings data share `state.json`; unused legacy profile-folder settings remain visible for review. Browser cache follows launcher data, while managed artwork/download cache relocation uses verified jobs and retains prior copies.
+- Feature availability comes from explicit capabilities. Unknown legacy feature names return false. Runtime network status, runtime network configuration and the launcher's own download HTTPS transport remain independent; status fixtures cannot enable production configuration.
+- `features.test.ts`, `profile_cache_tests.cpp`, provider tests and `smoke-profile-cache.mjs` cover these boundaries. Current live-provider work is tracked in [INTEGRATION.md](INTEGRATION.md); fixture evidence is not game compatibility.
+
 ## Remaining acceptance
 
 - macOS compile, app/helper startup, package icon, signing/notarization and native preference discovery. Source/CI exist; no Mac build/runtime result yet.
 - Native diagnostic translations and translator review.
-- Clean-machine distribution, broader Windows/Linux dialogs, lower-end hardware, large artwork libraries, physical controllers, screen readers and high DPI.
+- Clean-machine distribution, broader Windows/Linux dialogs, lower-end hardware, large artwork libraries, physical controllers, screen readers and high DPI. Live OS appearance/high-contrast and preference changes still need the wider platform matrix; desktop emulation alone does not close those gates.
 - Broader permission/filesystem and long-session fault coverage. A recoverable failure does not close a fault-tolerance gate.
 - Preparation, content mounting, live input/filesystem/network management and module ABI/game compatibility acceptance. The real session transport is connected; unrelated service capabilities remain unavailable explicitly. Fixtures execute no game or Xenon code.
 
-## Agreed sequence
+## Current follow-ups
 
-Complete and verify standalone migration, then refine navigation/pages/features and quality of life using Steam, COGBox and GOG as references, then connect the launcher to the rest of Xenon. Per-game settings, Updates/install discoverability and the populated demo are the first refinement slice. Preserve original assets, honest capability states and game/profile isolation.
+The standalone conversion and first Discover/Home refinement are implemented, with the acceptance limits above. Runtime-host session integration is connected; preparation and live-service integration remain separate work. Continue product improvements under the [design direction](DESIGN_DIRECTION.md#planned-product-follow-ups), preserving original assets, honest capability states and game/profile isolation. The renderer and graphics-menu work follows the [active enhancement plans](../docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md).

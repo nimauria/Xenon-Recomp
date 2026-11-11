@@ -7,12 +7,14 @@ given host. Build artifacts belong under `build/` and are not committed.
 
 Install Ninja and the dependencies described in `DEPENDENCIES.md`. The normal
 debug preset enables tests, memory, graphics, audio, and the runtime host.
-Qt 6.6+ is needed to include the launcher; pass its installation prefix when
-configuring. Native Vulkan and DXC targets require their SDKs.
+Native Vulkan and DXC targets require their SDKs. The CEF launcher is built
+and tested separately using [its build guide](../../launcher-next/README.md);
+it does not require Qt. Root `XENON_BUILD_LAUNCHER=ON` selects `launcher-next`
+and requires built web assets and `CEF_ROOT`.
 
 ```sh
 python3 tools/development/build_accountability.py prepare --build-dir build/linux-x64-debug
-cmake --preset linux-x64-debug -DCMAKE_PREFIX_PATH=/path/to/qt/gcc_64
+cmake --preset linux-x64-debug
 cmake --build build/linux-x64-debug --parallel 4
 ctest --test-dir build/linux-x64-debug --output-on-failure
 python3 tools/development/build_accountability.py check --build-dir build/linux-x64-debug

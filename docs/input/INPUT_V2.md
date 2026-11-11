@@ -125,8 +125,11 @@ without changing or invalidating existing v1 consumers.
 
 The host-neutral behavior, extended-device routing, sticky assignments and SDL
 adapter contract are covered by automated tests. SDL3 compilation is validated
-against the repository's managed SDL 3.4 headers and the complete launcher is
-built with the new backend selection and QML metadata.
+against the repository's managed SDL 3.4 headers. Earlier launcher validation
+covered backend selection and QML metadata in the retired Qt frontend; it is
+not evidence of current live input-device management in the CEF launcher.
+See [launcher integration](../../launcher-next/INTEGRATION.md) for the current
+handoff and remaining provider work.
 
 Physical USB/Bluetooth qualification still requires real DualSense, Steam
 Controller and Steam Deck hardware. In particular, Bluetooth firmware,

@@ -30,11 +30,14 @@ silently reused.
 Xenon is still under active development. The dependency system is therefore split deliberately:
 
 - normal developer presets keep `XENON_BUILD_INSTALLER=OFF` and may use `AUTO` or `SYSTEM` dependency resolution;
-- the production presets are opt-in and set `XENON_BUILD_INSTALLER=ON` plus `XENON_DEPENDENCY_MODE=MANAGED`;
-- installer/package validation is only enabled for those production presets;
+- runtime release presets select `MANAGED` native dependencies and keep the retired installer disabled;
+- `XENON_BUILD_INSTALLER=ON` now fails configuration with a retirement message;
+- standalone launcher packaging uses `launcher-next` and its own pinned CEF/dependency tooling;
 - no public release should be published until the runtime itself is declared release-ready.
 
-This means the production machinery can live in the repository now without making every in-progress developer build stage Qt, create installers, or enforce release-compliance gates.
+Runtime dependency resolution, launcher packaging and future combined
+distribution are separate concerns. The old combined Qt installer is not a
+supported build path.
 
 ## Managed release dependencies
 
@@ -48,9 +51,11 @@ The future production release set is pinned in `tools/deps/manifest.json`. These
 | Vulkan-Loader | host Vulkan dispatch | shared |
 | Microsoft DXC | HLSL → DXIL/SPIR-V shader compilation | shared |
 
-The launcher additionally uses a pinned Qt release in release CI. Qt deployment
-is handled by the install/package graph rather than by the native dependency
-bootstrap because it is already a first-class CMake/Qt SDK.
+The launcher uses a pinned CEF SDK fetched by `launcher-next/scripts/fetch-cef.mjs`.
+Its web build requires Node.js (package minimum 22.12; the launcher guide uses
+24 LTS). Qt is not a current dependency. See the
+[launcher guide](../../launcher-next/README.md) for platform prerequisites,
+licence collection and packaging.
 
 ## Audio and Xenia
 
@@ -66,8 +71,8 @@ shared avcodec/avutil libraries enabled.
 
 Windows developer `AUTO` builds may use the vetted static FFmpeg developer
 bundle committed under `third_party/xenon-ffmpeg/windows-x64`. Production
-installers never use that fallback: release presets force the managed shared
-build instead.
+runtime builds in `MANAGED` mode use the managed shared build instead of that
+developer fallback.
 
 ## Vulkan
 
@@ -101,22 +106,24 @@ python tools/deps/bootstrap.py ensure --only dxc
 `--offline` refuses network access and succeeds only when the exact pinned source
 or archive is already cached.
 
-### Windows release-build prerequisites
+### Windows runtime release-build prerequisites
 
 The **build machine**, not the end user, needs:
 
 - Visual Studio 2022 / MSVC developer environment;
 - Python 3.9+, Git, CMake and Ninja;
 - MSYS2 `bash` + `make` for the Xenia FFmpeg configure/make build;
-- NASM for optimized FFmpeg x86-64 assembly (recommended);
-- NSIS for the installer;
-- Qt 6.6+ SDK (release CI currently pins Qt 6.10.3).
+- NASM for optimized FFmpeg x86-64 assembly (recommended).
+
+The standalone launcher additionally needs its Node.js and CEF build inputs;
+it does not use NSIS or Qt.
 
 ### Linux release-build prerequisites
 
-The build machine needs a C/C++ toolchain, Git, Python 3.9+, CMake, Ninja,
-`make`, NASM, `patchelf`, Debian packaging tools, and the normal X11/XCB
-development headers needed to build the Vulkan loader/Qt desktop package.
+The runtime build machine needs a C/C++ toolchain, Git, Python 3.9+, CMake,
+Ninja, `make`, NASM and the platform development headers required by the native
+dependencies. Launcher builds add Node.js, CEF, libcurl and CEF's desktop
+libraries; use its guide and desktop workflow for the complete platform list.
 
 These are build-host requirements only. They are not instructions for users of
 the resulting package.
@@ -128,21 +135,21 @@ Vulkan loader files beside build-tree executables and gives Linux/macOS targets
 an origin-relative runtime search path.
 
 `xenon_install_runtime_dependencies(...)` installs the same runtimes and their
-license material. The runtime host owns these install rules so normal
-`cmake --install` and CPack packages contain the same native payload.
+license material. The runtime host owns these rules for `cmake --install`;
+this does not restore the retired combined installer.
 
-Qt is deployed separately through Qt's supported CMake deployment API on
-Windows. Linux packages add a private Qt runtime and QML/plugin set using
-`tools/release/stage_qt_linux.py` and relative RUNPATHs.
+The standalone launcher stages CEF and its own native dependencies through
+`npm run desktop:package`. Its packages do not yet bundle the Xenon runtime
+or preparation tool; see [integration status](../../launcher-next/INTEGRATION.md).
 
-## Public installer contract
+## Packaging boundary
 
-`XENON_BUILD_INSTALLER=ON` is deliberately strict. Packaging fails unless:
+The old `XENON_BUILD_INSTALLER=ON` contract is retired and rejected by root
+CMake. Current launcher artifacts come from the
+[standalone desktop packaging workflow](../../launcher-next/README.md#distribution-and-self-updating).
+Combined launcher/runtime/tool distribution remains future work. Third-party
+source availability is recorded in [THIRD_PARTY_SOURCE_OFFER.md](../../THIRD_PARTY_SOURCE_OFFER.md).
 
-- `XENON_DEPENDENCY_MODE=MANAGED`;
-- Memory, Filesystem/Kernel, Graphics, Vulkan, DXC, Audio and Input are enabled;
-- the launcher, Vulkan backend and DXC compiler target exist;
-- D3D12 is available for Windows production builds.
-
-See `docs/development/RELEASE_PACKAGING.md` for installer creation, CI validation and
-third-party source availability.
+The planned [XeSS/FSR/DLSS integrations](../graphics/UPSCALING_FRAME_GENERATION_PLAN.md)
+are not managed dependencies yet. Their package pins, capability checks and
+redistribution notices must be added as part of implementation.

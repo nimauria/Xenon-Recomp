@@ -2,7 +2,7 @@
 
 Agreed direction, 28 October 2026: combine Steam's desktop structure, GOG GALAXY's collection browsing and COGBox's focused game/controller flow, expressed through Xenon's existing branding and theme system.
 
-Set this direction during migration so every converted page uses the same hierarchy. Preserve the feature-parity checklist. Introduce larger new product features after the migration gates pass.
+Use this hierarchy across the current launcher. Implementation evidence and remaining acceptance gates are consolidated in [MIGRATION_STATUS.md](MIGRATION_STATUS.md); new features need their own scope and validation.
 
 | Reference | Apply to Xenon |
 |---|---|
@@ -20,7 +20,7 @@ Set this direction during migration so every converted page uses the same hierar
 - Downloads is the operation centre; its progress remains reachable from the application shell.
 - Settings and Support stay at the bottom of navigation. Developer filesystem/network tools remain an optional group.
 
-Navigation order: Browse (Home, Library, Discover, Captures), Manage (Modules, Profiles), Activity (Downloads, Updates), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences. Discover owns catalogue browsing, Modules owns installed module management, Downloads owns operations and ready packages, and Updates owns release discovery and update actions. See [REFINEMENTS.md](REFINEMENTS.md) for the current pass and scoped follow-ups.
+Navigation order: Browse (Home, Library, Discover, Captures), Manage (Modules, Profiles), Activity (Downloads, Updates), optional Developer tools, then Settings/Support. Preserve saved startup-page preferences. Discover owns catalogue browsing, Modules owns installed module management, Downloads owns operations and ready packages, and Updates owns release discovery and update actions. Current implementation evidence is in [MIGRATION_STATUS.md](MIGRATION_STATUS.md).
 
 ## Shared visual rules
 
@@ -30,11 +30,18 @@ Use restrained desktop spacing and readable text. Prefer a clear selected-game a
 
 A coherent Xenon interface takes priority over reproducing individual applications pixel for pixel. Reference product behaviour and hierarchy; retain Xenon's own assets and implementation.
 
-## Sequence
+## Planned product follow-ups
 
-During migration: establish shell/navigation, shared controls, game presentation and theme application; keep converting the existing functions and testing their actual native behaviour.
+Per-game settings, explicit install actions, the populated developer demo and the first Discover/Home refinement exist. Runtime-host integration is connected; live preparation/content/service work is tracked in [INTEGRATION.md](INTEGRATION.md).
 
-After standalone migration, refine pages, navigation and quality of life before connecting real Xenon providers. The first slice adds per-game Graphics/Audio/Controls/Game Options, explicit install actions and a populated opt-in developer demo. Assess saved collections, richer dashboard shelves, save backups or mod management separately; they are not existing capabilities.
+The remaining product ideas are planned, not implemented:
+
+1. Saved library views/collections with per-profile queries, sorting and filters; renaming or deleting a collection must not move game files.
+2. A Storage page combining managed destinations, cache locations and available space, with background size scans and explicit move previews.
+3. A selected-game workspace grouping Overview, Game settings, Add-ons and Captures around a stable header, with controller focus and unsaved-change guards.
+4. A single-step package workflow chaining release check, verified download and explicit installation through persisted jobs, with cancellation/retry and interrupted-state recovery.
+
+Release acceptance remains in [MIGRATION_STATUS.md](MIGRATION_STATUS.md#remaining-acceptance). Save backups or mod management need separate scope. New pages should consolidate a real workflow. These product follow-ups do not implement renderer features or live Xenon providers.
 
 ## References reviewed
 

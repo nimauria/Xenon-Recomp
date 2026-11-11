@@ -234,24 +234,29 @@ from a pinned upstream revision. Mixer, XMA-context/MMIO, render-system, and
 xboxkrnl export regression tests have passed in prior Audio V1 validation; the
 export path has also passed ASan/UBSan.
 
-Release qualification still requires a real SDL3 device plus a real compatible
-FFmpeg build, and an actual Ace Combat 6 module/assets to prove title-level
-initialize/stream/play behavior with compressed game data. The current Xenon
-kernel also has no general APU interrupt-controller delivery API; therefore
+**Current AC6 result (11 November 2026):** the project owner reports fully
+working audio while loading through the main menu into the first cutscene.
+The earlier silence/attenuation symptoms below are historical, not current
+audio blockers. Cutscene frame rate/pacing is being fixed separately. This
+documentation update records that runtime report; it did not rerun playback.
+Gameplay and full-title audio coverage remain unconfirmed.
+
+Broader release qualification still requires representative playback on real
+SDL3 devices with the supported FFmpeg builds and additional titles. The
+current Xenon kernel also has no general APU interrupt-controller delivery API; therefore
 `interrupt_when_done` is propagated correctly to the decoder completion sink,
 but turning that request into a guest hardware interrupt is a kernel-level
 prerequisite rather than an audio-local implementation. AC6 reference paths
 examined for Audio V1 do not establish that this interrupt delivery is required.
 
-Until real-title playback has been performed, Audio V1 should be treated as
-code-complete for the common path but not title-qualified. Do not replace that
-qualification with a null backend, fake-success exports, or a game-specific AC6
-audio engine.
+Working AC6 playback qualifies the tested sequence, not every audio feature or
+title. Keep broader qualification grounded in real playback rather than a null
+backend, fake-success exports, or a game-specific AC6 audio engine.
 
-### Real-title investigation, 2026-10-29
+### Historical real-title investigation, 2026-10-29
 
-AC6 has now been launched against the real SDL/FFmpeg path. It is **not audio
-qualified**: the captured startup contains silence followed by very quiet
+At this earlier snapshot, AC6 was launched against the real SDL/FFmpeg path
+but was **not yet audio qualified**: the captured startup contained silence followed by very quiet
 output (submitted peak about 0.002492), while decoded XMA peaks reach about
 0.373. Probes confirmed that the XMA-to-float conversion can preserve normal
 sample levels; an isolated execution of the generated unity-gain mixing
@@ -267,7 +272,7 @@ a register and therefore was not a valid control for compiled execution.
 `xenon_cpu_vector_audio` checks independent expected values through generated
 native code and the interpreter, including PCM signs and fused cancellation.
 
-Remaining title-level work is to trace the gain and playback state preceding
-the final mixing stage and establish the startup timing. Unit-test success
-does not establish audible AC6 playback; its graphical startup defects also
-remain unresolved.
+That pass left tracing the gain/playback state before final mixing and startup
+timing as follow-up work. The current working-audio report supersedes that
+blocker; these measurements remain useful as regression evidence. Unit-test
+success alone does not establish audible playback.

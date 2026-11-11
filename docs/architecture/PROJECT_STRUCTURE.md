@@ -50,8 +50,9 @@ builds and works. Documentation does not override those sources of truth.
 | Network service client | `include/xenon/network/` | `src/network/` | `xenon_network` |
 | Recompiler and analysis | `include/xenon/recomp/` | `src/recomp/` | `xenon_recomp` |
 
-`tools/` contains host utilities and dependency/release tooling. `launcher/`
-contains the Qt UI and its own tests. `runtime_host/` contains the guest-running
+`tools/` contains host utilities and dependency/release tooling. `launcher-next/`
+contains the CEF + React/TypeScript launcher and its own tests. The retired Qt
+`launcher/` tree is local, ignored and outside the current build. `runtime_host/` contains the guest-running
 process. `tests/` follows the owner above, and `third_party/` holds committed
 third-party material. Empty or reserved source directories do not imply a
 working subsystem.
@@ -141,8 +142,10 @@ tests).
 
 D3D12 and XInput compile on Windows. Vulkan and DXC require their native SDKs.
 Audio requires SDL3 and XMA-capable FFmpeg. SDL3 input support follows
-available SDKs. The launcher requires Qt 6.6+ and its GUI dependencies; the
-runtime host uses SDL3 for presentation. Configuration can omit optional
+available SDKs. The launcher requires built web assets and the pinned CEF SDK;
+Node.js is used at build time, with native HTTPS using WinHTTP on Windows and
+libcurl elsewhere. See the [launcher build guide](../../launcher-next/README.md).
+The runtime host uses SDL3 for presentation. Configuration can omit optional
 targets, so a passing build of one configuration does not establish coverage
 of another platform or feature.
 

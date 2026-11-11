@@ -8,11 +8,20 @@ need things a 2005-era console renderer never produced:
 - the lit scene colour and depth before post-processing;
 - a clear boundary between the 3D scene and the HUD and menus.
 
-The HUD stays sharp at output resolution and is never interpolated.
+The design goal is to keep the HUD sharp at output resolution and out of
+interpolation; composition still needs implementation and validation.
 
-Xenon provides all of this generically, from the guest's GPU command
-stream. A game module supplies only a small per-revision data file that says
-where its game keeps the camera, its lit scene and its HUD.
+Xenon currently provides temporal maths, revision profiles, pass
+classification and probes over the guest GPU command stream. It does not yet
+produce GPU motion buffers, apply jitter, run an upscaler or generate frames.
+A game module can supply a per-revision data file identifying camera, scene
+and HUD candidates; classification alone does not prove usable motion or
+correct composition for every title.
+
+The delivery sequence and quality gates are in the
+[upscaling/frame-generation plan](UPSCALING_FRAME_GENERATION_PLAN.md), with
+[catalogue-wide support](UNIVERSAL_RENDERING_SUPPORT_PLAN.md) and
+[launcher settings](LAUNCHER_GRAPHICS_MENU_PLAN.md) specified separately.
 
 ## The split
 
@@ -21,7 +30,7 @@ where its game keeps the camera, its lit scene and its HUD.
 | Halton jitter sequence and phase count (`temporal.hpp`) | which vertex constants hold the view-projection matrix, and their layout |
 | perspective detection, camera parameters, camera cuts | camera-cut thresholds, camera-position constant for camera-relative games |
 | per-draw classification: scene, screen-space scene, scene-colour resolve, post-process, HUD (`temporal_frame.hpp`) | lit-scene colour formats, optional scene depth tile |
-| reprojection matrix and camera motion from depth | which shaders begin the HUD |
+| reprojection matrix and reference camera-motion arithmetic from depth (no GPU motion pass yet) | which shaders begin the HUD |
 | the temporal probe that discovers the module's values | |
 
 The module data is `rendering.json` in the module's hint package, at
@@ -60,14 +69,14 @@ Vulkan. A frame ends at the front-buffer swap that shows it.
    - A frame that reaches its scene-colour resolve fixes the depth target for
      later frames. A profile can also pin it with `scene.depthTile`.
 2. **Scene** draws use that exact matrix and test against the scene depth.
-   They are the draws that get jitter.
+   They are candidates for jitter once the GPU integration is implemented.
    - Other draws into the scene depth are **screen-space scene** draws, such
      as lighting and fog quads. They are not jittered, because their depth
      lookups would shift.
    - Everything else before the scene-colour resolve is **offscreen**.
 3. The **scene-colour resolve** copies out the scene's colour target, the
-   colour target bound with the camera draws. This is where a temporal
-   upscaler runs.
+   colour target bound with the camera draws. This is a candidate boundary
+   for a future temporal upscaler; no provider dispatch runs here yet.
 4. After it, draws are **post-process** until the first draw using a
    profile HUD shader. From that draw on, everything is **HUD**.
 5. A frame has no usable history (`reset`) in any of these cases:
@@ -108,11 +117,14 @@ then gets a `[TemporalProbe]` report every 60 frames.
 
 Nothing yet changes what is rendered.
 
-**Deferred:** the steps below wait until Ace Combat 6 runs correctly, the
-first game whose profile will be measured. Until then this groundwork only
-observes.
+**Real-title validation gate:** AC6 now loads through the main menu into the
+first cutscene with fully working audio (owner report, 11 November 2026).
+Cutscene frame rate/pacing is being fixed; gameplay remains unconfirmed.
+Enhancement qualification requires correct baseline images and timing for the
+tested scenes. Shared contracts and synthetic GPU work can proceed independently.
 
-**Next, in order:**
+**Planned GPU work:** the linked implementation plan defines the delivery
+order, dependencies and acceptance gates. The main missing pieces are:
 
 1. **Jitter.** Offset the viewport of scene draws by the frame's jitter,
    applied as an IR rewrite before the backend, so it is backend-independent.
@@ -122,11 +134,13 @@ observes.
    reprojection matrix to the scene depth (`temporal::camera_motion` is the
    reference arithmetic).
 3. **Upscaler providers** behind one interface:
-   - FSR, from AMD's FidelityFX SDK, MIT;
-   - XeSS, from Intel's SDK, under its own licence;
-   - DLSS, from NVIDIA's SDK, under the RTX SDK licence.
+   - FSR, from AMD's SDK;
+   - XeSS, from Intel's SDK;
+   - DLSS, from NVIDIA's SDK.
 
-   SDK binaries are fetched by the dependency resolver and never committed.
+   Dependency-resolver integration is planned; SDK revisions, licences and
+   redistribution terms must be recorded per selected package. Vendor binaries
+   are to stay out of source control.
    Native-resolution anti-aliasing (render size = output size) comes first;
    it needs no scaled rendering.
 4. **Scaled 3D passes.** Render scene targets below output resolution while
@@ -135,6 +149,8 @@ observes.
    so that interpolated frames get the HUD composited on top rather than
    interpolated.
 
-The design follows the published approach of COGBox (Gears of War static
-recompilations, MIT). Those projects show this classification is enough for
-FSR, DLSS and XeSS on real Xbox 360 renderers. No COGBox code is copied.
+COGBox's Gears rendering integrations are research references, as recorded in
+the implementation plan. They do not establish that Xenon's classifier alone
+is sufficient for dynamic-object motion, multiple views or interleaved HUDs.
+Those inputs and composition paths require independent implementation and
+validation. No COGBox code is copied in this groundwork.

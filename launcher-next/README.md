@@ -42,6 +42,17 @@ The original registry/catalogue schema, cached/bundled entries, native HTTPS, ve
 
 The production session bridge can now use the real Xenon runtime host. Settings → Runtime selects a host; an explicit `--runtime-host` or a host beside the launcher is also supported. See [INTEGRATION.md](INTEGRATION.md) for running, verified evidence and the remaining preparation/content/live-service work. Native-message translation, Mac and broader accessibility/distribution checks remain open. Optional Discord presence has an opt-in local IPC provider.
 
+## Planned graphics controls
+
+The [graphics menu plan](../docs/graphics/LAUNCHER_GRAPHICS_MENU_PLAN.md)
+describes global/per-game reconstruction, frame-generation controls and
+reporting of the active renderer state. It accompanies the
+[shared XeSS/FSR/DLSS plan](../docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md)
+and [per-game rendering support plan](../docs/graphics/UNIVERSAL_RENDERING_SUPPORT_PLAN.md).
+These controls and SDK integrations are planned, not implemented launcher
+features. The existing runtime-host bridge does not establish enhancement
+support or title playability.
+
 ## Native builds and validation
 
 ```powershell
@@ -89,7 +100,7 @@ The converters read the original launcher and write only this folder. C++ servic
 
 Re-running those legacy converters requires the locally retained `../launcher` sources; normal builds use the converted contracts and assets already in this project.
 
-The baseline [migration plan](MIGRATION_PLAN.md) and [legacy inventory](LEGACY_INVENTORY.md) are retained here. Conversion scripts also require that local source tree. Full parity, platform, migration and packaging gates remain open.
+The completed migration inventory is summarised in [MIGRATION_STATUS.md](MIGRATION_STATUS.md), alongside remaining platform, migration and packaging acceptance. Legacy conversion scripts still require the local source tree; normal builds do not.
 
 Additional isolated desktop checks: `node scripts/smoke-profiles.mjs` (requires the explicit runtime fixture), `node scripts/smoke-captures.mjs`, `node scripts/smoke-migration.mjs`, and `node scripts/smoke-crash.mjs`. Test windows are closed when each check finishes; they are separate from the normal launcher. For network checks, generate `node scripts/create-network-fixtures.mjs`, start with `--fixture-network="<absolute build/network-fixtures>"` and run `npm run test:network`.
 
@@ -101,9 +112,9 @@ Automatic replacement is offered only by a marked packaged Windows installation,
 
 `create-updater-fixture.mjs <old-payload> <new-package.zip>` and `smoke-updater.mjs` exercise isolated real package replacement. Additional checks are `test:library`, `test:services`, `test:shell`, `scripts/smoke-parity-actions.mjs`, `scripts/smoke-dlc-catalog.mjs` and `scripts/smoke-startup-failure.mjs <isolated-fixture-data>`. Chooser selection remains a manual gate; automated content fixtures use native RPC.
 
-See [the individual parity audit](MIGRATION_PARITY.md) and [current migration gates](MIGRATION_STATUS.md). The original 183 invokable methods and 55 QML components are accounted for; remaining partial flows and platform/performance/accessibility gates are explicitly open.
+See the [current migration evidence and gates](MIGRATION_STATUS.md). The original 183 invokable methods and 55 QML components were accounted for; platform/performance/accessibility and live-provider acceptance remain open.
 
-`npm run test:media` and `npm run test:modules` require fresh isolated desktop instances with the explicit fixture host and debug endpoint described above. They exercise grouped discs/primary launch sources, metadata/unsaved changes, separate test activity, API declaration checks and owned-module uninstall. Their source paths and deletion requests use native RPC; the operating-system picker remains a separate acceptance gate. Native Release checks include twenty-one suites. See [JOBS.md](JOBS.md) for ownership, cancellation and interrupted-deletion behaviour, and [the property audit](MIGRATION_PROPERTIES.md) for individual legacy getter dispositions.
+`npm run test:media` and `npm run test:modules` require fresh isolated desktop instances with the explicit fixture host and debug endpoint described above. They exercise grouped discs/primary launch sources, metadata/unsaved changes, separate test activity, API declaration checks and owned-module uninstall. Their source paths and deletion requests use native RPC; the operating-system picker remains a separate acceptance gate. See [JOBS.md](JOBS.md) for ownership, cancellation and interrupted-deletion behaviour, and [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for recorded suite results and compatibility boundaries.
 
 `npm run test:presentation-paths -- build/presentation-paths-network` additionally requires a local network fixture generated with `node scripts/create-network-fixtures.mjs build/presentation-paths-network` and the desktop arguments `--fixture-network="<absolute fixture folder>" --fixture-host="<absolute fixture host>"`. It checks catalogue text/artwork/DLC refresh, unsaved-edit protection, storage defaults/reset, decoded captures, build information and launch paths. Use a new isolated data directory; omit `--offline` so the explicit network fixture is selected. No real network service is used.
 
@@ -113,7 +124,7 @@ Settings > Paths shows working destinations separately from fixed launcher stora
 
 Profile names use pinned Unicode 17.0 data in both native and preview validation. The mapping is locale-independent scalar lowercase with Unicode whitespace trimming, preserving display names and the 48 UTF-16-unit limit; it does not add case folding or Unicode normalization. Metadata edits to older Unicode-equivalent display names remain possible without forced renaming, while new duplicates are rejected. `node scripts/generate-profile-unicode.mjs` reproduces both tables using a Node build with Unicode 17.0. Normal builds use the checked-in data and do not regenerate it. The Unicode licence ships with the package. The baseline is the original locale-independent [QString lowercase policy](https://doc.qt.io/qt-6/qstring.html#toLower); the new launcher has no Qt dependency.
 
-All 23 old frontend feature names and current provider gating are recorded in [FEATURE_PARITY.md](FEATURE_PARITY.md). Runtime network status, runtime network configuration and the launcher's own update transport have separate availability.
+Legacy feature names map through `web/features.ts` to explicit capability gates. Runtime network status, runtime network configuration and the launcher's own update transport have separate availability. Unknown names return false; the [status record](MIGRATION_STATUS.md#compatibility-boundaries-retained-from-migration) summarises the preserved boundaries.
 
 The [performance record](PERFORMANCE.md) includes process-startup samples and isolated 0/100/1,000/10,000-entry library measurements, runners and limits. Platform, total-memory and physical-input acceptance remain open.
 
@@ -125,7 +136,7 @@ Demo files stay below `build/demo/`; normal launcher data is separate. No sample
 
 Updates is a dedicated page for launcher/module releases. Download and Install controls remain visible with explanations when unavailable. Downloads also lists verified packages that are ready to install, including packages whose old job records were cleared.
 
-Discover exposes catalogue search and platform/installed/downloaded filters as a normal page. Home's Needs attention shortcuts lead to ready packages, updates, failed jobs and missing sources. See [REFINEMENTS.md](REFINEMENTS.md) for current changes and recommended next slices.
+Discover exposes catalogue search and platform/installed/downloaded filters as a normal page. Home's Needs attention shortcuts lead to ready packages, updates, failed jobs and missing sources. See [current evidence](MIGRATION_STATUS.md) and [planned product follow-ups](DESIGN_DIRECTION.md#planned-product-follow-ups).
 
 ## Per-game settings and repeatable acceptance
 

@@ -22,7 +22,7 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 >
 > Xenon is under active development. Much of the core infrastructure is implemented and covered by automated tests, but running commercial games is still experimental. **No commercial Xbox 360 game is currently confirmed playable**, and there is no public release or release date. You cannot yet download Xenon and play your Xbox 360 library with it.
 >
-> The first title, Ace Combat 6, now boots through its logos and plays its intro movie at the game's native frame rate. It reaches the main menu; controller input, loading past the first menu screen and gameplay have not been tested yet. See [Current milestone](#current-milestone-project-gracemeria).
+> The first title, Ace Combat 6, now loads through the main menu into the first cutscene. Audio is fully working in the tested sequence. A cutscene frame-rate/pacing issue is actively being fixed; gameplay is not yet confirmed. See [Current milestone](#current-milestone-project-gracemeria).
 
 > [!NOTE]
 > Xenon does not distribute Xbox 360 games, executables, firmware, title updates, DLC, encryption keys or any other proprietary content. You must supply content from lawful sources.
@@ -51,19 +51,25 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 
 **Project Gracemeria** is the integration effort for *Ace Combat 6: Fires of Liberation*. It is the first real title used to exercise the whole stack.
 
-Where it stands on the `development-restructure` branch:
+Current status, updated 11 November 2026 from the project owner's runtime testing:
+
+- **The game loads through the main menu into the first cutscene.** Progress is beyond the earlier main-menu milestone; gameplay and full-title compatibility are not yet confirmed.
+- **Audio is fully working in the tested sequence.** The earlier silence/attenuation investigation no longer describes the current result.
+- **Cutscene frame rate/pacing is the active issue and is being fixed.** Earlier measurements of evenly paced intro playback do not establish correct pacing for the current post-menu cutscene.
+
+Earlier integration milestones on `development-restructure`:
 
 - The game is prepared, and its recompiled guest code runs on the shared runtime. Guest threads, the GPU command pump and audio callbacks keep running.
 - **First graphical output: the Namco Bandai boot logo is drawn and presented** through the Direct3D 12 backend (28 October 2026). Getting there took generic fixes, not AC6 special cases. Shader ALU operands are now decoded as Xenos encodes them (component-relative swizzles, scalar operations reading source 3), vertex fetch indices are converted numerically, and scan-out applies the front buffer's swizzle.
 - **Boot to the logos in about 3 seconds.** The first frame is presented about 1.5 s after launch, and the first visible logo appears after about 3.2 s; the rest is the game's own fade-in. This comes from compiling switch tables and callbacks rather than interpreting them, inline guest-RAM access in generated code, and import dispatch through a per-thunk index.
-- **The logos run at 60 fps and the intro movie at its native 30 fps, evenly paced** (29 October 2026). DXGI frame statistics show each movie frame held for exactly two display refreshes. The fixes are all generic:
+- **An earlier intro playback run measured logos at 60 fps and the intro movie at its native 30 fps, evenly paced** (29 October 2026). DXGI frame statistics showed each movie frame held for exactly two display refreshes in that run. These historical measurements are separate from the current cutscene pacing issue. The fixes were all generic:
   - utility shaders are compiled once per process;
   - EDRAM depth moves between native owners on the GPU;
   - a VdSwap flip takes effect where the command processor reaches it, not when the CPU calls VdSwap;
   - guest vblanks are locked to the display's refresh;
   - the vblank interrupt waits until the frame it ends has been scanned out;
   - textures are read as guest memory stood at the GPU's last synchronisation with the CPU, so the movie decoder can no longer overwrite planes a draw is about to sample.
-- **The main menu is reached.** Not yet tested: controller input in the menus, loading past the first menu screen, gameplay, and frame rates above the game's own. Running AC6 at 60 fps or more needs a game-specific change to its frame pacing and simulation step, which belongs in the Project Gracemeria module. Audio callbacks run continuously through the intro; audio output quality is still being checked.
+- **The main menu was reached before the current post-menu cutscene milestone.** Frame rates above the game's own remain unvalidated. Changes to AC6's simulation step or title-specific frame cap belong in the Project Gracemeria module; generic presentation and timing fixes belong in Xenon.
 
 Any fix belongs in generic runtime code with its own tests, not in an Ace Combat 6 special case. The earlier runtime investigation is in [`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`](docs/runtime/AC6_RUNTIME_INVESTIGATION.md).
 
@@ -108,6 +114,7 @@ Status labels:
 - **Tested infrastructure:** implemented, with automated tests that run in CI.
 - **Implemented foundation:** the core functionality exists, but testing is partial or the feature is not yet connected end to end.
 - **Integration ongoing:** being connected to real-title execution, where open problems remain.
+- **Working in tested AC6 sequence:** confirmed in the reached AC6 flow; broader title coverage remains open.
 - **Under active development:** substantial work is still in progress.
 - **Experimental:** works in limited, developer-controlled conditions.
 - **Planned:** does not exist yet.
@@ -118,12 +125,13 @@ Status labels:
 | Memory V2 | Tested infrastructure | 512 MiB unified physical RAM, Xbox address-space aliases, page protection, MMIO, load-reserve/store-conditional, host VM integration and CPU/GPU coherency notifications. |
 | XEX loading | Implemented foundation | XEX1/XEX2 headers, AES decryption, Basic/LZX/delta decompression, imports/exports/TLS/relocations and title updates. Exercised with Ace Combat 6. Wider retail qualification remains. |
 | Recompilation analysis and generation | Implemented foundation | Function discovery, control-flow and value analysis, module hints, sharded C++ generation and a content-addressed cache (Gen 5–11). Exercised on Ace Combat 6. Not shown to be reliable across retail titles generally. |
-| Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Thread, event and wait behaviour under a real title is part of the open AC6 investigation. |
+| Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Exercised by AC6 through the main menu into the first cutscene; wider title and gameplay validation remains. |
 | Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL3 presentation. |
-| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay are covered by subsystem tests. Renders and presents AC6's boot logos and intro movie at the game's native frame rate, with flips, vblanks and texture reads timed as on hardware. Reaches the main menu; in-game 3D is not yet reached. |
+| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay have subsystem coverage. AC6 loads through the main menu into the first cutscene. Cutscene frame rate/pacing is being fixed; gameplay rendering remains unconfirmed. |
 | Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Shares all command handling with Direct3D 12, including GPU-side EDRAM tile transfers. Not yet shown rendering a commercial title. |
-| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. Runs AC6's boot logos and intro movie at native frame rate. |
-| Audio and XMA | Implemented foundation | SDL3 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, all with regression tests. AC6's audio callbacks run continuously through its intro; output quality is still being verified. |
+| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. AC6 reaches the first cutscene after the main menu; cutscene frame rate/pacing remains under repair. |
+| Temporal enhancements | Planned; analysis groundwork implemented | Temporal maths, revision profiles, pass classification and probes exist. XeSS/FSR/DLSS upscaling, native AA, frame generation and their launcher controls are planned, with per-title validation and fallback gates. |
+| Audio and XMA | Working in tested AC6 sequence | SDL3 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, with regression coverage. Audio is fully working through the tested post-menu cutscene sequence; broader title qualification remains. |
 | Input | Implemented foundation | SDL3 controllers (Valve's Steam Controller included, without Steam), XInput on Windows, keyboard and mouse used interchangeably with a controller, profiles, HOTAS mapping and XAM guest marshalling. |
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
@@ -132,7 +140,7 @@ Status labels:
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
-**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation is what exposes incorrect Xbox assumptions, and so far it has been performed only on Ace Combat 6, which has reached its main menu; input, loading past the first menu screen and gameplay are untested.
+**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation has so far focused on Ace Combat 6, which loads through the main menu into the first cutscene with working audio. Cutscene frame rate/pacing is being fixed, and gameplay is not yet confirmed.
 
 ---
 
@@ -220,7 +228,7 @@ XEX parsing → function discovery → control-flow analysis
 
 **Module hints** let a game project supply function boundaries, known symbols, data regions, hooks and patches. They never provide PowerPC semantics. An **instruction hook** runs a module's own C++ routine before or after one guest instruction, with full access to guest registers and memory, and can jump or return when it returns true. The module ships the routine's source and Xenon compiles the call into that function ([details](docs/recomp/RECOMPILATION_PIPELINE.md#instruction-hooks)).
 
-**Automatic game preparation.** `xenon-prepare`, which the launcher drives, accepts a disc image, an extracted folder or a loose XEX. It discovers every executable module, then analyses, generates, compiles and validates each one. The result goes into a **content-addressed cache** keyed by the effective (decrypted, title-update-patched) image, the module and its hints, Xenon's generated-code ABI, the build configuration and the compiler, so unchanged modules are not rebuilt. Preparation still needs a C++ toolchain on the local machine (MSVC or Build Tools on Windows; a C++20 compiler and CMake on Linux). Xenon does not bundle one yet.
+**Automatic game preparation.** The existing `xenon-prepare` worker accepts a disc image, an extracted folder or a loose XEX. It discovers every executable module, then analyses, generates, compiles and validates each one. The result goes into a **content-addressed cache** keyed by the effective (decrypted, title-update-patched) image, the module and its hints, Xenon's generated-code ABI, the build configuration and the compiler, so unchanged modules are not rebuilt. Connecting this worker to the CEF launcher's persisted jobs and first-Play handoff remains [integration work](launcher-next/INTEGRATION.md#next-integration-stages). Preparation still needs a C++ toolchain on the local machine (MSVC or Build Tools on Windows; a C++20 compiler and CMake on Linux). Xenon does not bundle one yet.
 
 The standalone tools (`recomp-driver`, `ppc-disasm`, `ir-dump`, `import-scanner` and `module-inspector`) share the same analysis and are useful for inspecting a title. They accept a disc image or extracted folder as well as a loose XEX. `hint-port` carries a module's hints to another revision of the same title, such as another region's disc, by aligning the two executables ([details](docs/recomp/RECOMPILATION_PIPELINE.md#porting-hints-to-another-revision)).
 
@@ -264,19 +272,25 @@ The hardware samples textures microseconds after the command processor passes a 
 **What has been demonstrated:**
 
 - subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI;
-- Ace Combat 6's boot, logos and intro movie rendered and presented through Direct3D 12 at the game's native frame rate.
+- Ace Combat 6's boot, logos, intro movie, main menu and loading into the first post-menu cutscene through Direct3D 12. Cutscene frame rate/pacing is an active issue.
 
-**What has not:** input, loading past the first menu screen, or in-game 3D rendering. Replaying captured retail command streams is also still outstanding.
+**What remains unconfirmed:** gameplay rendering and sustained play. Replaying captured retail command streams is also still outstanding.
 
-See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md), [`TEMPORAL_RENDERING.md`](docs/graphics/TEMPORAL_RENDERING.md) (upscaling and frame-generation groundwork) and the validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
+See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the historical validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
+
+### Planned upscaling and frame generation
+
+The existing [temporal groundwork](docs/graphics/TEMPORAL_RENDERING.md) observes camera and pass information; it does not yet change rendered output. The new [XeSS, FSR, DLSS and frame-generation plan](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md) stages shared GPU inputs, FSR native AA on D3D12, scaled rendering, XeSS/DLSS reconstruction, then frame generation and Vulkan integration. Reconstruction and frame generation are intended to be independently selectable where validated.
+
+The [universal rendering support plan](docs/graphics/UNIVERSAL_RENDERING_SUPPORT_PLAN.md) covers per-revision assessment, motion and HUD quality, capability reporting and fallbacks for every game. The [launcher graphics menu plan](docs/graphics/LAUNCHER_GRAPHICS_MENU_PLAN.md) covers global/per-game settings and the actual active feature state. These are plans, not available renderer features or launcher controls. Real-title enhancement validation requires correct baseline rendering and pacing; generic groundwork can proceed independently.
 
 ### Audio
 
 Audio V1 implements the Xbox render-driver and XMA context semantics in Xenon. That includes XMA packet and frame decoding through a pinned, Xenia-maintained FFmpeg build that exposes `XMAFRAMES`, plus bounded voice mixing and resampling, and an SDL3 host output device. There is deliberately no silent null backend.
 
-The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations. In Ace Combat 6 the callbacks run continuously through the intro, at about 181 per second against the reference recompilation's 187.
+The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations.
 
-Mixer, XMA and export regression tests pass. **AC6's audio output is still being verified**: some XMA decode errors and the music's timing are open. See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md).
+Mixer, XMA and export regression tests cover the shared audio path. **AC6 audio is fully working in the tested sequence through the first cutscene after the main menu**, as reported by the project owner on 11 November 2026. The active cutscene issue concerns frame rate/pacing. See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md) for current scope and historical investigation evidence.
 
 ---
 
@@ -400,7 +414,7 @@ cd launcher-next
 npm run desktop:package
 ```
 
-Windows produces a portable ZIP; Linux/macOS produce a tar.gz with checksum and dependency notices. These packages contain the standalone launcher; runtime integration is a separate milestone. Publication requires a `launcher-vX.Y.Z` tag and repository variable `XENON_LAUNCHER_RELEASES_ENABLED=true`. See [`launcher-next/README.md`](launcher-next/README.md). The old combined Qt installer pipeline is retired.
+Windows produces a portable ZIP; Linux/macOS produce a tar.gz with checksum and dependency notices. These packages contain the standalone launcher. The production runtime-host bridge is connected; preparation/content integration and bundled runtime distribution remain separate work. Publication requires a `launcher-vX.Y.Z` tag and repository variable `XENON_LAUNCHER_RELEASES_ENABLED=true`. See [`launcher-next/README.md`](launcher-next/README.md) and [`INTEGRATION.md`](launcher-next/INTEGRATION.md). The old combined Qt installer pipeline is retired.
 
 </details>
 
@@ -417,7 +431,7 @@ Runtime changes use the following workflows; launcher changes additionally have 
 | [Overall CI](https://github.com/nimauria/Xenon-Recomp/actions/workflows/ci.yml?query=branch%3Adevelopment-restructure) | Coverage-asset checks, focused ASan/UBSan tests, and agreement of the Windows and Linux results for the same commit |
 | [Launcher desktop](.github/workflows/release-launcher.yml) | Separate Windows/Linux/macOS launcher builds, native/frontend/desktop checks and package artifacts; remote results remain unverified until run |
 
-CI does not skip or filter failing tests. For historical context: on 9 October 2026, Linux passed 149 of 149 tests and Windows passed 147 of 148. The one Windows failure was `xenon_backend_capability_tests`, the D3D12 capability test, which reported DirectX debug-layer messages. Because Overall CI requires both platforms to pass, it failed as well. The badges are the current source of truth.
+CI does not skip or filter failing tests. Use the linked workflow results for the current revision; older test totals and failures are historical snapshots, not current build status. The graphics [validation log](docs/graphics/VALIDATION.md) retains scoped results from earlier passes.
 
 ### Implementation coverage dashboard
 
@@ -453,7 +467,7 @@ The intended user workflow is **Import → Analyse → Recompile → Prepare →
 | 5. Recompile into native build artifacts | **Exists**, but it needs a C++ toolchain on the local machine. |
 | 6. Produce a platform-compatible native module | **Host platform only.** Windows or Linux x86-64; there is no cross-compilation. |
 | 7. Validate and cache the artifacts | **Exists.** Staged build, validation, then promotion into a content-addressed cache. |
-| 8. Register the game in Xenon Launcher | **Implemented foundation.** Library import, plus preparation progress and cancellation. |
+| 8. Register the game in Xenon Launcher | **Implemented foundation.** Library import exists; connecting preparation jobs, progress, cancellation and cached-module registration remains in progress. |
 | 9. Launch through the shared runtime | **Integration ongoing.** No title is confirmed playable. |
 
 Three different outcomes need to be kept apart: **a game that recompiles is not necessarily a game that runs, and a game that runs is not necessarily playable.** Preparation can succeed for a title the runtime cannot yet execute correctly. Future work aims to remove the manual toolchain requirement and to make the workflow reliable for supported games. The full consumer workflow is not production-ready. See [`GAME_PREPARATION.md`](docs/development/GAME_PREPARATION.md).
@@ -499,7 +513,7 @@ Xenon Launcher is intended to become the main way users manage their recompiled 
 **Existing launcher infrastructure:**
 
 - a Qt-free library with move-or-keep import, multi-disc and multi-region media, per-game settings and accumulated play time;
-- preparation progress and cancellation, driven through the same `xenon-prepare` worker that is used from the command line;
+- bounded background jobs with progress and cancellation for current launcher operations; connecting `xenon-prepare` is still integration work;
 - module discovery, a GitHub-backed module catalogue, and package installation and updates;
 - DLC handling and module settings schemas;
 - profiles with per-profile save, game and capture paths;
@@ -581,12 +595,12 @@ These are goals in a rough order, not commitments or dates. Nothing here promise
 
 **Current priorities**
 
-1. Finish the structural restructuring. *(In progress.)*
-2. Stabilise Windows and Linux build and test workflows. *(In progress: Linux passes; one Windows D3D12 test is open.)*
-3. ~~Produce the first verified graphical output.~~ *(Done: Ace Combat 6's boot logo, 28 October 2026.)*
-4. Render at speed: GPU-resident EDRAM, GPU-side resolves and scan-out, with Vulkan matching Direct3D 12. *(In progress: the boot logos and the intro movie run at native frame rate on Direct3D 12.)*
-5. Sustained rendering, audio and gameplay past the main menu: controller input, loading, then the first mission.
-6. Establish the first confirmed playable title.
+1. Fix AC6's cutscene frame rate/pacing. *(Active; the game reaches the first cutscene after the main menu with working audio.)*
+2. Validate progress from that cutscene into the first mission, then sustained gameplay.
+3. Extend real-title rendering validation to Vulkan and keep Windows/Linux build and test workflows reliable.
+4. Deliver the shared [rendering enhancement plan](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md): GPU inputs, native AA/upscaling, then frame generation, with per-title quality and fallback gates.
+5. Connect the planned global/per-game graphics settings and capability reporting to the real renderer.
+6. Establish the first confirmed playable title. *(First graphical output was achieved on 28 October 2026; full playability remains unconfirmed.)*
 
 **Framework maturity**
 
@@ -619,7 +633,7 @@ These are goals in a rough order, not commitments or dates. Nothing here promise
 - Implement desktop-assisted cross-platform preparation.
 - Introduce Xenon Device Link.
 
-None of these milestones is complete yet.
+These remaining goals do not change the current compatibility limits described above.
 
 ---
 
@@ -648,15 +662,18 @@ AI tools have played a part in accelerating progress on this project. Every AI-a
 
 ## Documentation
 
+Start with the [documentation guide](docs/README.md) for current status, the graphics plans and the distinction between subsystem references and historical evidence.
+
 | Area | Documents |
 | --- | --- |
 | Architecture | [Project structure](docs/architecture/PROJECT_STRUCTURE.md) · [Restructure findings](docs/development/RESTRUCTURE_FINDINGS.md) |
-| Building and testing | [Testing](docs/development/TESTING.md) · [Dependencies](docs/development/DEPENDENCIES.md) · [Release packaging](docs/development/RELEASE_PACKAGING.md) · [Windows native](docs/development/WINDOWS_NATIVE.md) |
+| Building and testing | [Testing](docs/development/TESTING.md) · [Dependencies](docs/development/DEPENDENCIES.md) · [Launcher packaging](launcher-next/README.md#distribution-and-self-updating) · [Windows native](docs/development/WINDOWS_NATIVE.md) |
 | Runtime | [Runtime session](docs/runtime/RUNTIME_SESSION.md) · [Runtime host](docs/runtime/RUNTIME_HOST.md) · [AC6 investigation](docs/runtime/AC6_RUNTIME_INVESTIGATION.md) · [Boot checkpoints](docs/runtime/BOOT_CHECKPOINTS.md) |
 | CPU and memory | [CPU V2](docs/cpu/CPU_V2_DESIGN.md) · [Memory V2](docs/memory/MEMORY_V2.md) |
 | Recompilation | [Pipeline](docs/recomp/RECOMPILATION_PIPELINE.md) · [Game preparation](docs/development/GAME_PREPARATION.md) · [Game intake](docs/recomp/GAME_INTAKE_GEN11.md) |
 | Xbox system | [XEX loader](docs/xbox/XEX_LOADER_V2.md) · [Import dispatch](docs/xbox/IMPORT_DISPATCH.md) · [Kernel](docs/kernel/KERNEL_V1.md) · [XAM](docs/xam/XAM_V1.md) |
 | Graphics | [GPU V1](docs/graphics/GPU_V1.md) · [Native backends](docs/graphics/NATIVE_BACKENDS.md) · [Temporal rendering](docs/graphics/TEMPORAL_RENDERING.md) · [Validation log](docs/graphics/VALIDATION.md) |
+| Graphics plans | [XeSS/FSR/DLSS and frame generation](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md) · [Universal rendering support](docs/graphics/UNIVERSAL_RENDERING_SUPPORT_PLAN.md) · [Launcher graphics menus](docs/graphics/LAUNCHER_GRAPHICS_MENU_PLAN.md) |
 | Audio, input, files | [Audio V1](docs/audio/AUDIO_V1.md) · [Input V2](docs/input/INPUT_V2.md) · [Input module API](docs/modules/INPUT_API_V1.md) · [Filesystem](docs/filesystem/FILESYSTEM_V1.md) · [Content services](docs/modules/CONTENT_SERVICES.md) |
 | Network | [Xenon Network client](docs/network/XENON_NETWORK_V1.md) |
 | Launcher | [Launcher](launcher-next/README.md) · [Migration status](launcher-next/MIGRATION_STATUS.md) · [Contracts](launcher-next/contracts/launcher.ts) |
