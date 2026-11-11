@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/fault.hpp"
@@ -303,7 +304,15 @@ Status GuestIoBridge::nt_create_file(
 
   Handle handle = kInvalidHandle;
   IoStatusBlock iosb{};
+  // Activity trace: which path each open asked for and what it returned.
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"io", "open", {"access", "disposition", "options", "handle"}, true});
+  xenon::logging::ActivityScope activity(
+      activity_key, {desired_access, creation_disposition, create_options, 0u});
+  if (xenon::logging::activity_trace_enabled()) activity.text = request.path;
   const auto result = facade_.create_file(request, handle, iosb);
+  activity.result = static_cast<std::uint32_t>(result);
+  activity.arguments[3] = handle;
   if (is_error_status(result)) {
     report_io_failure("NtCreateFile",
                       describe_open(request.root_directory, request.path, desired_access,

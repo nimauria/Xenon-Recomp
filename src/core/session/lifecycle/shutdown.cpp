@@ -2,6 +2,7 @@
 #include <mutex>
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/xam/content_graph.hpp"
 
 #if defined(XENON_HAS_AUDIO)
@@ -84,6 +85,9 @@ void XenonSession::shutdown() {
   // mid-present when they are destroyed - see the class-level doc comment on
   // start_gpu_pump_thread() for why this must be one thread, not two).
   stop_gpu_pump_thread();
+  // Every thread that traced activity has stopped: write what each stream
+  // still holds and the summary.
+  if (logging::activity_trace_enabled()) logging::flush_activity_trace();
   if (memory_) {
     release_guest_thread_tls_context(*memory_, gpu_pump_thread_tls_);
     release_guest_thread_tls_context(*memory_, gpu_vsync_thread_tls_);

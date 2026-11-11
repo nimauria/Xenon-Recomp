@@ -9,9 +9,11 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "xenon/core/session.hpp"
 #include "xenon/kernel/time.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
@@ -285,11 +287,50 @@ bool XenonSession::dispatch_export(std::string_view module, std::uint32_t ordina
     return observer;
   };
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::BeforeKernelCall));
+  // Activity trace: every export with its first four arguments, its r3
+  // result and how long it took (a wait's time is how long it waited).
+  const bool trace_activity = logging::activity_trace_enabled();
+  std::uint32_t activity_key = 0;
+  std::uint64_t activity_start = 0;
+  if (trace_activity) {
+    thread_local std::unordered_map<const void*, std::uint32_t> keys;
+    thread_local std::unordered_map<std::uint64_t, std::uint32_t> unnamed_keys;
+    thread_local std::uint32_t labelled_thread = ~0u;
+    if (labelled_thread != calling_thread_id) {
+      labelled_thread = calling_thread_id;
+      std::string label = "T" + std::to_string(calling_thread_id);
+      if (kernel_process_)
+        if (auto current = kernel_process_->thread_manager().current_thread())
+          if (const auto name = current->name(); !name.empty()) label += ' ' + name;
+      logging::set_activity_thread_label(std::move(label));
+    }
+    const auto intern = [&] {
+      return logging::intern_activity(
+          {std::string(module), descriptor ? std::string(descriptor->name)
+                                           : "ordinal_" + std::to_string(ordinal),
+           {"r3", "r4", "r5", "r6"}, true});
+    };
+    if (descriptor) {
+      auto& key = keys[descriptor];
+      if (!key) key = intern();
+      activity_key = key;
+    } else {
+      auto& key = unnamed_keys[(std::hash<std::string_view>{}(module) << 20u) ^ ordinal];
+      if (!key) key = intern();
+      activity_key = key;
+    }
+    activity_start = logging::activity_now_ns();
+  }
   ExportCallResult result{};
   if (descriptor) {
     const bool handled = descriptor->handler(context);
     result = {handled, handled, {}};
   }
+  if (trace_activity)
+    logging::record_activity(activity_key,
+                             {arguments[0], arguments[1], arguments[2], arguments[3]},
+                             state.gpr[3], activity_start,
+                             logging::activity_now_ns() - activity_start);
   if (watch_active) sample_memory_watch(watch_observer(WatchPhase::AfterKernelCall));
   if (track_in_flight) {
     std::scoped_lock lock(in_flight_exports_mutex_);

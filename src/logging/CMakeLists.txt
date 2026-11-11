@@ -6,6 +6,7 @@
 # ODR violation from two libraries each compiling their own copy of
 # Logger::instance()'s function-local static singleton.
 add_library(xenon_logging STATIC
+  activity_trace.cpp
   diagnostic_events.cpp
   logger.cpp
   probe_log.cpp

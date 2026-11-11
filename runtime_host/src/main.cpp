@@ -35,6 +35,7 @@
 #include "presentation_host.hpp"
 #include "status_writer.hpp"
 #include "xenon/core/session.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
@@ -84,7 +85,8 @@ int main(int argc, char** argv) {
   std::cout << "[runtime_host] Diagnostic events: "
             << (xenon::logging::events::enabled() ? "on" : "off")
             << ", probe logs: " << (xenon::logging::probe_logs_enabled() ? "on" : "off")
-            << std::endl;
+            << ", activity trace: "
+            << (xenon::logging::activity_trace_enabled() ? "on" : "off") << std::endl;
   log_host_capabilities();
 
   StatusWriter status(launch.session_dir, launch);
@@ -339,6 +341,8 @@ int main(int argc, char** argv) {
     }
     if (now >= next_capability_report) {
       status.write_capability_report(session);
+      // The activity summary so far, so a run that dies still leaves one.
+      xenon::logging::write_activity_summary();
       next_capability_report = now + kCapabilityReportInterval;
     }
 

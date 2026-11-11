@@ -1,6 +1,7 @@
 #include <atomic>
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(XENON_HAS_AUDIO)
@@ -85,6 +86,9 @@ std::uint32_t XenonSession::run_audio_callback_thread() {
 
 bool XenonSession::invoke_audio_callback(cpu::GuestAddress callback,
                                          cpu::GuestAddress argument) {
+  static const auto activity_key = logging::intern_activity(
+      {"audio", "render callback", {"callback", "argument", "", ""}, false});
+  logging::ActivityScope activity(activity_key, {callback, argument, 0, 0});
   if (!callback || !memory_ || !compiled_registry_binder_ || !kernel_process_ ||
       !audio_callback_stack_base_ || !audio_callback_stack_size_) {
     return false;
