@@ -1,6 +1,7 @@
 ﻿#include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -104,7 +105,9 @@ int main(int argc, char** argv) {
                                                      "  Dumps every function and variable export the production registry\n"
                                                      "  holds as TSV (library, ordinal, name, kind, requirement, partial,\n"
                                                      "  note) for export-parity audits against reference ordinal tables.\n";
-    else std::cout << "usage: module-inspector <game.xex> [--json]\n";
+    else std::cout << "usage: module-inspector <game.xex|disc image|folder> [--json|--identity]\n"
+                      "  --identity prints the title/media IDs, versions and effective image\n"
+                      "  hash a game module keys its analysis package on, without analysis.\n";
     return argc < 2 ? 1 : 0;
   }
 #if defined(XENON_TOOL_HAS_CORE)
@@ -160,6 +163,8 @@ int main(int argc, char** argv) {
   bool quiet = false;
   for (int index = 2; index < argc; ++index) {
     if (std::string(argv[index]) == "--json") {
+      continue;
+    } else if (tool == "module-inspector" && std::string(argv[index]) == "--identity") {
       continue;
     } else if (std::string(argv[index]) == "--quiet") {
       quiet = true;
@@ -238,6 +243,34 @@ int main(int argc, char** argv) {
   if (!quiet) options.progress = [](const std::string& message) { std::cerr << message << "\n"; };
   xenon::recomp::AnalysisReport report;
   std::string error;
+  // module-inspector --identity: the revision identity a game module keys its
+  // analysis package on (title, media, versions, effective image hash),
+  // without analysing the executable.
+  if (tool == "module-inspector") {
+    bool identity_only = false;
+    for (int index = 2; index < argc; ++index)
+      if (std::string(argv[index]) == "--identity") identity_only = true;
+    if (identity_only) {
+      std::vector<std::byte> bytes;
+      xenon::xbox::XexImage image;
+      if (!xenon::recomp::read_game_executable_bytes(options.input, "default.xex", bytes, error) ||
+          !xenon::xbox::parse_xex_image(bytes, image, &error)) {
+        std::cerr << tool << ": " << options.input.string() << ": " << error << "\n";
+        return 2;
+      }
+      const auto& info = image.execution_info;
+      char line[256];
+      std::snprintf(line, sizeof(line),
+                    "titleId %08X\nmediaId %08X\nversion %08X\nbaseVersion %08X\ndisc %u/%u\n",
+                    info.title_id, info.media_id, info.version.value, info.base_version.value,
+                    info.disc_number, info.disc_count);
+      std::cout << line << "effectiveImageHash "
+                << xenon::xbox::format_effective_image_hash(
+                       xenon::xbox::compute_effective_image_hash(image))
+                << "\n";
+      return 0;
+    }
+  }
   // A disc image or extracted game folder is read the way game preparation
   // reads it: its default.xex, without extracting anything to disk.
   {

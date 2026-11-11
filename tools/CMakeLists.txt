@@ -27,6 +27,13 @@ target_compile_definitions(import-scanner PRIVATE XENON_TOOL_NAME="import-scanne
 target_link_libraries(import-scanner PRIVATE xenon_recomp xenon_core)
 xenon_enable_warnings(import-scanner)
 
+# xenon-extract: extracts a game disc image (GDFX .iso or .dvd) to a host
+# folder through Xenon's own filesystem layer (GdfxImageSource +
+# materialize_content_source).
+add_executable(xenon-extract xenon_extract/main.cpp)
+target_link_libraries(xenon-extract PRIVATE xenon_filesystem)
+xenon_enable_warnings(xenon-extract)
+
 # xenon-prepare: the out-of-process automatic game preparation worker (see
 # docs/development/GAME_PREPARATION.md). Reads default.xex directly out of a disc image/
 # directory (xenon_filesystem, transitively linked via xenon_recomp ->
