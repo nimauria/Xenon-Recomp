@@ -162,6 +162,15 @@ bool Lifter::lift_vector(const DecodedInstruction& i, ir::Builder& b) const {
     return true;
   }
 
+  // vpkd3d128/vupkd3d128 (VX128_4/VX128_3) have no vA: bits 11-15 hold the
+  // type/mask immediate. Pack merges into vD under its mask, so both take
+  // (old vD, vB) - reading vA here packed whichever register the immediate
+  // happened to name, and AC6's bone matrices came out zero.
+  if(m=="vpkd3d128" || m=="vupkd3d128") {
+    auto old=vread(b,d),src=vread(b,vb(i)); const ValueId x[]={old,src};
+    vwrite(b,d,b.emit(m=="vpkd3d128"?Op::VPack:Op::VUnpack,Type::V128,x,vector_tag(m),0,&i));
+    return true;
+  }
   if(starts(m,"vpk")) { vwrite(b,d,binary(b,Op::VPack,i,va(i),vb(i))); return true; }
   if(starts(m,"vupk")) { vwrite(b,d,unary(b,Op::VUnpack,i,vb(i))); return true; }
 

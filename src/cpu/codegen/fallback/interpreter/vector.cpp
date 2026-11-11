@@ -205,6 +205,18 @@ namespace xenon::cpu::fallback {
     return true;
   }
 
+  // vpkd3d128/vupkd3d128 take (old vD, vB) as lifter/vector.cpp wires them:
+  // they have no vA (bits 11-15 are the type/mask immediate) and pack merges
+  // into vD.
+  if (m == "vpkd3d128" || m == "vupkd3d128") {
+    const auto semantic = vector_semantic_for(m);
+    if (!semantic) return false;
+    const auto reg = vector_vd(i);
+    state.vr[reg] = aot::execute_vector(*semantic, i.word, state, state.vr[reg],
+                                        state.vr[vector_vb(i)], Vector128{}, Vector128{});
+    return true;
+  }
+
   // Unary vector semantics take their source in the first argument, just as
   // the lifter's unary() does. VA is an immediate/reserved field for these
   // instructions, so passing vA silently reads an unrelated register.
