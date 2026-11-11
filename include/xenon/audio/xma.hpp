@@ -43,10 +43,11 @@ struct XmaPacketHeader {
 // first frame - bit 32, where an input-buffer swap leaves it, or a packet
 // start - lies in the tail of a frame that began in an earlier packet, so
 // decoding starts at that packet's first frame; a packet with no frame start
-// passes to the next packet that has one. Returns input.size() * 8 when no
-// frame starts at or after the offset.
+// passes to the next packet that has one, and so does a frame length of 0 or
+// 0x7FFF, the padding after a packet's last frame. Returns input.size() * 8
+// when no frame starts at or after the offset.
 [[nodiscard]] std::size_t xma_frame_start_bit(std::span<const std::byte> input,
-                                              std::size_t read_offset_bits) noexcept;
+                                              std::size_t read_offset_bits);
 
 enum class XmaFrameGather : std::uint8_t {
   Complete,

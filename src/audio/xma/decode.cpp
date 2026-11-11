@@ -8,12 +8,14 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <optional>
 #include <utility>
 #include <vector>
 
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::audio {
@@ -127,7 +129,7 @@ void append_bit(std::vector<std::byte>& data, std::size_t bit_offset,
 }  // namespace
 
 std::size_t xma_frame_start_bit(std::span<const std::byte> input,
-                                std::size_t read_offset_bits) noexcept {
+                                std::size_t read_offset_bits) {
   for (auto packet = read_offset_bits / kBitsPerPacket;
        (packet + 1u) * kXmaPacketBytes <= input.size(); ++packet) {
     const auto header = parse_xma_packet_header(
@@ -135,7 +137,24 @@ std::size_t xma_frame_start_bit(std::span<const std::byte> input,
     // No frame starts in this packet: it is all continuation.
     if (header.first_frame_offset_bits >= kBitsPerPacket) continue;
     const auto first_frame = packet * kBitsPerPacket + header.first_frame_offset_bits;
-    return std::max(read_offset_bits, first_frame);
+    const auto candidate = std::max(read_offset_bits, first_frame);
+    if (candidate >= (packet + 1u) * kBitsPerPacket) continue;
+
+    // A length of 0 or 0x7FFF is the padding after a packet's last frame,
+    // not a frame: the stream goes on in its next packet. The previous
+    // frame's "another frame follows" bit can still be set ahead of it.
+    std::size_t source_bit = candidate;
+    std::size_t length_packet = packet;
+    std::vector<std::byte> length_bits;
+    std::uint32_t length{};
+    if (copy_stream_bits(input, source_bit, length_packet, 15u, length_bits) ==
+            XmaFrameGather::Complete &&
+        read_bits(length_bits, 0u, 15u, length) && (length == 0u || length == kMaxFrameBits)) {
+      packet += header.skip_count;
+      read_offset_bits = (packet + 1u) * kBitsPerPacket;
+      continue;
+    }
+    return candidate;
   }
   return input.size() * 8u;
 }
@@ -424,6 +443,21 @@ bool XmaDecoder::decode_one(std::size_t index) {
     return false;
   }
   if (gathered_frame.status != XmaFrameGather::Complete) {
+    // The stream state that led here, for the run's audio.log (the decoder
+    // records the error itself when it is published).
+    char detail[224];
+    std::snprintf(detail, sizeof(detail),
+                  "XMA context 0x%08X cannot parse a frame: %s at bit %zu (read offset %u), "
+                  "buffer %u of 0:%s%u/1:%s%u packets, %zu input bytes",
+                  static_cast<unsigned>(context),
+                  gathered_frame.status == XmaFrameGather::Invalid ? "impossible length"
+                                                                   : "frame runs past both buffers",
+                  start_bit, static_cast<unsigned>(data.input_buffer_read_offset),
+                  current ? 1u : 0u, data.input_buffer_0_valid ? "" : "invalid ",
+                  static_cast<unsigned>(data.input_buffer_0_packet_count),
+                  data.input_buffer_1_valid ? "" : "invalid ",
+                  static_cast<unsigned>(data.input_buffer_1_packet_count), input.size());
+    logging::Logger::instance().record(logging::Level::Warning, "audio", detail);
     data.parser_error_status = 1;
     data.parser_error_set = true;
     (void)merge_hardware_progress(context, initial, data);
@@ -506,14 +540,24 @@ bool XmaDecoder::decode_one(std::size_t index) {
   const int receive_result =
       send_result < 0 ? send_result
                       : avcodec_receive_frame(runtime.codec_context, runtime.frame);
-  if (receive_result < 0 ||
-      runtime.frame->nb_samples < static_cast<int>(kXmaSamplesPerFrame) ||
-      runtime.frame->format != AV_SAMPLE_FMT_FLTP) {
-    data.error_status = 8;
-    data.error_set = true;
-    (void)merge_hardware_progress(context, initial, data);
-    finish();
-    return false;
+  // A frame the decoder rejects still occupies one frame of the stream's
+  // timeline. Stopping the voice, or dropping the frame, puts it behind the
+  // other streams of a multi-stream voice for good - AC6 plays its cutscene
+  // 5.1 as parallel stereo streams, and a stream a frame out of step combs
+  // against the rest (a "robotic" echo). As the reference decoder does, the
+  // frame becomes silence and the stream moves past it.
+  const bool frame_decoded =
+      receive_result >= 0 &&
+      runtime.frame->nb_samples >= static_cast<int>(kXmaSamplesPerFrame) &&
+      runtime.frame->format == AV_SAMPLE_FMT_FLTP;
+  if (!frame_decoded) {
+    decode_errors_[8].fetch_add(1, std::memory_order_relaxed);
+    char entry[160];
+    std::snprintf(entry, sizeof(entry),
+                  "XMA context 0x%08X: the decoder rejected the %u-bit frame at bit %zu; "
+                  "playing it as silence to keep the stream in step",
+                  static_cast<unsigned>(context), gathered_frame.frame_bits, start_bit);
+    logging::Logger::instance().record(logging::Level::Warning, "audio", entry);
   }
 
   const auto frame_bytes = static_cast<std::size_t>(kXmaSamplesPerFrame) *
@@ -521,7 +565,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
   std::array<std::byte, Runtime::kMaxFrameBytes> decoded_pcm{};
   std::size_t decoded_offset = 0;
   float frame_peak = 0.0f;
-  for (std::uint32_t sample = 0; sample < kXmaSamplesPerFrame; ++sample) {
+  for (std::uint32_t sample = 0; frame_decoded && sample < kXmaSamplesPerFrame; ++sample) {
     for (int ch = 0; ch < channels; ++ch) {
       const auto* plane =
           reinterpret_cast<const float*>(runtime.frame->extended_data[ch]);
@@ -531,7 +575,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
       decoded_pcm[decoded_offset++] = std::byte(value & 0xFFu);
     }
   }
-  frames_decoded_.fetch_add(1, std::memory_order_relaxed);
+  if (frame_decoded) frames_decoded_.fetch_add(1, std::memory_order_relaxed);
   logging::append_probe_log(
       "audio_trace_xma.log", "%lld frame ctx=%zu in=%08X bit=%zu rate=%d ch=%d peak=%.5f loop=%u\n",
       static_cast<long long>(trace_milliseconds()), index, input_physical, start_bit, sample_rate,

@@ -50,9 +50,11 @@ void test_frame_start_skips_a_continuation() {
   write_packet_header(stream, 0, 100);
   write_bits(stream, 32, 15, 0x0003);  // what the tail looks like as a "length"
   write_bits(stream, 132, 15, 300);
+  write_bits(stream, 432, 15, 200);  // the next frame in the same packet
   // Packet 1 is continuation only; packet 2's first frame is at bit 32 + 40.
   write_packet_header(stream, 1, 0x7FFF);
   write_packet_header(stream, 2, 40);
+  write_bits(stream, 2u * kPacketBits + 72u, 15, 100);
 
   assert(xma_frame_start_bit(stream, 32) == 132u);
   assert(xma_frame_start_bit(stream, 132) == 132u);
@@ -113,9 +115,120 @@ void test_frame_length_across_packets() {
   assert(frame.final_packet == 1u && frame.final_source_bit == kPacketBits + 32u + 494u);
 }
 
+// Regression (AC6 menu music cut out for good at one point, with one XMA
+// parser error): a frame's "another frame follows" bit can be set ahead of
+// the padding that ends a packet (length 0x7FFF, or 0). Resuming there must
+// go on to the stream's next packet, not try to decode the padding.
+void test_padding_ends_the_packet() {
+  std::vector<std::byte> stream(4u * kXmaPacketBytes);
+  write_packet_header(stream, 0, 100, 1);  // this stream's next packet is 2
+  write_bits(stream, 132, 15, 300);
+  write_bits(stream, 132 + 299, 1, 1);     // "another frame follows"...
+  write_bits(stream, 432, 15, 0x7FFF);     // ...but the packet is padding
+  write_packet_header(stream, 1, 10);      // another stream's packet
+  write_packet_header(stream, 2, 60);
+  write_bits(stream, 2u * kPacketBits + 92u, 15, 400);
+
+  const auto frame = gather_xma_frame(stream, 132);
+  assert(frame.status == XmaFrameGather::Complete && frame.follows_in_packet);
+  assert(frame.final_source_bit == 432u);
+  assert(gather_xma_frame(stream, 432).status == XmaFrameGather::Invalid);
+  assert(xma_frame_start_bit(stream, 432) == 2u * kPacketBits + 92u);
+
+  // A zero length is padding as well.
+  write_bits(stream, 432, 15, 0);
+  assert(xma_frame_start_bit(stream, 432) == 2u * kPacketBits + 92u);
+  // A real frame there is still a frame.
+  write_bits(stream, 432, 15, 120);
+  assert(xma_frame_start_bit(stream, 432) == 432u);
+}
+
 }  // namespace
 
+// Regression (AC6 cutscene audio sounded robotic): a frame the decoder
+// rejects must neither stop the context with error 8 nor drop out of the
+// stream's timeline - one stream of a multi-stream voice falling a frame
+// behind the others combs against them. It plays as a frame of silence and
+// decoding goes on with the next frame.
+void test_rejected_frame_plays_as_silence() {
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+  XmaDecoder decoder(memory);
+  std::string error;
+  assert(decoder.initialize(&error));
+  const auto context = decoder.allocate_context();
+  assert(context != 0);
+  cpu::GuestAddress input{}, output{};
+  assert(memory.allocate(kXmaPacketBytes, 2048, memory::kReadWrite, false, input));
+  assert(memory.allocate(31u * kXmaOutputBlockBytes, 256, memory::kReadWrite, false, output));
+  memory.fill_bytes(output, 31u * kXmaOutputBlockBytes, 0xA5u);
+
+  // Three 64-bit frames: a length and then all ones, which no frame of real
+  // XMA can hold. The last bit of each says whether another frame follows.
+  std::vector<std::byte> packet(kXmaPacketBytes);
+  write_packet_header(packet, 0, 0);
+  constexpr unsigned kFrames = 3;
+  for (unsigned frame = 0; frame < kFrames; ++frame) {
+    const auto at = 32u + frame * 64u;
+    write_bits(packet, at, 15, 64);
+    write_bits(packet, at + 15u, 32, 0xFFFFFFFFu);
+    write_bits(packet, at + 47u, 16, 0xFFFFu);
+    write_bits(packet, at + 63u, 1, frame + 1u < kFrames ? 1u : 0u);
+  }
+  memory.write_bytes(input, packet);
+
+  XmaContextInit init{};
+  init.input_buffer_0 = input;
+  init.input_buffer_0_packet_count = 1;
+  init.input_buffer_read_offset = 32;
+  init.output_buffer = output;
+  init.output_buffer_block_count = 31;
+  init.subframe_decode_count = 4;
+  init.channel_count = 0;
+  init.sample_rate = 3;
+  assert(decoder.initialize_context(context, init));
+  std::atomic<unsigned> completions{0};
+  decoder.set_completion_sink([&](cpu::GuestAddress, bool) {
+    completions.fetch_add(1, std::memory_order_release);
+  });
+  XmaContextData state{};
+  assert(decoder.read_context(context, state));
+  state.input_buffer_0_valid = true;
+  state.output_buffer_valid = true;
+  assert(decoder.write_context(context, state, false));
+  const auto hw_index =
+      (memory.get_physical_address(context) - decoder.context_array_physical()) /
+      kXmaContextBytes;
+  memory.write32_le(kXmaMmioBase + 0x1940u + (hw_index >> 5u) * 4u, 1u << (hw_index & 31u));
+  for (int i = 0; i < 2000 && completions.load(std::memory_order_acquire) == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  assert(completions.load(std::memory_order_acquire) >= 1);
+  assert(decoder.block_while_in_use(context));
+
+  const auto stats = decoder.stats();
+  assert(stats.decode_errors[8] == kFrames);
+  assert(stats.frames_decoded == 0u);
+  assert(decoder.read_context(context, state));
+  assert(!state.error_set && state.error_status == 0u);
+  assert(!state.parser_error_set);
+  // Every frame was consumed: the buffer ran out, not the decoder.
+  assert(!state.input_buffer_0_valid);
+  // The frames that reached the output are silence.
+  assert(state.output_buffer_write_offset > 0u);
+  std::vector<std::byte> written(state.output_buffer_write_offset * kXmaOutputBlockBytes);
+  memory.read_bytes(output, written);
+  assert(std::all_of(written.begin(), written.end(),
+                     [](std::byte b) { return b == std::byte{}; }));
+
+  assert(decoder.release_context(context));
+  decoder.shutdown();
+  assert(memory.release(output));
+  assert(memory.release(input));
+}
+
 int main() {
+  test_rejected_frame_plays_as_silence();
+  test_padding_ends_the_packet();
   test_frame_start_skips_a_continuation();
   test_frame_across_buffers();
   test_frame_length_across_packets();
