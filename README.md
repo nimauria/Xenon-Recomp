@@ -442,6 +442,12 @@ Runtime changes use the following workflows; launcher changes additionally have 
 
 CI does not skip or filter failing tests. Use the linked workflow results for the current revision; older test totals and failures are historical snapshots, not current build status. The graphics [validation log](docs/graphics/VALIDATION.md) retains scoped results from earlier passes.
 
+The Linux workflow installs `libxcursor-dev` because SDL3's X11 configuration
+requires the Xcursor development headers. Windows executable targets embed the
+long-path-aware manifest through [`cmake/CompilerOptions.cmake`](cmake/CompilerOptions.cmake);
+build Windows targets from a Visual Studio developer prompt so the Windows SDK
+resource and manifest tools are available.
+
 ### Implementation coverage dashboard
 
 [![Xenon implementation coverage summary](docs/coverage/summary.svg)](docs/coverage/README.md)

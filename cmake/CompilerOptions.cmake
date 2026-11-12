@@ -4,6 +4,7 @@
 # to pass 260 characters under an ordinary user cache directory.
 if(MSVC)
   add_link_options(
+    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:/MANIFEST:EMBED>"
     "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:/MANIFESTINPUT:${CMAKE_CURRENT_LIST_DIR}/windows/long-path-aware.manifest>")
 endif()
 
