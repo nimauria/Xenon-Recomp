@@ -3,15 +3,18 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "core/session/session_internal.hpp"
 #include "xenon/core/frame_dump.hpp"
 #include "xenon/gpu/display_vblank.hpp"
 #include "xenon/gpu/resource_ir.hpp"
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 
@@ -150,6 +153,33 @@ void XenonSession::dump_presented_frame(const gpu::PresentationFrame& frame) {
   }();
   const auto index = dumped_frame_candidates_++;
   if (index % every != 0u) return;
+  // With probe logs on, the guest bytes behind the dumped frame are hashed
+  // the same way full-frame resolves are (frontbuffer_diag.log), so a stale
+  // dump can be told apart: a hash no resolve produced means the scan-out
+  // read something other than guest memory.
+  if (logging::probe_logs_enabled() && memory_) {
+    constexpr std::uint32_t kHashedBytes = 1280u * 720u * 4u;
+    std::vector<std::byte> bytes(kHashedBytes);
+    std::uint64_t hash = 0;
+    if (memory_->copy_physical_range(frame.texture.base_address, bytes)) {
+      hash = 1469598103934665603ull;
+      for (std::size_t i = 0; i + 8u <= bytes.size(); i += 8u) {
+        std::uint64_t word{};
+        std::memcpy(&word, bytes.data() + i, 8u);
+        hash = (hash ^ word) * 1099511628211ull;
+      }
+    }
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    logging::append_probe_log("frontbuffer_diag.log",
+                              "t=%lld.%03lld present frame_index=%llu base=0x%08X hash=%016llX\n",
+                              static_cast<long long>(now_us / 1000),
+                              static_cast<long long>(now_us % 1000),
+                              static_cast<unsigned long long>(index),
+                              static_cast<unsigned>(frame.texture.base_address),
+                              static_cast<unsigned long long>(hash));
+  }
   gpu::PreparedPresentationFrame image{};
   if (!gpu_->capture_scanout(frame, 640u, 360u, image)) return;
   const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -172,6 +202,11 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     kernel_process_->thread_manager().set_current_thread(gpu_pump_thread_);
   }
 
+  logging::set_activity_thread_label("gpu pump");
+  static const auto ring_key = logging::intern_activity(
+      {"gpu", "ring submit", {"read", "write", "capacity", ""}, true});
+  static const auto present_key =
+      logging::intern_activity({"gpu", "present", {"generation", "", "", ""}, false});
   using Clock = std::chrono::steady_clock;
   // The worker sleeps until the guest publishes ring work, the vsync thread
   // asks for a frame, or the session stops. Two cases still poll: a drain
@@ -196,6 +231,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     // has been presented (scanout_latched_).
     if ((reasons & kGpuWakePresent) != 0u) {
       const auto vblank = scanout_requested_.load(std::memory_order_acquire);
+      logging::ActivityScope present_activity(present_key, {last_presented_generation, 0, 0, 0});
       present_front_buffer(last_presented_generation);
       scanout_latched_.publish(vblank);
     }
@@ -203,6 +239,8 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     const auto _tick_phase_start = Clock::now();
     const auto ring = kernel_process_->gpu_ring_buffer();
     if (ring.configured() && ring.write_index != ring.read_index) {
+      logging::ActivityScope ring_activity(
+          ring_key, {ring.read_index, ring.write_index, ring.capacity_dwords, 0u});
       try {
         // Executes the drained work in order with its fences and interrupts,
         // so the read pointer below is written back only once the commands
@@ -211,6 +249,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
             *gpu_, ring.base_address, ring.capacity_dwords, ring.read_index,
             ring.write_index);
         kernel_process_->set_gpu_ring_buffer_read_index(new_read_index);
+        ring_activity.result = new_read_index;
         // Real Xenos read-pointer write-back hardware semantics
         // (VdEnableRingBufferRPtrWriteBack): mirror the freshly-consumed
         // read index into guest memory so the guest can poll its own copy.
@@ -348,6 +387,9 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
     kernel_process_->thread_manager().set_current_thread(gpu_vsync_thread_);
   }
 
+  logging::set_activity_thread_label("gpu vsync");
+  static const auto vblank_key = logging::intern_activity(
+      {"gpu", "vblank interrupt", {"callback", "front_buffer", "latch_timeout", ""}, true});
   using Clock = std::chrono::steady_clock;
   constexpr auto kVsyncInterval = std::chrono::nanoseconds(16'666'667);  // ~60Hz
   // The display is re-resolved this often: the window may move to another
@@ -450,6 +492,7 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
       }
       const auto _vsync_cb_start = Clock::now();
       const bool _vsync_cb_ok = invoke_gpu_interrupt_callback(interrupt.callback_address, interrupt.context);
+      vblank_activity.result = _vsync_cb_ok ? 1u : 0u;
       const auto _vsync_cb_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      Clock::now() - _vsync_cb_start)
                                      .count();

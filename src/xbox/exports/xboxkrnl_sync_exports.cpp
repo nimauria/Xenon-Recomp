@@ -3,6 +3,7 @@
 #include "xenon/kernel/completion_port.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -459,9 +460,27 @@ bool nt_resume_thread_export(kernel::KernelProcess& process, ExportCallContext& 
 
   auto& thread = static_cast<kernel::KernelThread&>(*view.object);
   const auto previous = thread.suspend_count();
+  // Probe logs only: which step of a slow resume held its caller up. On the
+  // console a resume takes microseconds; AC6's main thread took 27-83 ms over
+  // three, long enough for a worker it resumed to reach a critical section
+  // the main thread had not initialized yet.
+  using Clock = std::chrono::steady_clock;
+  const auto resume_start = Clock::now();
   static_cast<void>(thread.resume());
+  const auto resumed = Clock::now();
   if (previous_count_ptr != 0u) {
     context.memory.write32_be(previous_count_ptr, previous);
+  }
+  const auto written = Clock::now();
+  const auto us = [](Clock::duration d) {
+    return static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
+  };
+  if (written - resume_start > std::chrono::milliseconds(1)) {
+    logging::append_probe_log("slow_resume_diag.log",
+                              "NtResumeThread handle=0x%X thread=%u: resume %lld us, "
+                              "previous-count write %lld us\n",
+                              static_cast<unsigned>(handle), thread.thread_id(),
+                              us(resumed - resume_start), us(written - resumed));
   }
   context.cpu.gpr[3] = status::Success;
   return true;

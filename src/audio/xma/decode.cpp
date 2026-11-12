@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -27,6 +29,33 @@ namespace {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+// Decode speed per context, summarised once a second into
+// audio_xma_rate_diag.log: frames decoded and samples per second against the
+// stream's own sample rate (1.00x is real time). The per-frame trace fills
+// its cap within minutes; this stays small enough to cover a whole session.
+void record_decode_rate(std::size_t context, int sample_rate) {
+  if (!logging::probe_logs_enabled()) return;
+  static std::mutex mutex;
+  static std::int64_t second = -1;
+  static std::map<std::size_t, std::pair<std::uint64_t, int>> frames;
+  const auto now = trace_milliseconds() / 1000;
+  std::scoped_lock lock(mutex);
+  if (now != second) {
+    for (const auto& [ctx, counted] : frames) {
+      logging::append_probe_log(
+          "audio_xma_rate_diag.log", "%llds ctx=%zu frames=%llu rate=%d speed=%.2fx\n",
+          static_cast<long long>(second), ctx, static_cast<unsigned long long>(counted.first),
+          counted.second,
+          counted.second ? double(counted.first) * 512.0 / double(counted.second) : 0.0);
+    }
+    frames.clear();
+    second = now;
+  }
+  auto& counted = frames[context];
+  ++counted.first;
+  counted.second = sample_rate;
 }
 
 constexpr std::uint32_t kBitsPerPacket = kXmaPacketBytes * 8u;
@@ -575,7 +604,10 @@ bool XmaDecoder::decode_one(std::size_t index) {
       decoded_pcm[decoded_offset++] = std::byte(value & 0xFFu);
     }
   }
-  if (frame_decoded) frames_decoded_.fetch_add(1, std::memory_order_relaxed);
+  if (frame_decoded) {
+    frames_decoded_.fetch_add(1, std::memory_order_relaxed);
+    record_decode_rate(index, sample_rate);
+  }
   logging::append_probe_log(
       "audio_trace_xma.log", "%lld frame ctx=%zu in=%08X bit=%zu rate=%d ch=%d peak=%.5f loop=%u\n",
       static_cast<long long>(trace_milliseconds()), index, input_physical, start_bit, sample_rate,
