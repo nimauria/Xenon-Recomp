@@ -66,15 +66,17 @@ int main() {
         expected.set_u32_be(lane, static_cast<std::uint32_t>(
             static_cast<std::int32_t>(pcm[lane + (name == "vupklsh" ? 4 : 0)])));
     }
-    // Cancellation that needs a fused multiply-subtract: separate float
-    // multiply/subtract would round the product to 1 and lose the residual.
+    // The VMX multiply-add family rounds the product before the add, as the
+    // Xbox 360 does (xenia-project/xenia PPC test instr_vmaddfp: 1.1*1.1+1.1
+    // is 0x4013D70A, which a fused multiply-add cannot give): (1 + 2^-23) *
+    // (1 - 2^-23) rounds to 1, so -(1 - 1) is -0, not a fused 2^-46.
     if (name.starts_with("vnmsub")) {
       const float a = 1.0f + std::ldexp(1.0f, -23);
       const float b = 1.0f - std::ldexp(1.0f, -23);
       set_float(initial.vr[2], 3, a);
       set_float(initial.vr[name == "vnmsubfp128" ? 3 : 4], 3, b);
       set_float(initial.vr[name == "vnmsubfp128" ? 1 : 3], 3, 1.0f);
-      set_float(expected, 3, std::ldexp(1.0f, -46));
+      set_float(expected, 3, -0.0f);
     }
     auto native = initial;
     c.fn(native, memory, runtime);

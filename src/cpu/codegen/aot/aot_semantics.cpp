@@ -64,6 +64,19 @@ void write_vmx_f32(Vector128& v, unsigned lane, float f, const CpuState& state) 
   write_f32(v, lane, vmx_flush_subnormal(f, state));
 }
 
+// The VMX multiply-add family rounds the product to single precision before
+// the add, as Xbox 360 hardware does (xenia-project/xenia PPC test
+// instr_vmaddfp: 1.1 * 1.1 + 1.1 is 0x4013D70A, where a fused multiply-add
+// gives 0x4013D70B), and flushes a subnormal product like any other result.
+// Passing the product through the flush also keeps a compiler from fusing
+// the two back into one rounding.
+float vmx_multiply_add(float x, float y, float z, const CpuState& state) noexcept {
+  return vmx_flush_subnormal(x * y, state) + z;
+}
+float vmx_negative_multiply_subtract(float x, float y, float z, const CpuState& state) noexcept {
+  return -(vmx_flush_subnormal(x * y, state) - z);
+}
+
 
 float round_nearest_even(float value) noexcept {
   fenv_t env{};
@@ -491,12 +504,12 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
     case VectorSemantic::vctsxs:case VectorSemantic::vcfpsxws128:{unsigned sh=(s==VectorSemantic::vctsxs)?vx_imm5(w):vx128_imm3(w);float scale=std::ldexp(1.0f,int(sh));for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,vector_fp_to_int_sat<std::int32_t>(read_vmx_f32(a,i,state)*scale,state));return r;}
     case VectorSemantic::vctuxs:case VectorSemantic::vcfpuxws128:{unsigned sh=(s==VectorSemantic::vctuxs)?vx_imm5(w):vx128_imm3(w);float scale=std::ldexp(1.0f,int(sh));for(unsigned i=0;i<4;++i)write_be<std::uint32_t>(r,i,vector_fp_to_int_sat<std::uint32_t>(read_vmx_f32(a,i,state)*scale,state));return r;}
 
-    case VectorSemantic::vmaddfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state)),state);return r;}
-    case VectorSemantic::vmaddfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state)),state);return r;}
-    case VectorSemantic::vmaddcfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,std::fma(read_vmx_f32(b,i,state),read_vmx_f32(a,i,state),read_vmx_f32(c,i,state)),state);return r;}
-    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(b,i,state)),state);return r;}
+    case VectorSemantic::vmaddfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state),state),state);return r;}
+    case VectorSemantic::vmaddfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state),state),state);return r;}
+    case VectorSemantic::vmaddcfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_multiply_add(read_vmx_f32(b,i,state),read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),state),state);return r;}
+    case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state),state),state);return r;}
     // VMX128 inputs are (old vD, vA, vB): vD = -(vA * vB - old vD).
-    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,-std::fma(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),-read_vmx_f32(a,i,state)),state);return r;}
+    case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state),state),state);return r;}
     case VectorSemantic::vmsum3fp128:{float z=0;for(unsigned i=0;i<3;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
     case VectorSemantic::vmsum4fp128:{float z=0;for(unsigned i=0;i<4;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
 
@@ -580,7 +593,17 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
 Vector128 vector_load_shift_left(std::uint64_t ea) noexcept { Vector128 r{};unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16;++i)r.bytes[i]=std::uint8_t((n+i)&31u);return r; }
 Vector128 vector_load_shift_right(std::uint64_t ea) noexcept { Vector128 r{};unsigned n=unsigned(ea&15u);for(unsigned i=0;i<16;++i)r.bytes[i]=std::uint8_t((16u-n+i)&31u);return r; }
 
-Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, GuestAddress ea,unsigned width){Vector128 r=old;unsigned p=unsigned(ea&15u);if(width==1)r.bytes[p]=m.read8(ea);else if(width==2){ea&=~GuestAddress{1};unsigned lane=(p&14u)/2;r.set_u16_be(lane,m.read16_be(ea));}else{ea&=~GuestAddress{3};unsigned lane=(p&12u)/4;r.set_u32_be(lane,m.read32_be(ea));}return r;}
+// lvebx/lvehx/lvewx(128): AltiVec leaves the lanes other than the addressed
+// element undefined; the Xbox 360 loads the whole aligned quadword, as lvx
+// does (xenia-project/xenia PPC tests instr_lvexx: lvewx of 0x10001000 yields
+// all four words). Titles that read a neighbouring lane see memory, not the
+// register's old contents.
+Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, GuestAddress ea,
+                              unsigned width) {
+  (void)old;
+  (void)width;
+  return m.read128(GuestAddress(ea & ~GuestAddress{15}));
+}
 void vector_store_element(const Vector128& v,MemoryAccessContext&m,GuestAddress ea,unsigned width){unsigned p=unsigned(ea&15u);if(width==1)m.write8(ea,v.bytes[p]);else if(width==2){ea&=~GuestAddress{1};m.write16_be(ea,v.u16_be((p&14u)/2));}else{ea&=~GuestAddress{3};m.write32_be(ea,v.u32_be((p&12u)/4));}}
 Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& m,
                            GuestAddress ea) {
