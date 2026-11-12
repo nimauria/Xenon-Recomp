@@ -138,6 +138,11 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_primitive_processor_tests)
     add_test(NAME xenon_primitive_processor_tests COMMAND xenon_primitive_processor_tests)
     if(TARGET xenon_graphics_dxc)
+    add_executable(xenon_blend_constant_tests
+      xenos/blend_constant.cpp)
+    target_link_libraries(xenon_blend_constant_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_blend_constant_tests)
+    add_test(NAME xenon_blend_constant_tests COMMAND xenon_blend_constant_tests)
       add_executable(xenon_shader_translation_tests
         xenos/shader_translation.cpp)
       set_target_properties(xenon_shader_translation_tests PROPERTIES
