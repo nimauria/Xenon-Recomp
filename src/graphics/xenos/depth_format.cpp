@@ -110,4 +110,9 @@ std::uint32_t host_to_depth_stencil(DepthRenderTargetFormat format,
   return pack_depth_stencil(format, host_depth, stencil, rounding);
 }
 
+float host_viewport_depth(DepthRenderTargetFormat format, float guest_depth) noexcept {
+  if (format != DepthRenderTargetFormat::D24FS8) return guest_depth;
+  return quantize_float20e4(guest_depth) * 0.5f;
+}
+
 }  // namespace xenon::gpu

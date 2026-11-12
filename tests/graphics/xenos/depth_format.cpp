@@ -136,6 +136,27 @@ void test_clear_register_words_unpack_as_written() {
   }
 }
 
+// Regression (AC6 black campaign opening, D24FS8 depth copies all zero):
+// clears and loads stored half the guest depth on the host while draws used
+// the full guest viewport range, so geometry was tested against a clear at the
+// wrong scale. A guest depth must reach the host at the same value whether it
+// arrives as a clear/load or as the viewport bound of a draw.
+void test_viewport_depth_matches_the_host_scale() {
+  using namespace xenon::gpu;
+  for (const float guest : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+    const auto cleared = depth_stencil_to_host(
+        DepthRenderTargetFormat::D24FS8,
+        pack_depth_stencil(DepthRenderTargetFormat::D24FS8, guest, 0)).depth;
+    assert(host_viewport_depth(DepthRenderTargetFormat::D24FS8, guest) == cleared);
+    assert(host_viewport_depth(DepthRenderTargetFormat::D24S8, guest) == guest);
+  }
+  assert(host_viewport_depth(DepthRenderTargetFormat::D24FS8, 1.0f) == 0.5f);
+  // A bound between lattice points is rounded onto the 20e4 lattice first.
+  const float between = 0.3f;
+  assert(host_viewport_depth(DepthRenderTargetFormat::D24FS8, between) ==
+         quantize_float20e4(between) * 0.5f);
+}
+
 }  // namespace
 
 int main() {
@@ -145,5 +166,6 @@ int main() {
   test_round_trip_lattice_samples();
   test_packed_depth_stencil();
   test_clear_register_words_unpack_as_written();
+  test_viewport_depth_matches_the_host_scale();
   std::cout << "xenon_depth_format_tests: ok\n";
 }

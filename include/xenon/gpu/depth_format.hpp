@@ -52,4 +52,12 @@ struct DepthStencilSample {
     DepthRenderTargetFormat format, float host_depth, std::uint8_t stencil,
     Float20e4Rounding rounding = Float20e4Rounding::NearestEven) noexcept;
 
+// A guest viewport depth bound (RB viewport Z, already clamped to [0, 1]) as
+// the host viewport must use it. Draws have to land on the same scale as
+// clears, loads and readbacks: for D24FS8 that is half the guest value, and
+// the bound is first rounded onto the 20e4 lattice as the reference does, so
+// the post-shader clamp cannot produce a depth the format cannot hold.
+[[nodiscard]] float host_viewport_depth(DepthRenderTargetFormat format,
+                                        float guest_depth) noexcept;
+
 }  // namespace xenon::gpu
