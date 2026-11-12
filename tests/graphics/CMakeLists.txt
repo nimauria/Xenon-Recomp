@@ -143,6 +143,16 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_blend_constant_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_blend_constant_tests)
     add_test(NAME xenon_blend_constant_tests COMMAND xenon_blend_constant_tests)
+    add_executable(xenon_transient_arena_tests
+      xenos/transient_arena.cpp)
+    target_link_libraries(xenon_transient_arena_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_transient_arena_tests)
+    add_test(NAME xenon_transient_arena_tests COMMAND xenon_transient_arena_tests)
+    add_executable(xenon_blend_constant_tests
+      xenos/blend_constant.cpp)
+    target_link_libraries(xenon_blend_constant_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_blend_constant_tests)
+    add_test(NAME xenon_blend_constant_tests COMMAND xenon_blend_constant_tests)
       add_executable(xenon_shader_translation_tests
         xenos/shader_translation.cpp)
       set_target_properties(xenon_shader_translation_tests PROPERTIES
