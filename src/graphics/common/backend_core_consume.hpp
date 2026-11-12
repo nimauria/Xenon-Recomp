@@ -97,10 +97,41 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
     error.clear();
     const bool resolve = state.edram_mode == EdramMode::Copy;
     if (resolve) {
+      if (tracing()) {
+        const auto& copy = state.copy;
+        const auto source = copy.copies_depth() ? state.depth_target.base_tile
+                                                : state.color_targets[copy.source_select & 3u].base_tile;
+        const auto source_format = copy.copies_depth()
+                                       ? state.depth_target.format
+                                       : state.color_targets[copy.source_select & 3u].format;
+        char line[320];
+        std::snprintf(line, sizeof(line),
+                      "#%llu resolve source=%u base=%u fmt=%u pitch=%u msaa=%u samples=%u "
+                      "scissor=(%d,%d)-(%d,%d) window_offset=(%d,%d) to 0x%08X pitch=%u height=%u "
+                      "fmt=%u command=%u clear color=%d(0x%08X) depth=%d(0x%08X)",
+                      static_cast<unsigned long long>(trace_index), unsigned(copy.source_select),
+                      unsigned(source), unsigned(source_format),
+                      unsigned(state.raster.surface_pitch),
+                      unsigned(state.raster.msaa_samples_log2), unsigned(copy.sample_select),
+                      state.raster.scissor_left, state.raster.scissor_top,
+                      state.raster.scissor_right, state.raster.scissor_bottom,
+                      state.raster.window_offset_x, state.raster.window_offset_y,
+                      unsigned(copy.destination_base), unsigned(copy.destination_pitch),
+                      unsigned(copy.destination_height), unsigned(copy.destination_format),
+                      unsigned(copy.command), int(copy.color_clear_enabled),
+                      unsigned(copy.color_clear[0]), int(copy.depth_clear_enabled),
+                      unsigned(copy.depth_clear));
+        trace(line);
+      }
       consume_resolve(state);
+      if (tracing() && !error.empty()) trace("  resolve failed: " + error);
       report_slow("resolve");
+      // The next resolve's trail starts here.
+      draw_trail_count = 0;
     } else {
+      note_draw(*draw, state);
       consume_draw(draw, state);
+      if (tracing() && !error.empty()) trace("  draw failed: " + error);
       report_slow("draw");
     }
     if (error.empty()) {
@@ -163,6 +194,18 @@ void BackendCore<Derived, Api>::consume_resolve(
     return;
   }
   const auto& rectangle = resolve_plan.rectangle;
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"gpu", "resolve", {"dest", "rect_wh", "fmt_depth_samples", "clear"}, false});
+  xenon::logging::ActivityScope activity(
+      activity_key,
+      {resolve_plan.copy.destination_base,
+       std::uint64_t(std::uint32_t(rectangle.right - rectangle.left)) |
+           (std::uint64_t(std::uint32_t(rectangle.bottom - rectangle.top)) << 16u),
+       std::uint64_t(resolve_plan.copy.destination_format) |
+           (std::uint64_t(resolve_plan.depth ? 1u : 0u) << 8u) |
+           (std::uint64_t(resolve_plan.samples) << 16u),
+       std::uint64_t(resolve_plan.copy.color_clear_enabled ? 1u : 0u) |
+           (std::uint64_t(state.copy.depth_clear_enabled ? 2u : 0u))});
   // Every resolve: where the guest asked EDRAM to be copied, on the probe
   // logs' clock, so a screen that samples a stale copy can be traced back.
   xenon::logging::append_probe_log(
@@ -212,12 +255,45 @@ void BackendCore<Derived, Api>::consume_resolve(
     const EdramSurfaceLayout canonical_surface{
         state.depth_target.base_tile, state.raster.surface_pitch,
         static_cast<std::uint32_t>(rectangle.bottom), samples, false, true};
-    if (source) {
-      if (!acquire_depth_ownership(source_key, *source, source->surface())) return;
-    } else if (!make_region_canonical(canonical_surface, {rectangle.left, rectangle.top,
-                                                          rectangle.right, rectangle.bottom})) {
-      return;
+    const EdramSurfaceRegion depth_region{rectangle.left, rectangle.top, rectangle.right,
+                                          rectangle.bottom};
+    if (source && !acquire_depth_ownership(source_key, *source, source->surface())) return;
+    // When one native depth image owns every tile, the resolve runs on the GPU
+    // out of it, as a color resolve does: shadow maps and AC6's depth copies
+    // for depth of field took a readback, a CPU pack and a store each.
+    if (auto* owner = source ? source : single_depth_owner(canonical_surface, depth_region)) {
+      const auto gpu = plan_gpu_depth_resolve(resolve_plan, format, canonical_surface,
+                                              owner->surface(), owner->host_msaa(),
+                                              owner->guest_format());
+      if (gpu.valid) {
+        // Bytes of the touched pages outside the rectangle keep their CPU
+        // values; the pass writes the rectangle's words over them.
+        if (!mirror.synchronize_range(gpu.range_address, gpu.range_size,
+                                      memory::GpuRangeUsage::RenderReadback)) {
+          error = mirror.error();
+          return;
+        }
+        if (!self().gpu_depth_resolve(*owner, gpu.constants)) return;
+        mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+        note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
+        // Guest code may read what it resolved; the copy lands with the work.
+        if (!mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+                                         memory::GpuRangeUsage::RenderReadback)) {
+          error = mirror.error();
+          return;
+        }
+        ++performance.gpu_depth_resolves;
+        note_resolve(true, static_cast<std::uint8_t>(format), resolve_plan.copy.destination_format,
+                     rectangle, false,
+                     std::string("GPU path, ") + (source ? "native depth target" : "single owner") +
+                         ", RB_DEPTH_CLEAR 0x" + hex_word(state.copy.depth_clear) +
+                         (state.copy.depth_clear_enabled ? " (clears after)" : ""),
+                     resolve_plan.copy.destination_base);
+        (void)clear_depth_resolve_region(state, rectangle, samples);
+        return;
+      }
     }
+    if (!source && !make_region_canonical(canonical_surface, depth_region)) return;
     if (resolve_plan.selected_sample_count != 1) {
       error = named("Xenos depth resolve selected multiple samples");
       return;
@@ -261,7 +337,16 @@ void BackendCore<Derived, Api>::consume_resolve(
       error = written.error;
       return;
     }
-    guest_reads.backend_wrote(written.modified_address, written.modified_size);
+    note_resolve(true, static_cast<std::uint8_t>(format), resolve_plan.copy.destination_format,
+                 rectangle,
+                 std::all_of(readback.begin(), readback.end(),
+                             [](std::uint32_t word) { return word == 0u; }),
+                 std::string(source ? "native depth target" : "canonical EDRAM") +
+                     ", RB_DEPTH_CLEAR 0x" + hex_word(state.copy.depth_clear) +
+                     (state.copy.depth_clear_enabled ? " (clears after)" : ""),
+                 resolve_plan.copy.destination_base);
+    note_backend_write(texture_dirty, guest_reads, written.modified_address,
+                       written.modified_size);
     if (!clear_depth_resolve_region(state, rectangle, samples))
       return;
     return;
@@ -323,15 +408,27 @@ void BackendCore<Derived, Api>::consume_resolve(
       }
       if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
       mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
-      guest_reads.backend_wrote(gpu.range_address, gpu.range_size);
+      note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
       if (state.copy.color_clear_enabled && !self().gpu_color_clear(*owner, clear)) return;
-      // Guest code may read what it resolved, and it reads CPU memory.
-      if (!mirror.make_cpu_visible(gpu.range_address, gpu.range_size,
-                                   memory::GpuRangeUsage::RenderReadback)) {
+      // Guest code may read what it resolved, and it reads CPU memory. The
+      // copy is queued with the work and lands as the GPU finishes it; the
+      // command processor waits for it only before the guest can observe
+      // the GPU having passed this point (Backend::publish_gpu_writes()).
+      // Waiting here instead cost a GPU round trip per resolve, dozens a frame.
+      if (!mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+                                       memory::GpuRangeUsage::RenderReadback)) {
         error = mirror.error();
         return;
       }
       ++performance.gpu_resolves;
+      // Its bytes are not in guest memory yet, so the census counts it
+      // without a content scan.
+      note_resolve(false, static_cast<std::uint8_t>(format), state.copy.destination_format,
+                   rectangle, false, source ? "GPU path" : "GPU path, single owner",
+                   state.copy.destination_base);
+      probe_full_frame_resolve(source ? "gpu" : "gpu-single-owner", state.copy.destination_base,
+                               rectangle, source ? source_key : 0u,
+                               owner->height());
       // A depth clear sets its error itself; the color resolve is done.
       (void)clear_depth_resolve_region(state, rectangle, samples);
       return;
@@ -450,8 +547,16 @@ void BackendCore<Derived, Api>::consume_resolve(
     error = written.error;
     return;
   }
-  guest_reads.backend_wrote(written.modified_address, written.modified_size);
+  note_backend_write(texture_dirty, guest_reads, written.modified_address, written.modified_size);
   // Keep resolve correctness failures separate from presentation failures.
+  note_resolve(false, static_cast<std::uint8_t>(format), state.copy.destination_format,
+               rectangle,
+               std::all_of(readback.begin(), readback.end(),
+                           [](std::byte byte) { return byte == std::byte{}; }),
+               source ? "readback of native target" : "canonical EDRAM",
+               state.copy.destination_base, readback);
+  probe_full_frame_resolve(source ? "native-readback" : "canonical", state.copy.destination_base,
+                           rectangle, source ? source_key : 0u, source ? source->height() : 0u);
   // When probe logging is explicitly enabled, sample the first few resolves
   // on both sides of the native-readback -> guest-memory boundary. This is
   // intentionally bounded: AC6 resolves every frame, and an unbounded byte
@@ -534,6 +639,7 @@ void BackendCore<Derived, Api>::consume_shader_load(
 #ifdef XENON_HAS_DXC
   decoded_shaders[load->program.hash()] = load->decoded;
   const auto lowered = HlslShaderLowerer::lower(load->decoded);
+  dump_shader(load->program, lowered.hlsl);
   unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
   unsupported.unsupported_shader_features += lowered.unsupported_features;
   unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;

@@ -69,6 +69,8 @@ class CommandProcessor {
     std::uint64_t event_memory_writes{};
     std::uint64_t event_counter_writes{};
     std::uint64_t extent_event_writes{};
+    // EVENT_WRITE_EXT packets whose write left memory unchanged (no barrier).
+    std::uint64_t unchanged_event_writes{};
     std::uint64_t viz_query_begins{};
     std::uint64_t viz_query_ends{};
     std::uint64_t viz_query_visible_results{};

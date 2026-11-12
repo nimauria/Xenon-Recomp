@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -479,7 +480,7 @@ void test_constant_buffer_abi() {
   tracker.apply({0x210E, std::bit_cast<std::uint32_t>(0.5f)});
   tracker.apply({0x2202, 6u | (1u << 3) | (1u << 4) | (2u << 24) |
                              (2u << 26) | (2u << 28) | (2u << 30)});
-  std::vector<std::byte> data(9472);
+  std::vector<std::byte> data(xenon::gpu::kShaderConstantBufferBytes);
   assert(tracker.write_constant_buffer(data));
   const auto word = [&](std::size_t offset) {
     std::uint32_t value{};
@@ -499,7 +500,7 @@ void test_constant_buffer_abi() {
   assert(word(8836) == ((static_cast<std::uint32_t>(-128) << 16) | 0xFFFDu));
   assert(word(8840) == (0x12340000u | 0u));
   assert(word(8844) == (0x56780000u | 1u));
-  assert(word(9344) == 3u);
+  assert(word(xenon::gpu::kDrawStateOffset) == 3u);
   assert(word(9348) == static_cast<std::uint32_t>(CompareFunction::GreaterEqual));
   assert(word(9352) == 2u);
   assert(word(9356) == 0xAAu);
@@ -517,7 +518,7 @@ void test_constant_buffer_carries_vertex_index_offset_and_clamp() {
   tracker.apply({0x2102, 12u});         // VGT_INDX_OFFSET
   tracker.apply({0x2101, 4u});          // VGT_MIN_VTX_INDX
   tracker.apply({0x2100, 0x00FFFFFFu}); // VGT_MAX_VTX_INDX
-  std::vector<std::byte> data(9472);
+  std::vector<std::byte> data(xenon::gpu::kShaderConstantBufferBytes);
   assert(tracker.write_constant_buffer(data));
   const auto word = [&](std::size_t offset) {
     std::uint32_t value{};
@@ -550,7 +551,7 @@ void test_viewport_transform_follows_vte_enables() {
     std::memcpy(&value, data.data() + offset, sizeof(value));
     return value;
   };
-  std::vector<std::byte> data(9472);
+  std::vector<std::byte> data(xenon::gpu::kShaderConstantBufferBytes);
 
   // Pre-transformed: X/Y/Z transform off, XY and Z already divided by W0.
   tracker.apply({0x2206, (1u << 8) | (1u << 9)});
@@ -750,8 +751,10 @@ void test_color_target_plan() {
   using namespace xenon::gpu;
   DrawResourceState state{};
   state.edram_mode = EdramMode::ColorDepth;
+  for (std::size_t i = 0; i < state.color_targets.size(); ++i)
+    state.color_targets[i].base_tile = static_cast<std::uint32_t>(i * 300u);
 
-  auto plan = plan_color_targets(state);
+  auto plan = plan_color_targets(state, 0xF);
   assert(!plan.any());
   assert(plan.attachment_count == 0);
   assert(plan.contiguous);
@@ -759,7 +762,7 @@ void test_color_target_plan() {
   state.color_targets[0].enabled = true;
   state.color_targets[1].enabled = true;
   state.color_targets[3].enabled = true;
-  plan = plan_color_targets(state);
+  plan = plan_color_targets(state, 0xF);
   assert(plan.any());
   assert(plan.enabled_mask == 0b1011u);
   assert(plan.attachment_count == 4);
@@ -767,15 +770,140 @@ void test_color_target_plan() {
   assert(plan.enabled[0] && plan.enabled[1] && !plan.enabled[2] && plan.enabled[3]);
 
   state.color_targets[2].enabled = true;
-  plan = plan_color_targets(state);
+  plan = plan_color_targets(state, 0xF);
   assert(plan.enabled_mask == 0b1111u);
   assert(plan.attachment_count == 4);
   assert(plan.contiguous);
 
   state.edram_mode = EdramMode::DepthOnly;
-  plan = plan_color_targets(state);
+  plan = plan_color_targets(state, 0xF);
   assert(!plan.any());
   assert(plan.attachment_count == 0);
+}
+
+// Regression (AC6's first cutscene was black): its scene shaders export oC0
+// only, with RB_COLOR_MASK left open and RB_COLOR1-3_INFO at tile 0, the
+// same EDRAM as color target 0. Binding all four aliased one surface through
+// four host slots, and D3D12 dropped every scene draw. Only exported colors
+// with distinct EDRAM bases are written.
+void test_color_target_plan_follows_shader_exports() {
+  using namespace xenon::gpu;
+  DrawResourceState state{};
+  state.edram_mode = EdramMode::ColorDepth;
+  for (auto& target : state.color_targets) {
+    target.enabled = true;
+    target.write_mask = 0xF;
+    target.base_tile = 0;
+  }
+
+  auto plan = plan_color_targets(state, 0b0001u);
+  assert(plan.enabled_mask == 0b0001u);
+  assert(plan.attachment_count == 1);
+  assert(plan.contiguous);
+
+  // An MRT shader writing all four into one base still binds only slot 0.
+  plan = plan_color_targets(state, 0b1111u);
+  assert(plan.enabled_mask == 0b0001u);
+  assert(plan.attachment_count == 1);
+
+  // Distinct bases: each exported color is its own target; a slot the
+  // shader does not export stays unbound even with its mask open.
+  state.color_targets[1].base_tile = 300;
+  state.color_targets[2].base_tile = 0;
+  state.color_targets[3].base_tile = 900;
+  plan = plan_color_targets(state, 0b1011u);
+  assert(plan.enabled_mask == 0b1011u);
+  assert(plan.attachment_count == 4);
+  assert(!plan.contiguous);
+  plan = plan_color_targets(state, 0b1111u);
+  assert(plan.enabled_mask == 0b1011u);  // slot 2 repeats slot 0's base
+
+  // No color exports: a depth-only pass through a color-depth mode.
+  plan = plan_color_targets(state, 0u);
+  assert(!plan.any());
+
+  ShaderReflection reflection{};
+  reflection.exports = {62u, 0u, 2u, 61u};
+  assert(shader_color_output_mask(reflection) == 0b0101u);
+}
+
+// The host depth transform follows PA_CL_CLIP_CNTL as Xenia's
+// GetHostViewportInfo does: Direct3D clip space passes Z through to the
+// guest's depth range, OpenGL-style -W...W is remapped to 0...W, a reversed
+// range is put in order with Z flipped, a depth-writing pixel shader gets
+// 0...1, and with clipping off the vertex shader applies the whole Z
+// transform. Xenon used to ignore CLIP_CNTL and give a reversed range to the
+// host swapped but unflipped, inverting depth.
+void test_host_depth_transform() {
+  using namespace xenon::gpu;
+  const auto near = [](float a, float b) { return std::abs(a - b) < 1e-6f; };
+  const auto depth_at = [](const HostDepthTransform& t, float z_over_w) {
+    return t.z_min + (z_over_w * t.ndc_scale + t.ndc_offset) * (t.z_max - t.z_min);
+  };
+  RasterState raster{};
+  raster.viewport.z_scale = 0.5f;
+  raster.viewport.z_offset = 0.25f;
+
+  auto t = host_depth_transform(raster, false);
+  assert(near(t.z_min, 0.25f) && near(t.z_max, 0.75f));
+  assert(near(t.ndc_scale, 1.0f) && near(t.ndc_offset, 0.0f));
+
+  // -W...W: NDC -1 and 1 reach the guest's offset -/+ scale.
+  raster.dx_clip_space = false;
+  t = host_depth_transform(raster, false);
+  // Offset - scale is below 0: the host range starts at 0, where NDC -1 lands.
+  assert(near(t.z_min, 0.0f) && near(t.z_max, 0.75f));
+  assert(near(t.ndc_scale, 0.5f) && near(t.ndc_offset, 0.5f));
+  raster.viewport.z_scale = 0.25f;
+  raster.viewport.z_offset = 0.5f;
+  t = host_depth_transform(raster, false);
+  assert(near(t.z_min, 0.25f) && near(t.z_max, 0.75f));
+  assert(near(depth_at(t, -1.0f), 0.25f) && near(depth_at(t, 1.0f), 0.75f));
+  assert(near(depth_at(t, 0.0f), 0.5f));
+
+  // A reversed range (negative scale): ordered for the host, Z flipped, so
+  // every depth lands where the guest's own transform puts it.
+  raster.dx_clip_space = true;
+  raster.viewport.z_scale = -1.0f;
+  raster.viewport.z_offset = 1.0f;
+  t = host_depth_transform(raster, false);
+  assert(t.z_min <= t.z_max);
+  assert(near(t.z_min, 0.0f) && near(t.z_max, 1.0f));
+  for (const float z : {0.0f, 0.3f, 1.0f}) assert(near(depth_at(t, z), 1.0f - z));
+
+  // A shader that writes depth gets the whole range.
+  t = host_depth_transform(raster, true);
+  assert(near(t.z_min, 0.0f) && near(t.z_max, 1.0f));
+
+  // Clipping disabled: 0...1, and the vertex shader applies scale and offset.
+  raster.clip_disabled = true;
+  raster.viewport.z_scale = 0.5f;
+  raster.viewport.z_offset = 0.25f;
+  t = host_depth_transform(raster, false);
+  assert(near(t.z_min, 0.0f) && near(t.z_max, 1.0f));
+  assert(near(t.ndc_scale, 0.5f) && near(t.ndc_offset, 0.25f));
+  assert(near(depth_at(t, 1.0f), 0.75f));
+
+  // A NaN offset is clamped, as the host viewport requires.
+  raster.clip_disabled = false;
+  raster.viewport.z_offset = std::numeric_limits<float>::quiet_NaN();
+  t = host_depth_transform(raster, false);
+  assert(t.z_min >= 0.0f && t.z_min <= 1.0f && t.z_max >= 0.0f && t.z_max <= 1.0f);
+}
+
+// PA_CL_CLIP_CNTL is decoded into the raster state and keys the pipeline,
+// since clipping off is native rasterizer state (no depth clip).
+void test_clip_control_is_decoded() {
+  using namespace xenon::gpu;
+  ResourceStateTracker tracker;
+  tracker.apply({0x2204, (1u << 16) | (1u << 19)});
+  auto state = tracker.snapshot();
+  assert(state.raster.clip_disabled && state.raster.dx_clip_space);
+  const auto disabled_hash = state.pipeline_hash(xenon::gpu::ir::DrawPacket{});
+  tracker.apply({0x2204, 0u});
+  state = tracker.snapshot();
+  assert(!state.raster.clip_disabled && !state.raster.dx_clip_space);
+  assert(state.pipeline_hash(xenon::gpu::ir::DrawPacket{}) != disabled_hash);
 }
 
 void test_host_polygon_mode() {
@@ -920,7 +1048,38 @@ void test_window_scissor_bounds_the_drawable_rectangle() {
   assert(state.raster.drawable_bottom == 8192);
 }
 
+// Regression (AC6 campaign opening black): the luminance pass draws a
+// full-screen rectangle list while the scene's back-face culling is still set.
+// The rectangle was culled, its R32F target stayed empty and tone mapping
+// turned the frame black. Culling applies only to polygonal primitive types,
+// as on the reference renderers.
+void test_rectangle_lists_are_never_face_culled() {
+  using namespace xenon::gpu;
+  RasterState raster{};
+  raster.cull_back = true;
+  raster.front_face_clockwise = true;
+  for (const auto type : {PrimitiveType::RectangleList, PrimitiveType::PointList,
+                          PrimitiveType::LineList, PrimitiveType::LineStrip,
+                          PrimitiveType::LineLoop}) {
+    assert(!primitive_is_polygonal(type));
+    const auto host = host_raster_state(raster, type);
+    assert(!host.cull_front && !host.cull_back);
+    assert(host.front_face_clockwise);  // everything else is kept
+  }
+  for (const auto type : {PrimitiveType::TriangleList, PrimitiveType::TriangleFan,
+                          PrimitiveType::TriangleStrip, PrimitiveType::TriangleWithWFlags,
+                          PrimitiveType::QuadList, PrimitiveType::QuadStrip,
+                          PrimitiveType::Polygon}) {
+    assert(primitive_is_polygonal(type));
+    assert(host_raster_state(raster, type).cull_back);
+  }
+  raster.cull_front = true;  // both faces culled still culls polygons only
+  assert(!host_raster_state(raster, PrimitiveType::RectangleList).cull_front);
+  assert(host_raster_state(raster, PrimitiveType::TriangleList).cull_front);
+}
+
 int main() {
+  test_rectangle_lists_are_never_face_culled();
   test_window_scissor_bounds_the_drawable_rectangle();
   test_guest_memory_coherency_ranges();
   test_memexport_stream_planning();
@@ -932,6 +1091,9 @@ int main() {
   test_viewport_transform_follows_vte_enables();
   test_copy_resolve_state();
   test_color_target_plan();
+  test_color_target_plan_follows_shader_exports();
+  test_host_depth_transform();
+  test_clip_control_is_decoded();
   test_host_polygon_mode();
   test_preferred_polygon_offset();
   test_depth_control_without_effect_is_disabled();

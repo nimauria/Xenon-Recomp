@@ -213,6 +213,13 @@ struct RasterState {
   float polygon_offset_back_scale{};
   float polygon_offset_back_offset{};
   ViewportState viewport{};
+  // PA_CL_CLIP_CNTL: CLIP_DISABLE (bit 16) and DX_CLIP_SPACE_DEF (bit 19,
+  // clip-space Z in 0...W rather than -W...W).
+  bool clip_disabled{};
+  bool dx_clip_space{true};
+  // PA_CL_CLIP_CNTL UCP_ENA_0-5: the user clip planes (PA_CL_UCP_n) in use;
+  // none while clipping is disabled.
+  std::uint8_t user_clip_planes{};
   // The lowest pixel row (exclusive) this draw can reach: the scissor bottom,
   // further limited by the viewport bottom while clipping is enabled. Render
   // targets are sized from it; the scissor alone is 8192 under Direct3D when
@@ -264,8 +271,40 @@ struct MemExportPlan {
   [[nodiscard]] bool has_writes() const noexcept { return export_mask != 0; }
 };
 
+// SQ_PROGRAM_CNTL and SQ_CONTEXT_MISC as a draw uses them.
+struct ShaderProgramState {
+  // SQ_PROGRAM_CNTL VS_EXPORT_MODE (bits 24-26).
+  std::uint8_t vertex_export_mode{};
+  // SQ_PROGRAM_CNTL PARAM_GEN (bit 18) and SQ_CONTEXT_MISC PARAM_GEN_POS
+  // (bits 8-15): the pixel shader register the hardware fills with the
+  // pixel's parameters (PsParamGen) instead of an interpolant.
+  bool param_gen{};
+  std::uint8_t param_gen_position{};
+
+  // A multipass vertex shader only exports to memory; nothing rasterizes.
+  [[nodiscard]] bool multipass() const noexcept { return vertex_export_mode == 7u; }
+  // The sprite export modes put the point size in the second position
+  // export's X.
+  [[nodiscard]] bool vertex_point_size() const noexcept {
+    return vertex_export_mode == 2u || vertex_export_mode == 5u;
+  }
+  // The interpolator replaced by PsParamGen, or kNoParamGen.
+  static constexpr std::uint8_t kNoParamGen = 0xFF;
+  [[nodiscard]] std::uint8_t param_gen_interpolator() const noexcept {
+    return param_gen && param_gen_position < 16u ? param_gen_position : kNoParamGen;
+  }
+};
+
+// The shader constant buffer: float constants, bool and loop constants,
+// fetch constants, then per-draw native translation state
+// (XenonDrawState[24]). A multiple of 256 bytes, as Direct3D 12 constant
+// buffer views require.
+inline constexpr std::size_t kShaderConstantBufferBytes = 9728;
+inline constexpr std::size_t kDrawStateOffset = 9344;
+
 struct DrawResourceState {
   EdramMode edram_mode{EdramMode::NoOperation};
+  ShaderProgramState program{};
   std::array<RenderTargetDescriptor, 4> color_targets{};
   std::array<float, 4> blend_constant{};
   PixelControlState pixel_control{};
@@ -326,8 +365,18 @@ struct ColorTargetPlan {
   [[nodiscard]] bool any() const noexcept { return enabled_mask != 0; }
 };
 
+// A Xenos color target is written only when the pixel shader exports that
+// color (bit N of shader_color_outputs is export oCN) and its write mask is
+// non-zero; a target whose EDRAM base repeats a lower slot's is not bound
+// either. Titles leave RB_COLOR_MASK open and RB_COLOR1-3_INFO pointing at
+// tile 0 behind single-output shaders (AC6's cutscene scene), and binding
+// those would alias one surface through several host slots.
 [[nodiscard]] ColorTargetPlan plan_color_targets(
-    const DrawResourceState& state) noexcept;
+    const DrawResourceState& state, std::uint8_t shader_color_outputs) noexcept;
+
+// The color exports (oC0-oC3) a pixel shader writes, as a 4-bit mask.
+[[nodiscard]] std::uint8_t shader_color_output_mask(
+    const ShaderReflection& reflection) noexcept;
 
 // Xenos dual polygon mode can request a different representation for front and
 // back faces. Modern pipelines expose one fill mode, so choose the most
@@ -336,6 +385,35 @@ struct ColorTargetPlan {
 // filled triangles.
 [[nodiscard]] HostPolygonMode host_polygon_mode(
     const RasterState& raster) noexcept;
+
+// Whether Xenos treats a primitive type as polygons, which face culling (and
+// the per-face polygon state) applies to: the triangle, quad and polygon
+// types. Points, lines and rectangle lists are not; a rectangle list is drawn
+// whatever the cull mode, as the reference renderers do (games leave scene
+// culling on for full-screen rectangle passes).
+[[nodiscard]] bool primitive_is_polygonal(PrimitiveType type) noexcept;
+
+// The rasterizer state a host pipeline gets for a draw: the guest's, with
+// face culling off for a primitive type culling does not apply to.
+[[nodiscard]] RasterState host_raster_state(const RasterState& raster,
+                                            PrimitiveType type) noexcept;
+
+// How guest clip-space Z becomes host depth, as Xenia derives it
+// (draw_util::GetHostViewportInfo): the vertex shader first takes
+// z * ndc_scale + w * ndc_offset - remapping an OpenGL-style -W...W to
+// 0...W, flipping a reversed range, or applying the whole viewport Z
+// transform when clipping is off - and the host viewport then maps 0...W to
+// z_min...z_max, in guest depth units (a D24FS8 target halves them,
+// host_viewport_depth). Host viewports need z_min <= z_max. A pixel shader
+// that writes depth gets the full 0...1 range, which its depth is clamped to.
+struct HostDepthTransform {
+  float z_min{};
+  float z_max{1.0f};
+  float ndc_scale{1.0f};
+  float ndc_offset{};
+};
+[[nodiscard]] HostDepthTransform host_depth_transform(const RasterState& raster,
+                                                      bool pixel_shader_writes_depth) noexcept;
 
 [[nodiscard]] PolygonOffsetState preferred_polygon_offset(
     const RasterState& raster, HostPrimitiveTopology topology) noexcept;

@@ -142,6 +142,15 @@ void issue_dummy_draw(Backend& backend) {
   backend.consume(ir::Command{std::move(draw)});
 }
 
+// The guest learns the GPU got past a resolve through a fence or an
+// interrupt; the command processor publishes the resolve's queued readback
+// before either (Backend::publish_gpu_writes()), so the resolved bytes are in
+// guest memory by the time the guest can look.
+template <typename Backend>
+void guest_observes_resolve(Backend& backend) {
+  assert(backend.publish_gpu_writes(true));
+}
+
 template <typename Backend>
 void issue_color_resolve(Backend& backend, std::uint32_t destination,
                          bool clear_after) {
@@ -158,6 +167,7 @@ void issue_color_resolve(Backend& backend, std::uint32_t destination,
     write_register(backend, 0x231F, 0u);
   }
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
 }
 
 template <typename Backend>
@@ -175,6 +185,7 @@ void issue_depth_resolve(Backend& backend, std::uint32_t destination,
   set_resolve_destination(backend, destination, 6, Endian128::None, 7, true);
   if (clear_after) write_register(backend, 0x231D, kDepthClear);
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
 }
 
 std::uint32_t resolved_word_at(const xenon::memory::AddressSpace& memory,
@@ -267,10 +278,15 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
   // Resolve from the real depth owner. Xenos depth tiles exchange their two
   // 40-sample halves, so depth X=0 aliases color X=40 rather than color X=0.
   // The destination deliberately asks for a color conversion, but depth
-  // resolves must still write the exact packed D24S8 bits. Then clear depth in
-  // canonical EDRAM.
+  // resolves must still write the exact packed D24S8 bits. The depth image
+  // owns every tile, so the resolve and the clear after it both run on the GPU
+  // in that image; the clear reaches EDRAM when the owner hands its tiles back.
+  const auto depth_counters = backend.performance_counters();
   issue_depth_resolve(backend, kDepthResolveDestination, true);
   assert_backend_ok(backend, "depth resolve and clear");
+  assert(backend.performance_counters().gpu_depth_resolves ==
+         depth_counters.gpu_depth_resolves + 1u);
+  assert(backend.performance_counters().gpu_depth_clears == depth_counters.gpu_depth_clears + 1u);
   const auto depth_resolved =
       resolved_word_at(memory, kDepthResolveDestination, 0, 0);
   constexpr std::uint32_t kColorAtDepthZero = 0xA5000028u;
@@ -284,6 +300,7 @@ void run_backend_ownership_alias_resolve_clear(Backend& backend,
   const EdramSurfaceLayout depth_surface{
       kSurfaceBaseTile, kSurfacePitch, kGrownHeight, MsaaSamples::X1, false,
       true};
+  assert(backend.make_edram_canonical());
   assert(read_edram_sample(edram, depth_surface, 0, 0)[0] == kDepthClear);
   assert(read_edram_sample(edram, depth_surface, 15, 15)[0] == kDepthClear);
   assert(read_edram_sample(edram, depth_surface, 16, 0)[0] == 0xA5000038u);
@@ -437,6 +454,7 @@ void run_gpu_resolve_of_msaa_alias(Backend& backend, std::string_view name) {
   write_register(backend, 0x231E, kColorClear);
   write_register(backend, 0x231F, 0u);
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
   assert_backend_ok(backend, "GPU resolve");
   if (backend.performance_counters().gpu_resolves != before + 1u) {
     std::cerr << name << ": the resolve went through canonical EDRAM, not the GPU\n";
@@ -530,6 +548,7 @@ void run_direct_color_transfer(Backend& backend, std::string_view name) {
   write_register(backend, 0x2318, static_cast<std::uint32_t>(CopyCommand::Raw) << 20u);
   set_resolve_destination(backend, kDestination, 6);
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
   assert_backend_ok(backend, "resolve of the transferred tile");
   for (const auto [x, y] : {std::pair{0u, 0u}, std::pair{15u, 15u}, std::pair{7u, 3u}}) {
     const auto word = resolved_word_at(memory, kDestination, x, y);
@@ -610,6 +629,7 @@ void run_direct_depth_transfer(Backend& backend, std::string_view name) {
   write_register(backend, 0x2318, 4u | (static_cast<std::uint32_t>(CopyCommand::Raw) << 20u));
   set_resolve_destination(backend, kDestination, 6);
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
   assert_backend_ok(backend, "resolve of the transferred depth tile");
   for (std::uint32_t y = 0; y < 16u; ++y) {
     for (std::uint32_t x = 0; x < 16u; ++x) {
@@ -624,6 +644,141 @@ void run_direct_depth_transfer(Backend& backend, std::string_view name) {
   }
   backend.end_submission();
   std::cout << name << " direct EDRAM depth transfer: ok\n";
+}
+
+struct TransferView {
+  bool depth{};
+  std::uint8_t format{};
+  std::string_view label{};
+};
+
+constexpr TransferView kD24S8View{true, std::uint8_t(DepthRenderTargetFormat::D24S8), "D24S8"};
+constexpr TransferView kD24FS8View{true, std::uint8_t(DepthRenderTargetFormat::D24FS8),
+                                   "D24FS8"};
+constexpr TransferView kRgba8View{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8),
+                                  "8_8_8_8"};
+constexpr TransferView kR32FloatView{false, std::uint8_t(ColorRenderTargetFormat::R32Float),
+                                     "32_FLOAT"};
+
+// Regression (AC6's first cutscene ran below one frame a second): an EDRAM
+// tile changing between two different views - D24S8 and D24FS8 depth, depth
+// and a color format, two color formats - went through a readback, a CPU
+// repack and an upload with a queue drain, several times a frame, because
+// only same-format images had a GPU transfer. The tiles now move on the GPU
+// through the converting transfer, both ways (`first` -> `second` ->
+// `first`), and resolving `first` yields exactly the EDRAM words it
+// imported: the Xbox keeps the word, whatever view reads it.
+template <typename Backend>
+void run_converting_transfer(Backend& backend, std::string_view name, TransferView first,
+                             TransferView second) {
+  constexpr std::uint32_t kDestination = 0x100000;
+  constexpr std::uint32_t kTileWide = 80;
+  constexpr std::uint32_t kTwoTilesWide = 160;
+  constexpr std::uint32_t kRows = 16;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  const std::array<float, 6> resolve_vertices{-0.5f, -0.5f, 15.5f, -0.5f, -0.5f, 15.5f};
+  write_guest_bytes(memory, kResolveVertices, resolve_vertices.data(), sizeof(resolve_vertices));
+  Edram edram;
+  edram.reset();
+  const EdramSurfaceLayout wide{kSurfaceBaseTile, kTwoTilesWide, kRows,
+                                MsaaSamples::X1,  false,         first.depth};
+  // Distinct words that are ordinary values in every view (their 16-bit
+  // halves are finite), plus a cleared depth/stencil (0xFFFFFF00: a NaN as a
+  // float), zero and 1.0f.
+  const auto seeded = [](std::uint32_t x, std::uint32_t y) -> std::uint32_t {
+    if (y == 0 && x == 0) return 0xFFFFFF00u;
+    if (y == 0 && x == 1) return 0u;
+    if (y == 0 && x == 2) return 0x3F800000u;
+    return 0x40000000u | (((x * 7u + y * 37u) & 0xFFu) << 16u) | (y << 8u) | x;
+  };
+  const auto special = [](std::uint32_t x, std::uint32_t y) { return y == 0 && x < 3; };
+  for (std::uint32_t y = 0; y < kRows; ++y)
+    for (std::uint32_t x = 0; x < kTwoTilesWide; ++x)
+      assert(write_edram_sample(edram, wide, x, y, {seeded(x, y), 0u}));
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+
+  const auto set_surface = [&](TransferView view, std::uint32_t pitch) {
+    write_register(backend, 0x2000, pitch);
+    write_register(backend, 0x200E, 0u);
+    write_register(backend, 0x200F, pitch | (kRows << 16u));
+    write_register(backend, 0x2081, 1u << 31u);
+    write_register(backend, 0x2082, pitch | (kRows << 16u));
+    write_register(backend, view.depth ? 0x2002 : 0x2001,
+                   kSurfaceBaseTile | (std::uint32_t(view.format) << 16u));
+  };
+  const auto draw = [&](TransferView view, std::uint32_t pitch) {
+    set_surface(view, pitch);
+    write_register(backend, 0x2208,
+                   static_cast<std::uint32_t>(view.depth ? EdramMode::DepthOnly
+                                                         : EdramMode::ColorDepth));
+    write_register(backend, 0x2104, view.depth ? 0u : 0xFu);
+    write_register(backend, 0x2200, view.depth ? (1u << 1u) | (1u << 2u) : 0u);
+    issue_dummy_draw(backend);
+  };
+  const auto expect_direct = [&](std::uint64_t before, std::string_view step) {
+    if (backend.performance_counters().direct_edram_transfers > before) return;
+    std::cerr << name << ' ' << first.label << " <-> " << second.label << ": " << step
+              << " went through canonical EDRAM, not a GPU transfer\n";
+    assert(false);
+  };
+
+  draw(first, kTileWide);
+  assert_backend_ok(backend, "first view owner");
+  auto before = backend.performance_counters().direct_edram_transfers;
+  draw(second, kTwoTilesWide);
+  assert_backend_ok(backend, "second view owner");
+  expect_direct(before, "first -> second");
+  before = backend.performance_counters().direct_edram_transfers;
+  draw(first, kTwoTilesWide);
+  assert_backend_ok(backend, "first view again");
+  expect_direct(before, "second -> first");
+
+  set_surface(first, kTwoTilesWide);
+  set_resolve_fetch(backend);
+  write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::Copy));
+  write_register(backend, 0x2318,
+                 (first.depth ? 4u : 0u) | (static_cast<std::uint32_t>(CopyCommand::Raw) << 20u));
+  set_resolve_destination(backend, kDestination, 6);
+  issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
+  assert_backend_ok(backend, "resolve after the round trip");
+  std::uint32_t mismatches = 0;
+  for (std::uint32_t y = 0; y < 16u; ++y) {
+    for (std::uint32_t x = 0; x < 16u; ++x) {
+      const auto word = resolved_word_at(memory, kDestination, x, y);
+      if (word == seeded(x, y)) continue;
+      if (++mismatches <= 8u)
+        std::cerr << name << ' ' << first.label << " <-> " << second.label << " resolved 0x"
+                  << std::hex << word << " at (" << std::dec << x << ',' << y
+                  << "), expected 0x" << std::hex << seeded(x, y) << std::dec
+                  << (special(x, y) ? " (special word)" : "") << '\n';
+    }
+  }
+  assert(mismatches == 0);
+  backend.end_submission();
+  std::cout << name << " converting EDRAM transfer " << first.label << " <-> " << second.label
+            << ": ok\n";
+}
+
+template <typename Backend, typename Make>
+void run_converting_transfers(Make make, std::string_view name) {
+  const std::array<std::pair<TransferView, TransferView>, 5> pairs{{
+      {kD24S8View, kD24FS8View},
+      {kD24S8View, kR32FloatView},
+      {kD24FS8View, kRgba8View},
+      {kRgba8View, kR32FloatView},
+      {kRgba8View, kD24S8View},
+  }};
+  for (const auto& [first, second] : pairs) {
+    Backend backend;
+    if (!make(backend)) {
+      std::cerr << name << " backend initialization failed: " << backend.error() << '\n';
+      assert(false);
+    }
+    run_converting_transfer(backend, name, first, second);
+  }
 }
 
 }  // namespace
@@ -654,6 +809,8 @@ int main() {
     xenon::gpu::vulkan::Backend alias;
     assert(alias.initialize({.enable_validation = false}));
     run_gpu_resolve_of_msaa_alias(alias, "Vulkan");
+    run_converting_transfers<xenon::gpu::vulkan::Backend>(
+        [](auto& b) { return b.initialize({.enable_validation = false}); }, "Vulkan");
     ran_backend = true;
   }
 #endif
@@ -683,6 +840,11 @@ int main() {
     xenon::gpu::d3d12::Backend alias;
     assert(alias.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
     run_gpu_resolve_of_msaa_alias(alias, "D3D12");
+    run_converting_transfers<xenon::gpu::d3d12::Backend>(
+        [](auto& b) {
+          return b.initialize({.enable_debug_layer = false, .allow_software_adapter = false});
+        },
+        "D3D12");
     ran_backend = true;
   }
 #endif

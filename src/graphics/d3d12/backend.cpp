@@ -15,6 +15,7 @@
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/depth_target.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/d3d12/edram_transfer.hpp"
 #include "xenon/gpu/d3d12/gpu_resolve.hpp"
 #include "xenon/gpu/d3d12/guest_memory_mirror.hpp"
@@ -62,6 +63,9 @@ struct BackendApi {
   }
   // D3D12 has no FRONT_AND_BACK cull mode.
   static constexpr bool kEmulatesFrontAndBackCull = true;
+  // BLEND_FACTOR reads the blend constant's RGB; guest CONSTANT_ALPHA needs
+  // its alpha (shared_blend_factor_constant).
+  static constexpr bool kSharedBlendFactorConstant = true;
   static constexpr bool kSupportsDirectColorTransfer = true;
   static constexpr bool kSupportsDirectDepthTransfer = true;
 #ifdef XENON_HAS_DXC
@@ -91,6 +95,17 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
     if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_clear(DepthTargetImage& owner, const GpuClearConstants& constants,
+                       std::uint8_t stencil) {
+    if (gpu_resolver.clear_depth(context.device(), queue, owner, constants, stencil)) return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -129,6 +144,38 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                             std::span<const EdramSurfaceRegion> regions) {
     if (edram_depth_transfer.transfer(context.device(), queue, source, destination, constants,
                                       regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+  template <typename Source>
+  bool convert_color_tiles(Source& source, RenderTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    std::string source_error;
+    const auto view = edram_transfer_source(source, source_error);
+    if (!view.heap) {
+      error = named(source_error);
+      return false;
+    }
+    if (edram_color_transfer.convert(context.device(), queue, view, destination, constants,
+                                     regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  template <typename Source>
+  bool convert_depth_tiles(Source& source, DepthTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    std::string source_error;
+    const auto view = edram_transfer_source(source, source_error);
+    if (!view.heap) {
+      error = named(source_error);
+      return false;
+    }
+    if (edram_depth_transfer.convert(context.device(), queue, view, destination, constants,
+                                     regions))
       return true;
     error = named(edram_depth_transfer.error());
     return false;
@@ -176,8 +223,23 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                            DepthRenderTargetFormat format) {
     return image.initialize(context.device(), surface, format);
   }
-  bool create_texture(TextureImage& image, const DecodedTexture& decoded) {
-    return image.initialize(context.device(), queue, decoded);
+  GpuTextureLoader texture_loader{};
+  // Loads `layout` into `image` on the GPU, from `capture` (a sync-point copy
+  // of guest memory at `capture_base`) or, when that is empty, from the
+  // guest-memory mirror. A new or differently shaped image is created first.
+  bool load_texture(TextureImage& image, const TextureLayout& layout,
+                    std::span<const std::byte> capture, std::uint32_t capture_base) {
+    if (!image.matches(layout) && !image.create(context.device(), layout)) {
+      error = named(image.error());
+      return false;
+    }
+    const bool loaded =
+        capture.empty()
+            ? texture_loader.load_from_mirror(context.device(), queue, mirror, image, layout)
+            : texture_loader.load_from_bytes(context.device(), queue, image, layout, capture,
+                                             capture_base);
+    if (!loaded) error = named(texture_loader.error());
+    return loaded;
   }
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
@@ -207,6 +269,58 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     counters.unsupported_sampler_behaviors +=
         resources.unsupported_sampler_behaviors();
   }
+  // Diagnostic (the GPU trace's draw probe): the next recorded draw is wrapped
+  // in a pipeline statistics query, so a draw that leaves its targets
+  // untouched shows whether its vertices ran, its primitives survived
+  // clipping and its pixels were shaded.
+  void request_draw_statistics() {
+    if (!statistics_heap) {
+      D3D12_QUERY_HEAP_DESC heap_desc{};
+      heap_desc.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+      heap_desc.Count = 1;
+      const D3D12_HEAP_PROPERTIES readback_heap{D3D12_HEAP_TYPE_READBACK};
+      D3D12_RESOURCE_DESC buffer{};
+      buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buffer.Width = sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
+      buffer.Height = 1;
+      buffer.DepthOrArraySize = 1;
+      buffer.MipLevels = 1;
+      buffer.SampleDesc.Count = 1;
+      buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      if (FAILED(context.device()->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&statistics_heap))) ||
+          FAILED(context.device()->CreateCommittedResource(
+              &readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST,
+              nullptr, IID_PPV_ARGS(&statistics_readback)))) {
+        statistics_heap.Reset();
+        statistics_readback.Reset();
+        return;
+      }
+    }
+    statistics_requested = true;
+  }
+  [[nodiscard]] std::string draw_statistics() {
+    if (!statistics_recorded) return " statistics unavailable";
+    statistics_recorded = false;
+    if (!queue.wait_idle()) return " statistics: GPU wait failed";
+    D3D12_QUERY_DATA_PIPELINE_STATISTICS data{};
+    void* mapped = nullptr;
+    const D3D12_RANGE range{0, sizeof(data)};
+    if (FAILED(statistics_readback->Map(0, &range, &mapped))) return " statistics: map failed";
+    std::memcpy(&data, mapped, sizeof(data));
+    const D3D12_RANGE none{0, 0};
+    statistics_readback->Unmap(0, &none);
+    return " statistics: IA vertices " + std::to_string(data.IAVertices) + ", IA primitives " +
+           std::to_string(data.IAPrimitives) + ", VS invocations " +
+           std::to_string(data.VSInvocations) + ", GS primitives " +
+           std::to_string(data.GSPrimitives) + ", clipper in " +
+           std::to_string(data.CInvocations) + " out " + std::to_string(data.CPrimitives) +
+           ", PS invocations " + std::to_string(data.PSInvocations);
+  }
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> statistics_heap;
+  Microsoft::WRL::ComPtr<ID3D12Resource> statistics_readback;
+  bool statistics_requested{};
+  bool statistics_recorded{};
+
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
     return queue.execute_async([&](ID3D12GraphicsCommandList* list,
                                    std::uint32_t frame_index,
@@ -214,7 +328,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       resources.prepare_draw(frame_index, draw_slot);
       D3D12_INDEX_BUFFER_VIEW index_view{};
       std::size_t index_offset = 0;
-      if (!upload_draw_indices(draw, frame_index, draw_slot, index_offset)) {
+      if (!upload_draw_indices(draw, frame_index, index_offset)) {
         record_failed = true;
         return;
       }
@@ -242,17 +356,19 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                  ->GetGPUDescriptorHandleForHeapStart());
       list->SetGraphicsRootDescriptorTable(
           3, resources.memory_export_handle(frame_index, draw_slot));
-      list->OMSetBlendFactor(draw.state.blend_constant.data());
+      list->OMSetBlendFactor(draw.blend_constant.data());
       // The guest X/Y viewport transform runs in the vertex shader; the host
-      // viewport is the whole render target. Depth keeps the guest Z range.
-      const auto& guest_viewport = draw.state.raster.viewport;
-      const auto depth_a = (std::clamp)(guest_viewport.z_offset, 0.0f, 1.0f);
-      const auto depth_b = (std::clamp)(
-          guest_viewport.z_offset + guest_viewport.z_scale, 0.0f, 1.0f);
+      // viewport is the whole render target. Its depth range is the host
+      // depth transform's, which the vertex shader's Z part keeps ordered.
+      // A D24FS8 target holds half the guest depth on the host (see
+      // host_viewport_depth), so its draws use the halved range too.
+      const auto depth_format = draw.depth && draw.depth->requires_float24_conversion()
+                                    ? DepthRenderTargetFormat::D24FS8
+                                    : DepthRenderTargetFormat::D24S8;
       const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(draw.render_width),
                                     float(draw.render_height),
-                                    (std::min)(depth_a, depth_b),
-                                    (std::max)(depth_a, depth_b)};
+                                    host_viewport_depth(depth_format, draw.z_min),
+                                    host_viewport_depth(depth_format, draw.z_max)};
       const D3D12_RECT scissor{draw.scissor_left, draw.scissor_top,
                                draw.scissor_right, draw.scissor_bottom};
       list->RSSetViewports(1, &viewport);
@@ -277,12 +393,22 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
         }
       }
       list->IASetPrimitiveTopology(draw.pipeline.native_topology());
+      const bool statistics = statistics_requested;
+      statistics_requested = false;
+      if (statistics)
+        list->BeginQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
       if (draw.batch.indexed) {
         list->IASetIndexBuffer(&index_view);
         list->DrawIndexedInstanced(
             static_cast<UINT>(draw.batch.indices.size()), 1, 0, 0, 0);
       } else {
         list->DrawInstanced(draw.batch.vertex_count, 1, 0, 0);
+      }
+      if (statistics) {
+        list->EndQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+        list->ResolveQueryData(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0, 1,
+                               statistics_readback.Get(), 0);
+        statistics_recorded = true;
       }
     });
   }
@@ -337,6 +463,7 @@ void Backend::consume(const ir::Command& command) {
 }
 
 void Backend::end_submission() { impl_->end_submission(); }
+void Backend::end_submission_deferred() { impl_->end_submission(false); }
 bool Backend::make_guest_memory_cpu_visible(std::uint32_t physical_address,
                                             std::uint32_t size) {
   return impl_->make_guest_memory_cpu_visible(physical_address, size);
@@ -354,6 +481,10 @@ bool Backend::invalidate_edram_native_state() {
 
 void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
+bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_shader_cache_directory(const std::string& directory) {
+  impl_->shader_cache.set_disk_directory(directory);
+}
 
 bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
                               std::uint32_t height, PreparedPresentationFrame& output) {
@@ -377,6 +508,10 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
 
 std::vector<GpuFailureReason> Backend::failure_reasons() const {
   return impl_->failure_log.reasons();
+}
+
+std::vector<GpuResolveKind> Backend::resolve_census() const {
+  return impl_->resolve_census.kinds();
 }
 
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
@@ -410,7 +545,3 @@ const DeviceProperties& Backend::device_properties() const noexcept {
 const std::string& Backend::error() const noexcept { return impl_->error; }
 
 }  // namespace xenon::gpu::d3d12
-bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
-void Backend::set_shader_cache_directory(const std::string& directory) {
-  impl_->shader_cache.set_disk_directory(directory);
-}

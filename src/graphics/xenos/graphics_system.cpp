@@ -10,6 +10,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/shader_ir.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/logging/logger.hpp"
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -472,9 +473,25 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
                                           std::uint32_t read_index,
                                           std::uint32_t write_index) {
   // Only a decoded draw (a resolve is one) can change what the guest
-  // observes; register writes alone wait for the next draw or the end.
+  // observes; register writes alone wait for the next draw or the end. The
+  // barrier records that work in order but leaves it in the open batch:
+  // anything that needs its results (a resolve's readback, a wait) submits
+  // and waits itself, and the drain submits at its end. Submitting at every
+  // barrier made each of AC6's draws its own GPU batch - with three in
+  // flight, every draw waited a GPU round trip.
+  //
+  // Resolve readbacks are queued with the work and not waited for (see
+  // Backend::publish_gpu_writes()). Before the guest can observe that the
+  // GPU got past a point - a fence or memory write, an interrupt, a memory
+  // poll - every readback queued before it is waited for and written to
+  // guest memory, so a title that sees the fence also sees the resolve.
   command_processor_.set_guest_visible_barrier([this, &backend] {
-    if (command_processor_.statistics().draws != draws_at_last_execute_) execute_ir(backend);
+    if (command_processor_.statistics().draws != draws_at_last_execute_)
+      execute_ir(backend, /*submit=*/false);
+    if (!backend.publish_gpu_writes(/*wait=*/true)) {
+      logging::Logger::instance().log(logging::Level::Error, "gpu",
+                                      "resolve readback failed: " + backend.last_error());
+    }
   });
   command_processor_.set_sync_point_callback([&backend] { backend.sync_guest_reads(); });
   struct ClearBarrier {
@@ -493,6 +510,11 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
   const auto next_read_index =
       command_processor_.execute_ring(physical_address, capacity_dwords, read_index, write_index);
   execute_ir(backend);
+  // Readbacks the GPU has already finished land now, without waiting.
+  if (!backend.publish_gpu_writes(/*wait=*/false)) {
+    logging::Logger::instance().log(logging::Level::Error, "gpu",
+                                    "resolve readback failed: " + backend.last_error());
+  }
   return next_read_index;
 }
 
@@ -601,7 +623,7 @@ bool GraphicsSystem::replay_portable_capture(
   return true;
 }
 
-void GraphicsSystem::execute_ir(Backend& backend) {
+void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
   draws_at_last_execute_ = command_processor_.statistics().draws;
   using Clock = std::chrono::steady_clock;
   const auto begin_start = Clock::now();
@@ -628,7 +650,10 @@ void GraphicsSystem::execute_ir(Backend& backend) {
     }
   }
   const auto end_start = Clock::now();
-  backend.end_submission();
+  if (submit)
+    backend.end_submission();
+  else
+    backend.end_submission_deferred();
   if (const auto ms = elapsed_ms(end_start); ms >= 50)
     logging::append_probe_log("ir_timing_diag.log", "end_submission %lld ms\n", ms);
   stream_.clear();

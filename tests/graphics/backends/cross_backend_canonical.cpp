@@ -137,6 +137,15 @@ void issue_dummy_draw(Backend& backend) {
   backend.consume(ir::Command{std::move(draw)});
 }
 
+// The guest learns the GPU got past a resolve through a fence or an
+// interrupt; the command processor publishes the resolve's queued readback
+// before either (Backend::publish_gpu_writes()), so the resolved bytes are in
+// guest memory by the time the guest can look.
+template <typename Backend>
+void guest_observes_resolve(Backend& backend) {
+  assert(backend.publish_gpu_writes(true));
+}
+
 template <typename Backend>
 void issue_color_resolve(Backend& backend, MsaaSamples samples,
                          CopySampleSelect selection,
@@ -155,6 +164,7 @@ void issue_color_resolve(Backend& backend, MsaaSamples samples,
     write_register(backend, 0x231F, 0u);
   }
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
 }
 
 template <typename Backend>
@@ -178,6 +188,7 @@ void issue_depth_resolve(Backend& backend, MsaaSamples samples,
                  (6u << 7u) | (7u << 16u) | (1u << 24u));
   if (clear_after) write_register(backend, 0x231D, kDepthClear);
   issue_dummy_draw(backend);
+  guest_observes_resolve(backend);
 }
 
 std::uint32_t resolved_word_at(const xenon::memory::AddressSpace& memory,

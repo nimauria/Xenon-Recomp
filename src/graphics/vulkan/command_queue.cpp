@@ -1,5 +1,7 @@
 #include "xenon/gpu/vulkan/command_queue.hpp"
 
+#include "xenon/logging/activity_trace.hpp"
+
 namespace xenon::gpu::vulkan {
 
 CommandQueue::~CommandQueue() {
@@ -75,6 +77,10 @@ bool CommandQueue::wait_for_value(std::uint64_t value) {
     error_ = "Vulkan timeline wait requested on an uninitialized queue";
     return false;
   }
+  // Activity trace: how long the CPU waits on the GPU.
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"gpu", "fence wait", {"value", "submitted", "", ""}, false});
+  xenon::logging::ActivityScope activity(activity_key, {value, last_submitted_value_, 0u, 0u});
   VkSemaphoreWaitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
   wait.semaphoreCount = 1;
   wait.pSemaphores = &timeline_;

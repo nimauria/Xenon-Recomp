@@ -22,6 +22,7 @@ class Backend final : public xenon::gpu::Backend {
   void begin_submission(memory::AddressSpace& memory, Edram& edram) override;
   void consume(const ir::Command& command) override;
   void end_submission() override;
+  void end_submission_deferred() override;
   [[nodiscard]] bool make_guest_memory_cpu_visible(
       std::uint32_t physical_address, std::uint32_t size) override;
   [[nodiscard]] bool make_edram_canonical() override;
@@ -36,14 +37,15 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool presentation_ready() const noexcept override;
   [[nodiscard]] GpuPerformanceCounters performance_counters() const noexcept override;
   [[nodiscard]] std::vector<GpuFailureReason> failure_reasons() const override;
+  [[nodiscard]] std::vector<GpuResolveKind> resolve_census() const override;
   [[nodiscard]] GpuUnsupportedCounters unsupported_counters() const noexcept override;
   [[nodiscard]] GpuShaderCoverage shader_coverage() const noexcept override;
   void sync_guest_reads() override;
   void end_guest_read_sync() override;
-
-  [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] bool publish_gpu_writes(bool wait) override;
   void set_shader_cache_directory(const std::string& directory) override;
+
+  [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::size_t command_count() const noexcept;
   [[nodiscard]] std::size_t draw_count() const noexcept;
   [[nodiscard]] std::size_t compiled_shader_count() const noexcept;

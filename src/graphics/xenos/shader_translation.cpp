@@ -246,7 +246,7 @@ cbuffer XenonShaderConstants : register(b0) {
   uint4 XenonBoolConstants[8];
   uint4 XenonLoopConstants[32];
   uint4 XenonVertexFetchConstants[32];
-  uint4 XenonDrawState[8];
+  uint4 XenonDrawState[24];
 };
 #ifdef XENON_MEMORY_RW
 RWByteAddressBuffer XenonGuestMemory : register(u0);
@@ -274,16 +274,38 @@ uint xenon_vertex_index(uint index) {
 // render-target pixels times W) and the host's pixels-to-NDC mapping
 // (XenonDrawState[3].yz = 2 / width, 2 / height; Y down in pixels, up in
 // NDC - Vulkan flips its viewport to match).
-float4 xenon_host_position(float4 position) {
+float4 xenon_clip_position(float4 position) {
   uint flags = XenonDrawState[3].x;
   if ((flags & 4u) == 0u) position.w = 1.0 / position.w;
   if ((flags & 1u) != 0u) position.xy *= position.w;
   if ((flags & 2u) != 0u) position.z *= position.w;
+  return position;
+}
+float4 xenon_host_position(float4 position) {
+  position = xenon_clip_position(position);
+  // The host depth transform's Z part (XenonDrawState[4].xy, see
+  // host_depth_transform): OpenGL-style Z to 0...W, a reversed range flipped,
+  // or the whole viewport Z transform when the guest disables clipping.
+  float2 z_transform = asfloat(XenonDrawState[4].xy);
+  position.z = position.z * z_transform.x + z_transform.y * position.w;
   float4 transform = asfloat(XenonDrawState[2]);
   float2 pixels = position.xy * transform.xy + transform.zw * position.w;
   float2 to_ndc = asfloat(XenonDrawState[3].yz);
   return float4(pixels.x * to_ndc.x - position.w, position.w - pixels.y * to_ndc.y,
                 position.z, position.w);
+}
+
+// PA_CL_CLIP_CNTL UCP_ENA_n (XenonDrawState[4].w) with the planes in
+// XenonDrawState[5..10]: the guest clip-space position's distance to each
+// enabled plane; a disabled plane never clips.
+void xenon_user_clip_distances(float4 clip_position, out float4 clip0, out float2 clip1) {
+  uint enabled = XenonDrawState[4].w;
+  float distances[6];
+  [unroll] for (uint i = 0u; i < 6u; ++i)
+    distances[i] = ((enabled >> i) & 1u) != 0u
+                       ? dot(clip_position, asfloat(XenonDrawState[5u + i])) : 0.0;
+  clip0 = float4(distances[0], distances[1], distances[2], distances[3]);
+  clip1 = float2(distances[4], distances[5]);
 }
 
 bool xenon_bool(uint index) {
@@ -1045,12 +1067,20 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   if (shader.stage == ShaderStage::Pixel) out << "#define XENON_PIXEL_SHADER 1\n";
   emit_prelude(out, guest_memory_rw, memexport_enabled);
   if (shader.stage == ShaderStage::Vertex) {
+    // i16 carries the second position export (point size, edge flag, kill)
+    // to a point sprite geometry shader, which turns it into the sprite
+    // coordinates; the user clip distances come last.
     out << "struct XenonOutput { float4 position : SV_Position;";
-    for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    for (unsigned i=0;i<17;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    out << " float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;";
     out << " };\nXenonOutput " << options.entry_point << "(uint vertex_id : SV_VertexID) {\n";
   } else {
     out << "struct XenonInput { float4 position : SV_Position;";
     for (unsigned i=0;i<16;++i) out << " float4 i" << i << " : TEXCOORD" << i << ";";
+    // A point's PsParamGen takes its sprite coordinates from i16.
+    if (options.param_gen_point) out << " float4 i16 : TEXCOORD16;";
+    if (options.param_gen_interpolator < 16u && !options.param_gen_point)
+      out << " bool front_face : SV_IsFrontFace;";
     if (options.force_sample_frequency)
       out << " uint sample_index : SV_SampleIndex;";
     out << " };\nstruct XenonOutput {";
@@ -1062,13 +1092,39 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   out << "  float4 r[64]; float4 e[64];\n"
       << "  [unroll] for (uint i=0;i<64;++i) { r[i]=0.0.xxxx; e[i]=0.0.xxxx; }\n"
       << "  bool p0=false; int a0=0; int aL=0; float4 ps=0.0.xxxx;\n"
+      << "  uint2 vfetch_base=uint2(0u, 0u);\n"
       << "  float4 xenon_grad_h=0.0.xxxx, xenon_grad_v=0.0.xxxx; float xenon_register_lod=0.0;\n"
       << "  uint pc=0, guard=0, call_depth=0, loop_depth=0; bool running=true;\n"
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
   if (shader.stage == ShaderStage::Vertex)
     out << "  r[0].x = (float)xenon_vertex_index(vertex_id);\n";
-  else for (unsigned i=0;i<16;++i) out << "  r[" << i << "] = input.i" << i << ";\n";
+  else {
+    for (unsigned i=0;i<16;++i) {
+      if (i == options.param_gen_interpolator) continue;
+      out << "  r[" << i << "] = input.i" << i << ";\n";
+    }
+    if (options.param_gen_interpolator < 16u) {
+      // PsParamGen (SQ_PROGRAM_CNTL.PARAM_GEN): |XY| the pixel's position
+      // (whole numbers, as Direct3D 9's vPos), X's sign set for a back face,
+      // Y's for a point, Z's for a line; a point's ZW are its sprite
+      // coordinates. XenonDrawState[4].z holds the primitive class.
+      out << "  {\n"
+          << "    uint xenon_primitive = XenonDrawState[4].z;\n"
+          << "    float2 xenon_pixel = abs(floor(input.position.xy));\n"
+          << "    float4 xenon_param = float4(xenon_pixel, 0.0, 0.0);\n";
+      if (options.param_gen_point) {
+        out << "    xenon_param.y = asfloat(asuint(xenon_param.y) | 0x80000000u);\n"
+            << "    xenon_param.zw = saturate(input.i16.xy);\n";
+      } else {
+        out << "    if ((xenon_primitive & 1u) != 0u && !input.front_face)\n"
+            << "      xenon_param.x = asfloat(asuint(xenon_param.x) | 0x80000000u);\n"
+            << "    if ((xenon_primitive & 2u) != 0u) xenon_param.z = asfloat(0x80000000u);\n";
+      }
+      out << "    r[" << unsigned(options.param_gen_interpolator) << "] = xenon_param;\n"
+          << "  }\n";
+    }
+  }
 
   out << "  [loop] while (running && guard++ < 65536) {\n"
       << "    switch (pc) {\n";
@@ -1092,7 +1148,6 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
                  opcode == ControlFlowOpcode::CondExecPredEnd) {
         condition = cf.predicate.condition ? "p0" : "!p0";
       }
-      << "  uint2 vfetch_base=uint2(0u, 0u);\n"
       out << "        bool execute = " << condition << ";\n"
           << "        if (execute) {\n";
       for (std::uint32_t address = cf.target; address < cf.target + cf.count; ++address) {
@@ -1187,6 +1242,8 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   if (shader.stage == ShaderStage::Vertex) {
     out << "  output.position=xenon_host_position(e[62]);\n";
     for (unsigned i=0;i<16;++i) out << "  output.i" << i << "=e[" << i << "];\n";
+    out << "  output.i16=e[63];\n"
+        << "  xenon_user_clip_distances(xenon_clip_position(e[62]), output.clip0, output.clip1);\n";
   } else {
     for (unsigned i=0;i<4;++i) out << "  output.c" << i << "=e[" << i << "];\n";
     if (writes_color_target_zero) {
@@ -1208,10 +1265,19 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
         // sample index, but intentionally prevents the input from being DCE'd.
         out << "  if (input.sample_index == 0xFFFFFFFFu) xenon_depth = 0.0;\n";
       }
-      if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4NearestEven) {
-        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, true);\n";
-      } else if (options.pixel_depth_output == PixelDepthOutputMode::Float20e4Truncate) {
-        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, false);\n";
+      if (options.pixel_depth_output != PixelDepthOutputMode::Native) {
+        // A D24FS8 target holds half the guest depth on the host, as its
+        // clears, loads and readbacks do, and its viewport range is halved to
+        // match (host_viewport_depth). Interpolated Z is doubled back to guest
+        // depth, an exported depth is guest depth clamped as the viewport
+        // would, and either is rounded to 20e4 before being halved again.
+        out << (shader.reflection.writes_depth ? "  xenon_depth = saturate(xenon_depth);\n"
+                                               : "  xenon_depth *= 2.0;\n");
+        out << "  xenon_depth = xenon_quantize_float20e4(xenon_depth, "
+            << (options.pixel_depth_output == PixelDepthOutputMode::Float20e4NearestEven
+                    ? "true"
+                    : "false")
+            << ") * 0.5;\n";
       }
       out << "  output.depth=xenon_depth;\n";
     }
@@ -1240,6 +1306,8 @@ struct XenonVertex {
   float4 i10 : TEXCOORD10; float4 i11 : TEXCOORD11;
   float4 i12 : TEXCOORD12; float4 i13 : TEXCOORD13;
   float4 i14 : TEXCOORD14; float4 i15 : TEXCOORD15;
+  float4 i16 : TEXCOORD16;
+  float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;
 };
 
 XenonVertex xenon_rectangle_corner(XenonVertex a, XenonVertex b,
@@ -1263,6 +1331,8 @@ XenonVertex xenon_rectangle_corner(XenonVertex a, XenonVertex b,
   d.i10=a.i10+b.i10-c.i10; d.i11=a.i11+b.i11-c.i11;
   d.i12=a.i12+b.i12-c.i12; d.i13=a.i13+b.i13-c.i13;
   d.i14=a.i14+b.i14-c.i14; d.i15=a.i15+b.i15-c.i15;
+  d.i16=a.i16+b.i16-c.i16;
+  d.clip0=a.clip0+b.clip0-c.clip0; d.clip1=a.clip1+b.clip1-c.clip1;
   return d;
 }
 
@@ -1291,7 +1361,65 @@ void main(triangle XenonVertex input[3],
   stream.RestartStrip();
 }
 )hlsl";
-  result.source_hash = hash_text("xenon.rectangle-list.geometry.v2");
+  result.source_hash = hash_text("xenon.rectangle-list.geometry.v3");
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = true;
+  return result;
+}
+
+LoweredShader make_point_sprite_geometry_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Geometry;
+  result.entry_point = "main";
+  result.profile = "gs_6_0";
+  result.hlsl = R"hlsl(
+// Project Xenon native point sprite expansion. Xenos draws every point as a
+// screen-aligned square: its diameter is the vertex shader's exported size
+// (second position export X, in the sprite export modes) clamped to
+// PA_SU_POINT_MINMAX, or PA_SU_POINT_SIZE's. The sprite coordinates run from
+// 0 at the top left to 1 at the bottom right, in i16.xy for PsParamGen.
+cbuffer XenonShaderConstants : register(b0) {
+  float4 XenonFloatConstants[512];
+  uint4 XenonBoolConstants[8];
+  uint4 XenonLoopConstants[32];
+  uint4 XenonVertexFetchConstants[32];
+  uint4 XenonDrawState[24];
+};
+struct XenonVertex {
+  float4 position : SV_Position;
+  float4 i0 : TEXCOORD0; float4 i1 : TEXCOORD1;
+  float4 i2 : TEXCOORD2; float4 i3 : TEXCOORD3;
+  float4 i4 : TEXCOORD4; float4 i5 : TEXCOORD5;
+  float4 i6 : TEXCOORD6; float4 i7 : TEXCOORD7;
+  float4 i8 : TEXCOORD8; float4 i9 : TEXCOORD9;
+  float4 i10 : TEXCOORD10; float4 i11 : TEXCOORD11;
+  float4 i12 : TEXCOORD12; float4 i13 : TEXCOORD13;
+  float4 i14 : TEXCOORD14; float4 i15 : TEXCOORD15;
+  float4 i16 : TEXCOORD16;
+  float4 clip0 : SV_ClipDistance0; float2 clip1 : SV_ClipDistance1;
+};
+
+[maxvertexcount(4)]
+void main(point XenonVertex input[1], inout TriangleStream<XenonVertex> stream) {
+  XenonVertex v = input[0];
+  float4 sizes = asfloat(XenonDrawState[11]);
+  float2 diameter = sizes.xy;
+  if ((XenonDrawState[4].z & 8u) != 0u) diameter = clamp(v.i16.xx, sizes.z, sizes.w);
+  // Pixels to clip space: half the diameter, times 2 / render-target size,
+  // times W. NDC Y points up, so the top row is +Y.
+  float2 radius = diameter * 0.5 * asfloat(XenonDrawState[3].yz) * v.position.w;
+  const float2 corners[4] = {float2(-1.0, 1.0), float2(1.0, 1.0),
+                             float2(-1.0, -1.0), float2(1.0, -1.0)};
+  [unroll] for (uint i = 0u; i < 4u; ++i) {
+    XenonVertex corner = v;
+    corner.position.xy = v.position.xy + corners[i] * radius;
+    corner.i16 = float4(corners[i].x * 0.5 + 0.5, 0.5 - corners[i].y * 0.5, 0.0, 0.0);
+    stream.Append(corner);
+  }
+  stream.RestartStrip();
+}
+)hlsl";
+  result.source_hash = hash_text("xenon.point-sprite.geometry.v1");
   result.translation_hash = hash_text(result.hlsl);
   result.complete = true;
   return result;
@@ -1564,6 +1692,228 @@ LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) 
   result.translation_hash = hash_text(result.hlsl);
   result.complete = count == 1 || count == 2 || count == 4;
   if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
+  return result;
+}
+
+namespace {
+
+// HLSL ports of the CPU conversions between an EDRAM word and a host value
+// (pack_color_sample / unpack_color_sample for the formats whose host storage
+// is the word's own encoding, host_to_depth_stencil / depth_stencil_to_host),
+// for the formats edram_converting_transfer_supported() accepts.
+constexpr std::string_view kEdramWordCodecHlsl = R"hlsl(uint xe_unorm_bits(float v, float scale) {
+  return uint(floor(saturate(v) * scale + 0.5));
+}
+uint xe_pack_rgba8(float4 v) {
+  return xe_unorm_bits(v.x, 255.0) | (xe_unorm_bits(v.y, 255.0) << 8u) |
+         (xe_unorm_bits(v.z, 255.0) << 16u) | (xe_unorm_bits(v.w, 255.0) << 24u);
+}
+float4 xe_unpack_rgba8(uint w) {
+  return float4(uint4(w, w >> 8u, w >> 16u, w >> 24u) & 0xFFu) / 255.0;
+}
+uint xe_pack_rgb10a2(float4 v) {
+  return xe_unorm_bits(v.x, 1023.0) | (xe_unorm_bits(v.y, 1023.0) << 10u) |
+         (xe_unorm_bits(v.z, 1023.0) << 20u) | (xe_unorm_bits(v.w, 3.0) << 30u);
+}
+float4 xe_unpack_rgb10a2(uint w) {
+  return float4(float3(uint3(w, w >> 10u, w >> 20u) & 0x3FFu) / 1023.0, float(w >> 30u) / 3.0);
+}
+uint xe_pack_r32f(float4 v) { return asuint(v.x); }
+float4 xe_unpack_r32f(uint w) { return float4(asfloat(w), 0.0, 0.0, 1.0); }
+// nearbyint(clamp(d, 0, 1) * 16777215) without doubles: x = i + (f - d) with
+// a = d * 2^24 = i + f exact, rounding half to even.
+uint xe_pack_unorm24(float d) {
+  if (!(d > 0.0)) return 0u;
+  d = min(d, 1.0);
+  const float a = d * 16777216.0;
+  const float i = floor(a);
+  const float g = (a - i) - d;
+  const uint base = uint(i);
+  int r = 0;
+  if (g > 0.5 || (g == 0.5 && (base & 1u) != 0u)) r = 1;
+  else if (g < -0.5 || (g == -0.5 && (base & 1u) != 0u)) r = -1;
+  return min(uint(int(base) + r), 0xFFFFFFu);
+}
+float xe_unpack_unorm24(uint bits) { return float(bits + (bits >> 23u)) * (1.0 / 16777216.0); }
+uint xe_pack_float20e4(float v) {
+  if (!(v > 0.0)) return 0u;
+  uint bits = asuint(v);
+  if (bits >= 0x3FFFFFF8u) return 0xFFFFFFu;
+  if (bits < 0x38800000u) {
+    const uint shift = min(113u - (bits >> 23u), 24u);
+    bits = (0x00800000u | (bits & 0x007FFFFFu)) >> shift;
+  } else {
+    bits += 0xC8000000u;
+  }
+  bits += 3u + ((bits >> 3u) & 1u);
+  return (bits >> 3u) & 0xFFFFFFu;
+}
+float xe_unpack_float20e4(uint value) {
+  value &= 0xFFFFFFu;
+  if (value == 0u) return 0.0;
+  uint mantissa = value & 0xFFFFFu;
+  int exponent = int(value >> 20u);
+  if (exponent == 0) {
+    const uint shift = (31u - firstbithigh(mantissa)) - 11u;
+    exponent = 1 - int(shift);
+    mantissa = (mantissa << shift) & 0xFFFFFu;
+  }
+  return asfloat((uint(exponent + 112) << 23u) | (mantissa << 3u));
+}
+)hlsl";
+
+// The packing and unpacking functions for a color format the converting
+// transfer accepts.
+std::pair<std::string_view, std::string_view> color_word_codec(ColorRenderTargetFormat format) {
+  switch (storage_color_format(format)) {
+    case ColorRenderTargetFormat::R8G8B8A8: return {"xe_pack_rgba8", "xe_unpack_rgba8"};
+    case ColorRenderTargetFormat::R10G10B10A2: return {"xe_pack_rgb10a2", "xe_unpack_rgb10a2"};
+    case ColorRenderTargetFormat::R32Float: return {"xe_pack_r32f", "xe_unpack_r32f"};
+    default: return {};
+  }
+}
+
+// Declares the converting transfer's source and computes `word`, the EDRAM
+// word the selected source sample holds, after the shared mapping.
+bool write_converting_source(std::ostringstream& out, MsaaSamples source_host_samples,
+                             EdramTransferEndpoint source, bool declarations) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const std::string at = count == 1 ? "int3(int2(source_x, source_y), 0)"
+                                    : "int2(source_x, source_y), source_host";
+  if (source.depth) {
+    if (declarations) {
+      if (count == 1)
+        out << "Texture2D<float> SourceDepth : register(t0);\n"
+            << "Texture2D<uint4> SourceStencil : register(t1);\n";
+      else
+        out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
+            << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
+      return true;
+    }
+    const auto format = static_cast<DepthRenderTargetFormat>(source.format);
+    const std::string depth = "SourceDepth.Load(" + at + ")";
+    out << "  const uint depth_bits = "
+        << (format == DepthRenderTargetFormat::D24FS8
+                ? "xe_pack_float20e4(" + depth + " * 2.0)"
+                : "xe_pack_unorm24(" + depth + ")")
+        << ";\n  const uint word = (depth_bits << 8u) | (SourceStencil.Load(" << at
+        << ").y & 0xFFu);\n";
+    return format == DepthRenderTargetFormat::D24S8 || format == DepthRenderTargetFormat::D24FS8;
+  }
+  if (declarations) {
+    if (count == 1)
+      out << "Texture2D<float4> Source : register(t0);\n";
+    else
+      out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
+    return true;
+  }
+  const auto pack = color_word_codec(static_cast<ColorRenderTargetFormat>(source.format)).first;
+  if (pack.empty()) return false;
+  out << "  const uint word = " << pack << "(Source.Load(" << at << "));\n";
+  return true;
+}
+
+std::uint64_t converting_transfer_hash(MsaaSamples source_host_samples,
+                                       EdramTransferEndpoint source,
+                                       EdramTransferEndpoint destination,
+                                       std::uint32_t pass) {
+  return (std::uint64_t(1u) << static_cast<unsigned>(source_host_samples)) |
+         (std::uint64_t(source.depth) << 8u) | (std::uint64_t(source.format) << 16u) |
+         (std::uint64_t(destination.depth) << 24u) | (std::uint64_t(destination.format) << 32u) |
+         (std::uint64_t(pass) << 40u);
+}
+
+}  // namespace
+
+std::string_view edram_word_codec_hlsl() noexcept { return kEdramWordCodecHlsl; }
+
+LoweredShader make_edram_converting_color_transfer_shader(MsaaSamples source_host_samples,
+                                                          EdramTransferEndpoint source,
+                                                          ColorRenderTargetFormat destination) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  const auto unpack = color_word_codec(destination).second;
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl
+      << "float4 main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
+         " : SV_Target0 {\n"
+      << kEdramTransferMappingHlsl;
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  out << "  return " << unpack << "(word);\n}\n";
+  result.hlsl = out.str();
+  const EdramTransferEndpoint destination_endpoint{false, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.converting.color.v1") ^
+                       converting_transfer_hash(source_host_samples, source,
+                                                destination_endpoint, 0u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok && !unpack.empty() &&
+                    edram_converting_transfer_supported(source, destination_endpoint);
+  if (!result.complete)
+    result.diagnostics.emplace_back("unsupported converting EDRAM color transfer");
+  return result;
+}
+
+LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_host_samples,
+                                                          EdramTransferEndpoint source,
+                                                          DepthRenderTargetFormat destination,
+                                                          EdramDepthTransferPass pass) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl;
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << kEdramTransferMappingHlsl;
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  // The host stores D24FS8 depth at half its guest value (depth_stencil_to_host).
+  const std::string depth = destination == DepthRenderTargetFormat::D24FS8
+                                ? "xe_unpack_float20e4(word >> 8u) * 0.5"
+                                : "xe_unpack_unorm24(word >> 8u)";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = word & 0xFFu; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((word & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  const EdramTransferEndpoint destination_endpoint{true, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.converting.depth.v1") ^
+                       converting_transfer_hash(source_host_samples, source,
+                                                destination_endpoint, std::uint32_t(pass));
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
+                    edram_converting_transfer_supported(source, destination_endpoint);
+  if (!result.complete)
+    result.diagnostics.emplace_back("unsupported converting EDRAM depth transfer");
   return result;
 }
 

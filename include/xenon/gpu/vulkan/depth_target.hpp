@@ -53,7 +53,11 @@ class DepthTargetImage {
   void transition_to_sampled(VkCommandBuffer command) noexcept;
   // A descriptor set of `set_layout` (bindings 16 and 17 sampled images)
   // holding this image's depth and stencil aspects for that layout, created
-  // on first use. Null on failure (error()).
+  // on first use. Null on failure (error()). EDRAM transfers and GPU depth
+  // resolves both read the image through it, so every caller's layout must
+  // give both bindings exactly kSampledSourceStages.
+  static constexpr VkShaderStageFlags kSampledSourceStages =
+      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
   [[nodiscard]] VkDescriptorSet sampled_descriptor_set(VkDescriptorSetLayout set_layout);
   void reset() noexcept;
   [[nodiscard]] VkImage image() const noexcept { return image_; }

@@ -484,6 +484,27 @@ void test_event_extent(AddressSpace& memory, CommandProcessor& cp,
   assert(load_physical_be16(memory, target + 8u) == 0u);
   assert(load_physical_be16(memory, target + 10u) == 1u);
   assert(cp.statistics().extent_event_writes == before + 1u);
+
+  // Regression (AC6 ran its cutscene at about one frame a second): a write
+  // that leaves the extents as they are is unobservable, so it is no barrier;
+  // each was executing the draws before it, one at a time. A location the
+  // title changed in between is written again behind a barrier.
+  int barriers = 0;
+  cp.set_guest_visible_barrier([&] { ++barriers; });
+  const auto unchanged_before = cp.statistics().unchanged_event_writes;
+  cp.execute_buffer(commands, 3);
+  assert(barriers == 0);
+  assert(cp.statistics().unchanged_event_writes == unchanged_before + 1u);
+  assert(cp.statistics().extent_event_writes == before + 2u);
+  assert(load_physical_be16(memory, target + 2u) == 1024u);
+  const std::array<std::byte, 2> changed{std::byte{0x12}, std::byte{0x34}};
+  const bool title_wrote = memory.write_physical(target, changed);
+  assert(title_wrote);
+  cp.execute_buffer(commands, 3);
+  assert(barriers == 1);
+  assert(load_physical_be16(memory, target + 0u) == 0u);
+  assert(cp.statistics().unchanged_event_writes == unchanged_before + 1u);
+  cp.set_guest_visible_barrier({});
 }
 
 void test_visibility_queries(AddressSpace& memory, CommandProcessor& cp,
@@ -538,6 +559,12 @@ void test_sync_points_mark_cpu_handoffs(AddressSpace& memory, CommandProcessor& 
   std::vector<std::string> events;
   cp.set_sync_point_callback([&] { events.push_back("sync"); });
   cp.set_interrupt_callback([&](std::uint32_t) { events.push_back("interrupt"); });
+  // Guest-visible barriers (which wait for queued resolve readbacks) come
+  // before what the guest can observe: a memory poll and an interrupt. The
+  // COHER_STATUS_HOST poll observes nothing the GPU wrote, so it is no
+  // barrier; AC6 polls it after every resolve, and treating it as one waited
+  // for each resolve's readback.
+  cp.set_guest_visible_barrier([&] { events.push_back("barrier"); });
   const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
   write_words(memory, commands,
               {make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u, flag | swap, 7u,
@@ -548,8 +575,10 @@ void test_sync_points_mark_cpu_handoffs(AddressSpace& memory, CommandProcessor& 
                make_packet_type3(Type3Opcode::Interrupt, 1), 1u << 2u});
   const auto before = cp.statistics().sync_points;
   cp.execute_buffer(commands, 6 + 2 + 6 + 2);
-  assert((events == std::vector<std::string>{"sync", "sync", "interrupt"}));
+  assert((events ==
+          std::vector<std::string>{"barrier", "sync", "barrier", "sync", "interrupt"}));
   assert(cp.statistics().sync_points == before + 2u);
+  cp.set_guest_visible_barrier({});
   cp.set_sync_point_callback({});
   cp.set_interrupt_callback({});
 }
@@ -1519,7 +1548,8 @@ void test_gpu_unsupported_counters_total() {
   counters.unexpected_ownership_transitions = 10;
   counters.failed_resource_barriers = 11;
   counters.fallback_shader_uses = 12;
-  assert(counters.total() == 78u);  // 1+2+...+12
+  counters.unsupported_blend_states = 13;
+  assert(counters.total() == 91u);  // 1+2+...+13
 }
 
 void test_truncation_fault(AddressSpace& memory, CommandProcessor& cp) {

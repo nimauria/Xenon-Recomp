@@ -114,4 +114,41 @@ static_assert(sizeof(GpuClearConstants) == 80);
 
 [[nodiscard]] LoweredShader make_edram_clear_shader();
 
+// A depth resolve done on the GPU, as the color one is: a compute pass reads
+// the selected guest sample's depth and stencil from the native depth image
+// that owns the rectangle's tiles, packs the canonical 24_8 / 24_8_FLOAT
+// word write_depth_resolve() stores, and writes it tiled and endian-swapped
+// into the guest-memory mirror. Shadow maps and AC6's depth-of-field depth
+// copies took tens of milliseconds each as readbacks.
+//
+// Uses GpuResolveConstants with destination_format RawHost and one bit in
+// sample_mask. Invalid (with the reason) when the GPU pass cannot reproduce
+// the resolve exactly; the caller then resolves through a readback.
+[[nodiscard]] GpuResolvePlan plan_gpu_depth_resolve(const ResolvePlan& plan,
+                                                    DepthRenderTargetFormat format,
+                                                    const EdramSurfaceLayout& resolve_surface,
+                                                    const EdramSurfaceLayout& owner,
+                                                    MsaaSamples owner_host_samples,
+                                                    DepthRenderTargetFormat owner_format);
+
+// The depth resolve compute shader: depth at t0 and stencil (.y) at t1 of an
+// owner with `owner_host_samples` host samples storing `owner_format`.
+[[nodiscard]] LoweredShader make_gpu_depth_resolve_shader(MsaaSamples owner_host_samples,
+                                                          DepthRenderTargetFormat owner_format);
+
+// A resolve's depth clear done on the owner depth image instead of in
+// canonical EDRAM: the clear-shader draw writes `constants.color[0]` (the
+// clear's host depth) as SV_Depth to each sample whose EDRAM word lies in the
+// rectangle, and the pipeline's stencil REPLACE writes `stencil` there.
+// Invalid when the owner stores another depth format.
+[[nodiscard]] bool plan_gpu_depth_clear(const ResolveRectangle& rectangle,
+                                        std::uint32_t depth_clear, DepthRenderTargetFormat format,
+                                        const EdramSurfaceLayout& resolve_surface,
+                                        const EdramSurfaceLayout& owner,
+                                        MsaaSamples owner_host_samples,
+                                        DepthRenderTargetFormat owner_format,
+                                        GpuClearConstants& constants, std::uint8_t& stencil);
+
+[[nodiscard]] LoweredShader make_edram_depth_clear_shader();
+
 }  // namespace xenon::gpu

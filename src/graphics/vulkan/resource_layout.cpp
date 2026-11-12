@@ -17,7 +17,8 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
     return false;
   }
   device_ = device;
-  const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
+  // The geometry stage reads the draw state (point sprite sizes).
+  const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT |
                                     VK_SHADER_STAGE_FRAGMENT_BIT;
   const std::array bindings{
       VkDescriptorSetLayoutBinding{kConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,

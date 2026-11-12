@@ -24,7 +24,7 @@ class ResourceLayout {
   static constexpr std::uint32_t kTextureCubeBinding = 113;
   static constexpr std::uint32_t kSamplerBinding = 160;
   static constexpr std::uint32_t kMemoryExportBinding = 192;
-  static constexpr VkDeviceSize kConstantBufferBytes = 9472;
+  static constexpr VkDeviceSize kConstantBufferBytes = kShaderConstantBufferBytes;
   static constexpr std::uint32_t kFrameCount = CommandQueue::kFrameCount;
 
   ResourceLayout() = default;

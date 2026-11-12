@@ -5,7 +5,9 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/memory/types.hpp"
 
@@ -43,6 +45,167 @@ GpuResolvePlan invalid(std::string reason) {
   GpuResolvePlan plan{};
   plan.error = std::move(reason);
   return plan;
+}
+
+// The resolve passes' constants and the mirror they write.
+constexpr std::string_view kResolvePrologueHlsl = R"hlsl(struct ResolveConstants {
+  uint4 destination; uint4 source; uint4 extent;
+  uint left; uint top; uint width; uint height;
+  uint destination_base; uint destination_pitch; uint destination_format; uint source_storage;
+  uint sample_mask; uint flags; int exponent_bias; uint reserved;
+};
+#ifdef __spirv__
+[[vk::push_constant]] ResolveConstants c;
+[[vk::binding(0, 1)]] RWByteAddressBuffer guest;
+#else
+ConstantBuffer<ResolveConstants> c : register(b0);
+RWByteAddressBuffer guest : register(u0);
+#endif
+)hlsl";
+
+constexpr std::string_view kOwnerSampleHlsl = R"hlsl(
+// The owner-image sample holding guest sample `guest` of resolve-surface
+// pixel (x, y): the EDRAM transfer mapping, resolve surface to owner.
+bool owner_sample(uint x, uint y, uint guest, out int2 position, out uint host) {
+  position = int2(0, 0);
+  host = 0u;
+  const uint dst_base = c.destination.x, dst_pitch = c.destination.y, dst_msaa = c.destination.z;
+  const uint src_base = c.source.x, src_pitch = c.source.y;
+  const uint src_msaa = c.source.z, src_mode = c.source.w;
+  const uint stride = c.extent.x;
+  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
+  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
+                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
+  const uint in_tile_x = sample_x % 80u;
+  const uint row_in_tile = sample_y % 16u;
+  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
+  const uint relative = (tile + 2048u - src_base) % 2048u;
+  const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
+  const uint source_sample_y = (relative / src_pitch) * 16u + row_in_tile;
+  const uint source_x = source_sample_x >> (src_msaa == 2u ? 1u : 0u);
+  const uint source_y = source_sample_y >> (src_msaa == 0u ? 0u : 1u);
+  if (source_x >= c.extent.z || source_y >= c.extent.w) return false;
+  uint source_guest = 0u;
+  if (src_msaa == 2u) source_guest = (source_sample_y & 1u) * 2u + (source_sample_x & 1u);
+  else if (src_msaa == 1u) source_guest = source_sample_y & 1u;
+  host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
+       : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
+  position = int2(source_x, source_y);
+  return true;
+}
+)hlsl";
+
+constexpr std::string_view kResolveStoreHlsl = R"hlsl(
+uint swap8in16(uint v) { return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8); }
+uint swap8in32(uint v) { return (v << 24) | ((v & 0xFF00u) << 8) | ((v >> 8) & 0xFF00u) | (v >> 24); }
+
+// One destination word, with the destination's 128-bit endian swap applied
+// as apply_endian128() does to the block it lands in.
+void store_word(uint address, uint value) {
+  const uint endian = (c.flags >> 2) & 7u;
+  const uint block = address & ~15u;
+  const uint word = (address >> 2) & 3u;
+  if (endian == 1u) guest.Store(address, swap8in16(value));
+  else if (endian == 2u) guest.Store(address, swap8in32(value));
+  else if (endian == 3u) guest.Store(address, (value << 16) | (value >> 16));
+  else if (endian == 4u) guest.Store(block + ((word ^ 1u) << 2), swap8in32(value));
+  else if (endian == 5u) guest.Store(block + ((3u - word) << 2), swap8in32(value));
+  else guest.Store(address, value);
+}
+
+uint tiled_offset(uint x, uint y, uint log2_bpp) {
+  const uint outer = ((y >> 5) * (c.destination_pitch >> 5) + (x >> 5)) << 6;
+  const uint inner = (((y >> 1) & 7u) << 3) | (x & 7u);
+  const uint bank = (y >> 4) & 1u;
+  const uint pipe = ((x >> 3) & 3u) ^ (((y >> 3) & 1u) << 1);
+  const uint oi = (outer | inner) << log2_bpp;
+  return ((y & 1u) << 4) | (pipe << 6) | (bank << 11) | (oi & 0xFu) |
+         (((oi >> 4) & 1u) << 5) | (((oi >> 5) & 7u) << 8) | ((oi >> 8) << 12);
+}
+)hlsl";
+
+// The body shared by the clear draws: from the owner host sample at
+// SV_Position, its guest sample and EDRAM word as a pixel of the resolve
+// surface; samples outside the rectangle (or with no guest sample) discard.
+constexpr std::string_view kClearMappingHlsl = R"hlsl(  const uint x = uint(position.x);
+  const uint y = uint(position.y);
+  const uint dst_base = c.destination.x, dst_pitch = c.destination.y;
+  const uint dst_msaa = c.destination.z, dst_mode = c.destination.w;
+  const uint src_base = c.source.x, src_pitch = c.source.y, src_msaa = c.source.z;
+  const uint stride = c.extent.x;
+  // This owner host sample's guest sample.
+  uint guest = host_sample;
+  if (dst_mode == 1u) {
+    guest = host_sample != 0u ? 0u : 1u;
+  } else if (dst_mode == 2u) {
+    if (host_sample == 0u) guest = 0u;
+    else if (host_sample == 3u) guest = 1u;
+    else discard;
+  }
+  // Its EDRAM word, as a pixel of the resolve surface.
+  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
+  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
+                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
+  const uint in_tile_x = sample_x % 80u;
+  const uint row_in_tile = sample_y % 16u;
+  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
+  const uint relative = (tile + 2048u - src_base) % 2048u;
+  const uint surface_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
+  const uint surface_sample_y = (relative / src_pitch) * 16u + row_in_tile;
+  const uint surface_x = surface_sample_x >> (src_msaa == 2u ? 1u : 0u);
+  const uint surface_y = surface_sample_y >> (src_msaa == 0u ? 0u : 1u);
+  if (surface_x < c.left || surface_x >= c.right || surface_y < c.top || surface_y >= c.bottom)
+    discard;
+)hlsl";
+
+constexpr std::string_view kClearPrologueHlsl = R"hlsl(struct ClearConstants {
+  uint4 destination; uint4 source; uint4 extent;
+  uint left; uint top; uint right; uint bottom;
+  float4 color;
+};
+#ifdef __spirv__
+[[vk::push_constant]] ClearConstants c;
+#else
+ConstantBuffer<ClearConstants> c : register(b0);
+#endif
+)hlsl";
+
+// Fills the rectangle and destination fields of `c` and the guest bytes the
+// pass may write: whole 4 KiB tile rows covering the rectangle's 32x32 macro
+// tiles (tiled 2D addressing keeps each macro tile in whole pages; address
+// bits from 12 up are the macro tile's offset >> 8).
+bool plan_destination(const CopyResolveState& copy, const ResolveRectangle& rectangle,
+                      GpuResolvePlan& result) {
+  auto& c = result.constants;
+  const auto pitch = (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
+  const auto right = std::uint32_t(rectangle.right);
+  const auto bottom = std::uint32_t(rectangle.bottom);
+  if (!pitch || right > pitch) {
+    result.error = "resolve rectangle is wider than its destination";
+    return false;
+  }
+  c.left = std::uint32_t(rectangle.left);
+  c.top = std::uint32_t(rectangle.top);
+  c.width = right - c.left;
+  c.height = bottom - c.top;
+  c.destination_base = copy.destination_base;
+  c.destination_pitch = pitch;
+  const std::uint64_t first_tile =
+      std::uint64_t(c.top >> 5u) * (pitch >> 5u) + (c.left >> 5u);
+  const std::uint64_t last_tile =
+      std::uint64_t((bottom - 1u) >> 5u) * (pitch >> 5u) + ((right - 1u) >> 5u);
+  const std::uint64_t tile_bytes = 64u * result.bytes_per_pixel;
+  const std::uint64_t low = ((first_tile * tile_bytes) >> 8u) << 12u;
+  const std::uint64_t high = ((((last_tile + 1u) * tile_bytes - 1u) >> 8u) + 1u) << 12u;
+  const std::uint64_t begin = std::uint64_t(copy.destination_base) + low;
+  const std::uint64_t end = std::uint64_t(copy.destination_base) + high;
+  if (end > memory::kPhysicalMemorySize || begin >= end) {
+    result.error = "resolve destination is outside physical memory";
+    return false;
+  }
+  result.range_address = static_cast<std::uint32_t>(begin);
+  result.range_size = static_cast<std::uint32_t>(end - begin);
+  return true;
 }
 
 }  // namespace
@@ -101,36 +264,136 @@ GpuResolvePlan plan_gpu_color_resolve(const ResolvePlan& plan, ColorRenderTarget
                             owner.msaa == resolve_surface.msaa;
   if (plan.native_color_average && same_surface) c.flags |= kGpuResolveNativeAverage;
 
-  const auto pitch = (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
-  const auto right = std::uint32_t(rectangle.right);
-  const auto bottom = std::uint32_t(rectangle.bottom);
-  if (!pitch || right > pitch) return invalid("resolve rectangle is wider than its destination");
   c.transfer = make_edram_transfer_constants(owner, owner_host_samples, resolve_surface,
                                              resolve_surface.msaa);
-  c.left = std::uint32_t(rectangle.left);
-  c.top = std::uint32_t(rectangle.top);
-  c.width = right - c.left;
-  c.height = bottom - c.top;
-  c.destination_base = copy.destination_base;
-  c.destination_pitch = pitch;
   c.source_storage = static_cast<std::uint32_t>(*source);
-
-  // Tiled 2D addressing keeps each 32x32 macro tile in whole 4 KiB pages:
-  // address bits from 12 up are the macro tile's offset >> 8.
-  const std::uint64_t first_tile =
-      std::uint64_t(c.top >> 5u) * (pitch >> 5u) + (c.left >> 5u);
-  const std::uint64_t last_tile =
-      std::uint64_t((bottom - 1u) >> 5u) * (pitch >> 5u) + ((right - 1u) >> 5u);
-  const std::uint64_t tile_bytes = 64u * result.bytes_per_pixel;
-  const std::uint64_t low = ((first_tile * tile_bytes) >> 8u) << 12u;
-  const std::uint64_t high = ((((last_tile + 1u) * tile_bytes - 1u) >> 8u) + 1u) << 12u;
-  const std::uint64_t begin = std::uint64_t(copy.destination_base) + low;
-  const std::uint64_t end = std::uint64_t(copy.destination_base) + high;
-  if (end > memory::kPhysicalMemorySize || begin >= end)
-    return invalid("resolve destination is outside physical memory");
-  result.range_address = static_cast<std::uint32_t>(begin);
-  result.range_size = static_cast<std::uint32_t>(end - begin);
+  if (!plan_destination(copy, rectangle, result)) return invalid(result.error);
   result.valid = true;
+  return result;
+}
+
+GpuResolvePlan plan_gpu_depth_resolve(const ResolvePlan& plan, DepthRenderTargetFormat format,
+                                      const EdramSurfaceLayout& resolve_surface,
+                                      const EdramSurfaceLayout& owner,
+                                      MsaaSamples owner_host_samples,
+                                      DepthRenderTargetFormat owner_format) {
+  const auto& copy = plan.copy;
+  const auto& rectangle = plan.rectangle;
+  if (!plan.valid || !plan.depth || rectangle.empty() || rectangle.left < 0 || rectangle.top < 0)
+    return invalid("not a non-empty depth resolve");
+  if (copy.command != CopyCommand::Raw && copy.command != CopyCommand::Convert)
+    return invalid("resolve command has no GPU form");
+  if (format != DepthRenderTargetFormat::D24S8 && format != DepthRenderTargetFormat::D24FS8)
+    return invalid("depth format has no GPU resolve codec");
+  if (owner_format != format || !owner.depth || !resolve_surface.depth)
+    return invalid("owner image holds the tiles in another format");
+  if (copy.destination_array) return invalid("array resolve destinations resolve on the CPU");
+  // Depth never averages: the plan selects exactly one guest sample.
+  if (plan.selected_sample_count != 1 || std::popcount(plan.guest_sample_mask) != 1)
+    return invalid("depth resolve selects other than one sample");
+
+  GpuResolvePlan result{};
+  auto& c = result.constants;
+  result.bytes_per_pixel = 4u;
+  c.destination_format = static_cast<std::uint32_t>(GpuResolvePack::RawHost);
+  c.sample_mask = plan.guest_sample_mask;
+  c.flags = std::uint32_t(copy.destination_endian) << kGpuResolveEndianShift;
+  c.transfer = make_edram_transfer_constants(owner, owner_host_samples, resolve_surface,
+                                             resolve_surface.msaa);
+  if (!plan_destination(copy, rectangle, result)) return invalid(result.error);
+  result.valid = true;
+  return result;
+}
+
+LoweredShader make_gpu_depth_resolve_shader(MsaaSamples owner_host_samples,
+                                            DepthRenderTargetFormat owner_format) {
+  const auto count = 1u << static_cast<unsigned>(owner_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Compute;
+  result.entry_point = "main";
+  result.profile = "cs_6_0";
+  std::ostringstream out;
+  out << kResolvePrologueHlsl;
+  if (count == 1)
+    out << "Texture2D<float> SourceDepth : register(t0);\n"
+        << "Texture2D<uint4> SourceStencil : register(t1);\n";
+  else
+    out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
+        << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
+  out << edram_word_codec_hlsl() << kOwnerSampleHlsl << kResolveStoreHlsl;
+  const std::string at =
+      count == 1 ? "int3(position, 0)" : "position, host";
+  // The host stores D24FS8 depth at half its guest value (depth_stencil_to_host).
+  const bool float24 = owner_format == DepthRenderTargetFormat::D24FS8;
+  out << R"hlsl(
+[numthreads(8, 8, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+  if (id.x >= c.width || id.y >= c.height) return;
+  const uint x = c.left + id.x;
+  const uint y = c.top + id.y;
+  int2 position;
+  uint host;
+  uint word = 0u;
+  if (owner_sample(x, y, firstbitlow(c.sample_mask), position, host)) {
+    const float depth = SourceDepth.Load()hlsl"
+      << at << R"hlsl();
+    const uint stencil = SourceStencil.Load()hlsl"
+      << at << R"hlsl().y & 0xFFu;
+    word = ()hlsl"
+      << (float24 ? "xe_pack_float20e4(depth * 2.0)" : "xe_pack_unorm24(depth)")
+      << R"hlsl( << 8u) | stencil;
+  }
+  // The canonical 24_8 word, as write_depth_resolve() stores it.
+  store_word(c.destination_base + tiled_offset(x, y, 2u), word);
+}
+)hlsl";
+  result.hlsl = out.str();
+  result.source_hash = 0xDE7A50ull ^ (std::uint64_t(count) << 8u) ^ (float24 ? 1u : 0u);
+  result.translation_hash = std::hash<std::string>{}(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) &&
+                    (owner_format == DepthRenderTargetFormat::D24S8 || float24);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported depth resolve owner");
+  return result;
+}
+
+bool plan_gpu_depth_clear(const ResolveRectangle& rectangle, std::uint32_t depth_clear,
+                          DepthRenderTargetFormat format,
+                          const EdramSurfaceLayout& resolve_surface,
+                          const EdramSurfaceLayout& owner, MsaaSamples owner_host_samples,
+                          DepthRenderTargetFormat owner_format, GpuClearConstants& constants,
+                          std::uint8_t& stencil) {
+  constants = {};
+  stencil = 0u;
+  if (rectangle.empty() || rectangle.left < 0 || rectangle.top < 0) return false;
+  if (owner_format != format || !owner.depth) return false;
+  if (format != DepthRenderTargetFormat::D24S8 && format != DepthRenderTargetFormat::D24FS8)
+    return false;
+  constants.transfer = make_edram_transfer_constants(resolve_surface, resolve_surface.msaa,
+                                                     owner, owner_host_samples);
+  constants.left = std::uint32_t(rectangle.left);
+  constants.top = std::uint32_t(rectangle.top);
+  constants.right = std::uint32_t(rectangle.right);
+  constants.bottom = std::uint32_t(rectangle.bottom);
+  const auto host = depth_stencil_to_host(format, depth_clear);
+  constants.color[0] = host.depth;
+  stencil = host.stencil;
+  return true;
+}
+
+LoweredShader make_edram_depth_clear_shader() {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << kClearPrologueHlsl
+      << "float main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) : "
+         "SV_Depth {\n"
+      << kClearMappingHlsl << "  return c.color.x;\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = 0xC1EA2D0ull;
+  result.translation_hash = std::hash<std::string>{}(result.hlsl);
+  result.complete = true;
   return result;
 }
 
@@ -141,57 +404,12 @@ LoweredShader make_gpu_resolve_shader(MsaaSamples owner_host_samples) {
   result.entry_point = "main";
   result.profile = "cs_6_0";
   std::ostringstream out;
-  out << R"hlsl(struct ResolveConstants {
-  uint4 destination; uint4 source; uint4 extent;
-  uint left; uint top; uint width; uint height;
-  uint destination_base; uint destination_pitch; uint destination_format; uint source_storage;
-  uint sample_mask; uint flags; int exponent_bias; uint reserved;
-};
-#ifdef __spirv__
-[[vk::push_constant]] ResolveConstants c;
-[[vk::binding(0, 1)]] RWByteAddressBuffer guest;
-#else
-ConstantBuffer<ResolveConstants> c : register(b0);
-RWByteAddressBuffer guest : register(u0);
-#endif
-)hlsl";
+  out << kResolvePrologueHlsl;
   if (count == 1)
     out << "Texture2D<float4> Source : register(t0);\n";
   else
     out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
-  out << R"hlsl(
-// The owner-image sample holding guest sample `guest` of resolve-surface
-// pixel (x, y): the EDRAM transfer mapping, resolve surface to owner.
-bool owner_sample(uint x, uint y, uint guest, out int2 position, out uint host) {
-  position = int2(0, 0);
-  host = 0u;
-  const uint dst_base = c.destination.x, dst_pitch = c.destination.y, dst_msaa = c.destination.z;
-  const uint src_base = c.source.x, src_pitch = c.source.y;
-  const uint src_msaa = c.source.z, src_mode = c.source.w;
-  const uint stride = c.extent.x;
-  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
-  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
-                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
-  const uint in_tile_x = sample_x % 80u;
-  const uint row_in_tile = sample_y % 16u;
-  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
-  const uint relative = (tile + 2048u - src_base) % 2048u;
-  const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
-  const uint source_sample_y = (relative / src_pitch) * 16u + row_in_tile;
-  const uint source_x = source_sample_x >> (src_msaa == 2u ? 1u : 0u);
-  const uint source_y = source_sample_y >> (src_msaa == 0u ? 0u : 1u);
-  if (source_x >= c.extent.z || source_y >= c.extent.w) return false;
-  uint source_guest = 0u;
-  if (src_msaa == 2u) source_guest = (source_sample_y & 1u) * 2u + (source_sample_x & 1u);
-  else if (src_msaa == 1u) source_guest = source_sample_y & 1u;
-  host = src_mode == 1u ? (source_guest != 0u ? 0u : 1u)
-       : (src_mode == 2u ? (source_guest != 0u ? 3u : 0u) : source_guest);
-  position = int2(source_x, source_y);
-  return true;
-}
-
-float4 load_owner(int2 position, uint host) {
-)hlsl";
+  out << kOwnerSampleHlsl << "\nfloat4 load_owner(int2 position, uint host) {\n";
   if (count == 1)
     out << "  return Source.Load(int3(position, 0));\n}\n";
   else
@@ -223,34 +441,7 @@ float4 host_quantized(float4 v) {
 }
 
 uint unorm_bits(float v, float maximum) { return uint(round(saturate(v) * maximum)); }
-
-uint swap8in16(uint v) { return ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8); }
-uint swap8in32(uint v) { return (v << 24) | ((v & 0xFF00u) << 8) | ((v >> 8) & 0xFF00u) | (v >> 24); }
-
-// One destination word, with the destination's 128-bit endian swap applied
-// as apply_endian128() does to the block it lands in.
-void store_word(uint address, uint value) {
-  const uint endian = (c.flags >> 2) & 7u;
-  const uint block = address & ~15u;
-  const uint word = (address >> 2) & 3u;
-  if (endian == 1u) guest.Store(address, swap8in16(value));
-  else if (endian == 2u) guest.Store(address, swap8in32(value));
-  else if (endian == 3u) guest.Store(address, (value << 16) | (value >> 16));
-  else if (endian == 4u) guest.Store(block + ((word ^ 1u) << 2), swap8in32(value));
-  else if (endian == 5u) guest.Store(block + ((3u - word) << 2), swap8in32(value));
-  else guest.Store(address, value);
-}
-
-uint tiled_offset(uint x, uint y, uint log2_bpp) {
-  const uint outer = ((y >> 5) * (c.destination_pitch >> 5) + (x >> 5)) << 6;
-  const uint inner = (((y >> 1) & 7u) << 3) | (x & 7u);
-  const uint bank = (y >> 4) & 1u;
-  const uint pipe = ((x >> 3) & 3u) ^ (((y >> 3) & 1u) << 1);
-  const uint oi = (outer | inner) << log2_bpp;
-  return ((y & 1u) << 4) | (pipe << 6) | (bank << 11) | (oi & 0xFu) |
-         (((oi >> 4) & 1u) << 5) | (((oi >> 5) & 7u) << 8) | ((oi >> 8) << 12);
-}
-
+)hlsl" << kResolveStoreHlsl << R"hlsl(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
   if (id.x >= c.width || id.y >= c.height) return;
@@ -364,49 +555,12 @@ LoweredShader make_edram_clear_shader() {
   result.stage = ShaderStage::Pixel;
   result.entry_point = "main";
   result.profile = "ps_6_0";
-  result.hlsl = R"hlsl(struct ClearConstants {
-  uint4 destination; uint4 source; uint4 extent;
-  uint left; uint top; uint right; uint bottom;
-  float4 color;
-};
-#ifdef __spirv__
-[[vk::push_constant]] ClearConstants c;
-#else
-ConstantBuffer<ClearConstants> c : register(b0);
-#endif
-float4 main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) : SV_Target0 {
-  const uint x = uint(position.x);
-  const uint y = uint(position.y);
-  const uint dst_base = c.destination.x, dst_pitch = c.destination.y;
-  const uint dst_msaa = c.destination.z, dst_mode = c.destination.w;
-  const uint src_base = c.source.x, src_pitch = c.source.y, src_msaa = c.source.z;
-  const uint stride = c.extent.x;
-  // This owner host sample's guest sample.
-  uint guest = host_sample;
-  if (dst_mode == 1u) {
-    guest = host_sample != 0u ? 0u : 1u;
-  } else if (dst_mode == 2u) {
-    if (host_sample == 0u) guest = 0u;
-    else if (host_sample == 3u) guest = 1u;
-    else discard;
-  }
-  // Its EDRAM word, as a pixel of the resolve surface.
-  const uint sample_x = (x << (dst_msaa == 2u ? 1u : 0u)) | (dst_msaa == 2u ? (guest & 1u) : 0u);
-  const uint sample_y = (y << (dst_msaa == 0u ? 0u : 1u)) |
-                        (dst_msaa == 0u ? 0u : (dst_msaa == 1u ? guest : (guest >> 1u)));
-  const uint in_tile_x = sample_x % 80u;
-  const uint row_in_tile = sample_y % 16u;
-  const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
-  const uint relative = (tile + 2048u - src_base) % 2048u;
-  const uint surface_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
-  const uint surface_sample_y = (relative / src_pitch) * 16u + row_in_tile;
-  const uint surface_x = surface_sample_x >> (src_msaa == 2u ? 1u : 0u);
-  const uint surface_y = surface_sample_y >> (src_msaa == 0u ? 0u : 1u);
-  if (surface_x < c.left || surface_x >= c.right || surface_y < c.top || surface_y >= c.bottom)
-    discard;
-  return c.color;
-}
-)hlsl";
+  std::ostringstream out;
+  out << kClearPrologueHlsl
+      << "float4 main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) : "
+         "SV_Target0 {\n"
+      << kClearMappingHlsl << "  return c.color;\n}\n";
+  result.hlsl = out.str();
   result.source_hash = 0xC1EA2ull;
   result.translation_hash = std::hash<std::string>{}(result.hlsl);
   result.complete = true;

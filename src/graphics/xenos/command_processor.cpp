@@ -8,15 +8,75 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 namespace xenon::gpu {
 namespace {
+
+// The PM4 type-3 opcode's name, for the activity trace.
+std::string type3_opcode_name(std::uint32_t opcode) {
+  switch (opcode) {
+    case 0x10: return "Nop";
+    case 0x21: return "RegRmw";
+    case 0x22: return "DrawIndx";
+    case 0x23: return "VizQuery";
+    case 0x25: return "SetState";
+    case 0x26: return "WaitForIdle";
+    case 0x27: return "ImLoad";
+    case 0x2B: return "ImLoadImmediate";
+    case 0x2C: return "ImStore";
+    case 0x2D: return "SetConstant";
+    case 0x2E: return "LoadConstantContext";
+    case 0x2F: return "LoadAluConstant";
+    case 0x34: return "DrawIndxBin";
+    case 0x35: return "DrawIndx2Bin";
+    case 0x36: return "DrawIndx2";
+    case 0x37: return "IndirectBufferPfd";
+    case 0x3B: return "InvalidateState";
+    case 0x3C: return "WaitRegMem";
+    case 0x3D: return "MemWrite";
+    case 0x3E: return "RegToMem";
+    case 0x3F: return "IndirectBuffer";
+    case 0x44: return "CondExec";
+    case 0x45: return "CondWrite";
+    case 0x46: return "EventWrite";
+    case 0x48: return "MeInit";
+    case 0x4A: return "SetShaderBases";
+    case 0x4B: return "SetBinBaseOffset";
+    case 0x4F: return "MemWriteCounter";
+    case 0x50: return "SetBinMask";
+    case 0x51: return "SetBinSelect";
+    case 0x52: return "WaitRegEq";
+    case 0x53: return "WaitRegGte";
+    case 0x54: return "Interrupt";
+    case 0x55: return "SetConstant2";
+    case 0x56: return "SetShaderConstants";
+    case 0x58: return "EventWriteShaderDone";
+    case 0x59: return "EventWriteCacheFlush";
+    case 0x5A: return "EventWriteExtent";
+    case 0x5B: return "EventWriteZPassDone";
+    case 0x5C: return "WaitUntilRead";
+    case 0x5D: return "WaitIndirectBufferPfdComplete";
+    case 0x5E: return "ContextUpdate";
+    case 0x60: return "SetBinMaskLow";
+    case 0x61: return "SetBinMaskHigh";
+    case 0x62: return "SetBinSelectLow";
+    case 0x63: return "SetBinSelectHigh";
+    default: {
+      char text[24];
+      std::snprintf(text, sizeof(text), "type3_0x%02X", opcode);
+      return text;
+    }
+  }
+}
+
 
 [[nodiscard]] std::uint32_t load_be32(const std::byte* p) noexcept {
   std::uint32_t v{};
@@ -624,8 +684,11 @@ void CommandProcessor::execute_wait_reg_mem(
 
   ++stats_.wait_reg_mem_packets;
   // What the wait polls may be written by the work before it (a resolve, a
-  // memory export).
-  before_guest_visible_effect();
+  // memory export). COHER_STATUS_HOST is not: the command processor itself
+  // completes the coherency request it reports (below), and nothing the GPU
+  // wrote is observed through it. AC6 polls it after every resolve, so
+  // treating it as a barrier waited for each resolve's readback.
+  if (memory_source || payload[1] != kCoherStatusHostRegister) before_guest_visible_effect();
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
@@ -919,6 +982,17 @@ void CommandProcessor::execute_event_write_extent(
     encoded[i * 2u] = value[0];
     encoded[i * 2u + 1u] = value[1];
   }
+  // A write that leaves memory as it is cannot be observed, so it needs no
+  // ordering against the work before it. AC6 issues one after nearly every
+  // draw, each to a location already holding these extents; making each one
+  // a barrier executed the draws one at a time.
+  std::array<std::byte, 12> current{};
+  if (memory_.copy_physical_range(address, current) && current == encoded) {
+    ++stats_.extent_event_writes;
+    ++stats_.unchanged_event_writes;
+    ++stats_.event_packets;
+    return;
+  }
   before_guest_visible_effect();
   if (!memory_.write_physical(address, encoded)) {
     throw std::runtime_error("PM4_EVENT_WRITE_EXT write failed");
@@ -1150,6 +1224,23 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     }
   }
   auto payload = read_payload(reader, header.count);
+
+  // Activity trace: each type-3 packet, timed (a WAIT_REG_MEM's time is how
+  // long the ring waited; an IB's includes the packets inside it).
+  std::optional<logging::ActivityScope> activity;
+  if (logging::activity_trace_enabled()) {
+    static std::array<std::atomic<std::uint32_t>, 128> keys{};
+    const auto opcode = static_cast<std::uint32_t>(header.opcode) & 0x7Fu;
+    auto key = keys[opcode].load(std::memory_order_relaxed);
+    if (!key) {
+      key = logging::intern_activity({"pm4", type3_opcode_name(opcode),
+                                      {"dwords", "first", "second", ""}, false});
+      keys[opcode].store(key, std::memory_order_relaxed);
+    }
+    activity.emplace(key, std::array<std::uint64_t, 4>{
+                              header.count, payload.empty() ? 0u : payload[0],
+                              payload.size() > 1 ? payload[1] : 0u, 0u});
+  }
 
   // Type-3 predication is command-processor state, not draw/backend state.
   // A failed predicate suppresses the complete packet after its payload has

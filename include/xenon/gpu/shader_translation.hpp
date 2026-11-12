@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "xenon/gpu/shader_ir.hpp"
@@ -28,6 +29,10 @@ struct ShaderLoweringOptions {
   // itself memexport. Required when another stage in the same draw writes the
   // shared mirror while this stage may read it.
   bool force_guest_memory_rw{};
+  // Pixel shader: the interpolator PsParamGen replaces (0xFF for none), and
+  // whether the draw is of points (sprite coordinates in its ZW).
+  std::uint8_t param_gen_interpolator{0xFF};
+  bool param_gen_point{};
 };
 
 struct LoweredShader {
@@ -61,6 +66,8 @@ class HlslShaderLowerer {
 // (three post-VS corners) to a four-corner triangle strip. This is shared by
 // Vulkan and D3D12 and contains no guest command processing.
 [[nodiscard]] LoweredShader make_rectangle_list_geometry_shader();
+// Expands each point to a sprite (see the shader's comment).
+[[nodiscard]] LoweredShader make_point_sprite_geometry_shader();
 
 // Host-only shaders used by both backends for exact EDRAM ownership transfer.
 // Unlike a native resolve, the read shader loads one explicitly mapped sample;
@@ -89,6 +96,23 @@ class HlslShaderLowerer {
 enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, StencilBit };
 [[nodiscard]] LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
                                                              EdramDepthTransferPass pass);
+// The transfers between two different views edram_converting_transfer_supported()
+// accepts: each destination sample takes the EDRAM word of the source sample
+// the shared mapping selects - packed from the source's host value as its
+// format stores it - and writes that word unpacked as the destination's
+// format. A color source is t0; a depth source is t0 (depth) and t1 (stencil,
+// in .y). The color variant's constants are EdramTransferConstants, the depth
+// variant's EdramDepthTransferConstants, with the passes of the depth transfer.
+[[nodiscard]] LoweredShader make_edram_converting_color_transfer_shader(
+    MsaaSamples source_host_samples, EdramTransferEndpoint source,
+    ColorRenderTargetFormat destination);
+// HLSL for the EDRAM word codecs (xe_pack_unorm24, xe_pack_float20e4, their
+// unpacks and the color packs) the converting transfers use, bit-exact with
+// pack_depth_stencil() and unpack_depth_stencil(); GPU resolves share them.
+[[nodiscard]] std::string_view edram_word_codec_hlsl() noexcept;
+[[nodiscard]] LoweredShader make_edram_converting_depth_transfer_shader(
+    MsaaSamples source_host_samples, EdramTransferEndpoint source,
+    DepthRenderTargetFormat destination, EdramDepthTransferPass pass);
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};

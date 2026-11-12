@@ -13,7 +13,7 @@ namespace xenon::gpu::d3d12 {
 class CommandQueue {
  public:
   static constexpr std::uint32_t kFrameCount = 3;
-  static constexpr std::uint32_t kBatchCommandCount = 8;
+  static constexpr std::uint32_t kBatchCommandCount = 64;
 
   CommandQueue() = default;
   ~CommandQueue();
@@ -53,6 +53,8 @@ class CommandQueue {
   [[nodiscard]] std::uint64_t retirement_value() const noexcept {
     return current_frame_ != UINT32_MAX ? next_fence_value_ : last_submitted_value_;
   }
+  // Frame slot of the open asynchronous batch, or UINT32_MAX when none is open.
+  [[nodiscard]] std::uint32_t open_frame() const noexcept { return current_frame_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:

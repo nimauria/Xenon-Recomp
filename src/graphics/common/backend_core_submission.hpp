@@ -56,11 +56,11 @@ void BackendCore<Derived, Api>::begin_submission(
 }
 
 template <typename Derived, typename Api>
-void BackendCore<Derived, Api>::end_submission() {
+void BackendCore<Derived, Api>::end_submission(bool submit) {
   performance.submission_time_ns += static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now() - submission_started).count());
-  if (!ready) return;
+  if (!ready || !submit) return;
   if (!queue.flush()) {
     error = queue.error();
     ready = false;
@@ -70,6 +70,7 @@ void BackendCore<Derived, Api>::end_submission() {
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::sync_guest_reads() {
   if (!ready || !memory) return;
+  guest_reads.gpu_published(mirror.take_published_writes());
   guest_reads.sync(*memory, [this](std::uint64_t key, std::uint32_t base, std::uint32_t size) {
     if (!textures.contains(key)) return GuestReadSync::Tracking::Forget;
     // GPU-authored bytes are current in the mirror, not in guest memory; the
@@ -87,6 +88,18 @@ bool BackendCore<Derived, Api>::make_guest_memory_cpu_visible(
     error = mirror.error();
     return false;
   }
+  return true;
+}
+
+template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::publish_gpu_writes(bool wait) {
+  if (!ready || !memory) return true;
+  if (!mirror.cpu_visibility_pending()) return true;
+  if (!mirror.complete_cpu_visibility(wait)) {
+    error = named(mirror.error());
+    return false;
+  }
+  if (wait) ++performance.published_gpu_write_waits;
   return true;
 }
 
@@ -208,10 +221,10 @@ GpuShaderCoverage BackendCore<Derived, Api>::shader_coverage()
           ? coverage.shaders_discovered - coverage.translation_failures
           : 0u;
   coverage.cache_hits = shader_cache.hits();
+  coverage.cache_disk_hits = shader_cache.disk_hits();
+  coverage.cache_disk_writes = shader_cache.disk_writes();
   coverage.cache_misses = shader_cache.misses();
   return coverage;
 }
 
 }  // namespace xenon::gpu::detail
-  coverage.cache_disk_hits = shader_cache.disk_hits();
-  coverage.cache_disk_writes = shader_cache.disk_writes();

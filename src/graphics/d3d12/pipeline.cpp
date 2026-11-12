@@ -258,7 +258,9 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
                                       : raster.cull_back ? D3D12_CULL_MODE_BACK
                                                          : D3D12_CULL_MODE_NONE;
   desc.RasterizerState.FrontCounterClockwise = raster.front_face_clockwise ? FALSE : TRUE;
-  desc.RasterizerState.DepthClipEnable = TRUE;
+  // With PA_CL_CLIP_CNTL.CLIP_DISABLE nothing is clipped against Z either;
+  // depth is clamped to the viewport range instead.
+  desc.RasterizerState.DepthClipEnable = raster.clip_disabled ? FALSE : TRUE;
   const auto polygon_offset = preferred_polygon_offset(raster, topology);
   if (polygon_offset.enabled) {
     const auto depth_target_format =

@@ -138,6 +138,8 @@ JsonValue XenonSession::capability_report() const {
                     static_cast<std::int64_t>(unsupported.failed_resource_barriers));
     gpu_section.set("fallbackShaderUses",
                     static_cast<std::int64_t>(unsupported.fallback_shader_uses));
+    gpu_section.set("unsupportedBlendStates",
+                    static_cast<std::int64_t>(unsupported.unsupported_blend_states));
     gpu_section.set("unsupportedOperationsTotal", static_cast<std::int64_t>(unsupported.total()));
 
     const auto performance = gpu_->performance_counters();
@@ -163,10 +165,10 @@ JsonValue XenonSession::capability_report() const {
     shader_section.set("translationFailures",
                        static_cast<std::int64_t>(coverage.translation_failures));
     shader_section.set("cacheHits", static_cast<std::int64_t>(coverage.cache_hits));
-    shader_section.set("cacheMisses", static_cast<std::int64_t>(coverage.cache_misses));
-    report.set_section("shader", std::move(shader_section));
     shader_section.set("cacheDiskHits", static_cast<std::int64_t>(coverage.cache_disk_hits));
     shader_section.set("cacheDiskWrites", static_cast<std::int64_t>(coverage.cache_disk_writes));
+    shader_section.set("cacheMisses", static_cast<std::int64_t>(coverage.cache_misses));
+    report.set_section("shader", std::move(shader_section));
   }
 
   // Part 12 of the AC6 Runtime Readiness pass ("Title Update fidelity"):

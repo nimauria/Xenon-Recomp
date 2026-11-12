@@ -47,6 +47,19 @@ struct GpuPerformanceCounters {
   // Color resolves done on the GPU out of the image owning their tiles,
   // without flushing it to canonical EDRAM.
   std::uint64_t gpu_resolves{};
+  // Depth resolves done the same way, and resolve depth clears drawn into the
+  // owning depth image instead of canonical EDRAM.
+  std::uint64_t gpu_depth_resolves{};
+  std::uint64_t gpu_depth_clears{};
+  // Times the command processor waited for queued resolve readbacks before
+  // an effect the guest can observe (Backend::publish_gpu_writes()).
+  std::uint64_t published_gpu_write_waits{};
+  // Textures untiled and converted on the GPU straight from the guest-memory
+  // mirror (or from a sync-point copy), not decoded on the CPU.
+  std::uint64_t gpu_texture_loads{};
+  // Command batches submitted early because their transient index arena
+  // could not take the next draw's indices.
+  std::uint64_t transient_upload_flushes{};
 };
 
 // Part 7 of the AC6 Runtime Readiness pass ("GPU capability / silent
@@ -71,6 +84,7 @@ struct GpuUnsupportedCounters {
   std::uint64_t unexpected_ownership_transitions{}; // EDRAM/render-target ownership handoff the planner rejected.
   std::uint64_t failed_resource_barriers{};         // A requested resource barrier/transition that could not be satisfied.
   std::uint64_t fallback_shader_uses{};             // Draws that ran through a generic fallback shader, not the title's own.
+  std::uint64_t unsupported_blend_states{};         // Draws whose blend the host cannot express exactly (constant colour and alpha together).
 
   [[nodiscard]] std::uint64_t total() const noexcept {
     return unknown_packets + unknown_registers + unsupported_fetch_formats +
@@ -78,7 +92,7 @@ struct GpuUnsupportedCounters {
            unsupported_shader_instructions + unsupported_shader_features +
            unhandled_resolve_modes + unhandled_depth_stencil_paths +
            unexpected_ownership_transitions + failed_resource_barriers +
-           fallback_shader_uses;
+           fallback_shader_uses + unsupported_blend_states;
   }
 };
 
@@ -96,6 +110,8 @@ struct GpuShaderCoverage {
   std::uint64_t translation_failures{};  // HlslShaderLowerer::lower() returned incomplete.
   std::uint64_t cache_hits{};            // ShaderCache::get_or_compile() reused a prior compile.
   std::uint64_t cache_misses{};          // ShaderCache::get_or_compile() actually invoked the compiler.
+  std::uint64_t cache_disk_hits{};       // Loaded from the persistent shader cache instead.
+  std::uint64_t cache_disk_writes{};     // Compiles stored there for later sessions.
 };
 
 // Host graphics backends consume Xenon graphics IR, never PM4 directly. Vulkan
@@ -108,10 +124,13 @@ class Backend {
                                 Edram& edram) = 0;
   virtual void consume(const ir::Command& command) = 0;
   virtual void end_submission() = 0;
+  // Ends a submission whose recorded work need not reach the GPU yet: a
+  // barrier inside a ring drain only needs the work before it recorded in
+  // order. The next end_submission(), or anything that waits for GPU
+  // results, submits it. Backends that cannot defer submit here.
+  virtual void end_submission_deferred() { end_submission(); }
   // Makes GPU-authored guest physical memory visible to the CPU on demand.
   // Normal rendering and memexport remain GPU-resident until a CPU consumer
-  std::uint64_t cache_disk_hits{};       // Loaded from the persistent shader cache instead.
-  std::uint64_t cache_disk_writes{};     // Compiles stored there for later sessions.
   // explicitly requests the range.
   [[nodiscard]] virtual bool make_guest_memory_cpu_visible(
       std::uint32_t physical_address, std::uint32_t size) = 0;
@@ -148,6 +167,9 @@ class Backend {
   // Every distinct reason a draw or resolve failed this run, with counts (see
   // GpuFailureLog); last_error() alone keeps only the newest.
   [[nodiscard]] virtual std::vector<GpuFailureReason> failure_reasons() const { return {}; }
+  // Every kind of resolve this run and how many wrote only zeros (see
+  // GpuResolveCensus).
+  [[nodiscard]] virtual std::vector<GpuResolveKind> resolve_census() const { return {}; }
   [[nodiscard]] virtual GpuPerformanceCounters performance_counters() const noexcept {
     return {};
   }
@@ -175,6 +197,26 @@ class Backend {
   // it nowhere else, so has nothing to capture.
   virtual void sync_guest_reads() {}
   virtual void end_guest_read_sync() {}
+
+  // GPU writes to guest memory (resolves) reach guest memory without the
+  // command processor waiting for each: their readbacks are queued with the
+  // work and land as the GPU finishes them. Without `wait` this writes out
+  // the ones already finished; with it, it first waits for every one still
+  // queued - called before the command processor does anything the guest
+  // can observe (a fence write, an interrupt, a memory poll), so the guest
+  // never learns the GPU passed a resolve before its bytes are in memory.
+  // False on failure (last_error()).
+  // Where compiled shaders persist between sessions ("Persistent" shader
+  // cache mode); empty keeps them for this session only. A backend that
+  // compiles no shaders has nothing to keep.
+  virtual void set_shader_cache_directory(const std::string& directory) {
+    static_cast<void>(directory);
+  }
+
+  [[nodiscard]] virtual bool publish_gpu_writes(bool wait) {
+    static_cast<void>(wait);
+    return true;
+  }
 };
 
 class NullBackend final : public Backend {
@@ -197,26 +239,6 @@ class NullBackend final : public Backend {
   [[nodiscard]] bool invalidate_edram_native_state() override { return true; }
   [[nodiscard]] PresentStatus present(const PresentationFrame&) override {
     return PresentStatus::NotConfigured;
-
-  // GPU writes to guest memory (resolves) reach guest memory without the
-  // command processor waiting for each: their readbacks are queued with the
-  // work and land as the GPU finishes them. Without `wait` this writes out
-  // the ones already finished; with it, it first waits for every one still
-  // queued - called before the command processor does anything the guest
-  // can observe (a fence write, an interrupt, a memory poll), so the guest
-  // never learns the GPU passed a resolve before its bytes are in memory.
-  // False on failure (last_error()).
-  // Where compiled shaders persist between sessions ("Persistent" shader
-  // cache mode); empty keeps them for this session only. A backend that
-  // compiles no shaders has nothing to keep.
-  virtual void set_shader_cache_directory(const std::string& directory) {
-    static_cast<void>(directory);
-  }
-
-  [[nodiscard]] virtual bool publish_gpu_writes(bool wait) {
-    static_cast<void>(wait);
-    return true;
-  }
   }
   [[nodiscard]] bool resize_presentation(std::uint32_t, std::uint32_t) override {
     return false;

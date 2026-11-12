@@ -212,6 +212,10 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
                                 ? VK_FRONT_FACE_CLOCKWISE
                                 : VK_FRONT_FACE_COUNTER_CLOCKWISE;
   rasterization.lineWidth = 1.0f;
+  // With PA_CL_CLIP_CNTL.CLIP_DISABLE nothing is clipped against Z either;
+  // depth is clamped to the viewport range instead (depthClamp is a required
+  // device feature).
+  rasterization.depthClampEnable = raster.clip_disabled ? VK_TRUE : VK_FALSE;
   const auto polygon_offset = preferred_polygon_offset(raster, topology);
   rasterization.depthBiasEnable = polygon_offset.enabled;
   rasterization.depthBiasConstantFactor = scaled_polygon_offset_constant(

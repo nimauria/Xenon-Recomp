@@ -12,20 +12,50 @@ template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                              const DrawResourceState& state) {
   // Diagnostic: per-phase time of a draw slower than 50 ms (the GPU pump
-  // thread runs draws between ring drains and vsync interrupts).
+  // thread runs draws between ring drains and vsync interrupts), and, in
+  // probe logs, every phase's running total over all draws every 4096 draws
+  // (draw_phase_totals_diag.log) - where an ordinary draw's time goes.
   struct DrawPhases {
+    struct Totals {
+      std::array<const char*, 8> names{};
+      std::array<std::uint64_t, 8> ns{};
+      std::uint64_t draws{};
+    };
+    static Totals& totals() {
+      static Totals value;
+      return value;
+    }
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point mark = start;
     std::array<std::pair<const char*, long long>, 8> phases{};
     std::size_t count = 0;
     void at(const char* name) {
       const auto now = std::chrono::steady_clock::now();
-      if (count < phases.size())
-        phases[count++] = {name, std::chrono::duration_cast<std::chrono::milliseconds>(now - mark).count()};
+      const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - mark).count();
+      // Each phase name (a literal) owns one totals slot, whichever phase a
+      // draw that returns early ends on.
+      auto& sums = totals();
+      for (std::size_t slot = 0; slot < sums.names.size(); ++slot) {
+        if (sums.names[slot] && std::string_view(sums.names[slot]) != name) continue;
+        sums.names[slot] = name;
+        sums.ns[slot] += static_cast<std::uint64_t>(ns);
+        break;
+      }
+      if (count < phases.size()) phases[count++] = {name, ns / 1000000};
       mark = now;
     }
     ~DrawPhases() {
       at("record and finish");
+      auto& sums = totals();
+      if (xenon::logging::probe_logs_enabled() && (++sums.draws & 4095u) == 0u) {
+        std::string text;
+        for (std::size_t i = 0; i < sums.names.size() && sums.names[i]; ++i)
+          text += std::string(sums.names[i]) + " " + std::to_string(sums.ns[i] / 1000000u) +
+                  " ms; ";
+        xenon::logging::append_probe_log("draw_phase_totals_diag.log", "%llu draws: %s\n",
+                                         static_cast<unsigned long long>(sums.draws),
+                                         text.c_str());
+      }
       const auto total = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - start).count();
       if (total < 50) return;
@@ -36,15 +66,41 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                        static_cast<long long>(total), text.c_str());
     }
   } phases;
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"gpu", "draw", {"prim", "indices", "vs", "ps"}, false});
+  xenon::logging::ActivityScope activity(
+      activity_key, {static_cast<std::uint64_t>(draw->primitive_type), draw->index_count,
+                     draw->vertex_shader.hash, draw->pixel_shader.hash});
   pipeline_states.insert(state.pipeline_hash(*draw));
   std::array<RenderTargetImage*, 4> active_targets{};
   std::array<std::uint8_t, 4> active_write_masks{};
   std::array<BlendState, 4> active_blends{};
-  const auto color_plan = plan_color_targets(state);
+  // Only the colors the pixel shader exports are bound. A shader that is not
+  // decoded yet keeps every slot and fails on its missing reflection below.
+  const auto decoded_pixel_shader = draw->pixel_shader.valid
+                                        ? decoded_shaders.find(draw->pixel_shader.hash)
+                                        : decoded_shaders.end();
+  // A multipass vertex shader (SQ_PROGRAM_CNTL.VS_EXPORT_MODE) only exports
+  // to memory: nothing is rasterized, so no render target is bound.
+  const bool rasterizes = !state.program.multipass();
+  const auto color_plan =
+      rasterizes ? plan_color_targets(
+                       state, decoded_pixel_shader != decoded_shaders.end()
+                                  ? shader_color_output_mask(decoded_pixel_shader->second.reflection)
+                                  : std::uint8_t{0xF})
+                 : ColorTargetPlan{};
   const auto color_count =
       static_cast<std::size_t>(color_plan.attachment_count);
   DepthTargetImage* active_depth = nullptr;
+  // A depth target on the EDRAM base of a color target the draw writes is
+  // not bound: one surface cannot be bound twice, and depth is the one
+  // dropped, as Xenia does.
+  bool depth_aliases_color = false;
+  for (std::size_t slot = 0; slot < color_count; ++slot)
+    depth_aliases_color |= color_plan.enabled[slot] &&
+                           state.color_targets[slot].base_tile == state.depth_target.base_tile;
   const bool depth_bound =
+      rasterizes && !depth_aliases_color &&
       (state.edram_mode == EdramMode::ColorDepth || state.edram_mode == EdramMode::DepthOnly) &&
       (state.depth_target.test_enabled || state.depth_target.write_enabled ||
        state.depth_target.stencil_enabled);
@@ -77,7 +133,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       EdramSurfaceLayout surface{target.base_tile, state.raster.surface_pitch,
           height, static_cast<MsaaSamples>(state.raster.msaa_samples_log2),
           color_render_target_is_64bpp(format), false};
-      surface.height_pixels = (std::min)(surface.height_pixels,
+      surface.height_pixels = (std::min)(whole_tile_height_pixels(surface),
                                          rows_before_next_surface(surface, bound_bases));
       const auto key = surface.identity_hash() ^
                        (std::uint64_t(target.format) << 56u);
@@ -124,7 +180,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         state.depth_target.base_tile, state.raster.surface_pitch,
         std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
         static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false, true};
-    surface.height_pixels = (std::min)(surface.height_pixels,
+    surface.height_pixels = (std::min)(whole_tile_height_pixels(surface),
                                        rows_before_next_surface(surface, bound_bases));
     const auto key = surface.identity_hash() ^
                      (std::uint64_t(state.depth_target.format) << 60u);
@@ -183,6 +239,10 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   // fetches, and syncing those too cost AC6 up to 100 ms per draw. A shader
   // with no reflection syncs every valid constant.
   if (memory) {
+    // Vertex data is read as guest memory stood at the latest sync point, as
+    // textures are: the CPU writes since then are folded in once, at the next
+    // one, not once for every buffer of every draw.
+    const auto vertex_read_epoch = guest_reads.read_epoch(*memory);
     std::array<bool, 96> fetched{};
 #ifdef XENON_HAS_DXC
     bool all_fetched = false;
@@ -209,7 +269,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         if (bytes64 > UINT32_MAX ||
             !mirror.synchronize_range(
                 fetch->physical_address, static_cast<std::uint32_t>(bytes64),
-                memory::GpuRangeUsage::VertexBuffer)) {
+                memory::GpuRangeUsage::VertexBuffer, vertex_read_epoch)) {
           error = mirror.error().empty()
                              ? named("vertex fetch range is invalid")
                              : mirror.error();
@@ -235,6 +295,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     ready = false;
     return;
   }
+  probe_skinning_constants(draw->vertex_shader, constants, state.vertex_buffers);
   std::array<bool, 32> used{};
   const auto mark_used = [&](const ir::ShaderReference& shader) {
     const auto found = shader_textures.find(shader.hash);
@@ -252,19 +313,9 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     // picture a frame ahead, in the wrong colours. Changes after the sync
     // point are not visible yet and are picked up by a later draw.
     const auto dirty_epoch = guest_reads.read_epoch(*memory);
-    // Every texture the draw samples is copied first and only then decoded and
-    // uploaded, so one slow decode does not delay the next texture's copy.
-    struct PendingTexture {
-      std::uint32_t slot{};
-      const TextureDescriptor* descriptor{};
-      std::uint64_t key{};
-      std::vector<std::byte> snapshot{};
-      std::uint32_t snapshot_base{};
-      // Another slot samples the same texture: it is bound to the image
-      // decoded for the slot that took the snapshot.
-      bool shares_snapshot{false};
-    };
-    std::vector<PendingTexture> pending_textures;
+    // Textures this draw has already loaded: another slot sampling the same
+    // one binds that image.
+    std::vector<std::uint64_t> loaded_keys;
     for (std::uint32_t slot = 0; slot < used.size(); ++slot) {
       if (!used[slot] || !state.textures[slot]) continue;
       const auto& descriptor = *state.textures[slot];
@@ -293,117 +344,105 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
             descriptor.pitch, int(descriptor.tiled), descriptor.base_address,
             int(descriptor.exp_adjust));
       }
-      if (std::any_of(pending_textures.begin(), pending_textures.end(),
-                      [&](const PendingTexture& pending) { return pending.key == key; })) {
-        pending_textures.push_back({slot, &descriptor, key, {}, 0u, true});
-        continue;
-      }
       auto existing = textures.find(key);
       const bool already_cached = existing != textures.end();
-      bool dirty = already_cached &&
-                   texture_dirty.consume_dirty(key, memory->coherency(), dirty_epoch);
-      // A recent texture the latest sync point found unchanged was written, if
-      // at all, after it: not visible yet.
-      if (dirty && guest_reads.unchanged_at_sync(key)) dirty = false;
-      const bool refresh = !already_cached || dirty;
-      if (dirty) ++performance.texture_cache_invalidations;
-      if (refresh) {
-        // Texture decoding is still CPU-side. Preserve GPU-resident
-        // memexport normally, but if a later draw actually samples a
-        // GPU-authored texture, download only that texture's subresources.
-        const auto source_layout = build_texture_layout(descriptor);
-        if (!source_layout.valid) {
-          error = source_layout.error;
+      const bool loaded_here =
+          std::find(loaded_keys.begin(), loaded_keys.end(), key) != loaded_keys.end();
+      const bool dirty = already_cached && !loaded_here &&
+                         cached_texture_stale(texture_dirty, guest_reads, key,
+                                              memory->coherency(), dirty_epoch);
+      if (!already_cached || dirty) {
+        if (dirty) ++performance.texture_cache_invalidations;
+        const auto layout = build_texture_layout(descriptor);
+        if (!layout.valid) {
+          error = layout.error;
           return;
         }
-        for (const auto& subresource : source_layout.subresources) {
-          if (subresource.guest_size_bytes > UINT32_MAX ||
-              !mirror.make_cpu_visible(
-                  subresource.guest_address,
-                  static_cast<std::uint32_t>(subresource.guest_size_bytes),
-                  memory::GpuRangeUsage::Texture)) {
-            error = mirror.error().empty()
-                               ? named("GPU-authored texture range is invalid")
-                               : mirror.error();
-            return;
-          }
-        }
-        std::uint32_t texture_snapshot_base = memory::kPhysicalMemorySize;
-        std::uint64_t texture_snapshot_end = 0u;
-        for (const auto& subresource : source_layout.subresources) {
-          texture_snapshot_base =
-              (std::min)(texture_snapshot_base, subresource.guest_address);
-          texture_snapshot_end = (std::max)(
-              texture_snapshot_end,
-              std::uint64_t{subresource.guest_address} +
-                  subresource.guest_size_bytes);
-        }
-        if (texture_snapshot_base >= memory::kPhysicalMemorySize ||
-            texture_snapshot_end > memory::kPhysicalMemorySize ||
-            texture_snapshot_end <= texture_snapshot_base) {
-          error = named("texture snapshot range is invalid");
+        if (!layout.format.host_supported()) {
+          error = named("Xenos texture format " + std::to_string(descriptor.format) + " (" +
+                        std::string(layout.format.name) + ") has no lossless native mapping");
+          ++unsupported.unsupported_texture_formats;
           return;
         }
-        const auto texture_snapshot_size =
-            static_cast<std::uint32_t>(texture_snapshot_end - texture_snapshot_base);
+        std::uint32_t texture_base = memory::kPhysicalMemorySize;
+        std::uint64_t texture_end = 0u;
+        for (const auto& subresource : layout.subresources) {
+          texture_base = (std::min)(texture_base, subresource.guest_address);
+          texture_end = (std::max)(
+              texture_end, std::uint64_t{subresource.guest_address} + subresource.guest_size_bytes);
+        }
+        if (texture_base >= memory::kPhysicalMemorySize ||
+            texture_end > memory::kPhysicalMemorySize || texture_end <= texture_base) {
+          error = named("texture guest range is invalid");
+          return;
+        }
+        const auto texture_size = static_cast<std::uint32_t>(texture_end - texture_base);
         // The copy the latest sync point holds, whatever the CPU wrote since.
         // (Page epochs cannot say whether a write came before or after it: a
-        // page records only its newest write.)
-        std::vector<std::byte> texture_snapshot;
-        if (auto capture =
-                guest_reads.take_capture(key, texture_snapshot_base, texture_snapshot_size)) {
-          texture_snapshot = std::move(*capture);
+        // page records only its newest write.) Otherwise the texture is read
+        // where it lies: the mirror takes the bytes the CPU changed, and bytes
+        // a resolve or memory export wrote are already there - the texture
+        // never comes back to the CPU.
+        auto capture = guest_reads.take_capture(key, texture_base, texture_size);
+        if (capture) {
           ++performance.texture_sync_captures;
-        }
-        if (texture_snapshot.empty()) {
-          texture_snapshot.resize(texture_snapshot_size);
-          if (!memory->copy_physical_range(texture_snapshot_base, texture_snapshot)) {
-            error = named("texture snapshot failed");
-            return;
+        } else {
+          for (const auto& subresource : layout.subresources) {
+            if (subresource.guest_size_bytes > UINT32_MAX ||
+                !mirror.synchronize_range(subresource.guest_address,
+                                          static_cast<std::uint32_t>(subresource.guest_size_bytes),
+                                          memory::GpuRangeUsage::Texture, dirty_epoch)) {
+              error = mirror.error().empty() ? named("texture guest range is invalid")
+                                             : mirror.error();
+              return;
+            }
           }
         }
-        guest_reads.refreshed(key, texture_snapshot_base, texture_snapshot_size, dirty_epoch);
-        pending_textures.push_back(
-            {slot, &descriptor, key, std::move(texture_snapshot), texture_snapshot_base, false});
+        guest_reads.refreshed(key, texture_base, texture_size, dirty_epoch);
+        static const auto load_key = xenon::logging::intern_activity(
+            {"gpu", "texture load", {"format", "width", "height", "address"}, false});
+        xenon::logging::ActivityScope load_activity(
+            load_key, {static_cast<std::uint64_t>(descriptor.format), descriptor.width,
+                       descriptor.height, texture_base});
+        // A cached texture of the same key is reloaded in place: the work is
+        // queued after the draws that sampled it, so they read the old texels.
+        std::unique_ptr<TextureImage> created;
+        TextureImage* image = already_cached ? existing->second.get() : nullptr;
+        if (image && !image->matches(layout)) image = nullptr;
+        if (!image) {
+          created = std::make_unique<TextureImage>();
+          image = created.get();
+        }
+        const std::span<const std::byte> capture_bytes =
+            capture ? std::span<const std::byte>(*capture) : std::span<const std::byte>{};
+        if (!self().load_texture(*image, layout, capture_bytes, texture_base)) {
+          if (image->unsupported_format()) ++unsupported.unsupported_texture_formats;
+          if (!created && already_cached) {
+            // The image may be half written: decode it afresh next time.
+            retire_resource(std::move(existing->second));
+            textures.erase(existing);
+            texture_dirty.erase(key);
+          }
+          return;
+        }
+        ++performance.gpu_texture_loads;
+        texture_dirty.track_clean(key, layout, dirty_epoch);
+        if (created) {
+          if (already_cached) {
+            auto retired = std::move(existing->second);
+            existing->second = std::move(created);
+            retire_resource(std::move(retired));
+          } else {
+            textures.emplace(key, std::move(created));
+          }
+        }
+        loaded_keys.push_back(key);
       } else {
         guest_reads.reused(key);
-        if (!self().bind_texture(slot, descriptor, *existing->second)) {
-          error = resources.error();
-          return;
-        }
       }
-    }
-    for (auto& pending : pending_textures) {
-      const auto& descriptor = *pending.descriptor;
-      if (pending.shares_snapshot) {
-        const auto image = textures.find(pending.key);
-        if (image == textures.end() ||
-            !self().bind_texture(pending.slot, descriptor, *image->second)) {
-          error = resources.error();
-          return;
-        }
-        continue;
-      }
-      const auto decoded = decode_texture(descriptor, pending.snapshot, pending.snapshot_base);
-      if (!decoded.valid) {
-        error = decoded.error;
+      if (!self().bind_texture(slot, descriptor, *textures.at(key))) {
+        error = resources.error();
         return;
-      }
-      auto image = std::make_unique<TextureImage>();
-      if (!self().create_texture(*image, decoded) ||
-          !self().bind_texture(pending.slot, descriptor, *image)) {
-        error = image->error().empty() ? resources.error() : image->error();
-        if (image->unsupported_format()) ++unsupported.unsupported_texture_formats;
-        return;
-      }
-      texture_dirty.track_clean(pending.key, decoded.layout, dirty_epoch);
-      auto existing = textures.find(pending.key);
-      if (existing != textures.end()) {
-        auto retired = std::move(existing->second);
-        existing->second = std::move(image);
-        retire_resource(std::move(retired));
-      } else {
-        textures.emplace(pending.key, std::move(image));
       }
     }
   }
@@ -528,20 +567,32 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     if (!vertex_shader || !pixel_shader) return;
     bool float20_depth_variant = false;
     const auto samples = static_cast<MsaaSamples>(state.raster.msaa_samples_log2);
-    if (active_depth && active_depth->requires_float24_conversion() &&
-        (state.depth_target.test_enabled || state.depth_target.write_enabled)) {
-      const bool per_sample = samples != MsaaSamples::X1;
+    // Pixel shader variants: D24FS8 depth output (float20e4 rounding, per
+    // sample under MSAA) and PsParamGen (SQ_PROGRAM_CNTL.PARAM_GEN).
+    const bool float20_depth =
+        active_depth && active_depth->requires_float24_conversion() &&
+        (state.depth_target.test_enabled || state.depth_target.write_enabled);
+    const auto param_gen = state.program.param_gen_interpolator();
+    const bool point_primitive = draw->primitive_type == PrimitiveType::PointList;
+    if (float20_depth || param_gen != ShaderProgramState::kNoParamGen) {
+      const bool per_sample = float20_depth && samples != MsaaSamples::X1;
       const std::uint64_t variant_key =
-          draw->pixel_shader.hash ^ 0xD24F20E4D24F20E4ull ^
+          draw->pixel_shader.hash ^ (float20_depth ? 0xD24F20E4D24F20E4ull : 0ull) ^
           (per_sample ? 0x8000000000000000ull : 0ull) ^
-          (memexport_writable ? 0x0400000000000000ull : 0ull);
+          (memexport_writable ? 0x0400000000000000ull : 0ull) ^
+          (param_gen != ShaderProgramState::kNoParamGen
+               ? 0x5041524D47454E00ull ^ (std::uint64_t(param_gen) << 40u) ^
+                     (point_primitive ? 0x0000100000000000ull : 0ull)
+               : 0ull);
       auto variant = float20_depth_shaders.find(variant_key);
       if (variant == float20_depth_shaders.end()) {
         ShaderLoweringOptions lowering_options{};
-        lowering_options.pixel_depth_output =
-            PixelDepthOutputMode::Float20e4NearestEven;
+        if (float20_depth)
+          lowering_options.pixel_depth_output = PixelDepthOutputMode::Float20e4NearestEven;
         lowering_options.force_sample_frequency = per_sample;
         lowering_options.force_guest_memory_rw = memexport_writable;
+        lowering_options.param_gen_interpolator = param_gen;
+        lowering_options.param_gen_point = point_primitive;
         const auto lowered =
             HlslShaderLowerer::lower(decoded_pixel->second, lowering_options);
         unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
@@ -549,7 +600,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
         if (!lowered.complete) {
           error = lowered.diagnostics.empty()
-                             ? "D24FS8 pixel shader lowering failed"
+                             ? "pixel shader variant lowering failed"
                              : lowered.diagnostics.front();
           return;
         }
@@ -559,7 +610,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
             shader_cache.get_or_compile(lowered, compile_options);
         if (!compiled->succeeded) {
           error = compiled->diagnostics.empty()
-                             ? "D24FS8 pixel shader compilation failed"
+                             ? "pixel shader variant compilation failed"
                              : compiled->diagnostics.front();
           return;
         }
@@ -569,7 +620,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                       .first;
       }
       pixel_shader = variant->second;
-      float20_depth_variant = true;
+      float20_depth_variant = float20_depth;
     }
 
     if (draw->index_buffer.valid && draw->index_buffer.length_bytes &&
@@ -612,6 +663,22 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       error = batch.error;
       return;
     }
+    // Xenos draws points as sprites (PA_SU_POINT_SIZE, or the size the
+    // vertex shader exports), expanded by a geometry shader.
+    const bool point_sprites = batch.topology == HostPrimitiveTopology::PointList;
+    if (point_sprites && !point_sprite_shader) {
+      ShaderCompileOptions options{};
+      options.format = Api::kShaderBinaryFormat;
+      point_sprite_shader =
+          shader_cache.get_or_compile(make_point_sprite_geometry_shader(), options);
+      if (!point_sprite_shader->succeeded) {
+        error = point_sprite_shader->diagnostics.empty()
+                    ? named("point sprite shader compilation failed")
+                    : point_sprite_shader->diagnostics.front();
+        return;
+      }
+      ++compiled_shader_count;
+    }
     if (batch.requires_rectangle_expansion) {
       // A host-only fallback geometry shader, not the title's own -
       // Part 7 of the AC6 Runtime Readiness pass wants every draw that
@@ -632,12 +699,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         ++compiled_shader_count;
       }
     }
-    // D3D12 has no FRONT_AND_BACK cull mode and Vulkan does, but the common
-    // result is simpler: once Xenos has requested both faces culled, no
-    // triangle can reach rasterization. Points and lines are unaffected by
-    // polygon face culling.
+    // Face culling applies only to polygonal primitive types: a rectangle
+    // list (a full-screen pass, typically) is drawn whatever the cull mode the
+    // scene left set. D3D12 has no FRONT_AND_BACK cull mode and Vulkan does,
+    // but the common result is simpler: once Xenos has requested both faces
+    // culled, no polygon can reach rasterization.
+    const auto raster = host_raster_state(state.raster, draw->primitive_type);
     if (batch.topology == HostPrimitiveTopology::TriangleList &&
-        state.raster.cull_front && state.raster.cull_back &&
+        raster.cull_front && raster.cull_back &&
         !vertex_memexport) {
       return;
     }
@@ -645,6 +714,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     pipeline_key ^= std::uint64_t(batch.topology) << 61u;
     if (batch.requires_rectangle_expansion)
       pipeline_key ^= 0x52454354414E474Cull;
+    if (point_sprites) pipeline_key ^= 0x504F494E54535052ull;
     if (color_count) {
       for (std::size_t i = 0; i < color_count; ++i) {
         pipeline_key ^= std::uint64_t(Api::color_format(active_targets[i]))
@@ -676,10 +746,11 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       if (!pipeline->initialize(
               context.device(), self().pipeline_root(),
               *vertex_shader, *pixel_shader,
-              batch.requires_rectangle_expansion
-                  ? rectangle_list_shader.get() : nullptr,
+              batch.requires_rectangle_expansion ? rectangle_list_shader.get()
+              : point_sprites                    ? point_sprite_shader.get()
+                                                 : nullptr,
               format_span, samples,
-              batch.topology, state.raster, write_mask_span, blend_state_span,
+              batch.topology, raster, write_mask_span, blend_state_span,
               active_depth ? active_depth->format() : Api::kUndefinedFormat,
               active_depth ? &state.depth_target : nullptr)) {
         error = pipeline->error();
@@ -712,9 +783,10 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     // shader of a fully culled memexport draw; an empty scissor keeps any
     // triangle from reaching the render targets.
     const bool suppress_rasterization =
-        Api::kEmulatesFrontAndBackCull &&
-        batch.topology == HostPrimitiveTopology::TriangleList &&
-        state.raster.cull_front && state.raster.cull_back && vertex_memexport;
+        !rasterizes ||
+        (Api::kEmulatesFrontAndBackCull &&
+         batch.topology == HostPrimitiveTopology::TriangleList &&
+         raster.cull_front && raster.cull_back && vertex_memexport);
     const auto scissor_right = suppress_rasterization
                                    ? scissor_left
                                    : (std::clamp)(
@@ -729,34 +801,72 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     // render target, which is the host viewport (XenonDrawState[3].yz).
     const std::array<float, 2> pixels_to_ndc{2.0f / float(render_width),
                                              2.0f / float(render_height)};
-    std::memcpy(constants.data() + 9344 + 13 * 4, pixels_to_ndc.data(), sizeof(pixels_to_ndc));
+    std::memcpy(constants.data() + kDrawStateOffset + 13 * 4, pixels_to_ndc.data(),
+                sizeof(pixels_to_ndc));
+    // Words 16 and 17 (XenonDrawState[4].xy): the Z part of the host depth
+    // transform, whose depth range the backend gives its viewport.
+    const auto depth_transform =
+        host_depth_transform(state.raster, decoded_pixel->second.reflection.writes_depth);
+    const std::array<float, 2> z_transform{depth_transform.ndc_scale, depth_transform.ndc_offset};
+    std::memcpy(constants.data() + kDrawStateOffset + 16 * 4, z_transform.data(),
+                sizeof(z_transform));
+    // Word 18 (XenonDrawState[4].z): the primitive class PsParamGen reports
+    // (1 polygonal, 2 line, 4 point) and 8 when a point's size comes from
+    // its vertex shader.
+    const auto type = draw->primitive_type;
+    const bool line_primitive = type == PrimitiveType::LineList || type == PrimitiveType::LineStrip ||
+                                type == PrimitiveType::LineLoop ||
+                                type == PrimitiveType::TwoDLineStrip;
+    const std::uint32_t primitive_flags =
+        (primitive_is_polygonal(type) ? 1u : 0u) | (line_primitive ? 2u : 0u) |
+        (point_primitive ? 4u : 0u) | (state.program.vertex_point_size() ? 8u : 0u);
+    std::memcpy(constants.data() + kDrawStateOffset + 18 * 4, &primitive_flags,
+                sizeof(primitive_flags));
     bool draw_record_failed = false;
     phases.at("constants, pipeline and uploads");
+    if constexpr (requires { self().request_draw_statistics(); }) {
+      if (tracing() && state.raster.msaa_samples_log2 != 0 && trace_probes_left != 0)
+        self().request_draw_statistics();
+    }
+    auto blend_constant = state.blend_constant;
+    if constexpr (Api::kSharedBlendFactorConstant) {
+      std::array<BlendState, 4> draw_blends{};
+      for (std::size_t i = 0; i < color_count; ++i)
+        if (active_targets[i]) draw_blends[i] = active_blends[i];
+      const auto host = shared_blend_factor_constant(
+          std::span<const BlendState>(draw_blends.data(), color_count), state.blend_constant);
+      blend_constant = host.value;
+      if (!host.exact) ++unsupported.unsupported_blend_states;
+    }
+    if (!make_transient_upload_room(index_byte_size)) return;
     if (!self().record_draw(
             DrawRecording{state, batch, *pipeline, active_targets, color_count,
                           active_depth, index_byte_size, memexport_writable,
                           render_width, render_height, scissor_left,
-                          scissor_top, scissor_right, scissor_bottom},
+                          scissor_top, scissor_right, scissor_bottom,
+                          depth_transform.z_min, depth_transform.z_max, blend_constant},
             draw_record_failed)) {
       error = queue.error();
       return;
     } else if (draw_record_failed) {
       return;
-    } else if (memexport_writable) {
+    }
+    probe_draw_output(*draw, state.color_targets[0].format, color_count, active_targets,
+                      active_depth, state.raster.msaa_samples_log2);
+    trace_vertex_inputs(*draw, state);
+    if (memexport_writable) {
       if (dynamic_memexport_range) {
         // Unusual shaders may synthesize eA dynamically. Until runtime
         // address analysis is available, preserve correctness by treating
         // the complete physical aperture as GPU-owned rather than risking a
         // stale CPU upload over an unknown export.
         mirror.mark_gpu_write(0, memory::kPhysicalMemorySize);
-        texture_dirty.mark_dirty(0, memory::kPhysicalMemorySize);
-        guest_reads.backend_wrote(0, memory::kPhysicalMemorySize);
+        note_backend_write(texture_dirty, guest_reads, 0, memory::kPhysicalMemorySize);
       } else {
         for (const auto& range : memexport_ranges) {
           const auto address = range.base_address_dwords << 2u;
           mirror.mark_gpu_write(address, range.size_bytes);
-          texture_dirty.mark_dirty(address, range.size_bytes);
-          guest_reads.backend_wrote(address, range.size_bytes);
+          note_backend_write(texture_dirty, guest_reads, address, range.size_bytes);
         }
       }
     }

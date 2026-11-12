@@ -269,8 +269,6 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   assert(!HlslShaderLowerer::lower(shader).complete);
 }
 
-// Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
-// grouper's index - the draw's index plus VGT_INDX_OFFSET, 24 bits, clamped
 // Regression (AC6 contorted characters, torn aircraft): a vfetch_mini reads
 // at the address its preceding full vfetch latched, plus its own offset; it
 // never reads an index register. AC6 overwrites the index register with the
@@ -384,6 +382,8 @@ void test_vertex_fetch_index_tolerates_host_reciprocal_error() {
   std::cout << "  [PASS] vfetch index tolerates host reciprocal error\n";
 }
 
+// Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
+// grouper's index - the draw's index plus VGT_INDX_OFFSET, 24 bits, clamped
 // to [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX] - not the host's raw vertex id, or
 // every quad drawn at a StartVertex fetches the buffer's first vertices.
 void test_vertex_index_applies_grouper_offset_and_clamp() {
@@ -677,6 +677,59 @@ void test_sample_transfer_shaders() {
     return hlsl.substr(begin, end - begin);
   };
   assert(mapping_at(color) == mapping_at(depth));
+
+  // Converting transfers between different views: every accepted source
+  // (color or depth) into every accepted destination, at every source sample
+  // count, compile to DXIL and SPIR-V and share the same mapping.
+  const std::array<EdramTransferEndpoint, 5> endpoints{{
+      {false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8)},
+      {false, std::uint8_t(ColorRenderTargetFormat::R10G10B10A2)},
+      {false, std::uint8_t(ColorRenderTargetFormat::R32Float)},
+      {true, std::uint8_t(DepthRenderTargetFormat::D24S8)},
+      {true, std::uint8_t(DepthRenderTargetFormat::D24FS8)},
+  }};
+  const auto require = [&](const LoweredShader& shader, bool stencil_export) {
+    assert(shader.complete);
+    assert(mapping_at(shader.hlsl) == mapping_at(color));
+    const auto dxil = compiler.compile(shader, {});
+    if (!dxil.succeeded) {
+      for (const auto& line : dxil.diagnostics) std::cerr << line << '\n';
+      std::cerr << shader.hlsl << '\n';
+      assert(false);
+    }
+    auto options = spirv;
+    options.spirv_stencil_export = stencil_export;
+    const auto spirv_binary = compiler.compile(shader, options);
+    if (!spirv_binary.succeeded) {
+      for (const auto& line : spirv_binary.diagnostics) std::cerr << line << '\n';
+      assert(false);
+    }
+  };
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto& source : endpoints) {
+      for (const auto& destination : endpoints) {
+        if (source == destination) continue;
+        if (!destination.depth) {
+          require(make_edram_converting_color_transfer_shader(
+                      samples, source, static_cast<ColorRenderTargetFormat>(destination.format)),
+                  false);
+          continue;
+        }
+        for (const auto pass : {EdramDepthTransferPass::DepthAndStencil,
+                                EdramDepthTransferPass::Depth, EdramDepthTransferPass::StencilBit})
+          require(make_edram_converting_depth_transfer_shader(
+                      samples, source, static_cast<DepthRenderTargetFormat>(destination.format),
+                      pass),
+                  pass == EdramDepthTransferPass::DepthAndStencil);
+      }
+    }
+  }
+  // A view whose host storage is not its EDRAM word is refused, not
+  // approximated.
+  const EdramTransferEndpoint gamma{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8Gamma)};
+  assert(!make_edram_converting_color_transfer_shader(MsaaSamples::X1, gamma,
+                                                      ColorRenderTargetFormat::R32Float)
+              .complete);
 }
 
 
@@ -782,25 +835,6 @@ void test_utility_shaders_compile_once() {
   assert(!compiler.compile(incomplete).succeeded);
 }
 
-int main() {
-  test_lowering_is_deterministic();
-  test_dxc_dual_target_and_cache();
-  test_pixel_target_and_incomplete_rejection();
-  test_control_flow_state_machine_and_explicit_rejection();
-  test_texture_lod_and_gradient_lowering();
-  test_vertex_fetch_select_endian_and_packed_formats();
-  test_vertex_index_applies_grouper_offset_and_clamp();
-  test_texture_state_and_query_opcodes();
-  test_vertex_shader_texture_fetch_uses_explicit_lod();
-  test_rectangle_list_geometry_shader();
-  test_sample_transfer_shaders();
-  test_utility_shaders_compile_once();
-  test_memexport_translation_targets();
-  test_scalar_source_and_export_constants_compile();
-  std::cout << "xenon_shader_translation_tests: ok\n";
-}
-  test_vertex_fetch_index_tolerates_host_reciprocal_error();
-  test_vertex_fetch_mini_reuses_the_full_fetch_address();
 
 // The "Persistent" shader cache mode: a later session loads a title shader
 // compiled before instead of compiling it on the draw that first uses it
@@ -852,4 +886,23 @@ void test_persistent_shader_cache() {
   std::filesystem::remove_all(directory, ec);
 }
 
+int main() {
+  test_lowering_is_deterministic();
+  test_dxc_dual_target_and_cache();
   test_persistent_shader_cache();
+  test_pixel_target_and_incomplete_rejection();
+  test_control_flow_state_machine_and_explicit_rejection();
+  test_texture_lod_and_gradient_lowering();
+  test_vertex_fetch_select_endian_and_packed_formats();
+  test_vertex_index_applies_grouper_offset_and_clamp();
+  test_vertex_fetch_index_tolerates_host_reciprocal_error();
+  test_vertex_fetch_mini_reuses_the_full_fetch_address();
+  test_texture_state_and_query_opcodes();
+  test_vertex_shader_texture_fetch_uses_explicit_lod();
+  test_rectangle_list_geometry_shader();
+  test_sample_transfer_shaders();
+  test_utility_shaders_compile_once();
+  test_memexport_translation_targets();
+  test_scalar_source_and_export_constants_compile();
+  std::cout << "xenon_shader_translation_tests: ok\n";
+}

@@ -122,9 +122,29 @@ void test_implicit_float20_depth_variant() {
          std::string::npos);
   assert(lowered.hlsl.find("float xenon_depth = input.position.z") !=
          std::string::npos);
-  assert(lowered.hlsl.find("xenon_quantize_float20e4(xenon_depth, true)") !=
+  // Regression (AC6 black campaign opening): the host D24FS8 buffer holds
+  // half the guest depth, as clears and loads write it, so the variant must
+  // round in guest space and store half: interpolated Z (from the halved
+  // viewport range) is doubled first, then the 20e4 value is halved.
+  assert(lowered.hlsl.find("xenon_depth *= 2.0;") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_depth = xenon_quantize_float20e4(xenon_depth, true) * 0.5;") !=
          std::string::npos);
   assert(lowered.hlsl.find("input.sample_index == 0xFFFFFFFFu") !=
+         std::string::npos);
+}
+
+// A shader exporting depth on a D24FS8 target: oDepth is guest depth, so it
+// is clamped as the viewport would clamp it, not doubled, before rounding.
+void test_exported_depth_float20_variant() {
+  using namespace xenon::gpu;
+  ShaderLoweringOptions options{};
+  options.pixel_depth_output = PixelDepthOutputMode::Float20e4NearestEven;
+  const auto lowered = HlslShaderLowerer::lower(make_pixel_shader(true), options);
+  assert(lowered.complete);
+  assert(lowered.hlsl.find("float xenon_depth = e[61].x") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_depth = saturate(xenon_depth);") != std::string::npos);
+  assert(lowered.hlsl.find("xenon_depth *= 2.0;") == std::string::npos);
+  assert(lowered.hlsl.find("xenon_quantize_float20e4(xenon_depth, true) * 0.5;") !=
          std::string::npos);
 }
 
@@ -134,8 +154,9 @@ void test_float20_truncation_variant() {
   options.pixel_depth_output = PixelDepthOutputMode::Float20e4Truncate;
   const auto lowered = HlslShaderLowerer::lower(make_pixel_shader(false), options);
   assert(lowered.complete);
-  assert(lowered.hlsl.find("xenon_quantize_float20e4(xenon_depth, false)") !=
+  assert(lowered.hlsl.find("xenon_depth = xenon_quantize_float20e4(xenon_depth, false) * 0.5;") !=
          std::string::npos);
+
   assert(lowered.hlsl.find("SV_SampleIndex") == std::string::npos);
 }
 
@@ -337,6 +358,7 @@ int main() {
   test_explicit_guest_depth_export();
   test_implicit_float20_depth_variant();
   test_float20_truncation_variant();
+  test_exported_depth_float20_variant();
   test_memexport_gpu_write_lowering();
   test_non_memexport_guest_memory_stays_read_only();
   test_forced_writable_guest_memory_variant();

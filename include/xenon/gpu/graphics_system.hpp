@@ -66,7 +66,9 @@ class GraphicsSystem {
   // Executes each pending graphics-IR command exactly once, in order, then
   // clears the pending stream. Backends retain their own shadow state across
   // submissions via RegisterWrite commands.
-  void execute_ir(Backend& backend);
+  // `submit` false records the IR without submitting the backend's batch
+  // (Backend::end_submission_deferred()).
+  void execute_ir(Backend& backend, bool submit = true);
   // Explicit GPU -> CPU visibility hook for Memory v2 / CPU consumers.
   [[nodiscard]] bool make_guest_memory_cpu_visible(
       Backend& backend, std::uint32_t physical_address, std::uint32_t size);

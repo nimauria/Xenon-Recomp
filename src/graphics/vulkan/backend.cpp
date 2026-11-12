@@ -15,6 +15,7 @@
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/depth_target.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/vulkan/edram_transfer.hpp"
 #include "xenon/gpu/vulkan/gpu_resolve.hpp"
 #include "xenon/gpu/vulkan/guest_memory_mirror.hpp"
@@ -61,6 +62,8 @@ struct BackendApi {
   }
   // VK_CULL_MODE_FRONT_AND_BACK is native.
   static constexpr bool kEmulatesFrontAndBackCull = false;
+  // VK_BLEND_FACTOR_CONSTANT_ALPHA is native.
+  static constexpr bool kSharedBlendFactorConstant = false;
   static constexpr bool kSupportsDirectColorTransfer = true;
   static constexpr bool kSupportsDirectDepthTransfer = true;
 #ifdef XENON_HAS_DXC
@@ -89,6 +92,17 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   bool gpu_color_clear(RenderTargetImage& owner, const GpuClearConstants& constants) {
     if (gpu_resolver.clear(context.device(), queue, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolveConstants& constants) {
+    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, constants)) return true;
+    error = named(gpu_resolver.error());
+    return false;
+  }
+  bool gpu_depth_clear(DepthTargetImage& owner, const GpuClearConstants& constants,
+                       std::uint8_t stencil) {
+    if (gpu_resolver.clear_depth(context.device(), queue, owner, constants, stencil)) return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -132,6 +146,26 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     error = named(edram_depth_transfer.error());
     return false;
   }
+  template <typename Source>
+  bool convert_color_tiles(Source& source, RenderTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    if (edram_color_transfer.convert(context.device(), queue, source, destination, constants,
+                                     regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  template <typename Source>
+  bool convert_depth_tiles(Source& source, DepthTargetImage& destination,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions) {
+    if (edram_depth_transfer.convert(context.device(), context.physical_device(), queue, source,
+                                     destination, constants, regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
 
   bool create_render_target(RenderTargetImage& image,
                             const EdramSurfaceLayout& surface,
@@ -153,15 +187,31 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     return image.initialize(context.physical_device(), context.device(),
                             surface, format);
   }
-  bool create_texture(TextureImage& image, const DecodedTexture& decoded) {
-    const bool initialized = image.initialize(
-        context.physical_device(), context.device(), queue, decoded);
-    // Fold in regardless of overall success/failure: a texture can
-    // successfully bind while its sampler still substituted an
-    // unsupported clamp mode.
-    unsupported.unsupported_sampler_behaviors +=
-        image.unsupported_sampler_behaviors();
-    return initialized;
+  GpuTextureLoader texture_loader{};
+  // Loads `layout` into `image` on the GPU, from `capture` (a sync-point copy
+  // of guest memory at `capture_base`) or, when that is empty, from the
+  // guest-memory mirror. A new or differently shaped image is created first.
+  bool load_texture(TextureImage& image, const TextureLayout& layout,
+                    std::span<const std::byte> capture, std::uint32_t capture_base) {
+    if (!image.matches(layout)) {
+      const bool created = image.create(context.physical_device(), context.device(), layout);
+      // Fold in regardless of overall success/failure: a texture can
+      // successfully bind while its sampler still substituted an
+      // unsupported clamp mode.
+      unsupported.unsupported_sampler_behaviors += image.unsupported_sampler_behaviors();
+      if (!created) {
+        error = named(image.error());
+        return false;
+      }
+    }
+    const bool loaded =
+        capture.empty()
+            ? texture_loader.load_from_mirror(context.physical_device(), context.device(), queue,
+                                              mirror, image, layout)
+            : texture_loader.load_from_bytes(context.physical_device(), context.device(), queue,
+                                             image, layout, capture, capture_base);
+    if (!loaded) error = named(texture_loader.error());
+    return loaded;
   }
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
@@ -196,7 +246,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       const auto descriptor_set =
           resources.descriptor_set(frame_index, draw_slot);
       std::size_t index_offset = 0;
-      if (!upload_draw_indices(draw, frame_index, draw_slot, index_offset)) {
+      if (!upload_draw_indices(draw, frame_index, index_offset)) {
         record_failed = true;
         return;
       }
@@ -249,20 +299,23 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                               &descriptor_set, 0, nullptr);
       // The guest X/Y viewport transform runs in the vertex shader; the host
       // viewport is the whole render target, flipped so NDC Y points up as
-      // in Direct3D. Depth keeps the guest Z range.
-      const auto& guest_viewport = draw.state.raster.viewport;
-      const auto depth_a = (std::clamp)(guest_viewport.z_offset, 0.0f, 1.0f);
-      const auto depth_b = (std::clamp)(
-          guest_viewport.z_offset + guest_viewport.z_scale, 0.0f, 1.0f);
+      // in Direct3D. Its depth range is the host depth transform's, which
+      // the vertex shader's Z part keeps ordered.
+      // A D24FS8 target holds half the guest depth on the host (see
+      // host_viewport_depth), so its draws use the halved range too.
+      const auto depth_format = draw.depth && draw.depth->requires_float24_conversion()
+                                    ? DepthRenderTargetFormat::D24FS8
+                                    : DepthRenderTargetFormat::D24S8;
       const VkViewport viewport{0.0f, float(draw.render_height), float(draw.render_width),
-                                -float(draw.render_height), (std::min)(depth_a, depth_b),
-                                (std::max)(depth_a, depth_b)};
+                                -float(draw.render_height),
+                                host_viewport_depth(depth_format, draw.z_min),
+                                host_viewport_depth(depth_format, draw.z_max)};
       const VkRect2D scissor{{draw.scissor_left, draw.scissor_top},
                              {static_cast<std::uint32_t>(draw.scissor_right - draw.scissor_left),
                               static_cast<std::uint32_t>(draw.scissor_bottom - draw.scissor_top)}};
       vkCmdSetViewport(command_buffer, 0, 1, &viewport);
       vkCmdSetScissor(command_buffer, 0, 1, &scissor);
-      vkCmdSetBlendConstants(command_buffer, draw.state.blend_constant.data());
+      vkCmdSetBlendConstants(command_buffer, draw.blend_constant.data());
       if (draw.depth && draw.state.depth_target.stencil_enabled) {
         vkCmdSetStencilCompareMask(
             command_buffer, VK_STENCIL_FACE_FRONT_BIT,
@@ -360,6 +413,7 @@ void Backend::consume(const ir::Command& command) {
   impl_->consume(command);
 }
 void Backend::end_submission() { impl_->end_submission(); }
+void Backend::end_submission_deferred() { impl_->end_submission(false); }
 bool Backend::make_guest_memory_cpu_visible(std::uint32_t physical_address,
                                             std::uint32_t size) {
   return impl_->make_guest_memory_cpu_visible(physical_address, size);
@@ -377,6 +431,10 @@ bool Backend::invalidate_edram_native_state() {
 
 void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
+bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_shader_cache_directory(const std::string& directory) {
+  impl_->shader_cache.set_disk_directory(directory);
+}
 
 bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,
                               std::uint32_t height, PreparedPresentationFrame& output) {
@@ -400,6 +458,10 @@ GpuPerformanceCounters Backend::performance_counters() const noexcept {
 
 std::vector<GpuFailureReason> Backend::failure_reasons() const {
   return impl_->failure_log.reasons();
+}
+
+std::vector<GpuResolveKind> Backend::resolve_census() const {
+  return impl_->resolve_census.kinds();
 }
 
 GpuUnsupportedCounters Backend::unsupported_counters() const noexcept {
@@ -431,9 +493,5 @@ const DeviceProperties& Backend::device_properties() const noexcept {
   return impl_->context.properties();
 }
 const std::string& Backend::error() const noexcept { return impl_->error; }
-bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
-void Backend::set_shader_cache_directory(const std::string& directory) {
-  impl_->shader_cache.set_disk_directory(directory);
-}
 
 }  // namespace xenon::gpu::vulkan

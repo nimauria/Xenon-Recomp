@@ -27,7 +27,7 @@ class ResourceLayout {
   static constexpr std::uint32_t kMemoryExportDescriptor = kSrvCount;
   static constexpr std::uint32_t kResourceCount = kSrvCount + kUavCount;
   static constexpr std::uint32_t kSamplerCount = kTextureCount;
-  static constexpr std::uint64_t kConstantBufferBytes = 9472;
+  static constexpr std::uint64_t kConstantBufferBytes = kShaderConstantBufferBytes;
   static constexpr std::uint32_t kFrameCount = CommandQueue::kFrameCount;
 
   [[nodiscard]] bool initialize(ID3D12Device* device);
