@@ -57,20 +57,26 @@ void apply_host_affinity(std::thread& host_thread, std::uint32_t affinity) noexc
   if (affinity == 0xFFFFFFFFu) return;
   const auto handle = static_cast<HANDLE>(host_thread.native_handle());
   if (!handle) return;
-  // Xbox 360 hardware-thread bit N maps directly to host logical-processor
-  // bit N; every realistic host has at least the 6 bits real hardware could
-  // ever set, so no renumbering is needed - just mask to what the host
-  // actually reports, in case a guest affinity bit falls outside a very
-  // small host's processor count.
+  // The hardware thread the guest asked for (guest_processor_for_affinity:
+  // bit N is hardware thread N) becomes the host thread's ideal processor -
+  // a placement preference, not a restriction. On the console the six
+  // hardware threads are the title's own; on a host, pinning every guest
+  // thread to logical processors 0-5 crowded the whole title onto three
+  // cores, shared with the host's interrupts and every other process, while
+  // the rest sat idle. A pinned thread could wait out a whole scheduling
+  // quantum behind its neighbours: AC6's main thread stalled 40-63 ms
+  // resuming its audio workers, one of which then reached a critical
+  // section the main thread had not initialized yet and slept forever
+  // (the game never left its loading screen). The guest still reads back
+  // exactly the affinity it set (processor_affinity()); only the host
+  // placement is a preference.
+  PROCESSOR_NUMBER ideal{};
+  ideal.Group = 0;
+  ideal.Number = guest_processor_for_affinity(affinity);
   SYSTEM_INFO system_info{};
   GetSystemInfo(&system_info);
-  const DWORD_PTR host_mask =
-      system_info.dwNumberOfProcessors >= 32
-          ? 0xFFFFFFFFu
-          : ((DWORD_PTR{1} << system_info.dwNumberOfProcessors) - 1);
-  const DWORD_PTR requested = static_cast<DWORD_PTR>(affinity) & host_mask;
-  if (requested == 0) return;
-  SetThreadAffinityMask(handle, requested);
+  if (ideal.Number >= system_info.dwNumberOfProcessors) return;
+  SetThreadIdealProcessorEx(handle, &ideal, nullptr);
 }
 #endif
 
@@ -124,6 +130,19 @@ ThreadPriority KernelThread::priority() const noexcept {
 std::uint32_t KernelThread::exit_code() const noexcept {
   std::scoped_lock lock(mutex_);
   return exit_code_;
+}
+
+std::int32_t KernelThread::guest_base_priority() const noexcept {
+  std::scoped_lock lock(mutex_);
+  return guest_base_priority_;
+}
+
+void KernelThread::set_guest_base_priority(std::int32_t increment) noexcept {
+  {
+    std::scoped_lock lock(mutex_);
+    guest_base_priority_ = increment;
+  }
+  set_priority(host_priority_for_base_priority_increment(increment));
 }
 
 std::uint32_t KernelThread::processor_affinity() const noexcept {

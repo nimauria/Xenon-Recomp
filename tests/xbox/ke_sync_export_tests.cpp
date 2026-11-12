@@ -447,6 +447,52 @@ void test_ke_set_affinity_thread_moves_the_kpcr_processor_number() {
   assert(f.address_space->read32_be(previous) == 0x10u);
 }
 
+// Regression (AC6 stuck on its loading screen): KeSetBasePriorityThread's
+// value is a base-priority increment, kept exactly and read back by
+// KeQueryBasePriorityThread - not an index into ThreadPriority. Read as one,
+// AC6's main thread (increment 1) ran at "lowest" and its audio threads
+// (0xF, 0x11) at time-critical; the main thread stalled tens of milliseconds
+// resuming a worker, which reached an uninitialized critical section first.
+void test_ke_set_base_priority_thread_keeps_the_guest_increment() {
+  using kernel::ThreadPriority;
+  using kernel::host_priority_for_base_priority_increment;
+  static_assert(host_priority_for_base_priority_increment(0) == ThreadPriority::Normal);
+  static_assert(host_priority_for_base_priority_increment(1) == ThreadPriority::Normal);
+  static_assert(host_priority_for_base_priority_increment(0xF) == ThreadPriority::Normal);
+  static_assert(host_priority_for_base_priority_increment(0x11) == ThreadPriority::Normal);
+  static_assert(host_priority_for_base_priority_increment(0x12) == ThreadPriority::AboveNormal);
+  static_assert(host_priority_for_base_priority_increment(0x23) == ThreadPriority::Highest);
+  static_assert(host_priority_for_base_priority_increment(-0x11) == ThreadPriority::Normal);
+  static_assert(host_priority_for_base_priority_increment(-0x12) == ThreadPriority::BelowNormal);
+  static_assert(host_priority_for_base_priority_increment(-0x23) == ThreadPriority::Lowest);
+
+  Fixture f;
+  kernel::ThreadCreationParams params{};
+  auto thread = f.process->thread_manager().create_thread([] { return 0u; }, params);
+  assert(thread);
+  memory::GuestAddress kthread{};
+  assert(f.address_space->allocate(0x1000, 16, memory::kReadWrite, false, kthread));
+  thread->set_guest_kthread_address(kthread);
+
+  cpu::CpuState cpu{};
+  core::ExportCallContext call{cpu, *f.address_space, 0, 0};
+  std::uint32_t previous = 0u;
+  for (const std::int32_t increment : {1, 0xF, 0x11, 0, -2, 0x12}) {
+    cpu.gpr[3] = kthread;
+    cpu.gpr[4] = static_cast<std::uint32_t>(increment);
+    assert(xbox::ke_set_base_priority_thread_export(*f.process, call));
+    assert(cpu.gpr[3] == previous);  // the previous increment, as given
+    previous = static_cast<std::uint32_t>(increment);
+    assert(thread->guest_base_priority() == increment);
+    assert(thread->priority() == host_priority_for_base_priority_increment(increment));
+
+    cpu.gpr[3] = kthread;
+    assert(xbox::ke_query_base_priority_thread_export(*f.process, call));
+    assert(cpu.gpr[3] == static_cast<std::uint32_t>(increment));
+  }
+  std::cout << "  [PASS] KeSetBasePriorityThread keeps the guest increment\n";
+}
+
 }  // namespace
 
 // ---- Guest SignalState consistency -------------------------------------
@@ -638,6 +684,7 @@ int main() {
   test_ke_wait_for_multiple_objects_rejects_an_unknown_wait_type();
   test_unsupported_dispatcher_type_is_rejected_not_misinterpreted();
   test_ke_set_affinity_thread_moves_the_kpcr_processor_number();
+  test_ke_set_base_priority_thread_keeps_the_guest_increment();
   test_ke_query_base_priority_thread_unknown_thread_is_safe();
   test_ke_resume_thread_unknown_pointer_returns_invalid_handle();
   test_event_signal_state_follows_every_change();

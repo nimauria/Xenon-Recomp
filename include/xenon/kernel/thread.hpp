@@ -53,6 +53,25 @@ inline constexpr std::uint32_t kGuestKpcrCurrentCpuOffset = 0x10C;
   return 0;
 }
 
+// The host scheduling priority for a guest base-priority increment
+// (KeSetBasePriorityThread). The increment is not an index into
+// ThreadPriority: titles pass 0 for an ordinary thread, small steps around
+// it, and 15-17 (0xF-0x11) for their audio threads. Increments within
+// +-0x11 schedule at normal host priority; beyond that one step up or down,
+// and two beyond +-0x22 - the thresholds of xenia-project/xenia's
+// XThread::SetPriority. Never idle or time-critical: on a host those starve
+// the other guest threads (read as an index, AC6's main thread's increment of
+// 1 ran it at "lowest" behind time-critical audio threads, stalling it tens
+// of milliseconds in calls that take microseconds on the console).
+[[nodiscard]] constexpr ThreadPriority host_priority_for_base_priority_increment(
+    std::int32_t increment) noexcept {
+  if (increment > 0x22) return ThreadPriority::Highest;
+  if (increment > 0x11) return ThreadPriority::AboveNormal;
+  if (increment < -0x22) return ThreadPriority::Lowest;
+  if (increment < -0x11) return ThreadPriority::BelowNormal;
+  return ThreadPriority::Normal;
+}
+
 struct ThreadCreationParams {
   std::uint32_t stack_size{0};
   std::uint32_t creation_flags{0};
@@ -94,6 +113,11 @@ class KernelThread final : public KernelObject {
   }
 
   void set_priority(ThreadPriority priority) noexcept;
+  // The guest's base-priority increment, exactly as KeSetBasePriorityThread
+  // set it and KeQueryBasePriorityThread reads it back; setting it also sets
+  // the host priority it maps to (host_priority_for_base_priority_increment).
+  [[nodiscard]] std::int32_t guest_base_priority() const noexcept;
+  void set_guest_base_priority(std::int32_t increment) noexcept;
   void set_processor_affinity(std::uint32_t affinity) noexcept;
   void set_name(std::string name);
 
@@ -253,6 +277,7 @@ class KernelThread final : public KernelObject {
   std::unique_ptr<std::thread> host_thread_;
   ThreadState state_{ThreadState::Initialized};
   ThreadPriority priority_{ThreadPriority::Normal};
+  std::int32_t guest_base_priority_{0};
   std::uint32_t processor_affinity_{0xFFFFFFFF};
   std::uint32_t exit_code_{0};
   std::atomic<std::uint32_t> suspend_count_{0};
