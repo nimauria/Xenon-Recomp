@@ -411,13 +411,21 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
     // past kScanoutLatchTimeout (a long drain or callback) does not hold back
     // the vblank interrupt further.
     const auto vblank = scanout_requested_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    logging::ActivityScope vblank_activity(vblank_key);
     gpu_wake_.notify(kGpuWakePresent);
     if (graphics_system_ && gpu_ &&
         !scanout_latched_.wait_until(vblank, Clock::now() + kScanoutLatchTimeout)) {
       scanout_latch_timeouts_.fetch_add(1u, std::memory_order_relaxed);
+      vblank_activity.arguments[2] = 1u;
     }
 
+    // The vblank advances the GPU progress counter EVENT_WRITE_SHD reports,
+    // as on xenia and rexglue (MarkVblank), before the title's handler runs.
+    if (graphics_system_) graphics_system_->command_processor().notify_vblank();
+
     const auto interrupt = kernel_process_->gpu_interrupt_callback();
+    vblank_activity.arguments[0] = interrupt.callback_address;
+    vblank_activity.arguments[1] = kernel_process_->gpu_front_buffer().base_address;
     {
       static std::atomic<int> _vsync_diag_count{0};
       const int _n = _vsync_diag_count.fetch_add(1) + 1;

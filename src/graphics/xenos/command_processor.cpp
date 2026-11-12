@@ -217,7 +217,7 @@ void CommandProcessor::reset() {
   bin_select_ = 0;
   active_viz_queries_ = 0;
   viz_query_draws_ = 0;
-  swap_counter_ = 0;
+  std::atomic_ref<std::uint32_t>(swap_counter_).store(0u, std::memory_order_release);
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
   stall_frames_.clear();
@@ -879,7 +879,7 @@ void CommandProcessor::execute_event_write_shader_done(
   const std::uint32_t initiator = payload[0];
   emit_register_write(kVgtEventInitiator, initiator & 0x3Fu);
   const bool write_progress_counter = (initiator & 0x80000000u) != 0u;
-  const std::uint32_t value = write_progress_counter ? swap_counter_ : payload[2];
+  const std::uint32_t value = write_progress_counter ? swap_counter() : payload[2];
   if ((payload[1] & ~0x3u) != 0u) {
     write_physical_dword(payload[1], value);
     ++stats_.event_memory_writes;
@@ -1164,7 +1164,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       // The flip shows what the work before it rendered and resolved, so that
       // work executes first.
       before_guest_visible_effect();
-      ++swap_counter_;
+      advance_progress_counter();
       ++stats_.front_buffer_swaps;
       if (swap_callback_) swap_callback_(*swap);
       return;

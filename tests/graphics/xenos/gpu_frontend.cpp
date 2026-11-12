@@ -444,8 +444,13 @@ void test_event_write_and_fences(AddressSpace& memory, CommandProcessor& cp,
        counter_target | static_cast<std::uint32_t>(Endian::Swap8In32),
        0xDEADBEEFu});
 
+  // The counter EVENT_WRITE_SHD writes advances on vblanks as well as swaps
+  // (xenia's and rexglue's counter_, bumped by MarkVblank and the swap).
   cp.notify_present();
+  cp.notify_vblank();
+  cp.notify_vblank();
   cp.notify_present();
+  cp.notify_vblank();
   const auto before_events = cp.statistics().event_packets;
   const auto before_writes = cp.statistics().event_memory_writes;
   const auto before_counter = cp.statistics().event_counter_writes;
@@ -455,8 +460,8 @@ void test_event_write_and_fences(AddressSpace& memory, CommandProcessor& cp,
   assert(memory.read32_be(xenon::memory::kPhysical64KBase + literal_target) ==
          0x11223344u);
   assert(memory.read32_be(xenon::memory::kPhysical64KBase + counter_target) ==
-         2u);
-  assert(cp.swap_counter() == 2u);
+         5u);
+  assert(cp.swap_counter() == 5u);
   assert(cp.statistics().event_packets == before_events + 3u);
   assert(cp.statistics().event_memory_writes == before_writes + 2u);
   assert(cp.statistics().event_counter_writes == before_counter + 1u);

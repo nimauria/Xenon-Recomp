@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -114,11 +115,16 @@ class CommandProcessor {
                                            std::uint32_t write_index);
 
   void reset();
-  // Guest presentation / swap progress. EVENT_WRITE_SHD may request this
-  // counter rather than its literal payload value (initiator bit 31).
-  void notify_present() noexcept { ++swap_counter_; }
+  // The GPU progress counter EVENT_WRITE_SHD writes instead of its literal
+  // value when the initiator's bit 31 is set. It advances on every front
+  // buffer swap and on every vblank (xenia's and rexglue's counter_,
+  // incremented by the swap packet and by MarkVblank). The vblank thread
+  // and the command-processor worker both advance it, hence the atomic
+  // access.
+  void notify_present() noexcept { advance_progress_counter(); }
+  void notify_vblank() noexcept { advance_progress_counter(); }
   [[nodiscard]] std::uint32_t swap_counter() const noexcept {
-    return swap_counter_;
+    return std::atomic_ref<const std::uint32_t>(swap_counter_).load(std::memory_order_acquire);
   }
   void set_interrupt_callback(
       std::function<void(std::uint32_t cpu_index)> callback) {
@@ -259,7 +265,10 @@ class CommandProcessor {
   std::uint64_t bin_select_{};
   std::uint64_t active_viz_queries_{};
   std::uint64_t viz_query_draws_{};
-  std::uint32_t swap_counter_{};
+  void advance_progress_counter() noexcept {
+    std::atomic_ref<std::uint32_t>(swap_counter_).fetch_add(1u, std::memory_order_acq_rel);
+  }
+  alignas(std::atomic_ref<std::uint32_t>::required_alignment) std::uint32_t swap_counter_{};
   std::function<void(std::uint32_t cpu_index)> interrupt_callback_{};
   std::function<void(const FrontBufferSwap&)> swap_callback_{};
   std::function<void()> guest_visible_barrier_{};

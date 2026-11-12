@@ -21,6 +21,7 @@
 #include "xenon/xbox/xboxkrnl_video_exports.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -387,12 +388,18 @@ bool vd_swap_export(kernel::KernelProcess& process, ExportCallContext& context) 
   {
     static std::atomic<int> _vd_swap_call_count{0};
     const int _n = _vd_swap_call_count.fetch_add(1) + 1;
-    // First 20 in full, then a running total every 60 swaps (~1 s at 60 Hz).
+    // First 20 in full, then a running total every 60 swaps, stamped with
+    // milliseconds since the first swap so the title's present rate reads
+    // straight off the log (60 swaps a second apart means 60 fps).
+    using SwapClock = std::chrono::steady_clock;
+    static const auto first_swap = SwapClock::now();
     if (_n <= 20 || _n % 60 == 0) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          SwapClock::now() - first_swap).count();
       xenon::logging::append_probe_log(
           "vdswap_calls_diag.log",
-          "VdSwap call #%d: thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
-          _n, context.thread_id, (unsigned long long)context.cpu.lr,
+          "VdSwap call #%d: t=%lldms thread_id=%u lr=0x%08llX r3=0x%08llX r8=0x%08llX r9=0x%08llX r10=0x%08llX\n",
+          _n, static_cast<long long>(ms), context.thread_id, (unsigned long long)context.cpu.lr,
           (unsigned long long)context.cpu.gpr[3], (unsigned long long)context.cpu.gpr[8],
           (unsigned long long)context.cpu.gpr[9], (unsigned long long)context.cpu.gpr[10]);
     }
