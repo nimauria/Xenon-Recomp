@@ -141,6 +141,7 @@ bool XenonSession::init_gpu() {
       set_error("D3D12 graphics backend initialization failed: " + backend->error());
       return false;
     }
+    backend->set_shader_cache_directory(config_.shader_cache_directory);
     gpu_ = std::move(backend);
     return true;
 #else
@@ -156,6 +157,7 @@ bool XenonSession::init_gpu() {
       set_error("Vulkan graphics backend initialization failed: " + backend->error());
       return false;
     }
+    backend->set_shader_cache_directory(config_.shader_cache_directory);
     gpu_ = std::move(backend);
     return true;
 #else

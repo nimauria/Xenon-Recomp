@@ -235,6 +235,12 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   // to a Null backend for a real Play request. See docs/runtime/RUNTIME_SESSION.md.
   config.enable_graphics = launch.renderer != "None";
   config.graphics_backend = launch.renderer;
+  // "Persistent" keeps compiled shaders in the session directory between
+  // runs; "Session only" (or the cache switched off) keeps them in memory.
+  if (launch.shader_cache && launch.shader_cache_mode == "Persistent" &&
+      !launch.session_dir.empty())
+    config.shader_cache_directory =
+        (std::filesystem::path(launch.session_dir) / "shader_cache").string();
 
   // Same "None" convention on the input side; anything else (including an
   // empty/legacy launch config's default-constructed string) is treated as

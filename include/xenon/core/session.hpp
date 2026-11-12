@@ -61,6 +61,9 @@ namespace xenon::core {
 struct SessionConfig {
   bool enable_graphics{false};
   std::string graphics_backend{"null"};
+  // Where the graphics backend keeps compiled shaders between sessions;
+  // empty keeps them for this session only.
+  std::string shader_cache_directory{};
   bool enable_input{false};
   std::vector<std::string> input_drivers{};
 

@@ -410,3 +410,7 @@ const DeviceProperties& Backend::device_properties() const noexcept {
 const std::string& Backend::error() const noexcept { return impl_->error; }
 
 }  // namespace xenon::gpu::d3d12
+bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_shader_cache_directory(const std::string& directory) {
+  impl_->shader_cache.set_disk_directory(directory);
+}

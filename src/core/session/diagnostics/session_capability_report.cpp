@@ -165,6 +165,8 @@ JsonValue XenonSession::capability_report() const {
     shader_section.set("cacheHits", static_cast<std::int64_t>(coverage.cache_hits));
     shader_section.set("cacheMisses", static_cast<std::int64_t>(coverage.cache_misses));
     report.set_section("shader", std::move(shader_section));
+    shader_section.set("cacheDiskHits", static_cast<std::int64_t>(coverage.cache_disk_hits));
+    shader_section.set("cacheDiskWrites", static_cast<std::int64_t>(coverage.cache_disk_writes));
   }
 
   // Part 12 of the AC6 Runtime Readiness pass ("Title Update fidelity"):

@@ -43,6 +43,8 @@ class Backend final : public xenon::gpu::Backend {
   void end_guest_read_sync() override;
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] std::size_t command_count() const noexcept;
+  [[nodiscard]] bool publish_gpu_writes(bool wait) override;
+  void set_shader_cache_directory(const std::string& directory) override;
   [[nodiscard]] std::size_t draw_count() const noexcept;
   [[nodiscard]] std::size_t compiled_shader_count() const noexcept;
   [[nodiscard]] std::size_t pipeline_state_count() const noexcept;

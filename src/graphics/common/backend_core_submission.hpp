@@ -213,3 +213,5 @@ GpuShaderCoverage BackendCore<Derived, Api>::shader_coverage()
 }
 
 }  // namespace xenon::gpu::detail
+  coverage.cache_disk_hits = shader_cache.disk_hits();
+  coverage.cache_disk_writes = shader_cache.disk_writes();

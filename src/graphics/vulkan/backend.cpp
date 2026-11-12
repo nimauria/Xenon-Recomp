@@ -431,5 +431,9 @@ const DeviceProperties& Backend::device_properties() const noexcept {
   return impl_->context.properties();
 }
 const std::string& Backend::error() const noexcept { return impl_->error; }
+bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_shader_cache_directory(const std::string& directory) {
+  impl_->shader_cache.set_disk_directory(directory);
+}
 
 }  // namespace xenon::gpu::vulkan

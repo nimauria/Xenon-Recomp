@@ -1,10 +1,17 @@
 #include "xenon/gpu/dxc_shader_compiler.hpp"
 
+#include <array>
 #include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <cstring>
+#include <system_error>
 #include <stdexcept>
 #include <utility>
 
+#include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -67,12 +74,30 @@ class DxcShaderCompiler::Impl {
     if (FAILED(hr)) {
       error = "DxcCreateInstance(CLSID_DxcCompiler) failed";
       utils = nullptr;
+      return;
+    }
+    version = "dxc";
+    ComPtr<IDxcVersionInfo> info;
+    if (SUCCEEDED(compiler->QueryInterface(IID_PPV_ARGS(&info)))) {
+      UINT32 major = 0, minor = 0;
+      if (SUCCEEDED(info->GetVersion(&major, &minor)))
+        version += " " + std::to_string(major) + "." + std::to_string(minor);
+    }
+    ComPtr<IDxcVersionInfo2> commit_info;
+    if (SUCCEEDED(compiler->QueryInterface(IID_PPV_ARGS(&commit_info)))) {
+      UINT32 commits = 0;
+      char* hash = nullptr;
+      if (SUCCEEDED(commit_info->GetCommitInfo(&commits, &hash)) && hash) {
+        version += " " + std::to_string(commits) + " " + hash;
+        CoTaskMemFree(hash);
+      }
     }
   }
 
   ComPtr<IDxcUtils> utils;
   ComPtr<IDxcCompiler3> compiler;
   std::string error;
+  std::string version;
 };
 
 DxcShaderCompiler::DxcShaderCompiler() : impl_(std::make_unique<Impl>()) {}
@@ -84,6 +109,7 @@ bool DxcShaderCompiler::available() const noexcept {
   return impl_ && impl_->compiler && impl_->utils;
 }
 const std::string& DxcShaderCompiler::error() const noexcept { return impl_->error; }
+const std::string& DxcShaderCompiler::version() const noexcept { return impl_->version; }
 
 CompiledShader DxcShaderCompiler::compile(const LoweredShader& shader,
                                           const ShaderCompileOptions& options) const {
@@ -226,6 +252,101 @@ std::size_t UtilityShaderCompiler::compiles() noexcept {
   return store.compiles;
 }
 
+namespace {
+
+// A persistent entry: magic, then the full key and the binary, each
+// length-prefixed.
+constexpr std::array<char, 8> kDiskMagic{'X', 'S', 'H', 'C', 'A', 'C', 'H', '1'};
+
+std::string disk_key(const LoweredShader& shader, const ShaderCompileOptions& options,
+                     const std::string& compiler_version) {
+  std::string key = compiler_version;
+  key.push_back('\0');
+  key.append(utility_shader_key(shader, options));
+  return key;
+}
+
+std::filesystem::path disk_path(const std::filesystem::path& directory, const std::string& key) {
+  std::uint64_t hash = 14695981039346656037ull;
+  for (unsigned char c : key) {
+    hash ^= c;
+    hash *= 1099511628211ull;
+  }
+  char name[32];
+  std::snprintf(name, sizeof(name), "%016llx.xsc", static_cast<unsigned long long>(hash));
+  return directory / name;
+}
+
+void put_blob(std::string& out, std::string_view bytes) {
+  const auto size = static_cast<std::uint64_t>(bytes.size());
+  out.append(reinterpret_cast<const char*>(&size), sizeof(size));
+  out.append(bytes);
+}
+
+bool get_blob(std::string_view& in, std::string_view& bytes) {
+  std::uint64_t size{};
+  if (in.size() < sizeof(size)) return false;
+  std::memcpy(&size, in.data(), sizeof(size));
+  in.remove_prefix(sizeof(size));
+  if (in.size() < size) return false;
+  bytes = in.substr(0, static_cast<std::size_t>(size));
+  in.remove_prefix(static_cast<std::size_t>(size));
+  return true;
+}
+
+// The stored binary for `key`, if an entry for exactly that input exists.
+std::optional<CompiledShader> read_disk_entry(const std::filesystem::path& path,
+                                              const std::string& key,
+                                              const LoweredShader& shader,
+                                              const ShaderCompileOptions& options) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return std::nullopt;
+  const std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  std::string_view in(data);
+  if (in.size() < kDiskMagic.size() ||
+      std::memcmp(in.data(), kDiskMagic.data(), kDiskMagic.size()) != 0)
+    return std::nullopt;
+  in.remove_prefix(kDiskMagic.size());
+  std::string_view stored_key, binary;
+  if (!get_blob(in, stored_key) || stored_key != key || !get_blob(in, binary) || binary.empty() ||
+      !in.empty())
+    return std::nullopt;
+  CompiledShader compiled{};
+  compiled.stage = shader.stage;
+  compiled.format = options.format;
+  compiled.source_hash = shader.source_hash;
+  compiled.cache_key = cache_key(shader, options);
+  compiled.entry_point = shader.entry_point;
+  compiled.profile = shader.profile;
+  compiled.binary.resize(binary.size());
+  std::memcpy(compiled.binary.data(), binary.data(), binary.size());
+  compiled.succeeded = true;
+  return compiled;
+}
+
+// Written to a temporary name and renamed, so a reader never sees half a file.
+bool write_disk_entry(const std::filesystem::path& path, const std::string& key,
+                      const CompiledShader& compiled) {
+  std::string out(kDiskMagic.begin(), kDiskMagic.end());
+  put_blob(out, key);
+  put_blob(out, std::string_view(reinterpret_cast<const char*>(compiled.binary.data()),
+                                 compiled.binary.size()));
+  auto temporary = path;
+  temporary += ".tmp";
+  {
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(out.data(), static_cast<std::streamsize>(out.size()));
+    if (!file) return false;
+  }
+  std::error_code ec;
+  std::filesystem::rename(temporary, path, ec);
+  if (ec) std::filesystem::remove(temporary, ec);
+  return !ec;
+}
+
+}  // namespace
+
 ShaderCache::ShaderCache(std::shared_ptr<DxcShaderCompiler> compiler)
     : compiler_(std::move(compiler)) {
   if (!compiler_) throw std::invalid_argument("ShaderCache requires a compiler");
@@ -241,8 +362,37 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
       return found->second;
     }
   }
+  static const auto activity_key = xenon::logging::intern_activity(
+      {"gpu", "shader compile", {"source", "hlsl_bytes", "spirv", ""}, false});
+  std::optional<xenon::logging::ActivityScope> activity;
+  if (xenon::logging::activity_trace_enabled())
+    activity.emplace(activity_key,
+                     std::array<std::uint64_t, 4>{shader.source_hash, shader.hlsl.size(),
+                                                  options.format == ShaderBinaryFormat::Spirv,
+                                                  0u});
+  // A previous session's compile of exactly this input.
+  const auto persistent_directory = disk_directory();
+  std::string persistent_key;
+  std::filesystem::path persistent_path;
+  if (!persistent_directory.empty()) {
+    persistent_key = disk_key(shader, options, compiler_->version());
+    persistent_path = disk_path(persistent_directory, persistent_key);
+    if (auto stored = read_disk_entry(persistent_path, persistent_key, shader, options)) {
+      auto loaded = std::make_shared<const CompiledShader>(std::move(*stored));
+      std::scoped_lock lock(mutex_);
+      ++disk_hits_;
+      const auto [iterator, inserted] = entries_.emplace(key, loaded);
+      if (!inserted) ++hits_;
+      return iterator->second;
+    }
+  }
   const auto compile_start = std::chrono::steady_clock::now();
   auto compiled = std::make_shared<const CompiledShader>(compiler_->compile(shader, options));
+  if (!persistent_path.empty() && compiled->succeeded &&
+      write_disk_entry(persistent_path, persistent_key, *compiled)) {
+    std::scoped_lock lock(mutex_);
+    ++disk_writes_;
+  }
   const auto compile_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::steady_clock::now() - compile_start)
                               .count();
@@ -259,6 +409,37 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
   if (inserted) ++misses_;
   else ++hits_;
   return iterator->second;
+}
+
+void ShaderCache::set_disk_directory(std::filesystem::path directory) {
+  if (!directory.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    // An unusable directory leaves the cache memory-only, and says so.
+    if (ec || !std::filesystem::is_directory(directory, ec)) {
+      xenon::logging::append_probe_log("shader_compile_diag.log",
+                                       "shader cache directory %s is unusable; memory only\n",
+                                       directory.string().c_str());
+      directory.clear();
+    }
+  }
+  std::scoped_lock lock(mutex_);
+  disk_directory_ = std::move(directory);
+}
+
+std::filesystem::path ShaderCache::disk_directory() const {
+  std::scoped_lock lock(mutex_);
+  return disk_directory_;
+}
+
+std::size_t ShaderCache::disk_hits() const {
+  std::scoped_lock lock(mutex_);
+  return disk_hits_;
+}
+
+std::size_t ShaderCache::disk_writes() const {
+  std::scoped_lock lock(mutex_);
+  return disk_writes_;
 }
 
 void ShaderCache::clear() {

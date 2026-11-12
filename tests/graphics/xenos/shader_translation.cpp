@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -799,3 +801,55 @@ int main() {
 }
   test_vertex_fetch_index_tolerates_host_reciprocal_error();
   test_vertex_fetch_mini_reuses_the_full_fetch_address();
+
+// The "Persistent" shader cache mode: a later session loads a title shader
+// compiled before instead of compiling it on the draw that first uses it
+// (AC6 compiles took 50 ms to 1.3 s each, on the GPU thread). An entry is
+// used only for exactly its input; a damaged or foreign file is ignored.
+void test_persistent_shader_cache() {
+  using namespace xenon::gpu;
+  const auto directory = std::filesystem::temp_directory_path() / "xenon_shader_cache_test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  assert(compiler->available() && !compiler->version().empty());
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Spirv;
+
+  ShaderCache first(compiler);
+  first.set_disk_directory(directory);
+  const auto compiled = first.get_or_compile(lowered, options);
+  assert(compiled->succeeded);
+  assert(first.misses() == 1 && first.disk_writes() == 1 && first.disk_hits() == 0);
+
+  // The next session: loaded, not compiled, and identical.
+  ShaderCache second(compiler);
+  second.set_disk_directory(directory);
+  const auto loaded = second.get_or_compile(lowered, options);
+  assert(loaded->succeeded && loaded->binary == compiled->binary);
+  assert(second.disk_hits() == 1 && second.misses() == 0 && second.disk_writes() == 0);
+  // Another format is another input.
+  ShaderCompileOptions dxil{};
+  dxil.format = ShaderBinaryFormat::Dxil;
+  assert(second.get_or_compile(lowered, dxil)->succeeded);
+  assert(second.disk_hits() == 1 && second.misses() == 1 && second.disk_writes() == 1);
+
+  // A damaged entry is not used: the shader is compiled again and rewritten.
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    std::filesystem::resize_file(entry.path(), 16u, ec);
+    assert(!ec);
+  }
+  ShaderCache third(compiler);
+  third.set_disk_directory(directory);
+  assert(third.get_or_compile(lowered, options)->binary == compiled->binary);
+  assert(third.disk_hits() == 0 && third.misses() == 1 && third.disk_writes() == 1);
+
+  // Without a directory ("Session only") nothing is read or written.
+  ShaderCache memory_only(compiler);
+  assert(memory_only.get_or_compile(lowered, options)->succeeded);
+  assert(memory_only.disk_hits() == 0 && memory_only.disk_writes() == 0);
+  std::filesystem::remove_all(directory, ec);
+}
+
+  test_persistent_shader_cache();

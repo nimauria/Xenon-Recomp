@@ -110,6 +110,8 @@ class Backend {
   virtual void end_submission() = 0;
   // Makes GPU-authored guest physical memory visible to the CPU on demand.
   // Normal rendering and memexport remain GPU-resident until a CPU consumer
+  std::uint64_t cache_disk_hits{};       // Loaded from the persistent shader cache instead.
+  std::uint64_t cache_disk_writes{};     // Compiles stored there for later sessions.
   // explicitly requests the range.
   [[nodiscard]] virtual bool make_guest_memory_cpu_visible(
       std::uint32_t physical_address, std::uint32_t size) = 0;
@@ -195,6 +197,26 @@ class NullBackend final : public Backend {
   [[nodiscard]] bool invalidate_edram_native_state() override { return true; }
   [[nodiscard]] PresentStatus present(const PresentationFrame&) override {
     return PresentStatus::NotConfigured;
+
+  // GPU writes to guest memory (resolves) reach guest memory without the
+  // command processor waiting for each: their readbacks are queued with the
+  // work and land as the GPU finishes them. Without `wait` this writes out
+  // the ones already finished; with it, it first waits for every one still
+  // queued - called before the command processor does anything the guest
+  // can observe (a fence write, an interrupt, a memory poll), so the guest
+  // never learns the GPU passed a resolve before its bytes are in memory.
+  // False on failure (last_error()).
+  // Where compiled shaders persist between sessions ("Persistent" shader
+  // cache mode); empty keeps them for this session only. A backend that
+  // compiles no shaders has nothing to keep.
+  virtual void set_shader_cache_directory(const std::string& directory) {
+    static_cast<void>(directory);
+  }
+
+  [[nodiscard]] virtual bool publish_gpu_writes(bool wait) {
+    static_cast<void>(wait);
+    return true;
+  }
   }
   [[nodiscard]] bool resize_presentation(std::uint32_t, std::uint32_t) override {
     return false;
