@@ -28,7 +28,8 @@ KERNEL_REFERENCE_REPORT = ROOT / "docs" / "coverage" / "KERNEL_REFERENCE.md"
 INVENTORY_JSON = ROOT / "docs" / "coverage" / "inventory.json"
 CANDIDATES_JSON = ROOT / "docs" / "coverage" / "audit-candidates.json"
 AUDIT_REPORT = ROOT / "docs" / "coverage" / "AUDIT.md"
-GENERATED = (SVG, SUMMARY_SVG, REPORT, KERNEL_REFERENCE_REPORT, INVENTORY_JSON, CANDIDATES_JSON, AUDIT_REPORT)
+HTML = ROOT / "docs" / "coverage" / "dashboard.html"
+GENERATED = (SVG, SUMMARY_SVG, HTML, REPORT, KERNEL_REFERENCE_REPORT, INVENTORY_JSON, CANDIDATES_JSON, AUDIT_REPORT)
 CATEGORIES = ("kernel", "ppc", "shader", "pm4")
 STATES = {"verified", "implemented_unverified", "partial", "stub", "unimplemented", "unassessed"}
 STATE_ORDER = ("verified", "implemented_unverified", "partial", "stub", "unimplemented", "unassessed")
@@ -99,7 +100,7 @@ def kernel_group(name: str, path: str) -> str:
 def kernel_source_paths() -> list[str]:
     paths = sorted((ROOT / "src/xbox/exports").glob("xboxkrnl_*.cpp"))
     paths += sorted((ROOT / "src/core/session/exports").glob("*.cpp"))
-    return [str(file.relative_to(ROOT)) for file in paths]
+    return [file.relative_to(ROOT).as_posix() for file in paths]
 
 
 def kernel_registration_rows() -> dict[str, tuple[int, str]]:
@@ -341,16 +342,43 @@ def inventory() -> list[Item]:
 
 def pm4_classifier_groups(processor: str) -> dict[str, str]:
     groups: dict[str, str] = {}
-    for function, group in (("is_draw_opcode", "Draw"), ("is_shader_opcode", "Shader"),
-                            ("is_sync_opcode", "Synchronization"), ("is_event_opcode", "Event"),
-                            ("is_state_opcode", "State")):
-        match = re.search(r'bool ' + function + r'\(.*?\)\s*noexcept\s*\{(.*?)\n\}', processor, re.S)
-        if not match:
-            raise CoverageError(f"PM4 classifier {function} missing")
-        for name in re.findall(r'case Type3Opcode::(\w+):', match.group(1)):
-            if name in groups and groups[name] != group:
-                raise CoverageError(f"PM4 opcode {name} appears in two groups")
-            groups[name] = group
+    draw = re.search(r'bool is_draw_opcode\(.*?\)\s*noexcept\s*\{(.*?)\n\}', processor, re.S)
+    if not draw:
+        raise CoverageError("PM4 classifier is_draw_opcode missing")
+    for name in re.findall(r'case Type3Opcode::(\w+):', draw.group(1)):
+        groups[name] = "Draw"
+
+    # The command processor now classifies packets at their dispatch sites by
+    # emitting semantic IR. Keep the inventory tied to those production paths
+    # instead of requiring reporting-only classifier helpers.
+    for packet, group in (("ShaderPacket", "Shader"), ("ShaderLoad", "Shader"),
+                          ("SynchronizationPacket", "Synchronization"),
+                          ("EventPacket", "Event"), ("StatePacket", "State")):
+        for emit in re.finditer(r'ir::' + packet + r'\b', processor):
+            window = processor[max(0, emit.start() - 420):emit.start()]
+            for name in re.findall(r'Type3Opcode::(\w+)', window):
+                groups.setdefault(name, group)
+
+    # SetConstant2 and SetShaderConstants share a branch, but their emitted IR
+    # records are intentionally different. The explicit names preserve that
+    # distinction when the surrounding branch is scanned above.
+    if "Type3Opcode::SetShaderConstants" in processor:
+        groups["SetShaderConstants"] = "Shader"
+    if "Type3Opcode::SetConstant2" in processor:
+        groups["SetConstant2"] = "State"
+    if "Type3Opcode::ImLoad" in processor and "ir::ShaderLoad" in processor:
+        groups["ImLoad"] = "Shader"
+    if "Type3Opcode::ImLoadImmediate" in processor and "ir::ShaderLoad" in processor:
+        groups["ImLoadImmediate"] = "Shader"
+
+    if not any(group == "Shader" for group in groups.values()):
+        raise CoverageError("PM4 shader dispatch classification missing")
+    if not any(group == "Synchronization" for group in groups.values()):
+        raise CoverageError("PM4 synchronization dispatch classification missing")
+    if not any(group == "Event" for group in groups.values()):
+        raise CoverageError("PM4 event dispatch classification missing")
+    if not any(group == "State" for group in groups.values()):
+        raise CoverageError("PM4 state dispatch classification missing")
     return groups
 
 
@@ -376,7 +404,7 @@ def source_signals(items: list[Item]) -> dict[str, dict]:
         exact: dict[str, set[str]] = defaultdict(set)
         prefixes: dict[str, set[str]] = defaultdict(set)
         for file in sorted((ROOT / directory).glob("*.cpp")):
-            path = str(file.relative_to(ROOT))
+            path = file.relative_to(ROOT).as_posix()
             text = source(path)
             for literal in set(re.findall(r'"([a-z][a-z0-9.]*)"', text)):
                 exact[literal].add(path)
@@ -454,7 +482,7 @@ def ctest_targets() -> dict[str, set[str]]:
             command, target, body = match.groups()
             if command == "add_executable" and target not in registered:
                 continue
-            paths = {str(relative / path) for path in re.findall(r'[\w/.-]+\.cpp', body)}
+            paths = {(relative / path).as_posix() for path in re.findall(r'[\w/.-]+\.cpp', body)}
             if target in targets:
                 raise CoverageError(f"duplicate CTest target: {target}")
             targets[target] = paths
@@ -1003,6 +1031,124 @@ def render_candidates(content: dict, content_digest: str, metadata: dict) -> str
     return text[:-2] + ',\n  "candidates": [\n' + rows + "\n  ]\n}\n"
 
 
+def render_dashboard_html(model: Model, metadata: dict, content: dict | None = None) -> str:
+    """Render the interactive, self-contained coverage view published with the audit."""
+    content = content or snapshot(model)
+    data = {
+        "counts": content["counts"],
+        "operations": content["operations"],
+    }
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    revision = escape((metadata.get("assessed_commit") or "unknown")[:12])
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Xenon implementation coverage</title>
+<style>
+:root {{ color-scheme: dark; --bg:#0d1117; --panel:#161b22; --panel-2:#21262d; --line:#30363d;
+  --text:#e6edf3; --muted:#8b949e; --link:#58a6ff; --green:#3fb950; --blue:#58a6ff;
+  --amber:#d29922; --orange:#db6d28; --grey:#8b949e; --purple:#8957e5; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; background:radial-gradient(circle at 85% 0,#1d2b45 0,transparent 38%),var(--bg);
+  color:var(--text); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; }}
+main {{ max-width:1280px; margin:auto; padding:32px 24px 56px; }}
+h1,h2,h3,p {{ margin:0; }} h1 {{ font-size:clamp(28px,4vw,48px); letter-spacing:-.04em; }}
+h2 {{ font-size:18px; }} h3 {{ font-size:14px; }} a {{ color:var(--link); }}
+.eyebrow {{ color:var(--link); font-size:12px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }}
+.muted {{ color:var(--muted); }} .hero {{ display:flex; justify-content:space-between; gap:24px; align-items:end; margin-bottom:28px; }}
+.hero p {{ max-width:720px; margin-top:10px; color:var(--muted); }}
+.revision {{ color:var(--muted); text-align:right; white-space:nowrap; font:12px ui-monospace,monospace; }}
+.cards {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:18px; }}
+.card,.panel {{ border:1px solid var(--line); background:color-mix(in srgb,var(--panel) 94%,transparent); border-radius:12px; }}
+.card {{ padding:16px; }} .card strong {{ display:block; font-size:28px; margin-top:6px; }}
+.card span {{ color:var(--muted); font-size:12px; }}
+.progress {{ display:flex; height:8px; overflow:hidden; border-radius:99px; background:var(--panel-2); margin:12px 0 6px; }}
+.progress i {{ display:block; min-width:1px; }} .verified {{ background:var(--green); }} .implemented_unverified {{ background:var(--blue); }}
+.partial {{ background:var(--amber); }} .stub {{ background:var(--orange); }} .unimplemented {{ background:var(--grey); }}
+.unassessed {{ background:var(--purple); }}
+.toolbar {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:18px 0 14px; }}
+input,select {{ border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); padding:9px 11px; }}
+input {{ flex:1; min-width:220px; }} button {{ border:1px solid var(--line); border-radius:8px; background:var(--panel-2); color:var(--text); padding:9px 12px; cursor:pointer; }}
+button[aria-pressed=true] {{ border-color:var(--link); color:var(--link); }}
+.layout {{ display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,1.95fr); gap:18px; }}
+.panel {{ padding:18px; }} .panel > header {{ display:flex; justify-content:space-between; gap:12px; margin-bottom:15px; }}
+.map {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; }}
+.tile {{ min-height:110px; padding:12px; border:1px solid var(--line); border-radius:9px; background:var(--panel-2); }}
+.tile b {{ display:block; margin-bottom:5px; }} .tile small {{ color:var(--muted); }}
+.tile .progress {{ margin-top:16px; }} .legend {{ display:flex; flex-wrap:wrap; gap:8px 14px; color:var(--muted); font-size:12px; margin-top:15px; }}
+.legend span::before {{ content:""; display:inline-block; width:9px; height:9px; margin-right:5px; border-radius:2px; background:var(--c); }}
+.table-wrap {{ overflow:auto; max-height:650px; }} table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+th,td {{ text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
+th {{ position:sticky; top:0; background:var(--panel); color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }}
+td code {{ color:var(--muted); font-size:11px; }} .status {{ white-space:nowrap; font-size:11px; font-weight:700; }}
+.status::before {{ content:""; display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; background:var(--c); }}
+.empty {{ padding:28px; color:var(--muted); text-align:center; }} footer {{ margin-top:20px; color:var(--muted); font-size:12px; }}
+@media(max-width:850px) {{ .hero {{ display:block; }} .revision {{ text-align:left; margin-top:12px; }} .cards {{ grid-template-columns:repeat(2,1fr); }} .layout {{ grid-template-columns:1fr; }} }}
+@media(max-width:480px) {{ main {{ padding:22px 14px 40px; }} .cards {{ grid-template-columns:1fr 1fr; gap:8px; }} .card {{ padding:12px; }} }}
+</style>
+</head>
+<body><main>
+<section class="hero"><div><div class="eyebrow">Xenon / implementation audit</div>
+<h1>Coverage, with context.</h1>
+<p>Interactive source-declared coverage for the Xenon runtime. This is an audited lower bound, not a game-compatibility score; unassessed entries are unknown, not missing.</p></div>
+<div class="revision">assessed at<br><strong>{revision}</strong></div></section>
+<section class="cards" id="cards"></section>
+<section class="toolbar" aria-label="Coverage filters">
+<input id="search" type="search" placeholder="Search operation, group, or source…" aria-label="Search operations">
+<select id="category" aria-label="Filter by area"><option value="">All areas</option></select>
+<button data-state="" aria-pressed="true">All</button>
+<button data-state="verified" aria-pressed="false">Verified</button>
+<button data-state="implemented_unverified" aria-pressed="false">Unverified</button>
+<button data-state="partial" aria-pressed="false">Partial</button>
+<button data-state="stub" aria-pressed="false">Stub</button>
+<button data-state="unimplemented" aria-pressed="false">Unimplemented</button>
+<button data-state="unassessed" aria-pressed="false">Unassessed</button>
+</section>
+<section class="layout"><div class="panel"><header><h2>Coverage map</h2><span class="muted" id="map-caption"></span></header>
+<div class="map" id="map"></div><div class="legend">
+<span style="--c:var(--green)">verified</span><span style="--c:var(--blue)">unverified</span>
+<span style="--c:var(--amber)">partial</span><span style="--c:var(--orange)">stub</span>
+<span style="--c:var(--grey)">unimplemented</span><span style="--c:var(--purple)">unassessed</span></div></div>
+<div class="panel"><header><h2>Operations</h2><span class="muted" id="result-count"></span></header>
+<div class="table-wrap"><table><thead><tr><th>Operation</th><th>Area</th><th>State</th><th>Evidence</th></tr></thead>
+<tbody id="operations"></tbody></table><div class="empty" id="empty" hidden>No operations match these filters.</div></div></div></section>
+<footer>Generated by <code>tools/coverage/generate.py</code>. See <a href="README.md">coverage methodology</a>, <a href="REPORT.md">report</a>, and <a href="audit-candidates.json">audit queue</a>.</footer>
+</main>
+<script>
+const data={payload};
+const labels={{verified:"Verified",implemented_unverified:"Implemented, unverified",partial:"Partial",stub:"Stub",unimplemented:"Unimplemented",unassessed:"Unassessed"}};
+const areas={{kernel:"Kernel",ppc:"PPC",shader:"Shader",pm4:"PM4"}};
+const stateOrder=["verified","implemented_unverified","partial","stub","unimplemented","unassessed"];
+const operations=data.operations;
+const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c]));
+const counts=rows=>stateOrder.reduce((out,state)=>(out[state]=rows.filter(row=>row.state===state).length,out),{{}});
+const total=rows=>rows.length;
+function bar(counted,all){{return '<div class="progress">'+stateOrder.map(state=>`<i class="${{state}}" style="width:${{all?counted[state]/all*100:0}}%"></i>`).join("")+"</div>";}}
+function renderCards(){{const c=counts(operations), all=total(operations), verified=c.verified||0;
+document.getElementById("cards").innerHTML=[
+["Audited lower bound",`${{all?Math.round(verified/all*1000)/10:0}}%`,"verified operations"],
+["Verified",verified,"behavior tests with passing evidence"],
+["Classified",all-(c.unassessed||0),`of ${{all}} listed operations`],
+["Unknown",c.unassessed||0,"unassessed operations"]
+].map(item=>`<article class="card"><span>${{item[0]}}</span><strong>${{item[1]}}</strong><span>${{item[2]}}</span>${{bar(c,all)}}</article>`).join("");}}
+function filtered(){{const query=document.getElementById("search").value.toLowerCase(), category=document.getElementById("category").value;
+const state=document.querySelector("button[aria-pressed=true]")?.dataset.state||"";
+return operations.filter(row=>(!category||row.category===category)&&(!state||row.state===state)&&(!query||[row.id,row.name,row.group,row.source].join(" ").toLowerCase().includes(query)));}}
+function render(){{const rows=filtered(), map=document.getElementById("map"), body=document.getElementById("operations");
+document.getElementById("result-count").textContent=`${{rows.length}} of ${{operations.length}}`; document.getElementById("empty").hidden=rows.length!==0;
+const groups={{}}; rows.forEach(row=>{{const key=`${{row.category}}:${{row.group}}`; (groups[key]??=[]).push(row);}});
+map.innerHTML=Object.entries(groups).sort((a,b)=>b[1].length-a[1].length).map(([key,members])=>{{const [category,group]=key.split(":");const c=counts(members);
+return `<article class="tile"><b>${{esc(group)}}</b><small>${{areas[category]||category}} · ${{members.length}} operations</small>${{bar(c,members.length)}}<small>${{c.verified||0}} verified · ${{c.unassessed||0}} unknown</small></article>`;}}).join("")||'<div class="empty">No groups match these filters.</div>';
+body.innerHTML=rows.slice(0,500).map(row=>`<tr><td><strong>${{esc(row.name)}}</strong><br><code>${{esc(row.id)}}</code></td><td>${{esc(areas[row.category]||row.category)}}<br><span class="muted">${{esc(row.group)}}</span></td><td><span class="status ${{row.state}}" style="--c:var(--${{row.state==="verified"?"green":row.state==="implemented_unverified"?"blue":row.state==="partial"?"amber":row.state==="stub"?"orange":row.state==="unimplemented"?"grey":"purple"}})">${{labels[row.state]}}</span></td><td><code>${{esc(row.source)}}</code></td></tr>`).join("");}}
+renderCards(); [...new Set(operations.map(row=>row.category))].sort().forEach(category=>document.getElementById("category").insertAdjacentHTML("beforeend",`<option value="${{esc(category)}}">${{esc(areas[category]||category)}}</option>`));
+document.getElementById("search").addEventListener("input",render); document.getElementById("category").addEventListener("change",render);
+document.querySelectorAll("button[data-state]").forEach(button=>button.addEventListener("click",()=>{{document.querySelectorAll("button[data-state]").forEach(item=>item.setAttribute("aria-pressed",String(item===button)));render();}})); render();
+</script></body></html>
+"""
+
+
 def products(model: Model, metadata: dict, content: dict | None = None) -> dict[Path, str]:
     content = content or snapshot(model)
     content_digest = digest(content)
@@ -1011,6 +1157,7 @@ def products(model: Model, metadata: dict, content: dict | None = None) -> dict[
     audit_view = dict(content, metadata=metadata)
     return {SVG: render_svg(model.items, model.entries, metadata),
             SUMMARY_SVG: render_summary_svg(model.items, model.entries, metadata),
+            HTML: render_dashboard_html(model, metadata, content),
             REPORT: render_report(model.items, model.entries, metadata, model.approved),
             KERNEL_REFERENCE_REPORT: render_kernel_reference_report(provenance, reference, reconciliation),
             INVENTORY_JSON: render_inventory(content, content_digest, metadata),
@@ -1031,8 +1178,12 @@ def generate(manifest: Path = MANIFEST, ci_evidence: dict | None = None, source_
     return model, metadata, products(model, metadata, content)
 
 
-DASHBOARD = (SVG, SUMMARY_SVG, REPORT, KERNEL_REFERENCE_REPORT)
-METADATA_LINE = re.compile(r'^(?:<text [^>]*>assessed at [^<]*</text>|Assessed revision: .*)$', re.M)
+DASHBOARD = (SVG, SUMMARY_SVG, HTML, REPORT, KERNEL_REFERENCE_REPORT)
+METADATA_LINE = re.compile(
+    r'^(?:<text [^>]*>assessed at [^<]*</text>|'
+    r'<div class="revision">assessed at<br><strong>[^<]*</strong></div>.*|'
+    r'Assessed revision: .*)$',
+    re.M)
 
 
 def stale_products(outputs: dict[Path, str]) -> list[str]:
@@ -1090,7 +1241,9 @@ def main() -> int:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(data, encoding="utf-8", newline="\n")
         for category in CATEGORIES:
-            print(f"{category}: {summary([i for i in model.items if i.category == category], model.entries)}")
+            # Keep the CLI usable with legacy Windows console code pages.
+            text = summary([i for i in model.items if i.category == category], model.entries)
+            print(f"{category}: {text.replace('≥', '>=').replace('·', '-')}")
         provenance, reference = load_kernel_reference()
         matched = reconcile_kernel_reference(reference, kernel_registration_rows())["matched"]
         print(f"kernel reference: {len(matched)}/{len(reference)} exact registrations")

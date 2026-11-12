@@ -283,7 +283,11 @@ def propose(git: Git, api, patch: Path | None, body: str, branch: str, target_sh
     if outside or not paths:
         raise RefreshError("proposal may only change generated coverage files; got " + ", ".join(outside or ["nothing"]))
     try:
-        git("apply", "--index", str(patch))
+        # Apply to the checked-out tree first, then stage the exact paths. Using
+        # `git apply --index` is sensitive to Windows index/stat state after a
+        # detached checkout even when the target tree matches the patch base.
+        git("apply", str(patch))
+        git("add", "--", *paths)
         tree = git("write-tree")
     finally:
         git("reset", "--quiet", "--hard", target_sha)

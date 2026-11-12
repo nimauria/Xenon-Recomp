@@ -20,7 +20,7 @@ The `audit` job runs with `contents: read` and `actions: read`, and does not per
 2. Runs the coverage tooling tests (`python3 -m unittest discover -s tools/coverage`).
 3. Validates the source inventories and the manifest in strict mode (`generate.py --validate`).
 4. Reads existing CTest results (`collect_ci_evidence.py`). It uses the `ctest-results-<platform>` JUnit artifact when present, otherwise the CTest lines in the job log. Results the script cannot read are recorded as unavailable, never as passing.
-5. Regenerates both SVGs, `REPORT.md`, `KERNEL_REFERENCE.md`, `inventory.json`, `audit-candidates.json` and `AUDIT.md`, then compares them with the committed snapshot (`refresh.py run`). The comparison lists added, removed and renamed operations (renames are matched by ordinal, opcode pattern or enum value), changed implementation paths, changed test evidence, new or altered stubs and partials, classification and displayed-state changes, previously verified operations that lost verification, and new or resolved candidates and problems.
+5. Regenerates the interactive HTML dashboard, both SVGs, `REPORT.md`, `KERNEL_REFERENCE.md`, `inventory.json`, `audit-candidates.json` and `AUDIT.md`, then compares them with the committed snapshot (`refresh.py run`). The comparison lists added, removed and renamed operations (renames are matched by ordinal, opcode pattern or enum value), changed implementation paths, changed test evidence, new or altered stubs and partials, classification and displayed-state changes, previously verified operations that lost verification, and new or resolved candidates and problems.
 6. Packages the generated-file changes as a patch (`refresh.py patch`). It fails if anything outside `docs/coverage/` generated files changed.
 7. Uploads the reports (`diff.json`, `diff.md`, `pr-body.md`, `summary.md`, `status.json`, `ci-evidence.json`, `proposal.patch`) and writes a job summary.
 
@@ -31,7 +31,7 @@ The `propose` job runs only if `audit` succeeded with no validation errors. It r
 
 ## Safety rules
 
-- **Generated files only.** A proposal can only change the seven generated files in `docs/coverage/`. It cannot change `coverage.json`, runtime sources, tests or workflows.
+- **Generated files only.** A proposal can only change the eight generated files in `docs/coverage/`. It cannot change `coverage.json`, runtime sources, tests or workflows.
 - **No force-push.** Updates are fast-forward commits on top of the current bot branch head, merging in the new base revision when needed. The script refuses any forced push.
 - **Developer commits are respected.** If anyone other than the bot has pushed to `bot/coverage-refresh`, the workflow leaves the branch and its pull request untouched and reports why.
 - **No loops.** The bot pushes with `GITHUB_TOKEN`, which does not trigger workflows, and only to its own branch. Merging its pull request re-runs the refresh. That run proposes nothing unless the sources or CI results changed in the meantime, and it converges: each run either finds no change or applies the latest one.

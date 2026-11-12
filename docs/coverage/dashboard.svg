@@ -4,7 +4,7 @@
 <rect width="1200" height="1057" fill="#101721"/>
 <text x="30" y="49" fill="#f4f7fb" font-size="30" font-family="sans-serif" font-weight="700">XENON  /  IMPLEMENTATION AUDIT</text>
 <text x="30" y="76" fill="#bdc9d6" font-size="15" font-family="sans-serif">Source-declared scope • 29/891 (≥3.3%) test verified in the listed source subset • overall hardware coverage unknown</text>
-<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 5c487ca</text>
+<text x="1170" y="49" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at fb6cf1d</text>
 <rect x="30" y="105" width="555" height="426" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="135" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox kernel exports</text>
 <text x="46" y="157" fill="#bdc9d6" font-size="12" font-family="sans-serif">281 listed · 33 classified · ≥7.1% test verified</text>
@@ -963,22 +963,30 @@
 <rect x="891.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndx2Bin: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="1021.00" y="653.00" width="129.00" height="6" fill="#514c72"><title>pm4:type3:DrawIndx2: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="667" width="528" height="29" rx="3" fill="#223044"/>
-<text x="631" y="680" fill="#e5edf6" font-size="12" font-family="sans-serif">Event  ·  7  ·  0 verified (≥0.0%)</text>
-<rect x="631.00" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:VizQuery: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="705.29" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="779.57" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:Interrupt: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="853.86" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteShaderDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="928.14" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteCacheFlush: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1002.43" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteExtent: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1076.71" y="685.00" width="73.29" height="6" fill="#514c72"><title>pm4:type3:EventWriteZPassDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<text x="631" y="680" fill="#e5edf6" font-size="12" font-family="sans-serif">Event  ·  6  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:VizQuery: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="717.67" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:LoadAluConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:EventWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:Interrupt: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:EventWriteShaderDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1064.33" y="685.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:EventWriteExtent: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="699" width="528" height="29" rx="3" fill="#223044"/>
-<text x="631" y="712" fill="#e5edf6" font-size="12" font-family="sans-serif">Other / passthrough  ·  6  ·  1 verified (≥16.7%)</text>
-<rect x="631.00" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:Nop: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="717.67" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBufferPfd: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="804.33" y="717.00" width="85.67" height="6" fill="#3dbb79"><title>pm4:type3:MemWrite: verified; include/xenon/gpu/types.hpp</title></rect>
-<rect x="891.00" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:RegToMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="977.67" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBuffer: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1064.33" y="717.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:MemWriteCounter: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<text x="631" y="712" fill="#e5edf6" font-size="12" font-family="sans-serif">Other / passthrough  ·  15  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:Nop: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="665.67" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:SetState: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="700.33" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:WaitForIdle: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="735.00" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:LoadConstantContext: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="769.67" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBufferPfd: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:IndirectBuffer: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="839.00" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:MeInit: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="873.67" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:MemWriteCounter: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="908.33" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:EventWriteCacheFlush: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="943.00" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:EventWriteZPassDone: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:WaitUntilRead: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1012.33" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:WaitIndirectBufferPfdComplete: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1047.00" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:ContextUpdate: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1081.67" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1116.33" y="717.00" width="33.67" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="731" width="528" height="29" rx="3" fill="#223044"/>
 <text x="631" y="744" fill="#e5edf6" font-size="12" font-family="sans-serif">Packet headers  ·  4  ·  4 verified (≥100.0%)</text>
 <rect x="631.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type0: verified; include/xenon/gpu/types.hpp</title></rect>
@@ -986,40 +994,32 @@
 <rect x="891.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type2: verified; include/xenon/gpu/types.hpp</title></rect>
 <rect x="1021.00" y="749.00" width="129.00" height="6" fill="#3dbb79"><title>pm4:header:Type3: verified; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="763" width="528" height="29" rx="3" fill="#223044"/>
-<text x="631" y="776" fill="#e5edf6" font-size="12" font-family="sans-serif">Shader  ·  5  ·  0 verified (≥0.0%)</text>
-<rect x="631.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImLoad: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="735.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImLoadImmediate: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="839.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:ImStore: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="943.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:SetShaderBases: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1047.00" y="781.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:SetShaderConstants: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<text x="631" y="776" fill="#e5edf6" font-size="12" font-family="sans-serif">Shader  ·  6  ·  0 verified (≥0.0%)</text>
+<rect x="631.00" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:ImLoad: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="717.67" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:ImLoadImmediate: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="804.33" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:ImStore: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:InvalidateState: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="977.67" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:SetShaderBases: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1064.33" y="781.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:SetShaderConstants: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="795" width="528" height="29" rx="3" fill="#223044"/>
-<text x="631" y="808" fill="#e5edf6" font-size="12" font-family="sans-serif">State  ·  18  ·  2 verified (≥11.1%)</text>
-<rect x="631.00" y="813.00" width="27.89" height="6" fill="#3dbb79"><title>pm4:type3:RegRmw: verified; include/xenon/gpu/types.hpp</title></rect>
-<rect x="659.89" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetState: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="688.78" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="717.67" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:LoadConstantContext: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="746.56" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:LoadAluConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="775.44" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:InvalidateState: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="804.33" y="813.00" width="27.89" height="6" fill="#3dbb79"><title>pm4:type3:CondExec: verified; include/xenon/gpu/types.hpp</title></rect>
-<rect x="833.22" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:CondWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="862.11" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:MeInit: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="891.00" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinBaseOffset: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="919.89" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMask: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="948.78" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelect: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="977.67" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetConstant2: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1006.56" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:ContextUpdate: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1035.44" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1064.33" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinMaskHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1093.22" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1122.11" y="813.00" width="27.89" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<text x="631" y="808" fill="#e5edf6" font-size="12" font-family="sans-serif">State  ·  10  ·  2 verified (≥20.0%)</text>
+<rect x="631.00" y="813.00" width="51.00" height="6" fill="#3dbb79"><title>pm4:type3:RegRmw: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="683.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetConstant: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="735.00" y="813.00" width="51.00" height="6" fill="#3dbb79"><title>pm4:type3:MemWrite: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="787.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:RegToMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="839.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetBinBaseOffset: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="891.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetBinMask: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="943.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetBinSelect: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="995.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetConstant2: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1047.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectLow: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1099.00" y="813.00" width="51.00" height="6" fill="#514c72"><title>pm4:type3:SetBinSelectHigh: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="627" y="827" width="528" height="29" rx="3" fill="#223044"/>
-<text x="631" y="840" fill="#e5edf6" font-size="12" font-family="sans-serif">Synchronization  ·  6  ·  0 verified (≥0.0%)</text>
-<rect x="631.00" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitForIdle: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="717.67" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="804.33" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegEq: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="891.00" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitRegGte: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="977.67" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitUntilRead: unassessed; include/xenon/gpu/types.hpp</title></rect>
-<rect x="1064.33" y="845.00" width="85.67" height="6" fill="#514c72"><title>pm4:type3:WaitIndirectBufferPfdComplete: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<text x="631" y="840" fill="#e5edf6" font-size="12" font-family="sans-serif">Synchronization  ·  5  ·  1 verified (≥20.0%)</text>
+<rect x="631.00" y="845.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:WaitRegMem: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="735.00" y="845.00" width="103.00" height="6" fill="#3dbb79"><title>pm4:type3:CondExec: verified; include/xenon/gpu/types.hpp</title></rect>
+<rect x="839.00" y="845.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:CondWrite: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="943.00" y="845.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:WaitRegEq: unassessed; include/xenon/gpu/types.hpp</title></rect>
+<rect x="1047.00" y="845.00" width="103.00" height="6" fill="#514c72"><title>pm4:type3:WaitRegGte: unassessed; include/xenon/gpu/types.hpp</title></rect>
 <rect x="31" y="1015" width="18" height="18" fill="#3dbb79"/>
 <text x="57" y="1029" fill="#e5edf6" font-size="13" font-family="sans-serif">Verified by test</text>
 <rect x="224" y="1015" width="18" height="18" fill="#55a6e9"/>

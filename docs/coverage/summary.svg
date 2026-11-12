@@ -4,7 +4,7 @@
 <rect width="1200" height="700" fill="#101721"/>
 <text x="30" y="48" fill="#f4f7fb" font-size="29" font-weight="700" font-family="sans-serif">XENON  /  IMPLEMENTATION COVERAGE</text>
 <text x="30" y="77" fill="#c5d1dd" font-size="16" font-family="sans-serif">29/891 verified by tests (≥3.3%)  ·  45/891 classified  ·  source-listed scope</text>
-<text x="1170" y="48" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at 5c487ca</text>
+<text x="1170" y="48" text-anchor="end" fill="#7d8b9b" font-size="12" font-family="sans-serif">assessed at fb6cf1d</text>
 <rect x="30" y="102" width="555" height="266" rx="8" fill="#1b2634" stroke="#405168"/>
 <text x="46" y="132" fill="#f4f7fb" font-size="21" font-family="sans-serif" font-weight="700">Xbox 360 kernel exports</text>
 <text x="46" y="155" fill="#c5d1dd" font-size="13" font-family="sans-serif">281 listed  ·  33 classified  ·  20 verified (≥7.1%)</text>
@@ -160,25 +160,25 @@
 <rect x="744" y="476" width="115" height="13" fill="#514c72"><title>Draw: 4 unassessed</title></rect>
 <text x="884" y="487" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
 <text x="631" y="510" fill="#dce7f2" font-size="11" font-family="sans-serif">Event</text>
-<rect x="744" y="499" width="115" height="13" fill="#514c72"><title>Event: 7 unassessed</title></rect>
-<text x="884" y="510" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">7</text>
+<rect x="744" y="499" width="115" height="13" fill="#514c72"><title>Event: 6 unassessed</title></rect>
+<text x="884" y="510" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
 <text x="631" y="533" fill="#dce7f2" font-size="11" font-family="sans-serif">Other / passth…</text>
-<rect x="744" y="522" width="19" height="13" fill="#3dbb79"><title>Other / passthrough: 1 verified</title></rect>
-<rect x="763" y="522" width="96" height="13" fill="#514c72"><title>Other / passthrough: 5 unassessed</title></rect>
-<text x="884" y="533" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
+<rect x="744" y="522" width="115" height="13" fill="#514c72"><title>Other / passthrough: 15 unassessed</title></rect>
+<text x="884" y="533" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">15</text>
 <text x="631" y="556" fill="#dce7f2" font-size="11" font-family="sans-serif">Packet headers</text>
 <rect x="744" y="545" width="115" height="13" fill="#3dbb79"><title>Packet headers: 4 verified</title></rect>
 <text x="884" y="556" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">4</text>
 <text x="631" y="579" fill="#dce7f2" font-size="11" font-family="sans-serif">Shader</text>
-<rect x="744" y="568" width="115" height="13" fill="#514c72"><title>Shader: 5 unassessed</title></rect>
-<text x="884" y="579" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">5</text>
+<rect x="744" y="568" width="115" height="13" fill="#514c72"><title>Shader: 6 unassessed</title></rect>
+<text x="884" y="579" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
 <text x="631" y="602" fill="#dce7f2" font-size="11" font-family="sans-serif">State</text>
-<rect x="744" y="591" width="13" height="13" fill="#3dbb79"><title>State: 2 verified</title></rect>
-<rect x="757" y="591" width="102" height="13" fill="#514c72"><title>State: 16 unassessed</title></rect>
-<text x="884" y="602" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">18</text>
+<rect x="744" y="591" width="23" height="13" fill="#3dbb79"><title>State: 2 verified</title></rect>
+<rect x="767" y="591" width="92" height="13" fill="#514c72"><title>State: 8 unassessed</title></rect>
+<text x="884" y="602" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">10</text>
 <text x="631" y="625" fill="#dce7f2" font-size="11" font-family="sans-serif">Synchronization</text>
-<rect x="744" y="614" width="115" height="13" fill="#514c72"><title>Synchronization: 6 unassessed</title></rect>
-<text x="884" y="625" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">6</text>
+<rect x="744" y="614" width="23" height="13" fill="#3dbb79"><title>Synchronization: 1 verified</title></rect>
+<rect x="767" y="614" width="92" height="13" fill="#514c72"><title>Synchronization: 4 unassessed</title></rect>
+<text x="884" y="625" text-anchor="end" fill="#dce7f2" font-size="11" font-family="sans-serif">5</text>
 <rect x="30" y="657" width="17" height="17" fill="#3dbb79"/>
 <text x="55" y="671" fill="#e5edf6" font-size="13" font-family="sans-serif">Verified</text>
 <rect x="223" y="657" width="17" height="17" fill="#55a6e9"/>
