@@ -2,11 +2,27 @@
 # (LongPathsEnabled) only takes effect for processes whose manifest declares
 # longPathAware; preparation caches nest content-addressed keys deeply enough
 # to pass 260 characters under an ordinary user cache directory.
-if(MSVC)
-  add_link_options(
-    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:/MANIFEST:EMBED>"
-    "$<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:/MANIFESTINPUT:${CMAKE_CURRENT_LIST_DIR}/windows/long-path-aware.manifest>")
-endif()
+function(xenon_embed_windows_manifest)
+  if(NOT MSVC)
+    return()
+  endif()
+
+  get_property(_directories DIRECTORY "${XENON_SOURCE_DIR}" PROPERTY SUBDIRECTORIES)
+  list(PREPEND _directories "${XENON_SOURCE_DIR}")
+  while(_directories)
+    list(POP_FRONT _directories _directory)
+    get_property(_targets DIRECTORY "${_directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(_target IN LISTS _targets)
+      get_target_property(_type "${_target}" TYPE)
+      if(_type STREQUAL "EXECUTABLE")
+        target_sources("${_target}" PRIVATE
+          "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/windows/long-path-aware.manifest")
+      endif()
+    endforeach()
+    get_property(_children DIRECTORY "${_directory}" PROPERTY SUBDIRECTORIES)
+    list(APPEND _directories ${_children})
+  endwhile()
+endfunction()
 
 function(xenon_enable_guest_fp_semantics target visibility)
   if(MSVC)
