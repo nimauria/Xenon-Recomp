@@ -65,3 +65,5 @@ endif()
 if(XENON_BUILD_INSTALLER)
   message(FATAL_ERROR "The legacy installer is retired. Package the standalone launcher with npm run desktop:package in launcher-next.")
 endif()
+
+xenon_embed_windows_manifest()

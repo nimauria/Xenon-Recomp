@@ -32,9 +32,12 @@ Mesa's software rasterizer provides one. `xenon_backend_capability_tests`
 also enables the Khronos validation layer:
 
 ```sh
-sudo apt-get install mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+sudo apt-get install libxcursor-dev mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
 vulkaninfo --summary   # expect deviceName = llvmpipe
 ```
+
+`libxcursor-dev` is also installed by Linux CI. SDL3's X11 configuration
+requires its Xcursor development headers even when the host uses llvmpipe.
 
 ## Checking Windows graphics code on Linux
 

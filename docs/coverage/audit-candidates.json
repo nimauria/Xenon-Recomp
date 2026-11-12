@@ -1,8 +1,8 @@
 {
-  "content_digest": "sha256:00dfcede1e3e6f8bf152e8f3daa35450df2ff25b1ab16937e060e1131f658c9e",
+  "content_digest": "sha256:47e01710f66613e10ec7a86829dd7717be28da38766822034664e97ed14abb82",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "be78f75f7a8611dafce98d5971bfe92e4e1930e8",
+    "assessed_commit": "7a4506599a3337357e5157bfb525e07ef4a9de65",
     "worktree": "clean"
   },
   "problems": [
@@ -13,19 +13,7 @@
       "severity": "warning"
     },
     {
-      "detail": "windows: job log contains no CTest result lines",
-      "id": null,
-      "kind": "ci_unavailable",
-      "severity": "warning"
-    },
-    {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision be78f75f7a86",
-      "id": null,
-      "kind": "ci_stale",
-      "severity": "warning"
-    },
-    {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision be78f75f7a86",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision 7a4506599a33",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"

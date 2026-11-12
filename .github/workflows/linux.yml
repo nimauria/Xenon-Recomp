@@ -28,7 +28,7 @@ jobs:
             libwayland-dev libxrandr-dev libxcb1-dev libxcb-cursor-dev \
             libxcb-keysyms1-dev libxcb-xkb-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libxcb-sync-dev libxcb-randr0-dev libgl1-mesa-dev mesa-vulkan-drivers \
-            vulkan-validationlayers
+            libxcursor-dev vulkan-validationlayers
       - uses: actions/cache@v5
         with:
           path: .xenon/deps
