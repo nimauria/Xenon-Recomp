@@ -1,19 +1,31 @@
 {
-  "content_digest": "sha256:7fcd453a4f6bc41a9b479ac5a50310e08a77196a909eaa7fd14935528b7094bc",
+  "content_digest": "sha256:00dfcede1e3e6f8bf152e8f3daa35450df2ff25b1ab16937e060e1131f658c9e",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "fb6cf1ddebada4ced357e4adfebe85564ed0eb9b",
+    "assessed_commit": "be78f75f7a8611dafce98d5971bfe92e4e1930e8",
     "worktree": "clean"
   },
   "problems": [
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision fb6cf1ddebad",
+      "detail": "linux: job log contains no CTest result lines",
+      "id": null,
+      "kind": "ci_unavailable",
+      "severity": "warning"
+    },
+    {
+      "detail": "windows: job log contains no CTest result lines",
+      "id": null,
+      "kind": "ci_unavailable",
+      "severity": "warning"
+    },
+    {
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision be78f75f7a86",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
     },
     {
-      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision fb6cf1ddebad",
+      "detail": "windows results come from cfb0e8a5b3c7, not the assessed revision be78f75f7a86",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"
