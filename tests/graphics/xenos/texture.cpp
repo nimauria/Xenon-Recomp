@@ -480,6 +480,37 @@ void test_converted_resolve_write() {
              ColorRenderTargetFormat::R8G8B8A8Gamma, gamma_sample)[0]);
 }
 
+// 32_32_32_FLOAT is widened on load: no D3D12 or Vulkan device here samples
+// a 96-bit format (the host images failed to create), so each 12-byte texel
+// becomes four floats with w = 1.0, what a fetch of the format returns in w.
+void test_rgb_float_is_widened() {
+  const auto& format = texture_format_info(57);
+  assert(format.bytes_per_block() == 12u && format.host_bytes_per_block() == 16u);
+  assert(format.host_format == TextureHostFormat::R32G32B32A32Float);
+  assert(format.load == TextureLoad::ExpandRgbFloatToRgba);
+  TextureDescriptor d{};
+  d.base_address = 0x1000;
+  d.width = 2;
+  d.height = 1;
+  d.depth = 1;
+  d.pitch = 32;
+  d.format = 57;
+  d.endian = Endian::None;
+  d.valid = true;
+  std::vector<std::byte> memory(0x4000);
+  const std::array<float, 6> texels{1.5f, -2.0f, 3.25f, 4.0f, 5.5f, -6.75f};
+  std::memcpy(memory.data() + 0x1000, texels.data(), sizeof(texels));
+  const auto decoded = decode_texture(d, memory);
+  assert(decoded.valid);
+  assert(decoded.layout.subresources[0].linear_row_pitch_bytes == 32u);
+  std::array<float, 8> host{};
+  assert(decoded.linear_data.size() >= sizeof(host));
+  std::memcpy(host.data(), decoded.linear_data.data(), sizeof(host));
+  assert((host == std::array<float, 8>{1.5f, -2.0f, 3.25f, 1.0f, 4.0f, 5.5f, -6.75f, 1.0f}));
+  // Widened texels have no exact guest encoding to write back.
+  assert(!encode_texture(d, decoded.linear_data, memory));
+}
+
 }  // namespace
 
 int main() {

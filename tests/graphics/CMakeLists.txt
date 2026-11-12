@@ -43,6 +43,22 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
+    add_executable(xenon_gpu_texture_load_tests
+      backends/gpu_texture_load.cpp)
+    target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_gpu_texture_load_tests PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_gpu_texture_load_tests PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_gpu_texture_load_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_gpu_texture_load_tests)
+    add_test(NAME xenon_gpu_texture_load_tests COMMAND xenon_gpu_texture_load_tests)
     add_executable(xenon_scanout_integration_tests
       backends/scanout_integration.cpp)
     target_link_libraries(xenon_scanout_integration_tests

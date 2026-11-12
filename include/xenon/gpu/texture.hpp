@@ -63,6 +63,10 @@ enum class TextureLoad : std::uint8_t {
   // dropped, so these formats cannot be encoded back.
   DepthUnorm24ToFloat,
   DepthFloat20e4ToFloat,
+  // A 32_32_32_FLOAT texel (12 bytes) becomes 32_32_32_32_FLOAT with w = 1.0,
+  // what a fetch of the three-component format returns in w. No D3D12 or
+  // Vulkan device here can sample a 96-bit format, so it is widened on load.
+  ExpandRgbFloatToRgba,
 };
 
 struct TextureFormatInfo {
@@ -77,8 +81,14 @@ struct TextureFormatInfo {
   // The host texel has one channel that stands for every guest component,
   // so a fetch of x, y, z or w all read it (sampled depth, as on xenia).
   bool replicate_first_component{};
+  // Bytes of one block in guest memory.
   [[nodiscard]] constexpr std::uint32_t bytes_per_block() const noexcept {
     return (std::uint32_t(bits_per_pixel) * block_width * block_height + 7u) / 8u;
+  }
+  // Bytes of one block of the host image (and of a decoded texture's linear
+  // data): the guest size, except where the load widens the texel.
+  [[nodiscard]] constexpr std::uint32_t host_bytes_per_block() const noexcept {
+    return load == TextureLoad::ExpandRgbFloatToRgba ? 16u : bytes_per_block();
   }
   [[nodiscard]] constexpr bool host_supported() const noexcept {
     return host_format != TextureHostFormat::Unsupported;

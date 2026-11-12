@@ -96,7 +96,9 @@ constexpr std::array<TextureFormatInfo, 64> kFormats{{
     f(54,"2_10_10_10_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R10G10B10A2Unorm),
     f(55,"10_11_11_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R11G11B10Float),
     f(56,"11_11_10_AS_16_16_16_16",TextureStorage::Uncompressed,1,1,32,TextureHostFormat::R11G11B10Float),
-    f(57,"32_32_32_FLOAT",TextureStorage::Uncompressed,1,1,96,TextureHostFormat::R32G32B32Float),
+    // Widened to RGBA on load: no host here samples a 96-bit format.
+    {57, "32_32_32_FLOAT", TextureStorage::Uncompressed, 1, 1, 96,
+     TextureHostFormat::R32G32B32A32Float, TextureLoad::ExpandRgbFloatToRgba},
     f(58,"DXT3A",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::BC4Unorm),
     f(59,"DXT5A",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::BC4Unorm),
     f(60,"CTX1",TextureStorage::BlockCompressed,4,4,4,TextureHostFormat::Unsupported),
@@ -353,6 +355,8 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
   }
   result.linear_data.resize(static_cast<std::size_t>(result.layout.linear_size_bytes));
   const auto bpb = result.layout.format.bytes_per_block();
+  const auto host_bpb = result.layout.format.host_bytes_per_block();
+  const bool widen = result.layout.format.load == TextureLoad::ExpandRgbFloatToRgba;
   for (const auto& sub : result.layout.subresources) {
     for (std::uint32_t z = 0; z < sub.depth_texels; ++z) {
       for (std::uint32_t y = 0; y < sub.height_blocks; ++y) {
@@ -375,11 +379,11 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           const auto source = std::uint64_t(sub.guest_address) + source_offset;
           const auto destination = sub.linear_offset_bytes +
               (std::uint64_t(z) * sub.height_blocks + y) * sub.linear_row_pitch_bytes +
-              std::uint64_t(x) * bpb;
+              std::uint64_t(x) * host_bpb;
           if (source < physical_base ||
               source + bpb >
                   std::uint64_t{physical_base} + physical_memory.size() ||
-              destination + bpb > result.linear_data.size()) {
+              destination + host_bpb > result.linear_data.size()) {
             result.error = "Xenos texture references guest memory outside physical RAM";
             result.linear_data.clear();
             return result;
@@ -387,11 +391,16 @@ DecodedTexture decode_texture(const TextureDescriptor& descriptor,
           endian_copy(result.linear_data.data() + destination,
                       physical_memory.data() + (source - physical_base), bpb,
                       descriptor.endian);
+          if (widen) {
+            constexpr float kOne = 1.0f;
+            std::memcpy(result.linear_data.data() + destination + bpb, &kOne, sizeof(kOne));
+          }
         }
       }
     }
   }
-  if (result.layout.format.load != TextureLoad::Copy) {
+  if (result.layout.format.load == TextureLoad::DepthUnorm24ToFloat ||
+      result.layout.format.load == TextureLoad::DepthFloat20e4ToFloat) {
     const auto depth_format = result.layout.format.load == TextureLoad::DepthFloat20e4ToFloat
                                   ? DepthRenderTargetFormat::D24FS8
                                   : DepthRenderTargetFormat::D24S8;
@@ -421,7 +430,7 @@ bool encode_texture(const TextureDescriptor& descriptor,
   if (layout.format.load != TextureLoad::Copy)
     return fail("Xenos texture format " + std::to_string(layout.format.xenos_format) + " (" +
                 std::string(layout.format.name) +
-                ") is decoded to depth only, so it cannot be encoded back without its stencil");
+                ") is widened or decoded to depth on load, so it cannot be encoded back");
   if (linear_data.size() < layout.linear_size_bytes)
     return fail("linear texture source is smaller than the declared layout");
 

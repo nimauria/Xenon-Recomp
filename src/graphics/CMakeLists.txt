@@ -11,6 +11,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/resource_ir.cpp
     xenos/resource_barrier.cpp
     xenos/texture.cpp
+    xenos/gpu_texture_load.cpp
     xenos/presentation.cpp
     xenos/scanout.cpp
     xenos/gpu_resolve.cpp
