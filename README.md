@@ -22,7 +22,7 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 >
 > Xenon is under active development. Much of the core infrastructure is implemented and covered by automated tests, but running commercial games is still experimental. **No commercial Xbox 360 game is currently confirmed playable**, and there is no public release or release date. You cannot yet download Xenon and play your Xbox 360 library with it.
 >
-> The first title, Ace Combat 6, now loads through the main menu into the first mission. Audio is fully working in the tested sequence. An FPS issue is actively being fixed; sustained gameplay and full-title compatibility are not yet confirmed. See [Current milestone](#current-milestone-project-gracemeria).
+> The first title, Ace Combat 6, now loads through the main menu into the first mission with its characters, aircraft and terrain drawn correctly. It is not yet playable: in-engine cutscenes and missions run at a low frame rate, and the parts the game presents at 60 fps run at double speed. See [Current milestone](#current-milestone-project-gracemeria).
 
 > [!NOTE]
 > Xenon does not distribute Xbox 360 games, executables, firmware, title updates, DLC, encryption keys or any other proprietary content. You must supply content from lawful sources.
@@ -51,11 +51,20 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 
 **Project Gracemeria** is the integration effort for *Ace Combat 6: Fires of Liberation*. It is the first real title used to exercise the whole stack.
 
-Current status, updated 11 November 2026 from the project owner's runtime testing:
+Current status, updated 12 November 2026 from the project owner's runtime testing:
 
-- **The game loads through the main menu into the first mission.** Progress is beyond the earlier cutscene milestone; an FPS issue remains under active development, and sustained gameplay and full-title compatibility are not yet confirmed.
-- **Audio is fully working in the tested sequence.** The earlier silence/attenuation investigation no longer describes the current result.
-- **An FPS issue is the active issue and is being fixed.** Earlier measurements of evenly paced intro playback do not establish correct performance in the current first-mission flow.
+- **The game loads through the main menu into the first mission, and its geometry is now drawn correctly.**
+  - Characters and aircraft are no longer contorted or torn. Three VMX128 instructions that AC6's CPU skinning uses were wired wrongly: vperm128's control register, vsel128's mask, and the halfword unpacks. Comparing with rexglue found them; the xenia hardware test corpus, which now runs on both CPU paths, confirms them.
+  - The grid of black triangles over the terrain, runway and sea is gone: vertex fetch indices now tolerate the host's reciprocal error.
+  - The cloud and distant-texture corruption is gone: 2D mips and cube faces were being read from the wrong address.
+- **Parts the game presents at 60 fps run at double speed.**
+  - AC6 advances one fixed 1/30 s step per frame, and asks for 60 fps in its menus and briefing. So the briefing, its voice lines and the music after the main menu play too fast.
+  - Xenon paces presents exactly as the game asks.
+  - The fix is a frame step that follows real time: the briefing and cutscenes hold 30 fps while gameplay runs at 60 fps or higher. It belongs in the Project Gracemeria module, where ports of those hooks are being brought up.
+- **In-engine cutscenes and missions run at a low frame rate, with stutter.**
+  - The GPU sits mostly idle. The cost is CPU-side command processing plus shader compiles the first time each shader is used.
+  - A persistent shader cache now keeps compiled shaders between sessions.
+  - Audio decodes in real time.
 
 Earlier integration milestones on `development-restructure`:
 
@@ -69,7 +78,7 @@ Earlier integration milestones on `development-restructure`:
   - guest vblanks are locked to the display's refresh;
   - the vblank interrupt waits until the frame it ends has been scanned out;
   - textures are read as guest memory stood at the GPU's last synchronisation with the CPU, so the movie decoder can no longer overwrite planes a draw is about to sample.
-- **The main menu was reached before the current post-menu cutscene milestone.** Frame rates above the game's own remain unvalidated. Changes to AC6's simulation step or title-specific frame cap belong in the Project Gracemeria module; generic presentation and timing fixes belong in Xenon.
+- **The main menu was reached before the current post-menu cutscene milestone.** Changes to AC6's simulation step or title-specific frame cap belong in the Project Gracemeria module; generic presentation and timing fixes belong in Xenon.
 
 Any fix belongs in generic runtime code with its own tests, not in an Ace Combat 6 special case. The earlier runtime investigation is in [`docs/runtime/AC6_RUNTIME_INVESTIGATION.md`](docs/runtime/AC6_RUNTIME_INVESTIGATION.md).
 
@@ -127,11 +136,11 @@ Status labels:
 | Recompilation analysis and generation | Implemented foundation | Function discovery, control-flow and value analysis, module hints, sharded C++ generation and a content-addressed cache (Gen 5–11). Exercised on Ace Combat 6. Not shown to be reliable across retail titles generally. |
 | Kernel and guest threading | Integration ongoing | Handles, objects, threads, events, semaphores, mutants, timers, waits, file I/O and module management. Exercised by AC6 through the main menu into the first mission; wider title and gameplay validation remains. |
 | Runtime session | Integration ongoing | `XenonSession` ties the subsystems together for one title. `xenon_runtime_host` runs it in a separate process with SDL3 presentation. |
-| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay have subsystem coverage. AC6 loads through the main menu into the first mission. An FPS issue is being fixed; broader gameplay rendering remains unconfirmed. |
+| Xenos graphics frontend | Integration ongoing | PM4 processing, shader decoding and translation, textures, the EDRAM model, resolves and capture/replay have subsystem coverage. AC6 loads through the main menu into the first mission with correct geometry and terrain; cutscene and mission frame rates are being fixed; broader gameplay rendering remains unconfirmed. |
 | Vulkan backend | Tested infrastructure | Vulkan 1.3. Tests run on Linux CI against Mesa llvmpipe. Shares all command handling with Direct3D 12, including GPU-side EDRAM tile transfers. Not yet shown rendering a commercial title. |
-| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. AC6 reaches the first mission after the main menu; an FPS issue remains under repair. |
+| Direct3D 12 backend | Integration ongoing | Feature level 12_0. Tests run on Windows CI against the Microsoft Basic Render Driver. AC6 reaches the first mission after the main menu with correct geometry; its cutscene and mission frame rates are under repair. |
 | Temporal enhancements | Planned; analysis groundwork implemented | Temporal maths, revision profiles, pass classification and probes exist. XeSS/FSR/DLSS upscaling, native AA, frame generation and their launcher controls are planned, with per-title validation and fallback gates. |
-| Audio and XMA | Working in tested AC6 sequence | SDL3 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, with regression coverage. Audio is fully working through the tested post-menu cutscene sequence; broader title qualification remains. |
+| Audio and XMA | Working in tested AC6 sequence | SDL3 output, XMA decoding through FFmpeg `XMAFRAMES`, a voice mixer and Xbox render-driver callbacks, with regression coverage. AC6 audio decodes in real time; the music and voice lines after the main menu play fast only because the game runs at double speed there; broader title qualification remains. |
 | Input | Implemented foundation | SDL3 controllers (Valve's Steam Controller included, without Steam), XInput on Windows, keyboard and mouse used interchangeably with a controller, profiles, HOTAS mapping and XAM guest marshalling. |
 | Filesystem and content management | Implemented foundation | VFS, host paths, GDFX disc images, STFS packages, Xbox path semantics, and title-update, DLC and save content services. |
 | XAM services | Implemented foundation | Offline users and profiles, locale, content, notifications and achievements. Explicit "unsupported" results instead of fabricated success. |
@@ -140,7 +149,7 @@ Status labels:
 | Game preparation | Experimental | `xenon-prepare` discovers, recompiles, builds and caches every XEX in a title. It requires a local C++ toolchain. Tested end to end with synthetic content in CI. |
 | Platform support | Under active development | Windows and Linux x86-64 only. See [Platform support](#platform-support). |
 
-**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation has so far focused on Ace Combat 6, which loads through the main menu into the first mission with working audio. An FPS issue is being fixed, and sustained gameplay is not yet confirmed.
+**Component status is not game compatibility.** A subsystem that passes its own tests can still be incomplete or wrong for a specific title. Real-title validation has so far focused on Ace Combat 6, which loads through the main menu into the first mission with correct geometry. Low cutscene and mission frame rates and double-speed 60 fps sections are being fixed, and sustained gameplay is not yet confirmed.
 
 ---
 
@@ -272,7 +281,7 @@ The hardware samples textures microseconds after the command processor passes a 
 **What has been demonstrated:**
 
 - subsystem and backend tests, including cross-backend EDRAM and resolve checks on software devices in CI;
-- Ace Combat 6's boot, logos, intro movie, main menu and loading into the first post-menu cutscene through Direct3D 12. Cutscene frame rate/pacing is an active issue.
+- Ace Combat 6's boot, logos, intro movie, main menu, cutscenes, briefing and first mission through Direct3D 12, with skinned characters, aircraft and terrain drawn correctly. Cutscene and mission frame rates are an active issue.
 
 **What remains unconfirmed:** gameplay rendering and sustained play. Replaying captured retail command streams is also still outstanding.
 
@@ -290,7 +299,7 @@ Audio V1 implements the Xbox render-driver and XMA context semantics in Xenon. T
 
 The guest's render-driver callbacks are driven by **queue credits**. A credit is returned only when the host mixer consumes a frame the guest submitted. If a title's callback runs but submits nothing, the callbacks stop after eight invocations.
 
-Mixer, XMA and export regression tests cover the shared audio path. **AC6 audio is fully working in the tested sequence through the first mission after the main menu**, as reported by the project owner on 11 November 2026. The active issue concerns FPS. See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md) for current scope and historical investigation evidence.
+Mixer, XMA and export regression tests cover the shared audio path. **AC6 audio decodes in real time through the first mission** (measured per XMA context on 12 November 2026). After the main menu, music and voice lines play fast only because the game itself runs at double speed where it presents at 60 fps; see the [current milestone](#current-milestone-project-gracemeria). See [`AUDIO_V1.md`](docs/audio/AUDIO_V1.md) for current scope and historical investigation evidence.
 
 ---
 
@@ -595,7 +604,7 @@ These are goals in a rough order, not commitments or dates. Nothing here promise
 
 **Current priorities**
 
-1. Fix AC6's FPS issue. *(Active; the game reaches the first mission after the main menu with working audio.)*
+1. Make AC6 playable: a real-time frame step so 30 fps sections stay at 30 while gameplay runs at 60 fps or higher, and cutscene and mission frame rates. *(Active; the game reaches the first mission with correct geometry.)*
 2. Validate sustained gameplay and full-title compatibility.
 3. Extend real-title rendering validation to Vulkan and keep Windows/Linux build and test workflows reliable.
 4. Deliver the shared [rendering enhancement plan](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md): GPU inputs, native AA/upscaling, then frame generation, with per-title quality and fallback gates.
