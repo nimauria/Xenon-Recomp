@@ -122,6 +122,11 @@ if(XENON_BUILD_TESTS)
     target_link_libraries(xenon_presentation_tests PRIVATE xenon_graphics)
     xenon_enable_test_asserts(xenon_presentation_tests)
     add_test(NAME xenon_presentation_tests COMMAND xenon_presentation_tests)
+    add_executable(xenon_blend_constant_tests
+      xenos/blend_constant.cpp)
+    target_link_libraries(xenon_blend_constant_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_blend_constant_tests)
+    add_test(NAME xenon_blend_constant_tests COMMAND xenon_blend_constant_tests)
     add_executable(xenon_edram_surface_tests
       xenos/edram_surface.cpp)
     target_link_libraries(xenon_edram_surface_tests PRIVATE xenon_graphics)
