@@ -44,10 +44,15 @@ void test_native_store_publishes_its_page_when_an_epoch_is_requested() {
   assert(!coherency.range_changed_since(other_phys, 4u, before));
   assert(mem.read32_be(kPage + 0x10u) == 0x11223344u);
 
-  // Exact history is not kept for native stores: consumers take the
-  // page-level path for an interval that contains one.
+  // The collected page is journaled as one write of the whole page in the
+  // strongest ordering domain (the store's bytes and cache type are not
+  // recorded), so consumers keep exact history over the interval instead of
+  // scanning every page epoch - and still reconcile the whole page.
   std::vector<DirtyPhysicalWrite> exact;
-  assert(!coherency.collect_exact_dirty_writes(before, after, exact));
+  assert(coherency.collect_exact_dirty_writes(before, after, exact));
+  assert(exact.size() == 1u && exact[0].epoch == after &&
+         exact[0].address == (phys & ~0xFFFu) && exact[0].size == 0x1000u &&
+         exact[0].ordering_domain == xenon::cpu::MemoryOrderingDomain::CacheInhibited);
   std::vector<DirtyPhysicalRange> pages;
   coherency.collect_dirty_ranges(before, after, 0u, pages);
   assert(pages.size() == 1u && pages[0].address == (phys & ~0xFFFu) &&

@@ -95,15 +95,22 @@ class GuestMemoryCoherency {
     return cpu_dirty_summary_bits_.data();
   }
 
-  // Moves the pages native-access stores marked dirty into page epochs under
-  // one new epoch. Those stores test a page's bit before setting it, so one
-  // that found it set may still be in its core's store buffer when the bit is
-  // cleared here; flush_process_write_buffers() drains every thread's
-  // pending stores before the epoch is published, so a consumer that sees
-  // the epoch also sees the data. The journal has no entry for this epoch:
-  // exact history over it is unavailable and consumers take the page-level
-  // path, the same path a journal overflow takes. Returns the epoch, or 0
-  // when nothing was dirty.
+  // Moves the pages native-access stores marked dirty into page epochs, one
+  // new epoch per run of adjacent pages. Those stores test a page's bit
+  // before setting it, so one that found it set may still be in its core's
+  // store buffer when the bit is cleared here; flush_process_write_buffers()
+  // drains every thread's pending stores before the epochs are published, so
+  // a consumer that sees an epoch also sees the data.
+  //
+  // Each run is journaled as a write of its whole pages: the stores' bytes
+  // and cache types are not recorded, so the run covers every byte of its
+  // pages in the strongest ordering domain (cache-inhibited), exactly what
+  // the page-level path reports. Consumers then keep their exact history and
+  // reconcile only these pages. Without the journal entry every consumer took
+  // the page-level path, scanning all 131072 page epochs: with generated code
+  // storing between nearly every two draws, AC6 spent ~50 us of each draw's
+  // vertex and texture checks there and ran its 3D scenes at 1-3 fps.
+  // Returns the newest epoch, or 0 when nothing was dirty.
   std::uint64_t collect_cpu_dirty_pages() const noexcept {
     bool any = false;
     for (const auto& summary : cpu_dirty_summary_bits_) {
@@ -133,13 +140,24 @@ class GuestMemoryCoherency {
 
     flush_process_write_buffers();
     active_writers_.fetch_add(1u, std::memory_order_acq_rel);
-    auto epoch = write_epoch_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
-    if (epoch == 0u) {
-      write_epoch_.store(1u, std::memory_order_release);
-      epoch = 1u;
-    }
-    for (const auto page : collected_pages_) {
-      page_epochs_[page].store(epoch, std::memory_order_release);
+    std::uint64_t epoch = 0u;
+    // collected_pages_ is ascending: the bits are walked in page order.
+    for (std::size_t first = 0; first < collected_pages_.size();) {
+      std::size_t end = first + 1u;
+      while (end < collected_pages_.size() &&
+             collected_pages_[end] == collected_pages_[end - 1u] + 1u)
+        ++end;
+      epoch = write_epoch_.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+      if (epoch == 0u) {
+        write_epoch_.store(1u, std::memory_order_release);
+        epoch = 1u;
+      }
+      for (auto i = first; i < end; ++i)
+        page_epochs_[collected_pages_[i]].store(epoch, std::memory_order_release);
+      publish_journal(epoch, collected_pages_[first] * kBasePageSize,
+                      static_cast<std::uint32_t>(end - first) * kBasePageSize,
+                      xenon::cpu::MemoryOrderingDomain::CacheInhibited);
+      first = end;
     }
     active_writers_.fetch_sub(1u, std::memory_order_release);
     return epoch;
@@ -210,6 +228,24 @@ class GuestMemoryCoherency {
       if (epoch > since_epoch) return true;
     }
     return false;
+  }
+
+  // The newest epoch any page of the range was written at (page granularity:
+  // native-access stores not yet collected show up later, at a newer epoch).
+  [[nodiscard]] std::uint64_t newest_page_epoch(std::uint32_t physical_address,
+                                                std::uint32_t width) const noexcept {
+    if (!width || physical_address >= kPhysicalMemorySize) return 0u;
+    const auto end = std::min<std::uint64_t>(std::uint64_t{physical_address} + width,
+                                             kPhysicalMemorySize);
+    std::uint64_t newest = 0u;
+    for (auto page = physical_address / kBasePageSize;
+         page <= static_cast<std::uint32_t>((end - 1u) / kBasePageSize); ++page)
+      newest = (std::max)(newest, page_epochs_[page].load(std::memory_order_acquire));
+    return newest;
+  }
+  // The epoch page `page` (of kBasePageSize bytes) was last written at.
+  [[nodiscard]] std::uint64_t page_epoch(std::uint32_t page) const noexcept {
+    return page < kPageCount ? page_epochs_[page].load(std::memory_order_acquire) : 0u;
   }
 
   // Coalesces dirty pages between (since_epoch, through_epoch] into native
@@ -301,7 +337,7 @@ class GuestMemoryCoherency {
  private:
   void publish_journal(
       std::uint64_t epoch, std::uint32_t address, std::uint32_t size,
-      xenon::cpu::MemoryOrderingDomain ordering_domain) noexcept {
+      xenon::cpu::MemoryOrderingDomain ordering_domain) const noexcept {
     const auto index = static_cast<std::uint32_t>(epoch) &
                        (kWriteJournalCapacity - 1u);
     write_journal_ranges_[index].store(
@@ -313,9 +349,11 @@ class GuestMemoryCoherency {
 
   mutable std::vector<std::atomic<std::uint64_t>> page_epochs_{};
   static_assert((kWriteJournalCapacity & (kWriteJournalCapacity - 1u)) == 0u);
-  std::vector<std::atomic<std::uint64_t>> write_journal_epochs_{};
-  std::vector<std::atomic<std::uint64_t>> write_journal_ranges_{};
-  std::vector<std::atomic<std::uint8_t>> write_journal_domains_{};
+  // Mutable like page_epochs_: collect_cpu_dirty_pages() journals the pages
+  // it collects from const consumers.
+  mutable std::vector<std::atomic<std::uint64_t>> write_journal_epochs_{};
+  mutable std::vector<std::atomic<std::uint64_t>> write_journal_ranges_{};
+  mutable std::vector<std::atomic<std::uint8_t>> write_journal_domains_{};
   // Collection runs from const consumers (current_epoch), so the epoch and
   // writer counters it advances are mutable like the dirty bits it clears.
   mutable std::atomic<std::uint64_t> write_epoch_{0};
