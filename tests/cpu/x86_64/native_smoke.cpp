@@ -86,7 +86,9 @@ int main(){
   smoke_vsel(s,mem,rt);
   for (unsigned i=0; i<16; ++i)
     assert(s.vr[3].bytes[i] == static_cast<std::uint8_t>((a.bytes[i]&~mask.bytes[i])|(b.bytes[i]&mask.bytes[i])));
-  s.vr[3]=a; s.vr[1]=b; s.vr[2]=mask;
+  // vsel128 v3,v1,v2,v3: the old vD is the mask (binutils {VD128,VA128,
+  // VB128,VS128}; xenia InstrEmit_vsel128), so v3 = (v1 & ~v3) | (v2 & v3).
+  s.vr[1]=a; s.vr[2]=b; s.vr[3]=mask;
   smoke_vsel128(s,mem,rt);
   for (unsigned i=0; i<16; ++i)
     assert(s.vr[3].bytes[i] == static_cast<std::uint8_t>((a.bytes[i]&~mask.bytes[i])|(b.bytes[i]&mask.bytes[i])));

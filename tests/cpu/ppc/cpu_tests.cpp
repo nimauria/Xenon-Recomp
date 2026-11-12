@@ -100,7 +100,7 @@ int main() {
   assert(s.vector_non_java() && !s.vector_saturated());
 
   const auto cat = Decoder::opcode_catalog();
-  assert(cat.size() == 455);
+  assert(cat.size() == 457);
 
   // CPU V2 Phase 2: the declarative catalogue must have a deterministic,
   // strongly-typed identity and deterministic decode ordering.  The existing
@@ -138,7 +138,14 @@ int main() {
     for (unsigned n = 0; n < 64; ++n) {
       const std::uint32_t varied = (op.pattern & op.mask) | (rng() & ~op.mask);
       auto got = d.decode(0x82000000u, varied);
-      if (!got.valid() || got.mnemonic() != op.mnemonic) {
+      // An encoding that also fixes some of this form's operand bits is a
+      // different instruction there (vupkhsh128 is vupkhsb128 with VA128 =
+      // 0x60) and rightly wins: a strictly more specific mask that matches.
+      const bool narrower_form =
+          got.valid() && got.info->mask != op.mask &&
+          (got.info->mask & op.mask) == op.mask &&
+          (varied & got.info->mask) == (got.info->pattern & got.info->mask);
+      if (!got.valid() || (got.mnemonic() != op.mnemonic && !narrower_form)) {
         std::cerr << "operand-bit decode mismatch pattern=0x" << std::hex << op.pattern
                   << " varied=0x" << varied << " expected=" << op.mnemonic
                   << " got=" << (got.valid() ? got.mnemonic() : std::string_view{"invalid"})

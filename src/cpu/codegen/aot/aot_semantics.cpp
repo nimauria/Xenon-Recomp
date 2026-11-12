@@ -89,10 +89,11 @@ float round_nearest_even(float value) noexcept {
 
 template <typename T>
 T vector_fp_to_int_sat(float value, CpuState& state) noexcept {
+  // A NaN converts to 0 for both the signed and unsigned forms (AltiVec
+  // vctsxs/vctuxs; rexglue masks NaN lanes to 0).
   if (std::isnan(value)) {
     state.set_vector_saturated();
-    if constexpr (std::is_signed_v<T>) return std::numeric_limits<T>::min();
-    else return T{};
+    return T{};
   }
   const long double x = std::trunc(static_cast<long double>(value));
   const long double lo = static_cast<long double>(std::numeric_limits<T>::min());
@@ -264,8 +265,8 @@ Vector128 unpack_standard(VectorSemantic s,const Vector128&b){
   Vector128 r{};
   if(s==VectorSemantic::vupkhsb||s==VectorSemantic::vupkhsb128){for(unsigned i=0;i<8;++i)write_be<std::int16_t>(r,i,static_cast<std::int8_t>(b.bytes[i]));return r;}
   if(s==VectorSemantic::vupklsb||s==VectorSemantic::vupklsb128){for(unsigned i=0;i<8;++i)write_be<std::int16_t>(r,i,static_cast<std::int8_t>(b.bytes[8+i]));return r;}
-  if(s==VectorSemantic::vupkhsh){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(i)));return r;}
-  if(s==VectorSemantic::vupklsh){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(4+i)));return r;}
+  if(s==VectorSemantic::vupkhsh||s==VectorSemantic::vupkhsh128){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(i)));return r;}
+  if(s==VectorSemantic::vupklsh||s==VectorSemantic::vupklsh128){for(unsigned i=0;i<4;++i)write_be<std::int32_t>(r,i,static_cast<std::int16_t>(b.u16_be(4+i)));return r;}
   return r;
 }
 
@@ -565,7 +566,7 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
 
     case VectorSemantic::vpkuhum:case VectorSemantic::vpkuhum128:case VectorSemantic::vpkuhus:case VectorSemantic::vpkuhus128:case VectorSemantic::vpkshss:case VectorSemantic::vpkshss128:case VectorSemantic::vpkshus:case VectorSemantic::vpkshus128:
     case VectorSemantic::vpkuwum:case VectorSemantic::vpkuwum128:case VectorSemantic::vpkuwus:case VectorSemantic::vpkuwus128:case VectorSemantic::vpkswss:case VectorSemantic::vpkswss128:case VectorSemantic::vpkswus:case VectorSemantic::vpkswus128:return pack_standard(s,a,b,state);
-    case VectorSemantic::vupkhsb:case VectorSemantic::vupkhsb128:case VectorSemantic::vupklsb:case VectorSemantic::vupklsb128:case VectorSemantic::vupkhsh:case VectorSemantic::vupklsh:return unpack_standard(s,a);
+    case VectorSemantic::vupkhsb:case VectorSemantic::vupkhsb128:case VectorSemantic::vupklsb:case VectorSemantic::vupklsb128:case VectorSemantic::vupkhsh:case VectorSemantic::vupkhsh128:case VectorSemantic::vupklsh:case VectorSemantic::vupklsh128:return unpack_standard(s,a);
     // (old vD, vB), as lifter/vector.cpp and the interpreter wire them.
     case VectorSemantic::vpkd3d128:return d3d_pack(w,a,b);
     case VectorSemantic::vupkd3d128:return d3d_unpack(w,a,b);

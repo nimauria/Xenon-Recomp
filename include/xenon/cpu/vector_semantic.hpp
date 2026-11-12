@@ -204,10 +204,12 @@ enum class VectorSemantic : std::uint16_t {
   vupkhsb,
   vupkhsb128,
   vupkhsh,
+  vupkhsh128,
   vupklpx,
   vupklsb,
   vupklsb128,
   vupklsh,
+  vupklsh128,
   vxor,
   vxor128,
 };

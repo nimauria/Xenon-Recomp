@@ -134,9 +134,11 @@ namespace xenon::cpu::fallback {
       b = state.vr[vector_vb(i)];
       c = state.vr[vector_vc(i)];
     } else {
-      a = state.vr[reg];
-      b = state.vr[vector_va(i)];
-      c = state.vr[vector_vb(i)];
+      // vsel128 vD,vA,vB,vD: the old vD is the mask, so
+      // vD = (vA & ~vD) | (vB & vD), as lifter/vector.cpp wires it.
+      a = state.vr[vector_va(i)];
+      b = state.vr[vector_vb(i)];
+      c = state.vr[reg];
     }
     state.vr[reg] = aot::execute_vector(*semantic, i.word, state, a, b, c, Vector128{});
     return true;

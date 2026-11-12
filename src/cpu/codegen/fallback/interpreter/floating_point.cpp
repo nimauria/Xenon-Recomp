@@ -121,7 +121,9 @@ namespace xenon::cpu::fallback {
     }
     if (m == "fresx" || m == "frsqrtex") {
       const auto a = f64_at(i.rb());
-      const auto r = m == "fresx" ? aot::fp_reciprocal(state, a) : aot::fp_rsqrt(state, a);
+      // A single-precision estimate, as lifter/floating_point.cpp rounds it.
+      const auto r = aot::fp_round_single(
+          state, m == "fresx" ? aot::fp_reciprocal(state, a) : aot::fp_rsqrt(state, a));
       store_f64(i.frt(), r);
       aot::update_fpscr(state, r);
       update_cr1_if_rc();

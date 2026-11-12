@@ -87,7 +87,9 @@ struct alignas(64) CpuState {
   std::uint32_t cr{};
   std::uint32_t xer{};
   std::uint32_t fpscr{};
-  std::uint32_t vscr{};
+  // The Xbox 360's VMX unit runs in non-Java mode: denormal inputs and
+  // results flush to zero (xenia and rexglue flush every VMX float op).
+  std::uint32_t vscr{vscr_bits::NJ};
 
   std::uint64_t msr{};
   std::uint32_t vrsave{};

@@ -11,7 +11,7 @@ extern XenonGeneratedFn xenon_generated_all[];
 extern std::size_t xenon_generated_all_count;
 
 int main(){
-  assert(xenon_generated_all_count==455);
+  assert(xenon_generated_all_count==457);
   for(std::size_t i=0;i<xenon_generated_all_count;++i){
     CpuState state{};
     FlatMemory memory(0x20000u,0);
