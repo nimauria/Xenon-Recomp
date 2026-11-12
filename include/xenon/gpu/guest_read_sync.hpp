@@ -2,12 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
+#include "xenon/gpu/texture.hpp"
 #include "xenon/memory/address_space.hpp"
+#include "xenon/memory/gpu_coherency.hpp"
 
 namespace xenon::gpu {
 
@@ -60,6 +64,12 @@ class GuestReadSync {
   // ordered with the commands, and visible to every later draw. Textures it
   // overlaps are no longer tracked, so the next draw reads them anew.
   void backend_wrote(std::uint32_t base, std::uint32_t size);
+  // Resolve readbacks the backend copied into guest memory
+  // (GuestMemoryMirror::take_published_writes()). A tracked texture whose
+  // memory changed only by one of these holds those bytes already - it was
+  // loaded from the mirror after the GPU wrote them - so a sync point does
+  // not copy it and a draw does not reload it.
+  void gpu_published(std::span<const memory::GpuPublishedWrite> writes);
 
   void clear() noexcept;
   [[nodiscard]] std::uint64_t sync_points() const noexcept { return sync_points_; }
@@ -79,9 +89,42 @@ class GuestReadSync {
   };
   std::unordered_map<std::uint64_t, Sampled> sampled_{};
   std::unordered_map<std::uint64_t, Capture> captures_{};
+  // Whether [base, base + size) changed after `since` other than by a
+  // recorded GPU publication.
+  [[nodiscard]] bool changed_beyond_publications(const memory::GuestMemoryCoherency& coherency,
+                                                 std::uint32_t base, std::uint32_t size,
+                                                 std::uint64_t since) const;
+  // The newest publications, oldest first (bounded: an older one only means
+  // a conservative copy).
+  static constexpr std::size_t kPublicationsKept = 4096;
+  std::deque<memory::GpuPublishedWrite> published_{};
   bool active_{false};
   std::uint64_t epoch_{};
   std::uint64_t sync_points_{};
 };
+
+// The texture cache keeps two records of guest memory: page epochs per cached
+// texture (TextureDirtyTracker) and the sync-point view (GuestReadSync). A
+// draw consults both through cached_texture_stale(), and every write the GPU
+// itself makes goes to both through note_backend_write().
+
+// Whether a draw reading guest memory as of `read_epoch` must decode cached
+// texture `key` again: its memory changed through that epoch and the latest
+// sync point did not find it unchanged (a CPU write after the sync point came
+// after the hardware sampled it), or the GPU wrote over it since it was
+// decoded.
+[[nodiscard]] bool cached_texture_stale(TextureDirtyTracker& dirty, GuestReadSync& reads,
+                                        std::uint64_t key,
+                                        const memory::GuestMemoryCoherency& coherency,
+                                        std::uint64_t read_epoch);
+
+// The GPU wrote [base, base + size) (a resolve, a memory export). The write is
+// ordered with the command stream, so every later draw reads it, including
+// draws before the next sync point, whose read epoch predates it. The cached
+// textures it overlaps are marked dirty explicitly rather than left to the
+// page epochs (which today report any newer write, but are entitled to stop
+// at the read epoch), and are no longer tracked as unchanged at the sync point.
+void note_backend_write(TextureDirtyTracker& dirty, GuestReadSync& reads, std::uint32_t base,
+                        std::uint32_t size);
 
 }  // namespace xenon::gpu

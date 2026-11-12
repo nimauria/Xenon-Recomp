@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -42,6 +43,19 @@ struct GpuReadbackRange {
   [[nodiscard]] std::uint64_t end() const noexcept {
     return std::uint64_t{address} + size;
   }
+};
+
+// A GPU-authored range a discrete mirror copied back into Xbox physical RAM:
+// the epoch that copy published, and the newest epoch any of its pages had
+// just before it. A consumer that already holds the GPU's bytes for the range
+// (a texture loaded from the mirror after the GPU wrote it) knows a page whose
+// newest epoch is `epoch`, and was no newer than what it accounted for before,
+// changed only by this copy - to the bytes it already has.
+struct GpuPublishedWrite {
+  std::uint64_t epoch{};
+  std::uint64_t previous_epoch{};
+  std::uint32_t address{};
+  std::uint32_t size{};
 };
 
 // Describes how the host GPU reaches Xbox physical memory. Current desktop
@@ -134,13 +148,21 @@ class GuestMemoryGpuCoherency {
     touched_pages_.clear();
   }
 
+  // read_epoch: the guest-memory epoch the requesting draw reads at (the
+  // latest GPU/CPU sync point, gpu::GuestReadSync::read_epoch()); 0 means now.
+  // CPU writes are folded in through that epoch only, so the draws between
+  // two sync points fold in the CPU's writes once instead of once each: with
+  // AC6's cutscenes storing to thousands of scattered pages a frame, folding
+  // them in for every vertex buffer of every draw cost hundreds of
+  // microseconds a draw. Writes after the epoch are folded in at a later one
+  // and upload then; bytes uploaded now are at least as new as the epoch.
   [[nodiscard]] GpuUploadPlan plan_upload(
       const GuestMemoryCoherency& memory, std::uint32_t address = 0,
       std::uint32_t size = (std::numeric_limits<std::uint32_t>::max)(),
       std::uint32_t max_range_bytes = 0,
-      GpuRangeUsage usage = GpuRangeUsage::Generic) {
+      GpuRangeUsage usage = GpuRangeUsage::Generic, std::uint64_t read_epoch = 0) {
     GpuUploadPlan plan{};
-    plan.through_epoch = memory.current_epoch();
+    plan.through_epoch = read_epoch ? read_epoch : memory.current_epoch();
     plan.usage = usage;
 
     std::lock_guard lock(mutex_);
@@ -196,6 +218,24 @@ class GuestMemoryGpuCoherency {
   // non-overlapping generations remain independently committable.
   std::uint64_t mark_gpu_write(std::uint32_t address, std::uint32_t size) {
     std::lock_guard lock(mutex_);
+    return mark_gpu_write_unlocked(address, size);
+  }
+
+  // The GPU write lands after every CPU/DMA write published so far, so those
+  // are folded in first: a CPU write that preceded the GPU write must not be
+  // ingested later and taken for a newer write that cancels GPU ownership.
+  // (Readback planning skips ranges the GPU does not own without folding in
+  // CPU writes, so it cannot be relied on to have done this already.)
+  std::uint64_t mark_gpu_write(const GuestMemoryCoherency& memory,
+                               std::uint32_t address, std::uint32_t size) {
+    const auto through_epoch = memory.current_epoch();
+    std::lock_guard lock(mutex_);
+    (void)ingest_cpu_writes_unlocked(memory, through_epoch, 0u, 0u);
+    return mark_gpu_write_unlocked(address, size);
+  }
+
+ private:
+  std::uint64_t mark_gpu_write_unlocked(std::uint32_t address, std::uint32_t size) {
     const auto range = clamp(address, size);
     if (!range.size) return gpu_generation_;
     touch_pages_unlocked(range);
@@ -209,6 +249,8 @@ class GuestMemoryGpuCoherency {
     return gpu_generation_;
   }
 
+ public:
+
   // Reconcile CPU/DMA writes before selecting GPU-owned bytes. This prevents a
   // CPU write that happened after mark_gpu_write but before readback planning
   // from being overwritten by stale device data.
@@ -217,8 +259,25 @@ class GuestMemoryGpuCoherency {
       std::uint32_t size, std::uint32_t max_range_bytes = 0,
       GpuRangeUsage usage = GpuRangeUsage::RenderReadback) {
     GpuReadbackPlan plan{};
-    plan.through_epoch = memory.current_epoch();
     plan.usage = usage;
+    {
+      // Nothing the GPU owns overlaps the request, so nothing is read back:
+      // ingesting CPU writes can only remove GPU ownership, never add it.
+      // Every indexed draw asks for its index buffer, so this skips the
+      // per-draw fold of pending CPU writes (and its write-buffer flush).
+      std::lock_guard lock(mutex_);
+      const auto request = clamp(address, size);
+      if (!overlaps(gpu_dirty_, request)) {
+        plan.action = synchronization_action_unlocked();
+        plan.exact_history = true;
+        if (request.size) {
+          add(requested_, request);
+          touch_pages_unlocked(request);
+        }
+        return plan;
+      }
+    }
+    plan.through_epoch = memory.current_epoch();
 
     std::lock_guard lock(mutex_);
     plan.action = synchronization_action_unlocked();
@@ -645,120 +704,114 @@ class GuestMemoryGpuCoherency {
     return result;
   }
 
-  static bool overlaps(const std::vector<GpuCoherencyRange>& ranges,
-                       GpuCoherencyRange query) {
+  template <typename Range>
+  static bool overlaps(const std::vector<Range>& ranges, GpuCoherencyRange query) {
     if (!query.size) return false;
-    for (const auto& range : ranges) {
-      if (range.end() <= query.address) continue;
-      if (range.address >= query.end()) break;
-      return true;
-    }
-    return false;
+    const auto first = std::lower_bound(ranges.begin(), ranges.end(),
+                                        std::uint64_t{query.address},
+                                        [](const Range& range, std::uint64_t value) {
+                                          return range.end() <= value;
+                                        });
+    return first != ranges.end() && first->address < query.end();
   }
 
-  static bool overlaps(const std::vector<GpuReadbackRange>& ranges,
-                       GpuCoherencyRange query) {
-    if (!query.size) return false;
-    for (const auto& range : ranges) {
-      if (range.end() <= query.address) continue;
-      if (range.address >= query.end()) break;
-      return true;
-    }
-    return false;
+  // The single-range operations below edit the sorted, disjoint sets in place:
+  // a binary search finds the ranges the change touches and only those are
+  // rewritten. Rebuilding the whole set for every one made each upload plan
+  // and commit cost time in proportion to everything the CPU had ever
+  // dirtied - hundreds of microseconds a draw in AC6's cutscenes.
+
+  // The first range ending at or after `address` (ends ascend: the sets are
+  // sorted and disjoint).
+  template <typename Range>
+  static auto first_ending_at_or_after(std::vector<Range>& ranges, std::uint64_t address) {
+    return std::lower_bound(ranges.begin(), ranges.end(), address,
+                            [](const Range& range, std::uint64_t value) {
+                              return range.end() < value;
+                            });
   }
 
+  // Union with one range; ranges it overlaps or touches merge into it.
   static void add(std::vector<GpuCoherencyRange>& ranges,
                   GpuCoherencyRange inserted) {
     if (!inserted.size) return;
-    std::vector<GpuCoherencyRange> merged;
-    merged.reserve(ranges.size() + 1u);
     auto start = std::uint64_t{inserted.address};
     auto end = inserted.end();
-    bool emitted = false;
-    for (const auto& range : ranges) {
-      if (range.end() < start) {
-        merged.push_back(range);
-      } else if (end < range.address) {
-        if (!emitted) {
-          merged.push_back({static_cast<std::uint32_t>(start),
+    const auto first = first_ending_at_or_after(ranges, start);
+    auto last = first;
+    while (last != ranges.end() && last->address <= end) ++last;
+    if (first == last) {
+      ranges.insert(first, {static_cast<std::uint32_t>(start),
                             static_cast<std::uint32_t>(end - start)});
-          emitted = true;
-        }
-        merged.push_back(range);
-      } else {
-        start = (std::min)(start, std::uint64_t{range.address});
-        end = (std::max)(end, range.end());
-      }
+      return;
     }
-    if (!emitted)
-      merged.push_back({static_cast<std::uint32_t>(start),
-                        static_cast<std::uint32_t>(end - start)});
-    ranges = std::move(merged);
+    start = (std::min)(start, std::uint64_t{first->address});
+    end = (std::max)(end, std::prev(last)->end());
+    *first = {static_cast<std::uint32_t>(start), static_cast<std::uint32_t>(end - start)};
+    ranges.erase(std::next(first), last);
   }
 
-  static void subtract(std::vector<GpuCoherencyRange>& ranges,
-                       GpuCoherencyRange removed) {
+  // Removes one range; a range it cuts keeps its other fields (generation,
+  // ordering domain) on the pieces left either side.
+  template <typename Range>
+  static void subtract(std::vector<Range>& ranges, GpuCoherencyRange removed) {
     if (!removed.size || ranges.empty()) return;
-    std::vector<GpuCoherencyRange> result;
-    result.reserve(ranges.size() + 1u);
-    for (const auto& range : ranges) {
-      if (range.end() <= removed.address || range.address >= removed.end()) {
-        result.push_back(range);
-        continue;
-      }
-      if (range.address < removed.address)
-        result.push_back({range.address, removed.address - range.address});
-      if (range.end() > removed.end())
-        result.push_back({static_cast<std::uint32_t>(removed.end()),
-                          static_cast<std::uint32_t>(range.end() - removed.end())});
+    const auto removed_start = std::uint64_t{removed.address};
+    const auto removed_end = removed.end();
+    auto first = std::lower_bound(ranges.begin(), ranges.end(), removed_start,
+                                  [](const Range& range, std::uint64_t value) {
+                                    return range.end() <= value;
+                                  });
+    auto last = first;
+    while (last != ranges.end() && last->address < removed_end) ++last;
+    if (first == last) return;
+    std::array<Range, 2> pieces{};
+    std::size_t count = 0;
+    if (first->address < removed_start) {
+      pieces[count] = *first;
+      pieces[count].size = static_cast<std::uint32_t>(removed_start - first->address);
+      ++count;
     }
-    ranges = std::move(result);
+    const auto& tail = *std::prev(last);
+    if (tail.end() > removed_end) {
+      pieces[count] = tail;
+      pieces[count].address = static_cast<std::uint32_t>(removed_end);
+      pieces[count].size = static_cast<std::uint32_t>(tail.end() - removed_end);
+      ++count;
+    }
+    const auto covered = static_cast<std::size_t>(last - first);
+    const auto index = static_cast<std::size_t>(first - ranges.begin());
+    if (count <= covered) {
+      std::copy_n(pieces.begin(), count, first);
+      ranges.erase(first + static_cast<std::ptrdiff_t>(count), last);
+    } else {
+      // One range cut in two.
+      *first = pieces[0];
+      ranges.insert(ranges.begin() + static_cast<std::ptrdiff_t>(index + 1u), pieces[1]);
+    }
   }
 
-  static void subtract(std::vector<GpuReadbackRange>& ranges,
-                       GpuCoherencyRange removed) {
-    if (!removed.size || ranges.empty()) return;
-    std::vector<GpuReadbackRange> result;
-    result.reserve(ranges.size() + 1u);
-    for (const auto& range : ranges) {
-      if (range.end() <= removed.address || range.address >= removed.end()) {
-        result.push_back(range);
-        continue;
-      }
-      if (range.address < removed.address) {
-        result.push_back({range.address, removed.address - range.address,
-                          range.generation});
-      }
-      if (range.end() > removed.end()) {
-        result.push_back({static_cast<std::uint32_t>(removed.end()),
-                          static_cast<std::uint32_t>(range.end() - removed.end()),
-                          range.generation});
-      }
+  // Inserts `inserted` at its sorted position (the bytes it covers are free)
+  // and merges it with neighbours it touches that `same` accepts. The sets
+  // never hold two touching ranges `same` accepts, so merging with the
+  // immediate neighbours keeps that true for the whole set.
+  template <typename Range, typename Same>
+  static void insert_and_merge(std::vector<Range>& ranges, Range inserted, Same same) {
+    auto at = std::lower_bound(ranges.begin(), ranges.end(), inserted.address,
+                               [](const Range& range, std::uint32_t address) {
+                                 return range.address < address;
+                               });
+    at = ranges.insert(at, inserted);
+    if (std::next(at) != ranges.end() && at->end() == std::next(at)->address &&
+        same(*at, *std::next(at))) {
+      at->size += std::next(at)->size;
+      ranges.erase(std::next(at));
     }
-    ranges = std::move(result);
-  }
-
-  static void subtract(std::vector<GpuCpuVisibilityRange>& ranges,
-                       GpuCoherencyRange removed) {
-    if (!removed.size || ranges.empty()) return;
-    std::vector<GpuCpuVisibilityRange> result;
-    result.reserve(ranges.size() + 1u);
-    for (const auto& range : ranges) {
-      if (range.end() <= removed.address || range.address >= removed.end()) {
-        result.push_back(range);
-        continue;
-      }
-      if (range.address < removed.address) {
-        result.push_back({range.address, removed.address - range.address,
-                          range.ordering_domain});
-      }
-      if (range.end() > removed.end()) {
-        result.push_back({static_cast<std::uint32_t>(removed.end()),
-                          static_cast<std::uint32_t>(range.end() - removed.end()),
-                          range.ordering_domain});
-      }
+    if (at != ranges.begin() && std::prev(at)->end() == at->address &&
+        same(*std::prev(at), *at)) {
+      std::prev(at)->size += at->size;
+      ranges.erase(at);
     }
-    ranges = std::move(result);
   }
 
   static void assign_cpu_visibility_range(
@@ -766,22 +819,9 @@ class GuestMemoryGpuCoherency {
       GpuCpuVisibilityRange inserted) {
     if (!inserted.size) return;
     subtract(ranges, {inserted.address, inserted.size});
-    ranges.insert(std::lower_bound(ranges.begin(), ranges.end(), inserted.address,
-                                   [](const auto& range, std::uint32_t address) {
-                                     return range.address < address;
-                                   }),
-                  inserted);
-    std::vector<GpuCpuVisibilityRange> merged;
-    merged.reserve(ranges.size());
-    for (const auto& range : ranges) {
-      if (!merged.empty() && merged.back().end() == range.address &&
-          merged.back().ordering_domain == range.ordering_domain) {
-        merged.back().size += range.size;
-      } else {
-        merged.push_back(range);
-      }
-    }
-    ranges = std::move(merged);
+    insert_and_merge(ranges, inserted, [](const auto& a, const auto& b) {
+      return a.ordering_domain == b.ordering_domain;
+    });
   }
 
   [[nodiscard]] static unsigned domain_strength(
@@ -802,7 +842,14 @@ class GuestMemoryGpuCoherency {
     // visibility list from its start for every upload piece made planning
     // AC6's 692 KB vertex ring take up to a second.
     auto strongest = xenon::cpu::MemoryOrderingDomain::Normal;
-    std::size_t first = 0;
+    if (upload_ranges.empty()) return strongest;
+    std::size_t first = static_cast<std::size_t>(
+        std::lower_bound(visibility.begin(), visibility.end(),
+                         std::uint64_t{upload_ranges.front().address},
+                         [](const GpuCpuVisibilityRange& range, std::uint64_t value) {
+                           return range.end() <= value;
+                         }) -
+        visibility.begin());
     for (const auto& upload : upload_ranges) {
       while (first < visibility.size() && visibility[first].end() <= upload.address) ++first;
       for (auto i = first; i < visibility.size() && visibility[i].address < upload.end(); ++i) {
@@ -817,21 +864,9 @@ class GuestMemoryGpuCoherency {
                                GpuReadbackRange inserted) {
     if (!inserted.size) return;
     subtract(ranges, {inserted.address, inserted.size});
-    ranges.push_back(inserted);
-    std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
-      return a.address < b.address;
+    insert_and_merge(ranges, inserted, [](const auto& a, const auto& b) {
+      return a.generation == b.generation;
     });
-    std::vector<GpuReadbackRange> merged;
-    merged.reserve(ranges.size());
-    for (const auto& range : ranges) {
-      if (!merged.empty() && merged.back().end() == range.address &&
-          merged.back().generation == range.generation) {
-        merged.back().size += range.size;
-      } else {
-        merged.push_back(range);
-      }
-    }
-    ranges = std::move(merged);
   }
 
   // Remove only bytes still carrying generation. Returns the number of bytes
@@ -892,8 +927,13 @@ class GuestMemoryGpuCoherency {
       const std::vector<GpuReadbackRange>& ranges, GpuCoherencyRange query) {
     std::vector<GpuReadbackRange> result;
     if (!query.size) return result;
-    for (const auto& range : ranges) {
-      if (range.end() <= query.address) continue;
+    const auto first = std::lower_bound(ranges.begin(), ranges.end(),
+                                        std::uint64_t{query.address},
+                                        [](const GpuReadbackRange& range, std::uint64_t value) {
+                                          return range.end() <= value;
+                                        });
+    for (auto it = first; it != ranges.end(); ++it) {
+      const auto& range = *it;
       if (range.address >= query.end()) break;
       const auto start = (std::max)(std::uint64_t{range.address},
                                     std::uint64_t{query.address});

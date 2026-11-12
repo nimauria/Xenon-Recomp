@@ -1,5 +1,7 @@
 #include "xenon/gpu/guest_read_sync.hpp"
 
+#include <algorithm>
+
 namespace xenon::gpu {
 
 std::uint64_t GuestReadSync::sync(memory::AddressSpace& memory, const Classify& classify) {
@@ -27,7 +29,9 @@ std::uint64_t GuestReadSync::sync(memory::AddressSpace& memory, const Classify& 
       continue;
     }
     if (coherency.range_changed_since(sampled.base, sampled.size, sampled.accounted_epoch,
-                                      epoch_)) {
+                                      epoch_) &&
+        changed_beyond_publications(coherency, sampled.base, sampled.size,
+                                    sampled.accounted_epoch)) {
       auto& capture = captures_[it->first];
       capture.bytes.resize(sampled.size);
       capture.base = sampled.base;
@@ -42,6 +46,35 @@ std::uint64_t GuestReadSync::sync(memory::AddressSpace& memory, const Classify& 
     ++it;
   }
   return epoch_;
+}
+
+bool GuestReadSync::changed_beyond_publications(const memory::GuestMemoryCoherency& coherency,
+                                               std::uint32_t base, std::uint32_t size,
+                                               std::uint64_t since) const {
+  if (published_.empty() || !size) return true;
+  const auto end = (std::min)(std::uint64_t{base} + size, std::uint64_t{memory::kPhysicalMemorySize});
+  for (auto page = base / memory::kBasePageSize;
+       std::uint64_t{page} * memory::kBasePageSize < end; ++page) {
+    const auto epoch = coherency.page_epoch(page);
+    if (epoch <= since) continue;
+    // The page's newest write must be a publication covering it that found
+    // the page no newer than `since`: the copy rewrote bytes the texture
+    // already has, and nothing else wrote the page since.
+    const auto page_begin = std::uint64_t{page} * memory::kBasePageSize;
+    const bool only_published = std::any_of(
+        published_.rbegin(), published_.rend(), [&](const memory::GpuPublishedWrite& write) {
+          return write.epoch == epoch && write.previous_epoch <= since &&
+                 write.address < page_begin + memory::kBasePageSize &&
+                 page_begin < std::uint64_t{write.address} + write.size;
+        });
+    if (!only_published) return true;
+  }
+  return false;
+}
+
+void GuestReadSync::gpu_published(std::span<const memory::GpuPublishedWrite> writes) {
+  for (const auto& write : writes) published_.push_back(write);
+  while (published_.size() > kPublicationsKept) published_.pop_front();
 }
 
 std::uint64_t GuestReadSync::read_epoch(const memory::AddressSpace& memory) const {
@@ -93,7 +126,24 @@ void GuestReadSync::backend_wrote(std::uint32_t base, std::uint32_t size) {
 void GuestReadSync::clear() noexcept {
   sampled_.clear();
   captures_.clear();
+  published_.clear();
   active_ = false;
+}
+
+bool cached_texture_stale(TextureDirtyTracker& dirty, GuestReadSync& reads, std::uint64_t key,
+                          const memory::GuestMemoryCoherency& coherency,
+                          std::uint64_t read_epoch) {
+  if (!dirty.consume_dirty(key, coherency, read_epoch)) return false;
+  // A GPU write untracks the texture (backend_wrote), so this vetoes only a
+  // CPU write the latest sync point did not see.
+  return !reads.unchanged_at_sync(key);
+}
+
+void note_backend_write(TextureDirtyTracker& dirty, GuestReadSync& reads, std::uint32_t base,
+                        std::uint32_t size) {
+  if (!size) return;
+  dirty.mark_dirty(base, size);
+  reads.backend_wrote(base, size);
 }
 
 }  // namespace xenon::gpu
