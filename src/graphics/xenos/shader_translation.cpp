@@ -148,16 +148,26 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
 void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) {
   if (instruction.kind == ShaderInstructionKind::VertexFetch) {
     const auto& fetch = instruction.vertex_fetch;
-    out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          uint source_index = (uint)floor(r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + aL";
-    out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "] + "
-        << (fetch.index_rounded ? "0.5" : "0.0") << ");\n"
-        << "          float4 fetched = xenon_vertex_fetch(" << unsigned(fetch.fetch_constant)
-        << ", " << unsigned(fetch.fetch_constant_select) << ", source_index, " << unsigned(fetch.stride_dwords) << ", "
-        << fetch.offset_dwords << ", " << unsigned(fetch.data_format) << ", "
-        << (fetch.signed_data ? "true" : "false") << ", "
-        << (fetch.normalized ? "true" : "false") << ");\n"
+    out << "        if (" << predicate(fetch.predicate) << ") {\n";
+    // A full vfetch computes and latches the element's address (the fetch
+    // constant's base plus index * stride); a vfetch_mini reads at that
+    // latched address plus its own offset and never reads an index register.
+    // Titles overwrite the index register with the full fetch's own result
+    // (r0 = vfetch r0.x), so re-reading it for the mini fetches that follow
+    // fetched the rest of the vertex from wherever that data pointed:
+    // AC6's characters came out contorted and its aircraft torn apart.
+    if (!fetch.mini_fetch) {
+      out << "          vfetch_base = xenon_vertex_fetch_base(" << unsigned(fetch.fetch_constant)
+          << ", " << unsigned(fetch.fetch_constant_select) << ", xenon_fetch_index(r[("
+          << unsigned(fetch.source_register);
+      if (fetch.source_relative) out << " + aL";
+      out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "], "
+          << (fetch.index_rounded ? "true" : "false") << "), " << unsigned(fetch.stride_dwords)
+          << ");\n";
+    }
+    out << "          float4 fetched = xenon_vertex_decode(vfetch_base, " << fetch.offset_dwords
+        << ", " << unsigned(fetch.data_format) << ", " << (fetch.signed_data ? "true" : "false")
+        << ", " << (fetch.normalized ? "true" : "false") << ");\n"
         << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
     if (fetch.destination_relative) out << " + aL";
     out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
@@ -482,14 +492,38 @@ uint4 xenon_endian_swap(uint4 value, uint endian) {
   return value;
 }
 
-float4 xenon_vertex_fetch(uint fetch_constant, uint select, uint index, uint stride,
-                          int offset, uint format, bool is_signed, bool normalized) {
+// The vertex a vfetch reads: its index operand floored, or rounded to the
+// nearest (floor(x + 0.5)) for the rounded form. Titles compute indices with
+// reciprocals (index = a * rcp(b)); the host's reciprocal may land a few ULPs
+// below the Xenos result, so an index that is exactly 3 on the console
+// arrives as 2.9999998 and floors to the previous vertex. Ring and grid
+// indices (AC6's terrain and sea pick a slot as frac(n / 40) * 40) carry the
+// error of the larger value they came from, so a slot of 1 arrives as
+// 0.999999. The floor therefore tolerates 2.5e-4 - the fixed bias sal063's
+// AC6 recomp cured the game's black-triangle terrain with - or 2^-21 of the
+// index's magnitude where float spacing outgrows that, capped at a quarter,
+// so an exact integer never floors up where floats grow sparse; both stay far
+// below any fraction an index carries on purpose.
+uint xenon_fetch_index(float index, bool rounded) {
+  if (rounded) return (uint)floor(index + 0.5);
+  return (uint)floor(index + min(max(2.5e-4, abs(index) * 4.76837158203125e-7), 0.25));
+}
+
+// A full vfetch's latched element: its byte address (the fetch constant's
+// base plus index * stride dwords) and the constant's endian mode. vfetch_mini
+// instructions read at this address plus their own offset.
+uint2 xenon_vertex_fetch_base(uint fetch_constant, uint select, uint index, uint stride) {
   // Three vertex fetch constants share each fetch slot, packed by the host as
   // (dword address << 2) | endian in .x/.z/.w for selects 0/1/2.
   uint4 slot = XenonVertexFetchConstants[fetch_constant & 31];
   uint packed = select == 0u ? slot.x : (select == 1u ? slot.z : slot.w);
-  uint address = (packed & ~3u) + 4 * (index * stride + offset);
-  uint4 raw = xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u);
+  return uint2((packed & ~3u) + 4 * index * stride, packed & 3u);
+}
+
+float4 xenon_vertex_decode(uint2 base, int offset, uint format, bool is_signed,
+                           bool normalized) {
+  uint address = base.x + 4 * offset;
+  uint4 raw = xenon_endian_swap(XenonGuestMemory.Load4(address), base.y);
   if (format == 36) return asfloat(raw.x).xxxx;
   if (format == 37) return float4(asfloat(raw.xy), 0.0, 1.0);
   if (format == 57) return float4(asfloat(raw.xyz), 1.0);
@@ -1058,6 +1092,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
                  opcode == ControlFlowOpcode::CondExecPredEnd) {
         condition = cf.predicate.condition ? "p0" : "!p0";
       }
+      << "  uint2 vfetch_base=uint2(0u, 0u);\n"
       out << "        bool execute = " << condition << ";\n"
           << "        if (execute) {\n";
       for (std::uint32_t address = cf.target; address < cf.target + cf.count; ++address) {

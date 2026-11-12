@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -237,14 +238,16 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   }
   assert(lowered.complete);
   assert(lowered.hlsl.find(
-             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.0);") !=
+             "vfetch_base = xenon_vertex_fetch_base(5, 2, xenon_fetch_index(r[(0) & 63][0], "
+             "false), 3);") != std::string::npos);
+  assert(lowered.hlsl.find("asuint(r[") == std::string::npos);
+  assert(lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 0, 16, true, true)") !=
          std::string::npos);
-  assert(lowered.hlsl.find("source_index = asuint") == std::string::npos);
-  assert(lowered.hlsl.find("xenon_vertex_fetch(5, 2, source_index") != std::string::npos);
   assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
          std::string::npos);
-  assert(lowered.hlsl.find("(packed & ~3u)") != std::string::npos);
-  assert(lowered.hlsl.find("xenon_endian_swap(XenonGuestMemory.Load4(address), packed & 3u)") !=
+  assert(lowered.hlsl.find("uint2((packed & ~3u) + 4 * index * stride, packed & 3u)") !=
+         std::string::npos);
+  assert(lowered.hlsl.find("xenon_endian_swap(XenonGuestMemory.Load4(address), base.y)") !=
          std::string::npos);
   DxcShaderCompiler compiler;
   assert(compiler.compile(lowered, {}).succeeded);
@@ -258,7 +261,7 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   const auto rounded = HlslShaderLowerer::lower(shader);
   assert(rounded.complete);
   assert(rounded.hlsl.find(
-             "uint source_index = (uint)floor(r[(0) & 63][0] + 0.5);") !=
+             "xenon_fetch_index(r[(0) & 63][0], true), 3);") !=
          std::string::npos);
   shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
   assert(!HlslShaderLowerer::lower(shader).complete);
@@ -266,6 +269,119 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
 
 // Regression (Ace Combat 6 logos): the vertex shader's r0.x is the vertex
 // grouper's index - the draw's index plus VGT_INDX_OFFSET, 24 bits, clamped
+// Regression (AC6 contorted characters, torn aircraft): a vfetch_mini reads
+// at the address its preceding full vfetch latched, plus its own offset; it
+// never reads an index register. AC6 overwrites the index register with the
+// full fetch's own result (r0 = vfetch r0.x, then vfetch_mini +4 into r1), so
+// re-reading r0.x for the mini fetch took the rest of the vertex from wherever
+// the first fetched value pointed.
+void test_vertex_fetch_mini_reuses_the_full_fetch_address() {
+  using namespace xenon::gpu;
+  auto shader = make_shader(ShaderStage::Vertex);
+  DecodedInstruction full{};
+  full.kind = ShaderInstructionKind::VertexFetch;
+  full.vertex_fetch.address = 1;
+  full.vertex_fetch.fetch_constant = 31;
+  full.vertex_fetch.fetch_constant_select = 2;
+  full.vertex_fetch.source_register = 0;
+  full.vertex_fetch.destination_register = 0;  // overwrites its own index
+  full.vertex_fetch.destination_swizzle = 0x688;
+  full.vertex_fetch.stride_dwords = 8;
+  full.vertex_fetch.data_format = 38;  // 32_32_32_32_FLOAT
+  auto mini = full;
+  mini.vertex_fetch.address = 2;
+  mini.vertex_fetch.mini_fetch = true;
+  mini.vertex_fetch.destination_register = 1;
+  mini.vertex_fetch.offset_dwords = 4;
+  mini.vertex_fetch.stride_dwords = 0;  // a mini fetch encodes no stride
+  shader.instructions.insert(shader.instructions.begin(), {full, mini});
+  shader.instructions[2].alu.address = 3;
+  shader.control_flow[0].count = 3;
+  const auto lowered = HlslShaderLowerer::lower(shader);
+  assert(lowered.complete);
+  const auto first = lowered.hlsl.find(
+      "vfetch_base = xenon_vertex_fetch_base(31, 2, xenon_fetch_index(r[(0) & 63][0], false), 8);");
+  assert(first != std::string::npos);
+  // The base is latched once - the mini fetch does not read r0.x again.
+  assert(lowered.hlsl.find("vfetch_base = xenon_vertex_fetch_base(", first + 1) ==
+         std::string::npos);
+  const auto full_decode = lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 0, 38,", first);
+  const auto mini_decode = lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 4, 38,", first);
+  assert(full_decode != std::string::npos && mini_decode != std::string::npos &&
+         full_decode < mini_decode);
+  assert(lowered.hlsl.find("uint2 vfetch_base=uint2(0u, 0u);") != std::string::npos);
+  DxcShaderCompiler compiler;
+  assert(compiler.compile(lowered, {}).succeeded);
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  assert(compiler.compile(lowered, spirv).succeeded);
+  std::cout << "  [PASS] vfetch_mini reuses the full fetch's address\n";
+}
+
+// The emitted xenon_fetch_index, evaluated as the host GPU does (fp32).
+std::uint32_t host_fetch_index(float index, bool rounded) {
+  if (rounded) return static_cast<std::uint32_t>(std::floor(index + 0.5f));
+  return static_cast<std::uint32_t>(
+      std::floor(index + std::min(std::max(2.5e-4f, std::fabs(index) * 4.76837158203125e-7f), 0.25f)));
+}
+
+// Regression (AC6 black-triangle terrain, see-through aircraft): a vfetch
+// index the title computes as a * rcp(b) can reach the host a few ULPs below
+// the integer the console computes; flooring it fetched the previous vertex.
+// The floor tolerates host reciprocal error at any magnitude and leaves
+// intended fractions and the rounded form alone.
+void test_vertex_fetch_index_tolerates_host_reciprocal_error() {
+  using namespace xenon::gpu;
+  const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  assert(lowered.complete);
+  assert(lowered.hlsl.find(
+             "return (uint)floor(index + min(max(2.5e-4, abs(index) * 4.76837158203125e-7), 0.25));") !=
+         std::string::npos);
+  // 6 * (one ULP below 1/3), the product a low reciprocal yields: 1.9999999.
+  const float low_third = std::nextafter(1.0f / 3.0f, 0.0f);
+  assert(std::floor(6.0f * low_third) == 1.0f);
+  assert(host_fetch_index(6.0f * low_third, false) == 2u);
+  for (const float integer :
+       {1.0f, 3.0f, 255.0f, 4096.0f, 65535.0f, 1048575.0f, 4194303.0f, 16777215.0f}) {
+    for (int ulps = 0; ulps <= 4; ++ulps) {
+      float below = integer;
+      for (int i = 0; i < ulps; ++i) below = std::nextafter(below, 0.0f);
+      // Where floats are a quarter or more apart, a step down is another
+      // index, not error.
+      if (integer - below >= 0.25f) break;
+      assert(host_fetch_index(below, false) == static_cast<std::uint32_t>(integer));
+    }
+    assert(host_fetch_index(integer, false) == static_cast<std::uint32_t>(integer));
+  }
+  // Fractions an index carries on purpose still floor.
+  assert(host_fetch_index(0.0f, false) == 0u);
+  assert(host_fetch_index(2.5f, false) == 2u);
+  assert(host_fetch_index(1.75f, false) == 1u);
+  assert(host_fetch_index(1023.99f, false) == 1023u);
+  // The rounded form rounds to the nearest, halves up.
+  assert(host_fetch_index(2.5f, true) == 3u);
+  assert(host_fetch_index(2.4999998f, true) == 2u);
+  // Regression (AC6 black triangles on terrain, runway and sea): a ring slot
+  // worked out as frac(n * rcp(40)) * 40 carries the error of n / 40, so slot
+  // 1 arrived as 0.999999 and fetched the wrong ring entry. Every slot of the
+  // first hundred rows of a 40-entry ring resolves (slot 0 wraps from 40 and
+  // is the console's own ambiguity, so it is left out).
+  const float rcp40 = 1.0f / 40.0f;
+  unsigned slots = 0;
+  for (unsigned row = 0; row < 100; ++row) {
+    for (unsigned k = 0; k < 40; ++k) {
+      const unsigned n = 10u * row + 1u + k;
+      if (n % 40u == 0u) continue;
+      const float scaled = static_cast<float>(n) * rcp40;
+      const float slot = (scaled - std::floor(scaled)) * 40.0f;
+      assert(host_fetch_index(slot, false) == n % 40u);
+      ++slots;
+    }
+  }
+  assert(slots == 3900u);
+  std::cout << "  [PASS] vfetch index tolerates host reciprocal error\n";
+}
+
 // to [VGT_MIN_VTX_INDX, VGT_MAX_VTX_INDX] - not the host's raw vertex id, or
 // every quad drawn at a StartVertex fetches the buffer's first vertices.
 void test_vertex_index_applies_grouper_offset_and_clamp() {
@@ -681,3 +797,5 @@ int main() {
   test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }
+  test_vertex_fetch_index_tolerates_host_reciprocal_error();
+  test_vertex_fetch_mini_reuses_the_full_fetch_address();
