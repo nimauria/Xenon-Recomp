@@ -36,8 +36,9 @@ sudo apt-get install libxcursor-dev mesa-vulkan-drivers vulkan-validationlayers 
 vulkaninfo --summary   # expect deviceName = llvmpipe
 ```
 
-`libxcursor-dev` is also installed by Linux CI. SDL3's X11 configuration
-requires its Xcursor development headers even when the host uses llvmpipe.
+Linux CI also installs `libxext-dev`, `libxi-dev`, and `libxss-dev`. SDL3's
+X11 configuration requires these XInput and XScreenSaver development headers,
+as well as the Xcursor headers, even when the host uses llvmpipe.
 
 ## Checking Windows graphics code on Linux
 
