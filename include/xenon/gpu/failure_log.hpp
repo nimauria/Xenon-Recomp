@@ -38,4 +38,46 @@ class GpuFailureLog {
   std::uint64_t unlisted_{};
 };
 
+// One kind of resolve - depth or color, the source render-target format, the
+// destination texture format and the rectangle size - and how many of them
+// wrote only zeros.
+struct GpuResolveKind {
+  bool depth{};
+  std::uint8_t source_format{};
+  std::uint8_t destination_format{};
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::uint64_t count{};
+  std::uint64_t all_zero{};
+  // Guest physical address the latest resolve of this kind wrote.
+  std::uint32_t last_destination{};
+  // Resolves whose data sat in one byte lane of each 4-byte texel only (an
+  // alpha-only image is black), among those small enough to be scanned.
+  std::uint64_t single_lane{};
+};
+
+// A pass that resolves to black succeeds like any other resolve, so a frame
+// that comes out black with no failed draws gives no hint which pass went
+// dark. This keeps every kind of resolve in first-seen order with its
+// all-zero count, so the stop report shows where the image was lost.
+// Thread-safe and bounded like GpuFailureLog.
+class GpuResolveCensus {
+ public:
+  static constexpr std::size_t kMaxKinds = 64;
+
+  // Counts one resolve. Returns true when this is the first time its kind
+  // wrote only zeros.
+  bool record(bool depth, std::uint8_t source_format, std::uint8_t destination_format,
+              std::uint32_t width, std::uint32_t height, bool all_zero,
+              std::uint32_t destination = 0u, bool single_lane = false);
+  [[nodiscard]] std::vector<GpuResolveKind> kinds() const;
+  // Resolves whose kind was not kept because kMaxKinds was reached.
+  [[nodiscard]] std::uint64_t unlisted() const;
+
+ private:
+  mutable std::mutex mutex_{};
+  std::vector<GpuResolveKind> kinds_{};
+  std::uint64_t unlisted_{};
+};
+
 }  // namespace xenon::gpu

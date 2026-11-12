@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -60,9 +61,38 @@ void test_concurrent_record_and_read() {
   (void)seen;
 }
 
+// Each kind of resolve is counted with how many wrote only zeros, and only
+// the first all-zero output of a kind is reported as new.
+void test_resolve_census() {
+  xenon::gpu::GpuResolveCensus census;
+  assert(!census.record(false, 6, 26, 1280, 720, false, 0x1C150000u));
+  assert(census.record(false, 6, 26, 1280, 720, true));    // first all-zero
+  assert(!census.record(false, 6, 26, 1280, 720, true));   // already reported
+  assert(!census.record(true, 0, 22, 1280, 720, false));
+  assert(census.record(false, 6, 26, 640, 360, true));     // another size is another kind
+  const auto kinds = census.kinds();
+  assert(kinds.size() == 3u);
+  assert(!kinds[0].depth && kinds[0].source_format == 6 && kinds[0].destination_format == 26);
+  assert(kinds[0].width == 1280u && kinds[0].height == 720u);
+  assert(kinds[0].count == 3u && kinds[0].all_zero == 2u);
+  assert(kinds[0].last_destination == 0u);  // the latest resolve gave none
+  assert(kinds[1].depth && kinds[1].count == 1u && kinds[1].all_zero == 0u);
+  assert(kinds[2].count == 1u && kinds[2].all_zero == 1u);
+  census.record(true, 0, 22, 1280, 720, false, 0x1B688000u);
+  assert(census.kinds()[1].last_destination == 0x1B688000u);
+
+  xenon::gpu::GpuResolveCensus full;
+  for (std::uint32_t i = 0; i < xenon::gpu::GpuResolveCensus::kMaxKinds + 3u; ++i) {
+    full.record(false, 6, 26, i + 1u, 1, false);
+  }
+  assert(full.kinds().size() == xenon::gpu::GpuResolveCensus::kMaxKinds);
+  assert(full.unlisted() == 3u);
+}
+
 }  // namespace
 
 int main() {
+  test_resolve_census();
   test_counts_each_distinct_reason_in_first_seen_order();
   test_the_same_message_for_a_draw_and_a_resolve_stays_apart();
   test_bounded_past_the_limit();

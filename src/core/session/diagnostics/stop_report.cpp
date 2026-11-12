@@ -333,6 +333,16 @@ void XenonSession::report_stop_diagnostics() {
             std::cout << "[XenonSession]   " << (reason.resolve ? "resolve" : "draw")
                       << " failed x" << reason.count << ": " << reason.message << std::endl;
           }
+          // Which passes resolved to nothing: a black frame with no failed
+          // draws is traced from here.
+          for (const auto& kind : gpu_->resolve_census()) {
+            std::cout << "[XenonSession]   " << (kind.depth ? "depth" : "color")
+                      << " resolve rt format " << unsigned(kind.source_format)
+                      << " -> texture format " << unsigned(kind.destination_format) << ' '
+                      << kind.width << 'x' << kind.height << ": x" << kind.count << ", all-zero x"
+                      << kind.all_zero << ", single-lane x" << kind.single_lane << " (latest to 0x"
+                      << std::hex << kind.last_destination << std::dec << ")" << std::endl;
+          }
         }
         // Whether the scanout source holds an image at all: a black window
         // with an all-zero front buffer is a rendering problem, not a
