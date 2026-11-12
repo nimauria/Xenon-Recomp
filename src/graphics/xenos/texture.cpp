@@ -261,6 +261,10 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
                                                   : std::numeric_limits<std::uint32_t>::max();
   std::uint64_t mip_cursor = 0;
   std::uint64_t packed_tail_offset = 0;
+  // The mips' packed tail is stored once, at the first packed mip past the
+  // base (every later level samples inside it), even when the tail starts
+  // at level 0 and the base keeps its own (xenia/rexglue GetGuestTextureLayout).
+  bool mip_tail_placed = false;
   std::uint64_t linear_cursor = 0;
   for (std::uint32_t mip = first_mip; mip <= last_mip; ++mip) {
     const auto width = std::max(1u, descriptor.width >> mip);
@@ -284,13 +288,19 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
     auto row_pitch = pitch_blocks * result.format.bytes_per_block();
     if (!descriptor.tiled && mip != 0) row_pitch = align_up(row_pitch, 256);
     const auto slice_stride = std::uint64_t(row_pitch) * storage_height;
+    // Only 3D textures tile their depth in groups of four slices. A 2D array
+    // layer or cube face is one slice apart; padding those to four made every
+    // mip from 2 up, and cube faces 1-5, read the wrong guest memory (AC6's
+    // clouds as blocky noise, minified terrain and runway as garbage).
+    const auto stacked_slices =
+        descriptor.dimension == TextureDimension::ThreeD ? align_up(depth, 4) : 1u;
     const auto layer_stride = align_up(static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(slice_stride * align_up(depth, 4),
+        std::min<std::uint64_t>(slice_stride * stacked_slices,
                                 std::numeric_limits<std::uint32_t>::max())), 4096);
     std::uint32_t packed_x{}, packed_y{}, packed_z{};
     if (packed) packed_origin(descriptor, result.format, mip, packed_x, packed_y, packed_z);
-    if (mip != 0 && packed && (mip == tail_level || tail_level == 0))
-      packed_tail_offset = mip_cursor;
+    const bool places_mip_tail = mip != 0 && packed && !mip_tail_placed;
+    if (places_mip_tail) packed_tail_offset = mip_cursor;
     const auto level_offset = mip == 0 ? 0u :
                               packed ? packed_tail_offset : mip_cursor;
     for (std::uint32_t layer = 0; layer < array_layers; ++layer) {
@@ -314,12 +324,13 @@ TextureLayout build_texture_layout(const TextureDescriptor& descriptor) {
       sub.packed_z = packed_z;
       sub.guest_size_bytes = layer_stride;
       sub.linear_offset_bytes = linear_cursor;
-      sub.linear_row_pitch_bytes = width_blocks * result.format.bytes_per_block();
+      sub.linear_row_pitch_bytes = width_blocks * result.format.host_bytes_per_block();
       linear_cursor += std::uint64_t(sub.linear_row_pitch_bytes) * height_blocks * depth;
       result.subresources.push_back(sub);
     }
     if (mip == 0) result.base_extent_bytes = layer_stride * array_layers;
-    else if (!packed || mip == tail_level || tail_level == 0) {
+    else if (!packed || places_mip_tail) {
+      mip_tail_placed |= places_mip_tail;
       mip_cursor += layer_stride * array_layers;
       result.mip_extent_bytes = std::max(result.mip_extent_bytes, mip_cursor);
     }

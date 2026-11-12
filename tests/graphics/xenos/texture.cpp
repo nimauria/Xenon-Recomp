@@ -199,6 +199,53 @@ void test_mips_packing_and_dirty_ranges() {
   assert(!dirty.consume_dirty(descriptor.hash(), coherency, dirty_epoch));
 }
 
+// Regression (AC6 clouds as blocky noise, minified terrain and runway as
+// garbage): only 3D textures tile depth in groups of four slices. 2D mips and
+// cube faces are one 4 KiB-aligned slice apart (xenia/rexglue
+// GetGuestTextureLayout, COGBox texture_layout.h), and a mip tail packed from
+// level 0 is stored once, at the start of the mips.
+void test_layer_and_mip_strides() {
+  // 256x256 RGBA8, tiled, unpacked mips: mip 1 (128x128) is 128 * 4 bytes x
+  // 128 rows = 64 KiB, so mip 2 starts 64 KiB after the mip address.
+  auto mipped = rgba8(256, 256, true);
+  mipped.mip_max_level = 8;
+  auto layout = build_texture_layout(mipped);
+  assert(layout.valid && layout.subresources.size() == 9u);
+  assert(layout.subresources[1].guest_address == mipped.mip_address);
+  assert(layout.subresources[1].guest_size_bytes == 0x10000u);
+  assert(layout.subresources[2].guest_address == mipped.mip_address + 0x10000u);
+  assert(layout.subresources[3].guest_address == mipped.mip_address + 0x10000u + 0x4000u);
+
+  // 64x64 RGBA8 cube: each face is 64 * 4 bytes x 64 rows = 16 KiB.
+  auto cube = rgba8(64, 64, true);
+  cube.dimension = TextureDimension::Cube;
+  layout = build_texture_layout(cube);
+  assert(layout.valid && layout.subresources.size() == 6u);
+  for (std::uint32_t face = 0; face < 6u; ++face) {
+    assert(layout.subresources[face].array_layer == face);
+    assert(layout.subresources[face].guest_address == cube.base_address + face * 0x4000u);
+  }
+
+  // A 3D texture still keeps four slices per depth tile.
+  auto volume = rgba8(32, 32, true);
+  volume.dimension = TextureDimension::ThreeD;
+  volume.depth = 2;
+  layout = build_texture_layout(volume);
+  assert(layout.valid && layout.subresources[0].guest_size_bytes == 4u * 32u * 4u * 32u);
+
+  // 16x16 with packed mips: the tail starts at level 0, so the base keeps
+  // its own and every mip samples inside one shared tail at the mip address.
+  auto small = rgba8(16, 16, true);
+  small.mip_max_level = 4;
+  small.packed_mips = true;
+  layout = build_texture_layout(small);
+  assert(layout.valid && layout.subresources.size() == 5u);
+  assert(layout.subresources[0].guest_address == small.base_address);
+  for (std::size_t mip = 1; mip < layout.subresources.size(); ++mip)
+    assert(layout.subresources[mip].guest_address == small.mip_address);
+  std::cout << "  [PASS] 2D, cube and 3D layer and mip strides\n";
+}
+
 void test_3d_tiled_addressing() {
   std::set<std::uint64_t> offsets;
   for (std::uint32_t z = 0; z < 4; ++z)
@@ -440,10 +487,12 @@ int main() {
   test_sampled_depth_formats();
   test_tiled_decode_and_endian();
   test_mips_packing_and_dirty_ranges();
+  test_layer_and_mip_strides();
   test_3d_tiled_addressing();
   test_endian128_modes();
   test_raw_resolve_write();
   test_depth_resolve_write();
   test_converted_resolve_write();
+  test_rgb_float_is_widened();
   std::cout << "xenon_texture_tests: ok\n";
 }
