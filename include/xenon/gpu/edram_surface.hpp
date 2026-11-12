@@ -181,6 +181,13 @@ enum class ColorHostStorage : std::uint8_t {
 // that change hands. False when a tile lies outside the surface or a 64bpp
 // pixel column arrives with only one of its two tiles - such a set does not
 // map to whole pixels, and the caller must move the full surface.
+// `height_pixels` rounded up to whole EDRAM tile rows (16 sample rows). A
+// surface that reaches into a tile row owns that whole tile, so a native
+// image sized this way holds every tile it owns whole, and handing the tiles
+// to another view of them stays a GPU transfer (AC6's 640x360 scene ends half
+// way down a tile row and its 1280x720 view took the tiles on the CPU).
+[[nodiscard]] std::uint32_t whole_tile_height_pixels(const EdramSurfaceLayout& layout) noexcept;
+
 // The most rows `layout` can have without running into another surface bound
 // to the same draw. Surfaces of one draw never share EDRAM, so each ends where
 // the next bound base tile begins, counting cyclically through EDRAM. Bases
@@ -242,6 +249,28 @@ static_assert(sizeof(EdramDepthTransferConstants) == 64u);
 [[nodiscard]] bool edram_direct_transfer_supported(
     const EdramSurfaceLayout& source, const EdramSurfaceLayout& destination,
     std::span<const std::uint16_t> tiles) noexcept;
+
+// One side of an EDRAM transfer: a color or depth view of the tiles and its
+// guest format (a ColorRenderTargetFormat or DepthRenderTargetFormat).
+struct EdramTransferEndpoint {
+  bool depth{};
+  std::uint8_t format{};
+  friend bool operator==(const EdramTransferEndpoint&, const EdramTransferEndpoint&) = default;
+};
+
+// Whether a transfer shader can move EDRAM words between two different views
+// (another format, or color and depth) without the canonical byte store: on
+// Xenos the tiles hold raw 32-bit words, and the destination reads the words
+// the source wrote. The shader packs each source host sample into its EDRAM
+// word and unpacks that word as the destination's format, as the canonical
+// path's CPU conversion does. Both views must be 32 bits per sample, in a
+// format whose host value carries every word bit for bit: R8G8B8A8,
+// R10G10B10A2 (and its _AS_10 alias), R32_FLOAT, D24S8 and D24FS8. Other
+// formats keep the canonical path: gamma, 7e3 float, fixed-point 16 and
+// 64bpp are stored at another precision, and R16G16_FLOAT would lose NaN
+// payloads (GPUs canonicalize half NaNs on conversion).
+[[nodiscard]] bool edram_converting_transfer_supported(EdramTransferEndpoint source,
+                                                       EdramTransferEndpoint destination) noexcept;
 
 struct EdramTransferSample {
   std::uint32_t x{};

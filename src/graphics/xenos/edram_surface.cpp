@@ -661,6 +661,11 @@ bool clear_edram_surface_region(Edram& edram,
   return true;
 }
 
+std::uint32_t whole_tile_height_pixels(const EdramSurfaceLayout& layout) noexcept {
+  const auto rows_per_tile = layout.msaa == MsaaSamples::X1 ? 16u : 8u;
+  return (layout.height_pixels + rows_per_tile - 1u) / rows_per_tile * rows_per_tile;
+}
+
 std::uint32_t rows_before_next_surface(const EdramSurfaceLayout& layout,
                                        std::span<const std::uint32_t> bound_bases) {
   auto rows = layout.max_resident_height_pixels();
@@ -788,6 +793,30 @@ bool edram_direct_transfer_supported(const EdramSurfaceLayout& source,
                           source.base_tile % Edram::kTileCount) % 2u)
     return false;
   return true;
+}
+
+namespace {
+
+bool converting_transfer_format(EdramTransferEndpoint endpoint) noexcept {
+  if (endpoint.depth) {
+    const auto format = static_cast<DepthRenderTargetFormat>(endpoint.format);
+    return format == DepthRenderTargetFormat::D24S8 || format == DepthRenderTargetFormat::D24FS8;
+  }
+  switch (storage_color_format(static_cast<ColorRenderTargetFormat>(endpoint.format))) {
+    case ColorRenderTargetFormat::R8G8B8A8:
+    case ColorRenderTargetFormat::R10G10B10A2:
+    case ColorRenderTargetFormat::R32Float:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+bool edram_converting_transfer_supported(EdramTransferEndpoint source,
+                                         EdramTransferEndpoint destination) noexcept {
+  return converting_transfer_format(source) && converting_transfer_format(destination);
 }
 
 std::optional<EdramTransferSample> edram_transfer_source(
