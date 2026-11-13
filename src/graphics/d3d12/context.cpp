@@ -24,6 +24,14 @@ bool debug_layer_requested() {
   return value != nullptr && *value != 0 && std::string(value) != "0";
 }
 
+// XENON_D3D12_ADAPTER=warp renders on WARP, Windows' software rasterizer,
+// even where a GPU exists: what a host without one (CI's Windows runners)
+// renders on, so its results can be reproduced on any machine.
+bool software_adapter_requested() {
+  const char* value = std::getenv("XENON_D3D12_ADAPTER");
+  return value != nullptr && std::string(value) == "warp";
+}
+
 void CALLBACK debug_message(D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity,
                             D3D12_MESSAGE_ID id, LPCSTR description, void*) {
   if (severity > D3D12_MESSAGE_SEVERITY_WARNING) return;  // info and messages
@@ -63,6 +71,7 @@ bool Context::initialize(const ContextConfig& config) {
     error_ = "CreateDXGIFactory2 failed";
     return false;
   }
+  const bool software_only = software_adapter_requested();
   for (UINT index = 0;; ++index) {
     Microsoft::WRL::ComPtr<IDXGIAdapter1> candidate;
     if (factory_->EnumAdapterByGpuPreference(
@@ -72,8 +81,8 @@ bool Context::initialize(const ContextConfig& config) {
     }
     DXGI_ADAPTER_DESC1 desc{};
     candidate->GetDesc1(&desc);
-    if (!config.allow_software_adapter &&
-        (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+    const bool software = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+    if (software_only ? !software : (software && !config.allow_software_adapter)) {
       continue;
     }
     Microsoft::WRL::ComPtr<ID3D12Device> device;
@@ -100,7 +109,8 @@ bool Context::initialize(const ContextConfig& config) {
     }
     return true;
   }
-  error_ = "no D3D12 hardware adapter supports feature level 12_0";
+  error_ = software_only ? "XENON_D3D12_ADAPTER=warp: WARP does not support feature level 12_0"
+                        : "no D3D12 hardware adapter supports feature level 12_0";
   return false;
 }
 

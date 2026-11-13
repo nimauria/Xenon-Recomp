@@ -1,5 +1,6 @@
 #include "crash_report.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -206,12 +207,18 @@ void fatal_signal_handler(int signal_number, siginfo_t* signal_info, void*) {
 [[noreturn]] void terminate_handler() {
   // An uncaught C++ exception: name it when there is one to name.
   static char line[1024];
+  char what_buffer[512]{};
   std::string_view what = "no active exception";
   if (const auto current = std::current_exception()) {
     try {
       std::rethrow_exception(current);
     } catch (const std::exception& error) {
-      what = error.what();
+      const char* text = error.what();
+      if (text) {
+        const auto length = (std::min)(std::strlen(text), sizeof(what_buffer) - 1u);
+        std::memcpy(what_buffer, text, length);
+        what = std::string_view(what_buffer, length);
+      }
     } catch (...) {
       what = "a non-standard exception";
     }

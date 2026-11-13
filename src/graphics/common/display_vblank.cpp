@@ -21,6 +21,14 @@ std::uint32_t host_refreshes_per_guest_vblank(double host_refresh_hz) noexcept {
              : 0u;
 }
 
+bool display_wait_overran(double host_refresh_hz, std::uint32_t refreshes,
+                          std::chrono::nanoseconds elapsed) noexcept {
+  if (!(host_refresh_hz > 0.0) || !std::isfinite(host_refresh_hz)) return true;
+  const double period_ns = 1e9 / host_refresh_hz;
+  return static_cast<double>(elapsed.count()) >
+         (static_cast<double>(refreshes) + 0.5) * period_ns;
+}
+
 #if defined(_WIN32)
 struct HostDisplayVblank::State {
   Microsoft::WRL::ComPtr<IDXGIOutput> output;

@@ -45,8 +45,34 @@ void test_refresh_multiples() {
   assert(host_refreshes_per_guest_vblank(INFINITY) == 0u);
 }
 
-// On a host with a display the source waits for real refreshes: consecutive
-// waits are one refresh period apart.
+// Regression (Windows CI: the runner's virtual display reports 64 Hz and its
+// vblank waits take 24.6 ms): a display whose waits outlast its reported
+// refreshes is not one guest vblanks can lock to.
+void test_waits_longer_than_the_refresh_are_rejected() {
+  using std::chrono::microseconds;
+  using xenon::gpu::display_wait_overran;
+  // A real 60 Hz display: one refresh (16.7 ms), or a late arrival waiting a
+  // little longer, is fine; two refreshes for a 120 Hz lock are fine.
+  assert(!display_wait_overran(60.0, 1u, microseconds(16667)));
+  assert(!display_wait_overran(60.0, 1u, microseconds(24000)));
+  assert(!display_wait_overran(120.0, 2u, microseconds(16667)));
+  // A wait returning at once is the GPU pump's early check, not this one.
+  assert(!display_wait_overran(60.0, 1u, microseconds(10)));
+  // CI's virtual display, and a 60 Hz display waiting like a 40 Hz one.
+  assert(display_wait_overran(64.0, 1u, microseconds(24637)));
+  assert(display_wait_overran(60.0, 1u, microseconds(26000)));
+  assert(display_wait_overran(120.0, 2u, microseconds(21000)));
+  // No usable refresh rate is never lockable.
+  assert(display_wait_overran(0.0, 1u, microseconds(16667)));
+  assert(display_wait_overran(std::nan(""), 1u, microseconds(16667)));
+}
+
+// On a host with a display the source waits for its refreshes. Whatever the
+// display does, guest vblanks lock only to one whose waits follow its
+// reported rate: a wait one refresh long is accepted, one that outlasts the
+// refresh (a virtual display such as CI's) is rejected by
+// display_wait_overran(), and one that returns at once by the GPU pump's
+// early check.
 void test_waits_follow_the_display() {
   xenon::gpu::HostDisplayVblank display;
   if (!display.select(nullptr)) {
@@ -73,13 +99,25 @@ void test_waits_follow_the_display() {
   const double median = periods_ms[periods_ms.size() / 2];
   const double expected = 1000.0 / hz;
   std::cout << "  display " << hz << " Hz, median wait " << median << " ms\n";
-  assert(std::abs(median - expected) < expected * 0.15);
+  const bool follows_refresh = std::abs(median - expected) < expected * 0.15;
+  const bool overran = xenon::gpu::display_wait_overran(
+      hz, 1u, std::chrono::nanoseconds(static_cast<std::int64_t>(median * 1e6)));
+  const bool early = median < expected * 0.5;
+  if (!follows_refresh)
+    std::cout << "  this display does not wait at its reported rate; guest vblanks stay "
+              << (overran ? "timer-paced (waits overrun)" : early ? "timer-paced (waits return early)"
+                                                                   : "locked (within a refresh)")
+              << "\n";
+  // A display that is neither accurate, overrunning nor early would be
+  // locked to while off its rate by up to half a refresh.
+  assert(follows_refresh || overran || early);
 }
 
 }  // namespace
 
 int main() {
   test_refresh_multiples();
+  test_waits_longer_than_the_refresh_are_rejected();
   test_waits_follow_the_display();
   std::cout << "xenon_display_vblank_tests: ok\n";
   return 0;
