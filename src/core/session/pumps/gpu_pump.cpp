@@ -424,9 +424,16 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
     bool display_locked = false;
     if (refreshes_per_vblank != 0u && unusable_display_vblanks < kMaxUnusableDisplayVblanks) {
       bool waited = true;
+      const auto wait_started = Clock::now();
       for (std::uint32_t i = 0; waited && i < refreshes_per_vblank; ++i) waited = display.wait();
       const auto now = Clock::now();
-      if (waited && now - last_display_vblank >= kVsyncInterval / 2) {
+      // A wait longer than the display's refreshes is a display that does
+      // not wait at its reported rate (display_wait_overran): timer-paced
+      // vblanks keep the guest's 60 Hz instead.
+      const bool too_long = gpu::display_wait_overran(
+          display.refresh_hz(), refreshes_per_vblank,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - wait_started));
+      if (waited && !too_long && now - last_display_vblank >= kVsyncInterval / 2) {
         display_locked = true;
         unusable_display_vblanks = 0;
         last_display_vblank = now;
