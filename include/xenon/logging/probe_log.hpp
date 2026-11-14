@@ -42,4 +42,10 @@ void set_probe_log_directory(const std::string& directory);
 void append_probe_log(const char* file_name, const char* format, ...)
     XENON_PROBE_LOG_FORMAT(2, 3);
 
+// The same, written whether or not probes are on: for low-volume run records
+// every run keeps (perf_frame.log, one line a second), in the same directory
+// and under the same per-file limit.
+void append_run_log(const char* file_name, const char* format, ...)
+    XENON_PROBE_LOG_FORMAT(2, 3);
+
 }  // namespace xenon::logging

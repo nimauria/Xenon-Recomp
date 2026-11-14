@@ -50,6 +50,7 @@ void XenonSession::shutdown() {
   // kernel_process_.reset() (which would otherwise try to join the same
   // thread again from ThreadManager::shutdown() while nothing is left
   // draining its work).
+  stop_audio_stall_probe();
   if (audio_) {
     audio_->stop_guest_callback_pump();
   }

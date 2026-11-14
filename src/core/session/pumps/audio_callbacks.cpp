@@ -1,5 +1,11 @@
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <string>
+#include <string_view>
 
+#include "xenon/core/guest_stack_walk.hpp"
 #include "xenon/core/session.hpp"
 #include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/probe_log.hpp"
@@ -66,7 +72,104 @@ bool XenonSession::start_audio_guest_thread() {
     audio_thread_tls_ = {};
     return false;
   }
+  if (const char* probe = std::getenv("XENON_AUDIO_STALL_PROBE");
+      probe && *probe && std::string_view(probe) != "0" && !audio_stall_probe_running_.load()) {
+    audio_stall_probe_running_.store(true);
+    audio_stall_probe_thread_ = std::thread(&XenonSession::run_audio_stall_probe, this);
+  }
   return true;
+}
+
+void XenonSession::stop_audio_stall_probe() {
+  audio_stall_probe_running_.store(false);
+  if (audio_stall_probe_thread_.joinable()) audio_stall_probe_thread_.join();
+}
+
+// Samples every guest thread while an audio render callback overruns: 12 ms
+// in (the device holds about 37 ms of queued frames, so the queue is draining
+// by then), then every 40 ms until it returns. Each sample lists, per guest
+// thread, the kernel call it is blocked in (with its arguments and how long
+// it has been there) or, for a thread running guest code, its last recorded
+// address and caller chain. Capped so a long run stays readable.
+void XenonSession::run_audio_stall_probe() {
+  constexpr std::int64_t kFirstSampleNs = 12'000'000;
+  constexpr std::int64_t kRepeatNs = 40'000'000;
+  constexpr int kMaxSamples = 400;
+  int samples = 0;
+  std::int64_t sampled_callback_since = -1;
+  std::int64_t last_sample_ns = 0;
+  while (audio_stall_probe_running_.load() && samples < kMaxSamples) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    const auto watch = audio_callback_watch_.snapshot();
+    if (!watch.in_callback) continue;
+    const auto now = CallbackWatch::now_ns();
+    const auto stalled = now - watch.since_ns;
+    if (stalled < kFirstSampleNs) continue;
+    if (watch.since_ns == sampled_callback_since && now - last_sample_ns < kRepeatNs) continue;
+    sampled_callback_since = watch.since_ns;
+    last_sample_ns = now;
+    ++samples;
+
+    std::string text = "audio callback 0x" + [&] {
+      char buf[16];
+      std::snprintf(buf, sizeof(buf), "%08X", watch.entry);
+      return std::string(buf);
+    }() + " running " + std::to_string(stalled / 1'000'000) + " ms\n";
+    {
+      std::scoped_lock lock(in_flight_exports_mutex_);
+      std::set<std::uint32_t> threads;
+      for (const auto& [id, state] : guest_thread_states_) threads.insert(id);
+      for (const auto& [id, call] : in_flight_exports_) threads.insert(id);
+      for (const auto id : threads) {
+        char line[512];
+        std::string name;
+        if (kernel_process_) {
+          if (const auto* thread = kernel_process_->thread_manager().get_thread_ptr(id))
+            name = thread->name();
+        }
+        if (const auto call = in_flight_exports_.find(id); call != in_flight_exports_.end()) {
+          const auto& c = call->second;
+          std::snprintf(line, sizeof(line),
+                        "  t%u %s: in %s(%llX, %llX, %llX, %llX) for %lld ms, lr=%08llX\n", id,
+                        name.c_str(), c.descriptor ? c.descriptor->name.c_str() : "?",
+                        static_cast<unsigned long long>(c.arguments[0]),
+                        static_cast<unsigned long long>(c.arguments[1]),
+                        static_cast<unsigned long long>(c.arguments[2]),
+                        static_cast<unsigned long long>(c.arguments[3]),
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - c.since)
+                                .count()),
+                        static_cast<unsigned long long>(c.lr));
+          text += line;
+        } else if (const auto state = guest_thread_states_.find(id);
+                   state != guest_thread_states_.end() && state->second) {
+          const auto& s = *state->second;
+          std::snprintf(line, sizeof(line), "  t%u %s: running cia=%08llX lr=%08llX stack:", id,
+                        name.c_str(), static_cast<unsigned long long>(s.cia),
+                        static_cast<unsigned long long>(s.lr));
+          text += line;
+          if (memory_) {
+            for (const auto& frame :
+                 walk_guest_stack(*memory_, static_cast<std::uint32_t>(s.gpr[1]), 8u)) {
+              std::snprintf(line, sizeof(line), " %08X", frame.return_address);
+              text += line;
+            }
+          }
+          text += "\n";
+        }
+      }
+    }
+    // One record per line: a run-log record holds up to 1 KB, and a sample
+    // lists every guest thread.
+    for (std::size_t begin = 0; begin < text.size();) {
+      const auto end = text.find('\n', begin);
+      const auto stop = end == std::string::npos ? text.size() : end + 1;
+      logging::append_run_log("audio_stall_probe.log", "%s",
+                              text.substr(begin, stop - begin).c_str());
+      begin = stop;
+    }
+  }
 }
 
 std::uint32_t XenonSession::run_audio_callback_thread() {
