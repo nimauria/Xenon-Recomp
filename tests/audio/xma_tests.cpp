@@ -4,8 +4,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <string>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -226,8 +228,268 @@ void test_rejected_frame_plays_as_silence() {
   assert(memory.release(input));
 }
 
+// Writes `count` bits at a position in the packets' frame data (the stream
+// with the 32-bit packet headers left out), as an encoder lays frames out.
+void write_stream_bits(std::vector<std::byte>& packets, std::size_t stream_bit, unsigned count,
+                       std::uint32_t value) {
+  constexpr std::size_t kDataBits = kPacketBits - 32u;
+  for (unsigned i = 0; i < count; ++i) {
+    const auto bit = stream_bit + i;
+    const auto physical = (bit / kDataBits) * kPacketBits + 32u + bit % kDataBits;
+    write_bits(packets, physical, 1, (value >> (count - 1u - i)) & 1u);
+  }
+}
+
+// Regression (AC6 briefing voice at double speed and choppy, "Garuda team"
+// heard as "green", music skipping): the last frame to start in packet 0 runs
+// on into packet 1, and five more frames start in packet 1 after the run-on.
+// The engine went from that frame to "the packet after the one it ended in",
+// packet 2, and dropped packet 1's frames - half of every voice line, whose
+// frames run on across each packet. All 22 frames must be decoded.
+void test_frames_after_a_run_on_are_decoded() {
+  memory::AddressSpace memory(memory::GuestTranslationMode::Compact);
+  assert(memory.initialize());
+  XmaDecoder decoder(memory);
+  std::string error;
+  assert(decoder.initialize(&error));
+  const auto context = decoder.allocate_context();
+  assert(context != 0);
+  cpu::GuestAddress input{}, output{};
+  assert(memory.allocate(2u * kXmaPacketBytes, 2048, memory::kReadWrite, false, input));
+  assert(memory.allocate(31u * kXmaOutputBlockBytes, 256, memory::kReadWrite, false, output));
+
+  // 1000-bit frames from the start of packet 0's data: 17 start in packet 0
+  // (16 * 1000 = 16000 of its 16352 data bits), the 17th running 648 bits
+  // into packet 1; five more follow in packet 1.
+  constexpr unsigned kFrameBits = 1000, kPacket0Frames = 17, kFrames = 22;
+  std::vector<std::byte> packets(2u * kXmaPacketBytes);
+  write_packet_header(packets, 0, 0);
+  write_packet_header(packets, 1, kPacket0Frames * kFrameBits - (kPacketBits - 32u));
+  for (unsigned frame = 0; frame < kFrames; ++frame) {
+    const std::size_t at = std::size_t(frame) * kFrameBits;
+    write_stream_bits(packets, at, 15, kFrameBits);
+    for (unsigned bit = 15; bit + 32u <= kFrameBits - 1u; bit += 32u)
+      write_stream_bits(packets, at + bit, 32, 0xFFFFFFFFu);
+    write_stream_bits(packets, at + kFrameBits - 33u, 32, 0xFFFFFFFFu);
+    // "Another frame follows in this packet": not for the last to start in a
+    // packet.
+    const bool last_in_packet = frame + 1u == kPacket0Frames || frame + 1u == kFrames;
+    write_stream_bits(packets, at + kFrameBits - 1u, 1, last_in_packet ? 0u : 1u);
+  }
+  memory.write_bytes(input, packets);
+
+  XmaContextInit init{};
+  init.input_buffer_0 = input;
+  init.input_buffer_0_packet_count = 2;
+  init.input_buffer_read_offset = 32;
+  init.output_buffer = output;
+  init.output_buffer_block_count = 31;
+  init.subframe_decode_count = 4;
+  init.channel_count = 0;
+  init.sample_rate = 3;
+  assert(decoder.initialize_context(context, init));
+  XmaContextData state{};
+  assert(decoder.read_context(context, state));
+  state.input_buffer_0_valid = true;
+  state.output_buffer_valid = true;
+  assert(decoder.write_context(context, state, false));
+
+  // Play it through: kick, let the engine fill the ring, read it all, again.
+  for (int round = 0; round < 64; ++round) {
+    assert(decoder.enable_context(context));
+    assert(decoder.block_while_in_use(context));
+    assert(decoder.read_context(context, state));
+    if (!state.input_buffer_0_valid && !state.input_buffer_1_valid) break;
+    state.output_buffer_read_offset = state.output_buffer_write_offset;
+    state.output_buffer_valid = true;
+    assert(decoder.write_context(context, state, true));
+  }
+  assert(!state.input_buffer_0_valid);
+  // Every frame reached the decoder (these all-ones frames are rejected and
+  // play as silence, so each counts once as decode error 8).
+  assert(decoder.stats().decode_errors[8] == kFrames);
+
+  assert(decoder.release_context(context));
+  decoder.shutdown();
+  assert(memory.release(output));
+  assert(memory.release(input));
+}
+
+// A context with one input packet of `frames` frames (rejected by the
+// decoder, which plays them as silence: the frame contents do not matter
+// here), ready to kick.
+struct LockFixture {
+  memory::AddressSpace memory{memory::GuestTranslationMode::Compact};
+  XmaDecoder decoder{memory};
+  cpu::GuestAddress context{};
+  cpu::GuestAddress input{}, output{};
+  std::uint32_t hw_index{};
+
+  explicit LockFixture(unsigned frames) {
+    assert(memory.initialize());
+    std::string error;
+    assert(decoder.initialize(&error));
+    context = decoder.allocate_context();
+    assert(context != 0);
+    assert(memory.allocate(kXmaPacketBytes, 2048, memory::kReadWrite, false, input));
+    assert(memory.allocate(31u * kXmaOutputBlockBytes, 256, memory::kReadWrite, false, output));
+    std::vector<std::byte> packet(kXmaPacketBytes);
+    write_packet_header(packet, 0, 0);
+    for (unsigned frame = 0; frame < frames; ++frame) {
+      const auto at = 32u + frame * 64u;
+      write_bits(packet, at, 15, 64);
+      write_bits(packet, at + 15u, 32, 0xFFFFFFFFu);
+      write_bits(packet, at + 47u, 16, 0xFFFFu);
+      write_bits(packet, at + 63u, 1, frame + 1u < frames ? 1u : 0u);
+    }
+    memory.write_bytes(input, packet);
+    XmaContextInit init{};
+    init.input_buffer_0 = input;
+    init.input_buffer_0_packet_count = 1;
+    init.input_buffer_read_offset = 32;
+    init.output_buffer = output;
+    init.output_buffer_block_count = 31;
+    init.subframe_decode_count = 4;
+    init.channel_count = 0;
+    init.sample_rate = 3;
+    assert(decoder.initialize_context(context, init));
+    XmaContextData state{};
+    assert(decoder.read_context(context, state));
+    state.input_buffer_0_valid = true;
+    state.output_buffer_valid = true;
+    assert(decoder.write_context(context, state, false));
+    hw_index = (memory.get_physical_address(context) - decoder.context_array_physical()) /
+               kXmaContextBytes;
+  }
+  ~LockFixture() {
+    decoder.set_pass_observer({});
+    (void)decoder.release_context(context);
+    decoder.shutdown();
+    (void)memory.release(output);
+    (void)memory.release(input);
+  }
+  void write_group(std::uint32_t base) {
+    memory.write32_le(kXmaMmioBase + base + (hw_index >> 5u) * 4u, 1u << (hw_index & 31u));
+  }
+  void kick() { write_group(0x1940u); }
+  void lock() { write_group(0x1A40u); }
+};
+
+// Holds the first decode pass in flight until released.
+struct PassGate {
+  std::atomic<bool> started{false};
+  std::atomic<bool> released{false};
+  std::atomic<unsigned> passes{0};
+  void attach(XmaDecoder& decoder) {
+    decoder.set_pass_observer([this](cpu::GuestAddress) {
+      if (passes.fetch_add(1) != 0) return;
+      started = true;
+      for (int i = 0; i < 5000 && !released; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+  }
+  void wait_started() {
+    for (int i = 0; i < 5000 && !started; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(started);
+  }
+};
+
+// Regression (AC6 briefing voice and hangar music choppy and skipping): a
+// Lock register write returned at once while a decode pass was running, so
+// the title edited the context under it - and the pass, ending, published
+// its read offset, buffer and valid flags over the edit. Locking waits for
+// the pass, as the hardware's context lock does; the title's edit stands.
+void test_lock_waits_for_the_pass_in_flight() {
+  LockFixture fixture(3);
+  PassGate gate;
+  gate.attach(fixture.decoder);
+  fixture.kick();
+  gate.wait_started();
+
+  constexpr std::uint32_t kTitleReadOffset = 32u + 128u;
+  std::atomic<bool> edited{false};
+  std::thread title([&] {
+    fixture.lock();
+    // The title's edit once the lock returns: a new read position and the
+    // buffer made valid again.
+    XmaContextData state{};
+    assert(fixture.decoder.read_context(fixture.context, state));
+    state.input_buffer_read_offset = kTitleReadOffset;
+    state.input_buffer_0_valid = true;
+    assert(fixture.decoder.write_context(fixture.context, state, true));
+    edited = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // The pass is still held, so the lock has not returned.
+  assert(!edited);
+  gate.released = true;
+  title.join();
+  assert(edited);
+  assert(fixture.decoder.block_while_in_use(fixture.context));
+  XmaContextData state{};
+  assert(fixture.decoder.read_context(fixture.context, state));
+  assert(state.input_buffer_read_offset == kTitleReadOffset);
+  assert(state.input_buffer_0_valid);
+}
+
+// Regression: a kick during a decode pass set the context enabled, and the
+// pass, ending with nothing more to do, cleared it again - the kick was
+// lost and the stream waited for the next one. A kick waits for the pass
+// and then runs another.
+void test_kick_during_a_pass_is_not_lost() {
+  LockFixture fixture(1);
+  PassGate gate;
+  gate.attach(fixture.decoder);
+  fixture.kick();
+  gate.wait_started();
+  std::atomic<bool> kicked{false};
+  std::thread title([&] {
+    fixture.kick();
+    kicked = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  assert(!kicked);
+  gate.released = true;
+  title.join();
+  // The first pass consumed the only frame and finished; the kick runs a
+  // second one.
+  for (int i = 0; i < 2000 && gate.passes.load() < 2u; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  assert(gate.passes.load() >= 2u);
+}
+
+// A kick wakes the worker even when it lands while the worker is going to
+// sleep. The worker sleeps until a kick, so a lost wake-up would leave the
+// kicked context undecoded for good: every kick must get its decode.
+void test_kicks_always_wake_the_engine() {
+  LockFixture fixture(1);
+  for (int round = 0; round < 200; ++round) {
+    XmaContextData state{};
+    assert(fixture.decoder.read_context(fixture.context, state));
+    state.input_buffer_0_valid = true;
+    state.input_buffer_read_offset = 32;
+    state.output_buffer_valid = true;
+    state.output_buffer_read_offset = state.output_buffer_write_offset;
+    assert(fixture.decoder.write_context(fixture.context, state, true));
+    auto kick = std::async(std::launch::async, [&] {
+      fixture.kick();
+      assert(fixture.decoder.block_while_in_use(fixture.context));
+    });
+    assert(kick.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    assert(fixture.decoder.read_context(fixture.context, state));
+    assert(!state.input_buffer_0_valid);
+    // Vary where the next kick lands against the worker going to sleep.
+    std::this_thread::sleep_for(std::chrono::microseconds(50 + (round % 13) * 41));
+  }
+}
+
 int main() {
+  test_lock_waits_for_the_pass_in_flight();
+  test_kick_during_a_pass_is_not_lost();
+  test_kicks_always_wake_the_engine();
   test_rejected_frame_plays_as_silence();
+  test_frames_after_a_run_on_are_decoded();
   test_padding_ends_the_packet();
   test_frame_start_skips_a_continuation();
   test_frame_across_buffers();

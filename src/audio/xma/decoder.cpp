@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "xenon/logging/logger.hpp"
+#include "xenon/logging/probe_log.hpp"
 
 namespace xenon::audio {
 namespace {
@@ -125,7 +126,17 @@ void XmaDecoder::shutdown() noexcept {
     mmio_bridge_->owner = nullptr;
   }
   worker_running_.store(false);
+  {
+    std::lock_guard lock(worker_mutex_);
+    work_signalled_ = true;
+  }
   worker_cv_.notify_all();
+  // Release threads waiting on a context for a worker that is stopping.
+  for (auto& runtime : runtimes_) {
+    if (!runtime) continue;
+    std::lock_guard lock(runtime->mutex);
+    runtime->cv.notify_all();
+  }
   if (worker_.joinable()) worker_.join();
   for (std::size_t i = 0; i < kXmaContextCount; ++i) {
     allocated_[i].store(false);
@@ -264,6 +275,19 @@ bool XmaDecoder::initialize_context(cpu::GuestAddress context,
 
   const auto runtime_index = index_of(context);
   if (!runtime_index || !runtimes_[*runtime_index]) return false;
+  // The stream as the title describes it (XMAInitializeContext), next to the
+  // per-second decode and playback speeds in audio_xma_rate_diag.log.
+  logging::append_probe_log(
+      "audio_xma_rate_diag.log",
+      "%llds ctx=%zu init: channel_mode=%u sample_rate_id=%u subframes=%u blocks=%u "
+      "in0_packets=%u in1_packets=%u loop=%u start=%u end=%u\n",
+      static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count()),
+      *runtime_index, unsigned(init.channel_count), unsigned(init.sample_rate),
+      unsigned(init.subframe_decode_count), unsigned(init.output_buffer_block_count),
+      unsigned(init.input_buffer_0_packet_count), unsigned(init.input_buffer_1_packet_count),
+      unsigned(init.loop_count), unsigned(init.loop_start), unsigned(init.loop_end));
   {
     auto& runtime = *runtimes_[*runtime_index];
     std::unique_lock lock(runtime.mutex);
@@ -302,11 +326,24 @@ bool XmaDecoder::enable_context(cpu::GuestAddress context) {
   const auto index = index_of(context);
   if (!index || !allocated_[*index].load() || !runtimes_[*index]) return false;
   kicks_.fetch_add(1, std::memory_order_relaxed);
+  auto& runtime = *runtimes_[*index];
   {
-    std::lock_guard lock(runtimes_[*index]->mutex);
-    runtimes_[*index]->disable_requested = false;
-    runtimes_[*index]->completion_notified = false;
-    runtimes_[*index]->enabled = true;
+    // A kick waits for a decode pass in flight, as the hardware context
+    // lock does (xenia's XmaContext::Enable takes the lock Work holds): the
+    // pass ends by setting `enabled` from its own outcome, which would
+    // otherwise overwrite this kick and leave the stream waiting for the
+    // next one. It does not wait for the decode it starts: AC6 kicks from
+    // its audio mixing path, and holding it for whole decode runs stalled
+    // the render callback (hundreds of underruns, stalls near a second).
+    std::unique_lock lock(runtime.mutex);
+    runtime.cv.wait(lock, [&] { return !runtime.busy; });
+    runtime.disable_requested = false;
+    runtime.completion_notified = false;
+    runtime.enabled = true;
+  }
+  {
+    std::lock_guard lock(worker_mutex_);
+    work_signalled_ = true;
   }
   worker_cv_.notify_one();
   return true;
@@ -347,6 +384,11 @@ bool XmaDecoder::clear_context(cpu::GuestAddress context) {
   data.output_buffer_read_offset = 0;
   data.output_buffer_write_offset = 0;
   return write_context(context, data, true);
+}
+
+void XmaDecoder::set_pass_observer(PassObserver observer) {
+  std::lock_guard lock(pass_observer_mutex_);
+  pass_observer_ = std::move(observer);
 }
 
 void XmaDecoder::set_completion_sink(CompletionSink sink) {
@@ -482,10 +524,16 @@ void XmaDecoder::worker_main() {
     }
     if (!did_work) {
       std::unique_lock lock(worker_mutex_);
-      // A plain timed wait lets enable_context() wake the worker immediately.
-      // A predicate containing only shutdown state would swallow normal work
-      // notifications and add an avoidable 20 ms decode latency.
-      worker_cv_.wait_for(lock, std::chrono::milliseconds(20));
+      // The engine only runs contexts that were kicked, so it sleeps until
+      // the next kick (xenia's worker waits on its work event the same way).
+      // A kick sets work_signalled_ under this mutex, so one that lands
+      // after the scan above and before this wait still wakes the worker;
+      // the kicking thread is waiting for it.
+      worker_cv_.wait(lock, [&] { return work_signalled_ || !worker_running_.load(); });
+    }
+    {
+      std::lock_guard lock(worker_mutex_);
+      work_signalled_ = false;
     }
   }
 }

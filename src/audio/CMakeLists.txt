@@ -83,6 +83,19 @@ if(XENON_ENABLE_AUDIO)
   xenon_enable_warnings(xenon_audio)
   add_library(Xenon::Audio ALIAS xenon_audio)
 
+  # Development tool: decodes the frames of an XMA stream dump
+  # (XENON_XMA_DUMP, walked by tools/audio/xma_stream_frames.py) in stream
+  # order with the engine's decoder - the reference the engine's output is
+  # matched against (tools/audio/xma_frame_order.py).
+  add_executable(xenon_xma_frames_decode
+    "${XENON_SOURCE_DIR}/tools/audio/xma_frames_decode.cpp")
+  target_link_libraries(xenon_xma_frames_decode PRIVATE ${XENON_AUDIO_FFMPEG_TARGET})
+  target_compile_features(xenon_xma_frames_decode PRIVATE cxx_std_20)
+  if(XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT)
+    target_compile_definitions(xenon_xma_frames_decode PRIVATE XENON_AUDIO_FFMPEG_HAS_CH_LAYOUT=1)
+  endif()
+
+
   target_sources(xenon_core PRIVATE exports.cpp)
   target_compile_definitions(xenon_core PUBLIC XENON_HAS_AUDIO=1)
 endif()
