@@ -18,6 +18,7 @@ if(XENON_ENABLE_INPUT)
     flight_driver.cpp
     xinput/xinput_driver.cpp
     keyboard_mouse_driver.cpp
+    module_input_profile.cpp
     xam_facade.cpp
     null_driver.cpp
     sdl/sdl_driver.cpp

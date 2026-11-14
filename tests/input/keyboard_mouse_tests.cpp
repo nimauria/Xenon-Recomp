@@ -41,6 +41,20 @@ void test_default_mapping_and_mouse_stick() {
   assert((next.buttons & (input::DpadUp | input::DpadRight)) ==
          (input::DpadUp | input::DpadRight));
 
+  // The sticks have keys: without them a title's gameplay is unreachable
+  // (AC6's aircraft took no input). Arrows are the left stick, IJKL the
+  // right, and neither touches the D-pad.
+  driver.clear_input();
+  driver.set_key(static_cast<input::KeyCode>(input::Key::Up), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::Left), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::L), true);
+  driver.set_key(static_cast<input::KeyCode>(input::Key::K), true);
+  assert(driver.get_state(1, next) == input::Result::Success);
+  assert(next.thumb_ly == 32767 && next.thumb_lx == -32768);
+  assert(next.thumb_rx == 32767 && next.thumb_ry == -32768);
+  assert((next.buttons & (input::DpadUp | input::DpadDown | input::DpadLeft |
+                          input::DpadRight)) == 0);
+
   // Enter both starts and confirms; the mouse buttons confirm and cancel.
   driver.clear_input();
   driver.set_key(static_cast<input::KeyCode>(input::Key::Enter), true);

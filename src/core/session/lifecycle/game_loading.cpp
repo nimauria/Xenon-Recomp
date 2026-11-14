@@ -73,6 +73,8 @@ SessionResult XenonSession::load_game(std::span<const std::byte> xex_bytes,
   }
   // Before any guest code can submit GPU work.
   if (!configure_temporal_rendering()) return SessionResult::failure(last_error_);
+  // Before the title can poll a controller.
+  if (!configure_module_input()) return SessionResult::failure(last_error_);
 
   // Bind true native variable imports to guest-backed system-module
   // variables before any guest code or callbacks can observe the IAT slots.

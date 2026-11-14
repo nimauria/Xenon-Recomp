@@ -57,6 +57,8 @@ struct GuestThreadTerminated {};
 // Host/runtime services reachable from compiled CPU code. This is deliberately
 // not a kernel implementation: it is the narrow boundary used by generated
 // code for control transfers and architecturally-visible privileged events.
+struct ModuleServicesV1;
+
 class RuntimeServices {
  public:
   virtual ~RuntimeServices() = default;
@@ -121,7 +123,36 @@ class RuntimeServices {
     static_cast<void>(target);
     return false;
   }
+
+  // Runtime services a game module's hooks may call (see ModuleServicesV1),
+  // or null where the runtime has none (tests, tools). Declared last so a
+  // module built against an earlier RuntimeServices keeps its vtable layout.
+  [[nodiscard]] virtual const ModuleServicesV1* module_services() noexcept {
+    return nullptr;
+  }
 };
+
+// The versioned C table a game module's hooks reach through
+// ExecutionContext::runtime.module_services(): what a title module may ask of
+// the runtime while the game runs, as opposed to what it supplies at
+// preparation (analysis, hooks, profiles). Fields are only ever appended; a
+// module checks abi_version and struct_size before using one.
+struct ModuleServicesV1 {
+  static constexpr std::uint32_t kAbiVersion = 1;
+  std::uint32_t abi_version{kAbiVersion};
+  std::uint32_t struct_size{sizeof(ModuleServicesV1)};
+  void* context{};
+  // Selects the module input profile's keyboard/mouse context `name`
+  // (input.json "keyboard.contexts"); empty or null returns to the default
+  // bindings. 0 on success, 1 when the profile has no such context, 2 when
+  // the session has no keyboard and mouse.
+  std::int32_t (*set_input_context)(void* context, const char* name){};
+};
+
+[[nodiscard]] inline bool module_services_v1_usable(const ModuleServicesV1* services) noexcept {
+  return services && services->abi_version == ModuleServicesV1::kAbiVersion &&
+         services->struct_size >= sizeof(ModuleServicesV1);
+}
 
 // Runs the import thunk `target` reached by an UNLINKED branch, such as the
 // `b thunk` at the end of a title's argument-shuffling wrapper. call()
