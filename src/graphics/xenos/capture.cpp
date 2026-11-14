@@ -393,8 +393,9 @@ bool read_command(Reader& in, ir::Command& command) {
           !in.pod_vector(raw_payload)) {
         return false;
       }
+      auto decoded = std::make_shared<const DecodedShader>(ShaderDecoder::decode(program));
       command = ir::ShaderLoad{opcode, immediate, physical_address, program,
-                               ShaderDecoder::decode(program),
+                               std::move(decoded),
                                std::move(raw_payload)};
       return true;
     }

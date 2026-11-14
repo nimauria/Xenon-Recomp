@@ -13,6 +13,7 @@
 #include "core/session/session_internal.hpp"
 #include "xenon/core/frame_dump.hpp"
 #include "xenon/gpu/display_vblank.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/logging/activity_trace.hpp"
 #include "xenon/logging/logger.hpp"
@@ -216,6 +217,8 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   constexpr auto kIdleFallback = std::chrono::milliseconds(50);
   // The front buffer generation (VdSwap count) last presented successfully.
   std::uint64_t last_presented_generation = 0;
+  // The VdSwap count last added to the frame statistics.
+  std::uint64_t counted_swap_generation = 0;
 
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
     const bool parked =
@@ -282,6 +285,10 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     }
 
     const auto _after_submit_ring = Clock::now();
+    gpu::perf::add(gpu::perf::Counter::RingNs,
+                   static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  _after_submit_ring - _tick_phase_start)
+                                                  .count()));
 
     // Graphics IR a failed drain left decoded is still played into the
     // backend (see GraphicsSystem::execute_ir()).
@@ -297,6 +304,17 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
 
     {
       const auto _after_execute_ir = Clock::now();
+      gpu::perf::add(gpu::perf::Counter::IrNs,
+                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    _after_execute_ir - _after_submit_ring)
+                                                    .count()));
+      const auto swap_generation = kernel_process_->gpu_front_buffer().generation;
+      if (swap_generation > counted_swap_generation) {
+        if (counted_swap_generation != 0)
+          gpu::perf::add(gpu::perf::Counter::Swaps, swap_generation - counted_swap_generation);
+        counted_swap_generation = swap_generation;
+      }
+      gpu::perf::flush_if_due(_after_execute_ir);
       const auto _submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    _after_submit_ring - _tick_phase_start)
                                    .count();
@@ -347,7 +365,13 @@ void XenonSession::present_front_buffer(std::uint64_t& last_presented_generation
       frame.visible_height = front_buffer.height ? front_buffer.height : texture->height;
       const auto _present_start = Clock::now();
       const auto status = graphics_system_->present(*gpu_, frame);
+      const auto _present_end = Clock::now();
+      gpu::perf::add(gpu::perf::Counter::PresentNs,
+                     static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                    _present_end - _present_start)
+                                                    .count()));
       if (status == gpu::PresentStatus::Success || status == gpu::PresentStatus::Suboptimal) {
+        gpu::perf::note_presented_frame(_present_end);
         last_presented_generation = front_buffer.generation;
         dump_presented_frame(frame);
       }
@@ -427,13 +451,17 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
       const auto wait_started = Clock::now();
       for (std::uint32_t i = 0; waited && i < refreshes_per_vblank; ++i) waited = display.wait();
       const auto now = Clock::now();
-      // A wait longer than the display's refreshes is a display that does
-      // not wait at its reported rate (display_wait_overran): timer-paced
-      // vblanks keep the guest's 60 Hz instead.
+      // A wait longer than the display's refreshes, or a vblank sooner than
+      // them after the last one, is a display that does not wait at its
+      // reported rate (display_wait_overran, display_wait_returned_early):
+      // timer-paced vblanks keep the guest's 60 Hz instead.
       const bool too_long = gpu::display_wait_overran(
           display.refresh_hz(), refreshes_per_vblank,
           std::chrono::duration_cast<std::chrono::nanoseconds>(now - wait_started));
-      if (waited && !too_long && now - last_display_vblank >= kVsyncInterval / 2) {
+      const bool too_soon = gpu::display_wait_returned_early(
+          display.refresh_hz(), refreshes_per_vblank,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_display_vblank));
+      if (waited && !too_long && !too_soon) {
         display_locked = true;
         unusable_display_vblanks = 0;
         last_display_vblank = now;

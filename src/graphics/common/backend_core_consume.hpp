@@ -8,6 +8,49 @@
 
 namespace xenon::gpu::detail {
 
+// Why a resolve took the CPU path (a readback, a CPU pack and a store each):
+// each kind's first occurrence, then a running count of every kind once in
+// 512 CPU resolves, on the probe logs' clock. The GPU path is the normal one,
+// so these name exactly what still holds a scene's resolves on the CPU.
+inline void note_cpu_resolve(std::string_view reason, bool depth, unsigned source_format,
+                             unsigned destination_format, std::uint32_t width,
+                             std::uint32_t height, std::uint32_t destination) {
+  struct Kind {
+    std::string reason;
+    std::uint64_t count{};
+  };
+  static std::mutex mutex;
+  static std::map<std::uint64_t, Kind> kinds;
+  static std::uint64_t total{};
+  const std::lock_guard lock(mutex);
+  const auto key = (std::uint64_t{std::hash<std::string_view>{}(reason)} << 1u) ^
+                   (std::uint64_t{depth} << 63u) ^ (std::uint64_t{source_format} << 56u) ^
+                   (std::uint64_t{destination_format} << 48u) ^
+                   (std::uint64_t{width} << 24u) ^ height;
+  auto [kind, inserted] = kinds.try_emplace(key);
+  ++kind->second.count;
+  ++total;
+  const auto now = static_cast<long long>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  if (inserted) {
+    kind->second.reason = std::string(depth ? "depth" : "color") + " fmt " +
+                          std::to_string(source_format) + " -> " +
+                          std::to_string(destination_format) + " " + std::to_string(width) +
+                          "x" + std::to_string(height) + ": " + std::string(reason);
+    xenon::logging::append_probe_log("resolve_cpu_path_diag.log",
+                                     "%lld first %s (dest=0x%08X)\n", now,
+                                     kind->second.reason.c_str(), destination);
+  }
+  if (total % 512u == 0u) {
+    for (const auto& [_, entry] : kinds)
+      xenon::logging::append_probe_log("resolve_cpu_path_diag.log", "%lld count %llu %s\n", now,
+                                       static_cast<unsigned long long>(entry.count),
+                                       entry.reason.c_str());
+  }
+}
+
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume(const ir::Command& command) {
   collect_retired_resources();
@@ -123,6 +166,7 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
                       unsigned(copy.depth_clear));
         trace(line);
       }
+      perf::add(perf::Counter::Resolves, 1u);
       consume_resolve(state);
       if (tracing() && !error.empty()) trace("  resolve failed: " + error);
       report_slow("resolve");
@@ -130,6 +174,7 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       draw_trail_count = 0;
     } else {
       note_draw(*draw, state);
+      perf::add(perf::Counter::Draws, 1u);
       consume_draw(draw, state);
       if (tracing() && !error.empty()) trace("  draw failed: " + error);
       report_slow("draw");
@@ -261,10 +306,12 @@ void BackendCore<Derived, Api>::consume_resolve(
     // When one native depth image owns every tile, the resolve runs on the GPU
     // out of it, as a color resolve does: shadow maps and AC6's depth copies
     // for depth of field took a readback, a CPU pack and a store each.
+    std::string cpu_reason = "no native depth image owns every tile";
     if (auto* owner = source ? source : single_depth_owner(canonical_surface, depth_region)) {
       const auto gpu = plan_gpu_depth_resolve(resolve_plan, format, canonical_surface,
                                               owner->surface(), owner->host_msaa(),
                                               owner->guest_format());
+      cpu_reason = gpu.error;
       if (gpu.valid) {
         // Bytes of the touched pages outside the rectangle keep their CPU
         // values; the pass writes the rectangle's words over them.
@@ -293,6 +340,11 @@ void BackendCore<Derived, Api>::consume_resolve(
         return;
       }
     }
+    note_cpu_resolve(cpu_reason, true, static_cast<unsigned>(format),
+                     resolve_plan.copy.destination_format,
+                     static_cast<std::uint32_t>(rectangle.right - rectangle.left),
+                     static_cast<std::uint32_t>(rectangle.bottom - rectangle.top),
+                     resolve_plan.copy.destination_base);
     if (!source && !make_region_canonical(canonical_surface, depth_region)) return;
     if (resolve_plan.selected_sample_count != 1) {
       error = named("Xenos depth resolve selected multiple samples");
@@ -391,10 +443,14 @@ void BackendCore<Derived, Api>::consume_resolve(
   // that image, through the EDRAM mapping when it is another view of the
   // tiles (AC6 resolves its 640x360 4x MSAA scene as a 1280x720 surface).
   // Nothing is flushed to canonical EDRAM or read back to convert.
-  if (auto* owner = source ? source : single_color_owner(canonical_surface, resolve_region)) {
+  std::string cpu_reason;
+  auto* owner = source ? source : single_color_owner(canonical_surface, resolve_region);
+  if (!owner) cpu_reason = describe_missing_color_owner(canonical_surface, resolve_region);
+  if (owner) {
     const auto gpu = plan_gpu_color_resolve(resolve_plan, format, canonical_surface,
                                             owner->surface(), owner->host_msaa(),
                                             owner->guest_format());
+    cpu_reason = gpu.valid ? "the clear after it has no GPU form" : gpu.error;
     GpuClearConstants clear{};
     if (gpu.valid && (!state.copy.color_clear_enabled ||
                       plan_gpu_color_clear(resolve_plan, format, canonical_surface,
@@ -426,6 +482,7 @@ void BackendCore<Derived, Api>::consume_resolve(
       note_resolve(false, static_cast<std::uint8_t>(format), state.copy.destination_format,
                    rectangle, false, source ? "GPU path" : "GPU path, single owner",
                    state.copy.destination_base);
+      trace_resolve_image(state.copy, rectangle);
       probe_full_frame_resolve(source ? "gpu" : "gpu-single-owner", state.copy.destination_base,
                                rectangle, source ? source_key : 0u,
                                owner->height());
@@ -434,6 +491,11 @@ void BackendCore<Derived, Api>::consume_resolve(
       return;
     }
   }
+  note_cpu_resolve(cpu_reason, false, static_cast<unsigned>(format),
+                   state.copy.destination_format,
+                   static_cast<std::uint32_t>(rectangle.right - rectangle.left),
+                   static_cast<std::uint32_t>(rectangle.bottom - rectangle.top),
+                   state.copy.destination_base);
   // Otherwise whichever images own the rectangle's tiles return them to
   // canonical EDRAM and the resolve reads them there. Failing the resolve
   // instead left AC6's front buffer unwritten, and the screen black.
@@ -555,6 +617,7 @@ void BackendCore<Derived, Api>::consume_resolve(
                            [](std::byte byte) { return byte == std::byte{}; }),
                source ? "readback of native target" : "canonical EDRAM",
                state.copy.destination_base, readback);
+  trace_resolve_image(state.copy, rectangle);
   probe_full_frame_resolve(source ? "native-readback" : "canonical", state.copy.destination_base,
                            rectangle, source ? source_key : 0u, source ? source->height() : 0u);
   // When probe logging is explicitly enabled, sample the first few resolves
@@ -634,11 +697,18 @@ void BackendCore<Derived, Api>::consume_resolve(
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume_shader_load(
     const ir::ShaderLoad* load) {
-  shader_textures[load->program.hash()] =
-      load->decoded.reflection.texture_fetch_constants;
+  // Titles reload the same microcode many times a frame (AC6: every draw
+  // batch). Everything below depends only on the program - its decode, the
+  // lowering, the compile and its outcome - so a program is handled once,
+  // and a repeat load only makes it current again, which the frontend
+  // already tracks through ShaderReference.
+  if (!load->decoded || !handled_shader_loads.insert(load->program.hash()).second) return;
+  const DecodedShader& decoded = *load->decoded;
+  shader_textures[load->program.hash()] = decoded.reflection.texture_fetch_constants;
+  shader_texture_filters[load->program.hash()] = decoded.reflection.texture_filter_overrides;
 #ifdef XENON_HAS_DXC
-  decoded_shaders[load->program.hash()] = load->decoded;
-  const auto lowered = HlslShaderLowerer::lower(load->decoded);
+  decoded_shaders[load->program.hash()] = decoded;
+  const auto lowered = HlslShaderLowerer::lower(decoded);
   dump_shader(load->program, lowered.hlsl);
   unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
   unsupported.unsupported_shader_features += lowered.unsupported_features;

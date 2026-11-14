@@ -495,6 +495,13 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   ++stats_.physical_writes;
 }
 
+std::shared_ptr<const DecodedShader> CommandProcessor::decode_program(
+    const ShaderProgram& program) {
+  auto& slot = decoded_programs_[program.hash()];
+  if (!slot) slot = std::make_shared<const DecodedShader>(ShaderDecoder::decode(program));
+  return slot;
+}
+
 std::uint32_t CommandProcessor::read_physical_dword(
     std::uint32_t address_with_endian) const {
   const Endian endian = static_cast<Endian>(address_with_endian & 0x3u);
@@ -1419,7 +1426,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
     }
-    auto decoded = ShaderDecoder::decode(program);
+    auto decoded = decode_program(program);
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
                                 std::move(program), std::move(decoded), payload});
     return;
@@ -1447,7 +1454,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_shader_ = reference;
       active_pixel_program_ = program;
     }
-    auto decoded = ShaderDecoder::decode(program);
+    auto decoded = decode_program(program);
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
                                 std::move(program), std::move(decoded), payload});
     return;

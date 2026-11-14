@@ -21,14 +21,26 @@ inline constexpr double kGuestVblankHz = 60.0;
 [[nodiscard]] std::uint32_t host_refreshes_per_guest_vblank(double host_refresh_hz) noexcept;
 
 // Whether waiting for `refreshes` vertical blanks of a display reporting
-// `host_refresh_hz` took longer than those refreshes plus half of one more:
-// a display that does not wait at the rate it reports. A virtual or remote
-// display can report one rate and wait at another - a CI runner's adapter
-// reports 64 Hz and waits 24.6 ms - and guest vblanks locked to it would run
-// the title's 60 Hz clock slow, so the GPU pump stops locking to it. (A wait
-// returning early is the pump's other check: no vblank in between.)
+// `host_refresh_hz` took longer than those refreshes plus kDisplayWaitSlack
+// of one more: a display that does not wait at the rate it reports. A wait
+// ends at the next vblank, so it never needs more than its refreshes; the
+// slack absorbs the scheduler waking the thread late. A virtual or remote
+// display can report one rate and wait at another - CI runners' adapters
+// report 64 Hz (15.6 ms) and waited 24.6 ms on one run, 21.2 ms on another -
+// and guest vblanks locked to it would run the title's 60 Hz clock slow (47 Hz
+// at 21.2 ms), so the GPU pump stops locking to it. (A wait returning early is
+// the pump's other check: no vblank in between.)
+inline constexpr double kDisplayWaitSlack = 0.15;
 [[nodiscard]] bool display_wait_overran(double host_refresh_hz, std::uint32_t refreshes,
                                         std::chrono::nanoseconds elapsed) noexcept;
+
+// Whether a display vblank came less than `refreshes` (less the same slack)
+// after the previous one the guest was locked to: a display waiting faster
+// than it reports, which would run the title's 60 Hz clock fast. With
+// display_wait_overran() it keeps locked guest vblanks within 15% of the
+// display's reported rate either way.
+[[nodiscard]] bool display_wait_returned_early(double host_refresh_hz, std::uint32_t refreshes,
+                                               std::chrono::nanoseconds since_last) noexcept;
 
 // Waits for the vertical blank of the display a native window is on (the
 // primary display without one). Backend-independent: the same display clock

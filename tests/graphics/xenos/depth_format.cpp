@@ -1,8 +1,12 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <span>
+#include <utility>
+#include <vector>
 
 #include "xenon/gpu/depth_format.hpp"
 
@@ -93,18 +97,144 @@ void test_packed_depth_stencil() {
     assert(pack_depth_stencil(DepthRenderTargetFormat::D24FS8,
                               unpacked.depth, unpacked.stencil) == packed);
     const auto host = depth_stencil_to_host(
-        DepthRenderTargetFormat::D24FS8, packed);
+        DepthRenderTargetFormat::D24FS8, packed, Unorm24DepthWrite::Midpoint);
     assert(host.depth >= 0.0f && host.depth < 1.0f);
+    // A float attachment's depth does not depend on the D24 encoding.
+    assert(depth_stencil_to_host(DepthRenderTargetFormat::D24FS8, packed,
+                                 Unorm24DepthWrite::PowerOfTwo).depth == host.depth);
     assert(host_to_depth_stencil(DepthRenderTargetFormat::D24FS8,
                                  host.depth, host.stencil) == packed);
   }
-  for (const auto code : {0u, 1u, 0x7FFFFFu, 0x800000u, 0xFFFFFFu}) {
-    const auto packed = (code << 8u) | 0xC3u;
-    const auto host = depth_stencil_to_host(
-        DepthRenderTargetFormat::D24S8, packed);
-    assert(host_to_depth_stencil(DepthRenderTargetFormat::D24S8,
-                                 host.depth, host.stencil) == packed);
+  for (const auto write : kUnorm24DepthWrites) {
+    for (const auto code : {0u, 1u, 0x7FFFFFu, 0x800000u, 0xFFFFFFu}) {
+      const auto packed = (code << 8u) | 0xC3u;
+      const auto host = depth_stencil_to_host(DepthRenderTargetFormat::D24S8, packed, write);
+      assert(host.depth == unorm24_depth_for_write(code, write) && host.stencil == 0xC3u);
+    }
   }
+}
+
+// The ways a device may convert a written depth to a 24-bit UNORM code:
+// truncating or rounding to nearest, on the 2^24 - 1 scale the APIs specify
+// or the 2^24 scale some devices use - or, as NVIDIA was measured to, on the
+// 2^24 scale (half up) below depth 1/16 and the specified one above.
+enum class D24Conversion {
+  TruncateSpec, RoundSpec, TruncatePow2, RoundPow2, RoundHalfUpPow2, RoundMixedScale
+};
+std::uint32_t d24_convert(D24Conversion conversion, float depth) {
+  const double spec = double(depth) * 16777215.0, pow2 = double(depth) * 16777216.0;
+  double code = 0.0;
+  switch (conversion) {
+    case D24Conversion::TruncateSpec: code = std::floor(spec); break;
+    case D24Conversion::RoundSpec: code = std::nearbyint(spec); break;
+    case D24Conversion::TruncatePow2: code = std::floor(pow2); break;
+    case D24Conversion::RoundPow2: code = std::nearbyint(pow2); break;
+    case D24Conversion::RoundHalfUpPow2: code = std::floor(pow2 + 0.5); break;
+    case D24Conversion::RoundMixedScale:
+      code = depth < 0.0625f ? std::floor(pow2 + 0.5) : std::nearbyint(spec);
+      break;
+  }
+  return std::uint32_t(std::min(code, 16777215.0));
+}
+
+// Regression (CI: WARP truncated a post-resolve depth clear of 0x556677 to
+// 0x556676; NVIDIA turned the midpoint of code 0 into 1): each encoding
+// stores every one of the 2^24 codes exactly on the conversions it is for,
+// so a device converting either way has an exact encoding to calibrate to.
+void test_unorm24_depth_writes_store_their_codes() {
+  using namespace xenon::gpu;
+  for (std::uint32_t code = 0; code <= 0xFFFFFFu; ++code) {
+    const float midpoint = unorm24_depth_for_write(code, Unorm24DepthWrite::Midpoint);
+    assert(d24_convert(D24Conversion::TruncateSpec, midpoint) == code);
+    assert(d24_convert(D24Conversion::RoundSpec, midpoint) == code);
+    const float pow2 = unorm24_depth_for_write(code, Unorm24DepthWrite::PowerOfTwo);
+    assert(d24_convert(D24Conversion::TruncatePow2, pow2) == code);
+    assert(d24_convert(D24Conversion::RoundPow2, pow2) == code);
+    assert(d24_convert(D24Conversion::RoundHalfUpPow2, pow2) == code);
+    const float split = unorm24_depth_for_write(code, Unorm24DepthWrite::Split);
+    assert(d24_convert(D24Conversion::RoundSpec, split) == code);
+    assert(d24_convert(D24Conversion::RoundMixedScale, split) == code);
+    assert(split == (code < 0x800000u ? pow2 : midpoint));
+    assert(pow2 < 1.0f && midpoint <= 1.0f);
+  }
+  // On NVIDIA's mix neither of the others is exact, where it was measured.
+  assert(d24_convert(D24Conversion::RoundMixedScale,
+                     unorm24_depth_for_write(0u, Unorm24DepthWrite::Midpoint)) == 1u);
+  assert(d24_convert(D24Conversion::RoundMixedScale,
+                     unorm24_depth_for_write(0x800001u, Unorm24DepthWrite::PowerOfTwo)) ==
+         0x800000u);
+  // Only the code's low 24 bits count.
+  assert(unorm24_depth_for_write(0x1556677u, Unorm24DepthWrite::Midpoint) ==
+         unorm24_depth_for_write(0x556677u, Unorm24DepthWrite::Midpoint));
+  // The encodings the CI failures came from fail where described.
+  const float sampled = float(0x556677u) * (1.0f / 16777216.0f);
+  assert(d24_convert(D24Conversion::TruncateSpec, sampled) == 0x556676u);
+  assert(d24_convert(D24Conversion::RoundHalfUpPow2,
+                     unorm24_depth_for_write(0u, Unorm24DepthWrite::Midpoint)) == 1u);
+}
+
+// The calibration words span the whole range - both ends, both sides of 2^23
+// - and the selection keeps the first exact encoding, or the least wrong one
+// with its first mismatch when none is exact, and reports a failed store.
+void test_unorm24_calibration_chooses_the_exact_encoding() {
+  using namespace xenon::gpu;
+  const auto words = unorm24_depth_calibration_words(66560u);
+  assert(words.size() == 66560u);
+  bool low = false, high = false, zero = false, full = false;
+  std::uint32_t stencils = 0u;
+  for (std::size_t i = 0; i < words.size(); ++i) {
+    const auto code = words[i] >> 8u;
+    low |= code < 0x800000u && code > 0x400000u;
+    high |= code >= 0x800000u && code < 0xFFFFFFu;
+    zero |= code == 0u;
+    full |= code == 0xFFFFFFu;
+    if (i > 0 && (words[i] & 0xFFu) != (words[i - 1] & 0xFFu)) ++stencils;
+  }
+  assert(low && high && zero && full && stencils > words.size() / 2);
+  assert(unorm24_depth_calibration_words(3u).size() == 16u);
+
+  const auto device = [&](D24Conversion conversion) {
+    return [conversion](Unorm24DepthWrite write, std::span<const std::uint32_t> source,
+                        std::vector<std::uint32_t>& stored) {
+      for (const auto word : source)
+        stored.push_back((d24_convert(conversion, unorm24_depth_for_write(word >> 8u, write))
+                          << 8u) |
+                         (word & 0xFFu));
+      return true;
+    };
+  };
+  for (const auto [conversion, expected] :
+       {std::pair{D24Conversion::TruncateSpec, Unorm24DepthWrite::Midpoint},
+        std::pair{D24Conversion::RoundSpec, Unorm24DepthWrite::Midpoint},
+        std::pair{D24Conversion::TruncatePow2, Unorm24DepthWrite::PowerOfTwo},
+        std::pair{D24Conversion::RoundPow2, Unorm24DepthWrite::PowerOfTwo},
+        std::pair{D24Conversion::RoundHalfUpPow2, Unorm24DepthWrite::PowerOfTwo},
+        std::pair{D24Conversion::RoundMixedScale, Unorm24DepthWrite::Split}}) {
+    const auto result = calibrate_unorm24_depth_write(words, device(conversion));
+    assert(result && result->exact && result->write == expected && result->mismatches == 0u);
+  }
+  // A device storing every code one high: nothing is exact; the result is
+  // the encoding with the fewest wrong codes, with its first mismatch.
+  const auto off_by_one = calibrate_unorm24_depth_write(
+      words, [](Unorm24DepthWrite, std::span<const std::uint32_t> source,
+                std::vector<std::uint32_t>& stored) {
+        for (const auto word : source)
+          stored.push_back(((std::min((word >> 8u) + 1u, 0xFFFFFFu)) << 8u) | (word & 0xFFu));
+        return true;
+      });
+  assert(off_by_one && !off_by_one->exact && off_by_one->mismatches > 0u);
+  assert(off_by_one->mismatches < words.size());
+  assert((off_by_one->first_stored >> 8u) == (off_by_one->first_expected >> 8u) + 1u);
+  // A store that fails, or returns the wrong count, is no measurement.
+  assert(!calibrate_unorm24_depth_write(
+      words, [](Unorm24DepthWrite, std::span<const std::uint32_t>,
+                std::vector<std::uint32_t>&) { return false; }));
+  assert(!calibrate_unorm24_depth_write(
+      words, [](Unorm24DepthWrite, std::span<const std::uint32_t>,
+                std::vector<std::uint32_t>& stored) {
+        stored.push_back(0u);
+        return true;
+      }));
 }
 
 // Regression (AC6 campaign opening rendered black with no failed draws): a
@@ -146,7 +276,8 @@ void test_viewport_depth_matches_the_host_scale() {
   for (const float guest : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
     const auto cleared = depth_stencil_to_host(
         DepthRenderTargetFormat::D24FS8,
-        pack_depth_stencil(DepthRenderTargetFormat::D24FS8, guest, 0)).depth;
+        pack_depth_stencil(DepthRenderTargetFormat::D24FS8, guest, 0),
+        Unorm24DepthWrite::Midpoint).depth;
     assert(host_viewport_depth(DepthRenderTargetFormat::D24FS8, guest) == cleared);
     assert(host_viewport_depth(DepthRenderTargetFormat::D24S8, guest) == guest);
   }
@@ -166,6 +297,8 @@ int main() {
   test_round_trip_lattice_samples();
   test_packed_depth_stencil();
   test_clear_register_words_unpack_as_written();
+  test_unorm24_depth_writes_store_their_codes();
+  test_unorm24_calibration_chooses_the_exact_encoding();
   test_viewport_depth_matches_the_host_scale();
   std::cout << "xenon_depth_format_tests: ok\n";
 }

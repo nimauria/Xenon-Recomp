@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "xenon/gpu/backend.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/vulkan/context.hpp"
 
 namespace xenon::gpu::vulkan {
@@ -46,6 +48,9 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool publish_gpu_writes(bool wait) override;
   void set_shader_cache_directory(const std::string& directory) override;
   [[nodiscard]] bool ready() const noexcept;
+  // How this device's D24 depth writes were measured to encode a code at
+  // initialize(); empty before it, or in a build without shader writes.
+  [[nodiscard]] std::optional<Unorm24DepthCalibration> unorm24_depth_calibration() const;
   [[nodiscard]] std::size_t command_count() const noexcept;
   [[nodiscard]] std::size_t draw_count() const noexcept;
   [[nodiscard]] std::size_t compiled_shader_count() const noexcept;
@@ -53,6 +58,10 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] bool resource_layout_ready() const noexcept;
   [[nodiscard]] std::size_t realized_texture_count() const noexcept;
   [[nodiscard]] std::size_t realized_render_target_count() const noexcept;
+  // The rows of the tallest colour render target alive: how much EDRAM
+  // the draws so far had to cover (a regression check for draws sized to
+  // an open scissor).
+  [[nodiscard]] std::uint32_t tallest_render_target_rows() const noexcept;
   [[nodiscard]] const DeviceProperties& device_properties() const noexcept;
   [[nodiscard]] const std::string& error() const noexcept;
   [[nodiscard]] std::string last_error() const override { return error(); }

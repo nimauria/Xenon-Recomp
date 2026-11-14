@@ -516,12 +516,12 @@ bool DepthTargetImage::upload_sample(
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT depth_footprint{}, stencil_footprint{};
   if (!make_upload(depth_source.Get(), 4, depth_upload, depth_footprint,
           [&](std::byte* destination, std::uint32_t packed) {
-            const auto value = depth_stencil_to_host(guest_format_, packed);
+            const auto value = depth_stencil_to_host(guest_format_, packed, unorm24_write_);
             std::memcpy(destination, &value.depth, 4);
           }) ||
       !make_upload(stencil_source.Get(), 1, stencil_upload, stencil_footprint,
           [&](std::byte* destination, std::uint32_t packed) {
-            *destination = std::byte(depth_stencil_to_host(
+            *destination = std::byte(unpack_depth_stencil(
                 guest_format_, packed).stencil);
           })) {
     error_ = "D3D12 depth upload staging allocation failed";

@@ -156,16 +156,18 @@ bool GpuResolver::create_layouts(VkDevice device) {
 }
 
 VkPipeline GpuResolver::resolve_pipeline(VkDevice device, MsaaSamples samples, bool depth,
-                                         DepthRenderTargetFormat depth_format) {
+                                         DepthRenderTargetFormat depth_format, bool integer) {
 #ifndef XENON_HAS_DXC
   (void)device;
   (void)samples;
   (void)depth;
   (void)depth_format;
+  (void)integer;
   error_ = "Vulkan GPU resolve requires DXC";
   return VK_NULL_HANDLE;
 #else
   const auto key = static_cast<std::uint32_t>(samples) | (depth ? 0x100u : 0u) |
+                   (integer ? 0x200u : 0u) |
                    (depth ? std::uint32_t(depth_format) << 16u : 0u);
   if (const auto found = resolve_pipelines_.find(key); found != resolve_pipelines_.end())
     return found->second;
@@ -173,7 +175,7 @@ VkPipeline GpuResolver::resolve_pipeline(VkDevice device, MsaaSamples samples, b
   VkShaderModule module = VK_NULL_HANDLE;
   if (!create_module(device,
                      depth ? make_gpu_depth_resolve_shader(samples, depth_format)
-                           : make_gpu_resolve_shader(samples),
+                           : make_gpu_resolve_shader(samples, integer),
                      module, error_))
     return VK_NULL_HANDLE;
   VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
@@ -328,9 +330,13 @@ void GpuResolver::dispatch(VkCommandBuffer command, VkPipeline pipeline, VkPipel
 bool GpuResolver::resolve(VkDevice device, CommandQueue& queue, GuestMemoryMirror& mirror,
                           RenderTargetImage& owner, const GpuResolveConstants& constants) {
   if (!constants.width || !constants.height) return true;
-  const auto pipeline = resolve_pipeline(device, owner.host_msaa(), false, {});
+  // A 16-bit float owner is read through its integer view, so a raw resolve
+  // keeps its bits.
+  const auto pipeline =
+      resolve_pipeline(device, owner.host_msaa(), false, {},
+                       owner.transfer_format() != owner.format());
   if (!pipeline) return false;
-  const auto source_set = owner.sampled_descriptor_set(source_layout_);
+  const auto source_set = owner.transfer_descriptor_set(source_layout_);
   if (!source_set) {
     error_ = owner.error();
     return false;

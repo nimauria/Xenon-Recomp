@@ -247,15 +247,25 @@ void test_decoded_scalar_operations_read_source_three() {
   assert(hlsl.find("float4 s1 = XenonFloatConstants[((40) & 255)].xyyy;") != std::string::npos);
   assert(hlsl.find("float4 s2 = XenonFloatConstants[((40) & 255)].wwww;") != std::string::npos);
   assert(hlsl.find("float4 s2 = r[(0) & 63].xxxx;") != std::string::npos);
-  assert(hlsl.find("xenon_scalar_op(11, s2, s2, ps") != std::string::npos);
+  // Each instruction carries its own operation: frcs takes source 3's W.
+  assert(hlsl.find("scalar op 11") != std::string::npos);
+  assert(hlsl.find("v = x - floor(x);") != std::string::npos);
   assert(hlsl.find("float4 s2 = XenonFloatConstants[((9) & 255)].xzww;") != std::string::npos);
   assert(hlsl.find("float4 s3t = r[(23) & 63].xzww;") != std::string::npos);
-  assert(hlsl.find("xenon_scalar_op(43, s2, s3t, ps") != std::string::npos);
+  assert(hlsl.find("scalar op 43") != std::string::npos);
+  assert(hlsl.find("float4 b = s3t;") != std::string::npos);
+  assert(hlsl.find("v = xenon_legacy_mul(x, b.x);") != std::string::npos);
   // sin reads r1's swizzled W: relative field 1 in X makes it .yyzw... and the
   // W field 0 makes `a` = (0 + 3) & 3 = W.
   assert(hlsl.find("float4 s2 = r[(1) & 63].yyzw;") != std::string::npos);
-  assert(hlsl.find("xenon_scalar_op(48, s2, s2, ps") != std::string::npos);
-  assert(hlsl.find("xenon_scalar_op(48, s0") == std::string::npos);
+  assert(hlsl.find("scalar op 48") != std::string::npos);
+  assert(hlsl.find("v = sin(x);") != std::string::npos);
+  // The scalar operand is always source 3 (s2), never the vector unit's s0.
+  assert(hlsl.find("float x = s2.w;") != std::string::npos);
+  assert(hlsl.find("float x = s0") == std::string::npos);
+  // No instruction calls a generic every-opcode function any more.
+  assert(hlsl.find("xenon_vector_op") == std::string::npos);
+  assert(hlsl.find("xenon_scalar_op") == std::string::npos);
 }
 
 // Export write masks: both bits give 1.0, neither bit with scalar_dest_rel
@@ -294,8 +304,14 @@ void test_vector_kill_is_not_cleared_by_scalar_operation() {
   const auto lowered =
       HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Pixel, {alu}));
   assert(lowered.complete);
-  assert(lowered.hlsl.find("p0, a0, vector_killed);") != std::string::npos);
-  assert(lowered.hlsl.find("p0, a0, scalar_killed);") != std::string::npos);
+  // The vector unit sets vector_killed; the scalar unit only ever writes
+  // scalar_killed, so it cannot clear the vector kill.
+  const auto set = lowered.hlsl.find("vector_killed = any(s0 == s1);");
+  assert(set != std::string::npos);
+  // Nothing after the vector operation assigns vector_killed again.
+  assert(lowered.hlsl.find("vector_killed =", set + 1) == std::string::npos);
+  assert(lowered.hlsl.find("bool vector_killed = false, scalar_killed = false;") <
+         set);
   assert(lowered.hlsl.find("if (vector_killed || scalar_killed) discard;") !=
          std::string::npos);
 }
@@ -329,15 +345,32 @@ void test_relative_addressing_registers() {
 // predicate becomes true, and maxas loads a0 from `a`, not the maximum.
 void test_scalar_helper_semantics() {
   using namespace xenon::gpu;
-  const auto lowered = HlslShaderLowerer::lower(make_pixel_shader(false));
-  const auto& hlsl = lowered.hlsl;
-  assert(hlsl.find("v=p0 ? 0.0 : 1.0;") != std::string::npos);
-  assert(hlsl.find("a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);") !=
+  const auto lower_ops = [](unsigned vector_opcode, unsigned scalar_opcode) {
+    auto alu = make_alu(0);
+    alu.alu.vector_opcode = static_cast<std::uint8_t>(vector_opcode);
+    alu.alu.scalar_opcode = static_cast<std::uint8_t>(scalar_opcode);
+    const auto lowered = HlslShaderLowerer::lower(make_alu_shader(ShaderStage::Vertex, {alu}));
+    assert(lowered.complete);
+    return lowered.hlsl;
+  };
+  // setp_eq: the predicate becomes x == 0, and the result is 0.0 when it does.
+  assert(lower_ops(0, 27).find("p0 = x == 0.0; v = p0 ? 0.0 : 1.0;") != std::string::npos);
+  // maxas rounds `a` (source 3's W) into a0; maxasf floors it. The result is
+  // the maximum.
+  assert(lower_ops(0, 23).find("a0 = (int)clamp(floor(x + 0.5), -256.0, 255.0); v = x >= y ? x : y;") !=
          std::string::npos);
-  assert(hlsl.find("rsqrt(abs(") == std::string::npos);
-  assert(hlsl.find("sqrt(abs(") == std::string::npos);
-  assert(hlsl.find("p0=!p0") == std::string::npos);
-  assert(hlsl.find("float x = a.z, y = a.w, z = a.x;") != std::string::npos);
+  assert(lower_ops(0, 24).find("a0 = (int)clamp(floor(x), -256.0, 255.0); v = x >= y ? x : y;") !=
+         std::string::npos);
+  // rsq_ff / sqrt take the operand as it is, never its absolute value.
+  for (const unsigned op : {20u, 21u, 22u, 40u}) {
+    const auto hlsl = lower_ops(0, op);
+    assert(hlsl.find("rsqrt(abs(") == std::string::npos);
+    assert(hlsl.find("sqrt(abs(") == std::string::npos);
+  }
+  // setp_inv and friends never invert p0 in place.
+  for (unsigned op = 27; op <= 34; ++op) assert(lower_ops(0, op).find("p0=!p0") == std::string::npos);
+  // cube reads the direction from source 1 as .z_xy.
+  assert(lower_ops(18, 50).find("float x = s0.z, y = s0.w, z = s0.x;") != std::string::npos);
 }
 
 void test_forced_writable_guest_memory_variant() {

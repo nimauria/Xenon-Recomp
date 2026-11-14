@@ -38,8 +38,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <set>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -58,16 +61,19 @@
 #include "xenon/logging/probe_log.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_ownership.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/guest_read_sync.hpp"
 #include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
 #include "xenon/gpu/transient_arena.hpp"
+#include "xenon/gpu/vertex_position_evaluator.hpp"
 #include "xenon/gpu/blend_constant.hpp"
 #include "xenon/logging/logger.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -214,6 +220,12 @@ class BackendCore {
   std::unordered_map<EdramOwnerId, DepthTargetImage*> owner_depth_targets{};
   std::unordered_map<std::uint64_t, std::unique_ptr<GraphicsPipeline>> pipelines{};
   std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> shader_textures{};
+  // Per shader, the filters each fetch constant it samples is fetched with
+  // (ShaderReflection::texture_filter_overrides).
+  std::unordered_map<std::uint64_t, std::vector<TextureFilterOverride>> shader_texture_filters{};
+  // Program hashes consume_shader_load() has handled (lowered and compiled,
+  // or found unlowerable); a repeated load of one is a no-op.
+  std::unordered_set<std::uint64_t> handled_shader_loads{};
   TextureDirtyTracker texture_dirty{};
   // Texture reads as of GPU/CPU sync points (sync_guest_reads()).
   GuestReadSync guest_reads{};
@@ -273,6 +285,59 @@ class BackendCore {
 #endif
   std::string error{};
   bool ready{};
+
+  // How this device's D24 depth writes encode a code, measured once the
+  // queue is up (calibrate_depth_writes) and given to every depth image
+  // created after it: uploads, GPU clears and EDRAM transfers into D24S8
+  // images then store the guest's exact code. Empty until measured.
+  Unorm24DepthWrite unorm24_depth_write{Unorm24DepthWrite::Midpoint};
+  std::optional<Unorm24DepthCalibration> unorm24_depth_calibration{};
+
+  // Writes calibration words into a D24S8 probe image through the depth
+  // upload path (the same SV_Depth write every D24 path uses) under each
+  // encoding, reads them back, and keeps the first exact one. Without DXC
+  // no shader writes depth, so nothing needs measuring.
+  bool calibrate_depth_writes() {
+#ifdef XENON_HAS_DXC
+    // Whole 80x16 tiles: 4 x 13 tiles, 66560 codes.
+    constexpr std::uint32_t kWidth = 320u, kHeight = 208u;
+    const EdramSurfaceLayout surface{0u, kWidth, kHeight, MsaaSamples::X1, false, true};
+    DepthTargetImage probe;
+    if (!self().create_depth_target(probe, surface, DepthRenderTargetFormat::D24S8)) {
+      error = named("D24 depth-write calibration image: " + probe.error());
+      return false;
+    }
+    const auto words = unorm24_depth_calibration_words(kWidth * kHeight);
+    const auto measured = calibrate_unorm24_depth_write(
+        words, [&](Unorm24DepthWrite write, std::span<const std::uint32_t> source,
+                   std::vector<std::uint32_t>& stored) {
+          probe.set_unorm24_depth_write(write);
+          std::uint32_t pitch{};
+          return probe.upload_sample(queue, 0u, 0u, 0u, kWidth, kHeight, source, kWidth * 4u) &&
+                 probe.readback_sample(queue, 0u, 0u, 0u, kWidth, kHeight, stored, pitch);
+        });
+    if (!measured) {
+      error = named("D24 depth-write calibration failed: " + probe.error());
+      return false;
+    }
+    unorm24_depth_calibration = measured;
+    unorm24_depth_write = measured->write;
+    const auto name = unorm24_depth_write_name(measured->write);
+    if (measured->exact)
+      logging::append_probe_log("gpu_device_diag.log", "%.*s D24 depth writes: %.*s (exact)\n",
+                                int(Api::kName.size()), Api::kName.data(), int(name.size()),
+                                name.data());
+    else
+      logging::append_probe_log(
+          "gpu_device_diag.log",
+          "%.*s D24 depth writes: no exact encoding; %.*s leaves %u of %zu codes wrong "
+          "(0x%06X stored as 0x%06X)\n",
+          int(Api::kName.size()), Api::kName.data(), int(name.size()), name.data(),
+          measured->mismatches, words.size(), measured->first_expected >> 8u,
+          measured->first_stored >> 8u);
+#endif
+    return true;
+  }
 
   // Diagnostic: time spent in each step of a whole-surface EDRAM ownership
   // transfer (these run on the GPU pump thread), logged when slow.
@@ -806,6 +871,34 @@ class BackendCore {
     return found->second;
   }
 
+  // Why single_color_owner() found no image, for the CPU-path resolve probe.
+  std::string describe_missing_color_owner(const EdramSurfaceLayout& surface,
+                                           const EdramSurfaceRegion& region) const {
+    const auto tiles = covered_edram_tiles(surface, region);
+    if (tiles.empty()) return "the rectangle covers no EDRAM tile";
+    std::size_t canonical = 0;
+    std::set<EdramOwnerId> owners;
+    for (const auto tile : tiles) {
+      const auto owner = edram_ownership.owner(tile);
+      if (owner == kCanonicalEdramOwner) ++canonical;
+      else owners.insert(owner);
+    }
+    if (owners.empty()) return "every tile is canonical (no native image holds them)";
+    if (canonical || owners.size() > 1u)
+      return std::to_string(canonical) + " canonical tiles and " + std::to_string(owners.size()) +
+             " owners";
+    const auto found = owner_render_targets.find(*owners.begin());
+    if (found == owner_render_targets.end() || !found->second)
+      return "the owner is not a color image (a depth image holds the tiles)";
+    const auto& held = found->second->surface();
+    return "the owner's view cannot be read directly (owner pitch " +
+           std::to_string(held.pitch_pixels) + " msaa " +
+           std::to_string(static_cast<unsigned>(held.msaa)) + " 64bpp " +
+           std::to_string(held.is_64bpp ? 1 : 0) + ", resolve pitch " +
+           std::to_string(surface.pitch_pixels) + " msaa " +
+           std::to_string(static_cast<unsigned>(surface.msaa)) + ")";
+  }
+
   // The same for a depth image: the native depth image owning every tile
   // `region` of `surface` covers and holding them whole, or null.
   DepthTargetImage* single_depth_owner(const EdramSurfaceLayout& surface,
@@ -933,6 +1026,10 @@ class BackendCore {
     std::uint32_t vte_control{};
     std::uint32_t clip_control{};
     std::uint32_t mode_control{};
+    // RB_BLENDCONTROL0 and RB_COLORCONTROL as set: which blend, and the
+    // alpha test and alpha-to-coverage behind a translucent draw's look.
+    std::uint32_t blend_control{};
+    std::uint32_t color_control{};
     std::array<DrawTrailTexture, 4> textures{};
     std::uint8_t texture_count{};
     // The highest pixel-shader float constants the shader reads, as set.
@@ -953,6 +1050,118 @@ class BackendCore {
   static constexpr std::size_t kDrawTrailLength = 48;
   std::array<DrawTrailEntry, kDrawTrailLength> draw_trail{};
   std::size_t draw_trail_count{};
+
+  // The lowest pixel row (exclusive) `draw` can reach. ResourceIrBuilder
+  // bounds a draw that clips against a transformed viewport; one with
+  // clipping disabled or the viewport transform off positions its vertices
+  // in render-target pixels itself (Direct3D's EDRAM clears and resolve
+  // rectangles), and is left at the scissor - 8192 rows when the scissor test
+  // is off, which sized AC6's clear targets to all of EDRAM and moved every
+  // tile's ownership for each clear (55-990 ms each). For such a draw of up
+  // to kMaxEvaluatedVertices vertices, its vertex shader runs on the CPU
+  // (VertexPositionEvaluator) and the draw reaches the lowest vertex. A
+  // shader that cannot be evaluated keeps the scissor bound and is counted.
+  static constexpr std::uint32_t kMaxEvaluatedVertices = 64;
+  [[nodiscard]] std::int32_t drawable_bottom_for(const ir::DrawPacket& draw,
+                                                 const DrawResourceState& state) {
+    const auto scissor_bound = state.raster.drawable_bottom;
+    const auto vte = resource_state.register_value(0x2206u);
+    const bool viewport_bounded = !state.raster.clip_disabled && (vte & 0x4u) && (vte & 0x8u);
+    // Points grow into sprites of their exported or register size; they keep
+    // the scissor bound.
+    if (viewport_bounded || !memory || !draw.vertex_shader.valid || draw.index_count == 0u ||
+        draw.index_count > kMaxEvaluatedVertices || scissor_bound <= 0 ||
+        draw.primitive_type == PrimitiveType::PointList)
+      return scissor_bound;
+    const auto decoded = decoded_shaders.find(draw.vertex_shader.hash);
+    if (decoded == decoded_shaders.end()) return scissor_bound;
+    if (!VertexPositionEvaluator::unsupported_reason(decoded->second).empty()) {
+      ++unsupported.unsupported_shader_features;
+      return scissor_bound;
+    }
+    // The vertices the host would run: the processed batch's indices, or
+    // 0..n-1 for a non-indexed one.
+    std::vector<std::byte> index_snapshot;
+    std::uint32_t index_snapshot_base = 0u;
+    if (draw.source == DrawSource::Dma) {
+      const auto bytes_per_index = draw.index_buffer.format == IndexFormat::UInt32 ? 4u : 2u;
+      const auto index_bytes =
+          std::uint64_t{(std::min)(draw.index_count, draw.index_buffer.length_bytes / bytes_per_index)} *
+          bytes_per_index;
+      if (!draw.index_buffer.valid || !index_bytes ||
+          std::uint64_t{draw.index_buffer.physical_address} + index_bytes > memory::kPhysicalMemorySize ||
+          !mirror.make_cpu_visible(draw.index_buffer.physical_address,
+                                   static_cast<std::uint32_t>(index_bytes),
+                                   memory::GpuRangeUsage::IndexBuffer))
+        return scissor_bound;
+      index_snapshot.resize(static_cast<std::size_t>(index_bytes));
+      index_snapshot_base = draw.index_buffer.physical_address;
+      if (!memory->copy_physical_range(index_snapshot_base, index_snapshot)) return scissor_bound;
+    }
+    const auto batch = process_primitives(
+        draw, index_snapshot,
+        {state.primitive_assembly.reset_enabled, state.primitive_assembly.reset_index},
+        index_snapshot_base);
+    if (!batch.valid || batch.topology == HostPrimitiveTopology::PointList) return scissor_bound;
+    std::vector<std::uint32_t> order;
+    if (batch.indexed) {
+      order = batch.indices;
+    } else {
+      order.resize(batch.vertex_count);
+      for (std::uint32_t i = 0; i < batch.vertex_count; ++i) order[i] = i;
+    }
+    auto vertices = order;
+    std::sort(vertices.begin(), vertices.end());
+    vertices.erase(std::unique(vertices.begin(), vertices.end()), vertices.end());
+    if (vertices.empty() || vertices.size() > kMaxEvaluatedVertices) return scissor_bound;
+
+    std::array<std::byte, kShaderConstantBufferBytes> constants{};
+    if (!resource_state.write_constant_buffer(constants)) return scissor_bound;
+    // Vertex data as the GPU will read it: CPU writes folded in, GPU-written
+    // (memexported) data brought back.
+    const GuestPhysicalReader reader = [&](std::uint32_t address, std::span<std::byte> out) {
+      if (std::uint64_t{address} + out.size() > memory::kPhysicalMemorySize) return false;
+      if (!mirror.make_cpu_visible(address, static_cast<std::uint32_t>(out.size()),
+                                   memory::GpuRangeUsage::VertexBuffer))
+        return false;
+      return memory->copy_physical_range(address, out);
+    };
+    float lowest = -INFINITY;
+    std::unordered_map<std::uint32_t, std::array<float, 2>> pixels;
+    for (const auto vertex : vertices) {
+      const auto evaluated =
+          VertexPositionEvaluator::evaluate(decoded->second, constants, vertex, reader);
+      if (!evaluated.valid) {
+        ++unsupported.unsupported_shader_features;
+        return scissor_bound;
+      }
+      pixels.emplace(vertex, evaluated.pixel);
+      lowest = (std::max)(lowest, evaluated.pixel[1]);
+    }
+    // A rectangle list's fourth corner, as the expansion geometry shader
+    // makes it (make_rectangle_list_geometry_shader): A + B - C, with A-B the
+    // longest side. Off an axis-aligned rectangle it can reach lower.
+    if (batch.requires_rectangle_expansion) {
+      for (std::size_t i = 0; i + 2u < order.size(); i += 3u) {
+        const std::array<std::array<float, 2>, 3> p{pixels.at(order[i]), pixels.at(order[i + 1u]),
+                                                     pixels.at(order[i + 2u])};
+        const auto distance = [&](std::size_t u, std::size_t v) {
+          const float dx = p[u][0] - p[v][0], dy = p[u][1] - p[v][1];
+          return dx * dx + dy * dy;
+        };
+        const float d01 = distance(0, 1), d12 = distance(1, 2), d20 = distance(2, 0);
+        std::size_t a = 2, b = 0, c = 1;
+        if (d01 >= d12 && d01 >= d20) a = 0, b = 1, c = 2;
+        else if (d12 >= d20) a = 1, b = 2, c = 0;
+        lowest = (std::max)(lowest, p[a][1] + p[b][1] - p[c][1]);
+      }
+    }
+    // Rows whose pixel centres lie above the lowest point.
+    if (!std::isfinite(lowest)) return scissor_bound;
+    if (!(lowest > 0.0f)) return (std::min)(scissor_bound, 1);
+    const auto rows = static_cast<std::int32_t>(std::ceil((std::min)(lowest, 16384.0f)));
+    return (std::min)(scissor_bound, (std::max)(1, rows));
+  }
 
   void note_draw(const ir::DrawPacket& draw, const DrawResourceState& state) {
     auto& entry = draw_trail[draw_trail_count % kDrawTrailLength];
@@ -1011,6 +1220,8 @@ class BackendCore {
     entry.vte_control = resource_state.register_value(0x2206u);
     entry.clip_control = resource_state.register_value(0x2204u);
     entry.mode_control = resource_state.register_value(0x2205u);
+    entry.blend_control = resource_state.register_value(0x2201u);
+    entry.color_control = resource_state.register_value(0x2202u);
     if (const auto pixel = decoded_shaders.find(draw.pixel_shader.hash);
         pixel != decoded_shaders.end()) {
       const auto& used = pixel->second.reflection.float_constants;
@@ -1080,8 +1291,16 @@ class BackendCore {
   // resolves go in order to gpu_trace.log in the run's error folder, every
   // resolve with its byte lanes, so a frame that ends black shows the pass
   // where its picture was lost. Development only.
+  //
+  // XENON_GPU_TRACE_TRIGGER=<file>: a trace starts only at such a resolve
+  // while <file> exists, and deletes it, so a trace can be taken of the
+  // moment something is on screen (a mission, not the logos). Each trace goes
+  // to its own gpu_trace_<n>.log, headed with the steady-clock time the
+  // XENON_FRAME_DUMP images are named by; creating the file again takes
+  // another.
   struct GpuTraceConfig {
     std::uint32_t width{}, height{}, events{};
+    std::filesystem::path trigger{};
   };
   static const GpuTraceConfig& gpu_trace_config() {
     static const GpuTraceConfig config = [] {
@@ -1093,6 +1312,8 @@ class BackendCore {
       parsed.width = width;
       parsed.height = height;
       parsed.events = events && *events ? std::uint32_t(std::strtoul(events, nullptr, 10)) : 3000u;
+      if (const char* trigger = std::getenv("XENON_GPU_TRACE_TRIGGER"); trigger && *trigger)
+        parsed.trigger = trigger;
       return parsed;
     }();
     return config;
@@ -1102,16 +1323,26 @@ class BackendCore {
     if (!trace_events_left) return;
     if (!trace_file) {
       const auto directory = xenon::logging::Logger::instance().error_directory();
+      const auto name = gpu_trace_config().trigger.empty()
+                            ? std::string("gpu_trace.log")
+                            : "gpu_trace_" + std::to_string(traces_taken) + ".log";
       const auto path = (directory.empty() ? std::filesystem::path{}
                                            : std::filesystem::path(directory)) /
-                        "gpu_trace.log";
+                        name;
       trace_file = std::make_unique<std::ofstream>(path, std::ios::trunc);
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+      *trace_file << "(trace starts at steady " << now_ms << " ms)\n";
     }
     *trace_file << line << '\n';
     ++trace_index;
     if (--trace_events_left == 0) {
       *trace_file << "(trace ends)\n";
       trace_file->flush();
+      trace_file.reset();
+      // With a trigger file, another trace is taken when it appears again.
+      if (!gpu_trace_config().trigger.empty()) trace_started = false;
     }
   }
   void maybe_start_trace(bool depth, std::uint32_t width, std::uint32_t height) {
@@ -1119,12 +1350,152 @@ class BackendCore {
     if (trace_started || depth || !config.events || width != config.width ||
         height != config.height)
       return;
+    if (!config.trigger.empty()) {
+      std::error_code error;
+      if (!std::filesystem::exists(config.trigger, error)) return;
+      std::filesystem::remove(config.trigger, error);
+    }
     trace_started = true;
+    ++traces_taken;
     trace_events_left = config.events;
+  }
+  // XENON_GPU_TRACE_IMAGES=1 (with XENON_GPU_TRACE): while a trace runs, the
+  // destination of every colour resolve to an 8_8_8_8, 16_16_FLOAT,
+  // 16_16_16_16_FLOAT or 32_FLOAT texture is also written as
+  // trace<n>_<event>_<address>_<w>x<h>.bmp beside the trace, untiled and
+  // endian-swapped as the guest would read it, so an intermediate render
+  // target (a particle buffer, a picture-in-picture) can be looked at as the
+  // frame built it. Float formats are scaled to the image's own range.
+  // Development only: it waits for the GPU's copy into guest memory, which
+  // the resolve had queued anyway.
+  static bool trace_images_enabled() {
+    static const bool enabled = [] {
+      const char* value = std::getenv("XENON_GPU_TRACE_IMAGES");
+      return value && *value == '1';
+    }();
+    return enabled;
+  }
+  [[nodiscard]] static float trace_half_to_float(std::uint16_t half) noexcept {
+    const std::uint32_t sign = (half >> 15u) & 1u, exponent = (half >> 10u) & 31u,
+                        mantissa = half & 1023u;
+    float value;
+    if (exponent == 0u) value = std::ldexp(static_cast<float>(mantissa), -24);
+    else if (exponent == 31u) value = mantissa ? std::nanf("") : INFINITY;
+    else value = std::ldexp(static_cast<float>(mantissa | 1024u), static_cast<int>(exponent) - 25);
+    return sign ? -value : value;
+  }
+  void trace_resolve_image(const CopyResolveState& copy, const ResolveRectangle& rectangle) {
+    if (!tracing() || !trace_images_enabled() || !memory || copy.destination_array) return;
+    const auto format = copy.destination_format;
+    if (format != 6u && format != 31u && format != 32u && format != 36u) return;
+    const auto width = static_cast<std::uint32_t>(rectangle.right - rectangle.left);
+    const auto height = static_cast<std::uint32_t>(rectangle.bottom - rectangle.top);
+    // Intermediate targets only (up to 640x720): whole frames are what
+    // XENON_FRAME_DUMP already saves, at 3.7 MB a resolve here.
+    if (!width || !height || std::uint64_t(width) * height > 640u * 720u) return;
+    if (!mirror.complete_cpu_visibility(true)) return;
+    const auto bytes_per_pixel = format == 32u ? 8u : 4u;
+    const auto pitch_aligned = (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
+    // Each pixel's value as up to four floats, in the guest's component order.
+    std::vector<std::array<float, 4>> pixels(std::size_t(width) * height);
+    for (std::uint32_t y = 0; y < height; ++y) {
+      for (std::uint32_t x = 0; x < width; ++x) {
+        const auto tiled = tiled_offset_2d(static_cast<std::uint32_t>(rectangle.left) + x,
+                                           static_cast<std::uint32_t>(rectangle.top) + y,
+                                           pitch_aligned, bytes_per_pixel);
+        const auto address = std::uint64_t(copy.destination_base) + tiled;
+        std::array<std::byte, 16> block{};
+        if (address + bytes_per_pixel > memory::kPhysicalMemorySize ||
+            !memory->copy_physical_range(static_cast<std::uint32_t>(address & ~15ull), block))
+          return;
+        apply_endian128(block, copy.destination_endian);
+        const auto* p = block.data() + (address & 15ull);
+        const auto u8 = [&](std::size_t i) { return std::to_integer<std::uint8_t>(p[i]); };
+        const auto u16 = [&](std::size_t i) {
+          return static_cast<std::uint16_t>(u8(i) | (u8(i + 1) << 8u));
+        };
+        auto& out = pixels[std::size_t(y) * width + x];
+        if (format == 6u) {
+          for (std::size_t c = 0; c < 4; ++c) out[c] = u8(c) / 255.0f;
+        } else if (format == 31u) {
+          out = {trace_half_to_float(u16(0)), trace_half_to_float(u16(2)), 0.0f, 1.0f};
+        } else if (format == 32u) {
+          for (std::size_t c = 0; c < 4; ++c) out[c] = trace_half_to_float(u16(c * 2));
+        } else {
+          std::uint32_t word = u8(0) | (u8(1) << 8u) | (u8(2) << 16u) | (std::uint32_t(u8(3)) << 24u);
+          const auto value = std::bit_cast<float>(word);
+          out = {value, value, value, 1.0f};
+        }
+      }
+    }
+    // Float formats: scale the finite colour values to 0..1 over the image.
+    float low = 0.0f, high = 1.0f;
+    if (format != 6u) {
+      low = INFINITY;
+      high = -INFINITY;
+      for (const auto& pixel : pixels)
+        for (std::size_t c = 0; c < 3; ++c)
+          if (std::isfinite(pixel[c])) {
+            low = (std::min)(low, pixel[c]);
+            high = (std::max)(high, pixel[c]);
+          }
+      if (!(high > low)) {
+        low = 0.0f;
+        high = 1.0f;
+      }
+    }
+    std::vector<std::uint8_t> bmp;
+    const auto put16 = [&](std::uint32_t v) {
+      bmp.push_back(static_cast<std::uint8_t>(v));
+      bmp.push_back(static_cast<std::uint8_t>(v >> 8u));
+    };
+    const auto put32 = [&](std::uint32_t v) {
+      put16(v);
+      put16(v >> 16u);
+    };
+    const auto pixel_bytes = width * height * 4u;
+    bmp.push_back('B');
+    bmp.push_back('M');
+    put32(54u + pixel_bytes);
+    put32(0u);
+    put32(54u);
+    put32(40u);
+    put32(width);
+    put32(static_cast<std::uint32_t>(-static_cast<std::int32_t>(height)));  // top-down
+    put16(1u);
+    put16(32u);
+    put32(0u);
+    put32(pixel_bytes);
+    put32(2835u);
+    put32(2835u);
+    put32(0u);
+    put32(0u);
+    const auto to_byte = [&](float v) {
+      const float scaled = (v - low) / (high - low);
+      return static_cast<std::uint8_t>(std::isfinite(scaled) ? std::clamp(scaled, 0.0f, 1.0f) * 255.0f + 0.5f
+                                                             : 255.0f);
+    };
+    for (const auto& pixel : pixels) {
+      bmp.push_back(to_byte(pixel[2]));
+      bmp.push_back(to_byte(pixel[1]));
+      bmp.push_back(to_byte(pixel[0]));
+      bmp.push_back(255u);
+    }
+    const auto directory = xenon::logging::Logger::instance().error_directory();
+    char name[96];
+    std::snprintf(name, sizeof(name), "trace%u_%llu_%08X_%ux%u_f%u.bmp", traces_taken,
+                  static_cast<unsigned long long>(trace_index), copy.destination_base, width,
+                  height, unsigned(format));
+    std::ofstream file((directory.empty() ? std::filesystem::path{}
+                                          : std::filesystem::path(directory)) /
+                           name,
+                       std::ios::binary | std::ios::trunc);
+    file.write(reinterpret_cast<const char*>(bmp.data()), static_cast<std::streamsize>(bmp.size()));
   }
   std::unique_ptr<std::ofstream> trace_file{};
   std::uint32_t trace_events_left{};
   std::uint64_t trace_index{};
+  std::uint32_t traces_taken{};
   bool trace_started{};
 
   void log_draw_trail() {
@@ -1169,12 +1540,14 @@ class BackendCore {
     if (length > 0 && length < static_cast<int>(sizeof(line))) {
       length += std::snprintf(line + length, sizeof(line) - static_cast<std::size_t>(length),
                               " viewport scale=(%g,%g,%g) offset=(%g,%g,%g) window_offset=%d(%d,%d)"
-                              " drawable_bottom=%d vte=0x%X clip=0x%X mode=0x%X",
+                              " drawable_bottom=%d vte=0x%X clip=0x%X mode=0x%X"
+                              " blendctl=0x%08X colorctl=0x%08X",
                               double(e.viewport[0]), double(e.viewport[2]), double(e.viewport[4]),
                               double(e.viewport[1]), double(e.viewport[3]), double(e.viewport[5]),
                               int(e.window_offset), e.window_offset_xy[0], e.window_offset_xy[1],
                               e.drawable_bottom, unsigned(e.vte_control),
-                              unsigned(e.clip_control), unsigned(e.mode_control));
+                              unsigned(e.clip_control), unsigned(e.mode_control),
+                              unsigned(e.blend_control), unsigned(e.color_control));
     }
     for (std::uint8_t c = 0; c < e.ps_constant_count && length > 0 &&
                              length < static_cast<int>(sizeof(line));
@@ -1652,7 +2025,8 @@ class BackendCore {
       if (plan_gpu_depth_clear(rectangle, state.copy.depth_clear,
                                static_cast<DepthRenderTargetFormat>(state.depth_target.format),
                                surface, owner->surface(), owner->host_msaa(),
-                               owner->guest_format(), constants, stencil)) {
+                               owner->guest_format(), owner->unorm24_depth_write(),
+                               constants, stencil)) {
         if (!self().gpu_depth_clear(*owner, constants, stencil)) return false;
         ++performance.gpu_depth_clears;
         return true;

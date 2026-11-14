@@ -58,7 +58,12 @@ ID3D12PipelineState* GpuResolver::resolve_pipeline(ID3D12Device* device, MsaaSam
   error_ = "D3D12 GPU resolve requires DXC";
   return nullptr;
 #else
+  // edram_transfer_source() binds a 16-bit float owner's integer view.
+  const bool integer =
+      !source.depth &&
+      color_host_transfers_as_integer(static_cast<ColorRenderTargetFormat>(source.format));
   const auto key = static_cast<std::uint32_t>(samples) | (source.depth ? 0x100u : 0u) |
+                   (integer ? 0x200u : 0u) |
                    (source.depth ? std::uint32_t(source.format) << 16u : 0u);
   if (const auto found = resolve_pipelines_.find(key); found != resolve_pipelines_.end())
     return found->second.Get();
@@ -68,7 +73,7 @@ ID3D12PipelineState* GpuResolver::resolve_pipeline(ID3D12Device* device, MsaaSam
   const auto cs = compiler.compile(
       source.depth ? make_gpu_depth_resolve_shader(
                          samples, static_cast<DepthRenderTargetFormat>(source.format))
-                   : make_gpu_resolve_shader(samples));
+                   : make_gpu_resolve_shader(samples, integer));
   if (!cs.succeeded) {
     error_ = cs.diagnostics.empty() ? "D3D12 GPU resolve shader compilation failed"
                                     : cs.diagnostics.front();

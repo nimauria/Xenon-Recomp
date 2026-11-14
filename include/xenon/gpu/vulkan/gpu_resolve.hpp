@@ -40,7 +40,8 @@ class GpuResolver {
  private:
   [[nodiscard]] bool create_layouts(VkDevice device);
   [[nodiscard]] VkPipeline resolve_pipeline(VkDevice device, MsaaSamples samples, bool depth,
-                                            DepthRenderTargetFormat depth_format);
+                                            DepthRenderTargetFormat depth_format,
+                                            bool integer = false);
   [[nodiscard]] VkPipeline clear_pipeline(VkDevice device, VkFormat format, MsaaSamples samples,
                                           bool depth);
   void bind_guest(VkDevice device, GuestMemoryMirror& mirror);

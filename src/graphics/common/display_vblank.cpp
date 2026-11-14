@@ -26,7 +26,15 @@ bool display_wait_overran(double host_refresh_hz, std::uint32_t refreshes,
   if (!(host_refresh_hz > 0.0) || !std::isfinite(host_refresh_hz)) return true;
   const double period_ns = 1e9 / host_refresh_hz;
   return static_cast<double>(elapsed.count()) >
-         (static_cast<double>(refreshes) + 0.5) * period_ns;
+         (static_cast<double>(refreshes) + kDisplayWaitSlack) * period_ns;
+}
+
+bool display_wait_returned_early(double host_refresh_hz, std::uint32_t refreshes,
+                                 std::chrono::nanoseconds since_last) noexcept {
+  if (!(host_refresh_hz > 0.0) || !std::isfinite(host_refresh_hz)) return true;
+  const double period_ns = 1e9 / host_refresh_hz;
+  return static_cast<double>(since_last.count()) <
+         (static_cast<double>(refreshes) - kDisplayWaitSlack) * period_ns;
 }
 
 #if defined(_WIN32)

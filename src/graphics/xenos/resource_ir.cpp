@@ -597,6 +597,29 @@ std::optional<TextureDescriptor> ResourceStateTracker::texture(
        registers_[offset + 3u], registers_[offset + 4u], registers_[offset + 5u]});
 }
 
+TextureDescriptor with_filter_override(TextureDescriptor descriptor,
+                                       const TextureFilterOverride& filters) noexcept {
+  if (filters.mag_filter != kTextureFilterUseFetchConstant)
+    descriptor.mag_filter = filters.mag_filter;
+  if (filters.min_filter != kTextureFilterUseFetchConstant)
+    descriptor.min_filter = filters.min_filter;
+  if (filters.mip_filter != kTextureFilterUseFetchConstant)
+    descriptor.mip_filter = filters.mip_filter;
+  if (filters.aniso_filter != kAnisoFilterUseFetchConstant)
+    descriptor.aniso_filter = filters.aniso_filter;
+  return descriptor;
+}
+
+std::optional<TextureFilterOverride> merge_texture_filters(
+    const std::optional<TextureFilterOverride>& pixel,
+    const std::optional<TextureFilterOverride>& vertex) noexcept {
+  if (!pixel) return vertex;
+  if (!vertex) return pixel;
+  auto merged = *pixel;
+  merged.conflicting = pixel->conflicting || vertex->conflicting || !pixel->same_filters(*vertex);
+  return merged;
+}
+
 std::optional<TextureDescriptor> decode_texture_fetch_constant(
     const std::array<std::uint32_t, 6>& words) noexcept {
   const auto [w0, w1, w2, w3, w4, w5] = words;

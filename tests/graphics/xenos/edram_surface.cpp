@@ -193,10 +193,11 @@ void test_direct_transfer_reads_the_sample_holding_the_same_word() {
 
 // The converting transfer takes exactly the 32bpp views whose host value
 // carries every EDRAM word bit for bit: unorm and 32-bit float color stored
-// as their own encoding, and both depth formats. Views stored at another
-// precision (gamma in 16-bit unorm, 16-bit fixed, 7e3 float), 64bpp, and
-// 16-bit float (GPUs canonicalize half NaNs, so 0xFF00 comes back 0x7FFF)
-// are refused and keep the exact CPU path.
+// as their own encoding, 16-bit float through its integer view (GPUs
+// canonicalize a half NaN through a float view, so 0xFF00 would come back
+// 0x7FFF), and both depth formats. Views stored at another precision (gamma
+// in 16-bit unorm, 16-bit fixed, 7e3 float) and 64bpp are refused and keep
+// the exact CPU path.
 void test_converting_transfer_formats() {
   const auto color = [](ColorRenderTargetFormat f) {
     return EdramTransferEndpoint{false, std::uint8_t(f)};
@@ -207,13 +208,13 @@ void test_converting_transfer_formats() {
   const std::array accepted{color(ColorRenderTargetFormat::R8G8B8A8),
                             color(ColorRenderTargetFormat::R10G10B10A2),
                             color(ColorRenderTargetFormat::R10G10B10A2As10),
+                            color(ColorRenderTargetFormat::R16G16Float),
                             color(ColorRenderTargetFormat::R32Float),
                             depth(DepthRenderTargetFormat::D24S8),
                             depth(DepthRenderTargetFormat::D24FS8)};
   for (const auto& a : accepted)
     for (const auto& b : accepted) assert(edram_converting_transfer_supported(a, b));
   for (const auto refused : {ColorRenderTargetFormat::R8G8B8A8Gamma,
-                             ColorRenderTargetFormat::R16G16Float,
                              ColorRenderTargetFormat::R16G16Fixed,
                              ColorRenderTargetFormat::R10G10B10A2Float,
                              ColorRenderTargetFormat::R16G16B16A16Float,
@@ -221,6 +222,14 @@ void test_converting_transfer_formats() {
     assert(!edram_converting_transfer_supported(color(refused), accepted.front()));
     assert(!edram_converting_transfer_supported(accepted.back(), color(refused)));
   }
+  // Which host storages transfer through an integer view: the 16-bit float
+  // ones, whatever guest format they hold.
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16Float));
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16B16A16Float));
+  assert(color_host_transfers_as_integer(ColorRenderTargetFormat::R16G16Fixed));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R8G8B8A8));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R32Float));
+  assert(!color_host_transfers_as_integer(ColorRenderTargetFormat::R8G8B8A8Gamma));
 }
 
 // Native images are sized to whole tile rows, so an image holds every tile it
@@ -245,9 +254,39 @@ void test_whole_tile_heights() {
                                           tiles));
 }
 
+// Regression: a 16_16_FLOAT (and 16_16_16_16_FLOAT) word lost bits on its
+// way through the CPU - float_to_half() shifted half denormals 13 bits short
+// (0x0005 came back 0xA000) and turned every NaN into 0x7E00 - so importing
+// or repacking such a surface changed EDRAM words the Xbox keeps. Every
+// 16-bit pattern, in both halves, must come back unchanged through the
+// guest-word codec and through the host storage.
+void test_half_float_words_round_trip() {
+  for (const auto format :
+       {ColorRenderTargetFormat::R16G16Float, ColorRenderTargetFormat::R16G16B16A16Float}) {
+    const bool wide = format == ColorRenderTargetFormat::R16G16B16A16Float;
+    for (std::uint32_t h = 0; h < 0x10000u; ++h) {
+      const std::array<std::uint32_t, 2> word{h | ((h ^ 0x8001u) << 16u),
+                                              wide ? ((h ^ 0x7C00u) | (h << 16u)) : 0u};
+      const auto sample = unpack_color_sample(format, word);
+      const auto packed = pack_color_sample(format, sample);
+      if (packed != word) {
+        std::cerr << "half word 0x" << std::hex << word[0] << ' ' << word[1] << " came back 0x"
+                  << packed[0] << ' ' << packed[1] << std::dec << '\n';
+        assert(false);
+      }
+      std::array<std::byte, 8> host{};
+      assert(encode_host_color_sample(format, sample, host));
+      ColorSample decoded{};
+      assert(decode_host_color_sample(format, host, decoded));
+      assert(pack_color_sample(format, decoded) == word);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_half_float_words_round_trip();
   test_whole_tile_heights();
   test_direct_transfer_reads_the_sample_holding_the_same_word();
   test_converting_transfer_formats();

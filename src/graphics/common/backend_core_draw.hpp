@@ -104,6 +104,10 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       (state.edram_mode == EdramMode::ColorDepth || state.edram_mode == EdramMode::DepthOnly) &&
       (state.depth_target.test_enabled || state.depth_target.write_enabled ||
        state.depth_target.stencil_enabled);
+  // How far down the draw reaches, which sizes its render targets
+  // (drawable_bottom_for: unclipped draws are bounded by their vertices).
+  const auto drawable_bottom = rasterizes ? drawable_bottom_for(*draw, state)
+                                          : state.raster.drawable_bottom;
   // The surfaces bound to this draw never share EDRAM, so each one ends where
   // the next bound surface begins (AC6's 640x360 4x MSAA color target at tile
   // 0 is followed by its depth at tile 720).
@@ -121,7 +125,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     // Sized to the rows the draw can reach, not the (often open) scissor,
     // and never taller than EDRAM can hold at this pitch.
     const auto height = (std::min)(
-        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
+        std::uint32_t((std::max)(1, drawable_bottom)),
         EdramSurfaceLayout{0u, state.raster.surface_pitch, 1u,
                            static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false,
                            false}
@@ -178,7 +182,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
        state.depth_target.stencil_enabled)) {
     EdramSurfaceLayout surface{
         state.depth_target.base_tile, state.raster.surface_pitch,
-        std::uint32_t((std::max)(1, state.raster.drawable_bottom)),
+        std::uint32_t((std::max)(1, drawable_bottom)),
         static_cast<MsaaSamples>(state.raster.msaa_samples_log2), false, true};
     surface.height_pixels = (std::min)(whole_tile_height_pixels(surface),
                                        rows_before_next_surface(surface, bound_bases));
@@ -204,6 +208,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         error = image->error();
         return;
       } else {
+        image->set_unorm24_depth_write(unorm24_depth_write);
         auto* image_pointer = image.get();
         depth_targets.emplace(key, std::move(image));
         const auto owner = next_edram_owner++;
@@ -242,7 +247,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     // Vertex data is read as guest memory stood at the latest sync point, as
     // textures are: the CPU writes since then are folded in once, at the next
     // one, not once for every buffer of every draw.
-    const auto vertex_read_epoch = guest_reads.read_epoch(*memory);
+    // XENON_VERTEX_READ_NOW=1 (development A/B only): vertex data is read as
+    // guest memory stands at the draw, every CPU write folded in, to tell a
+    // sync-point fold-in that missed vertices apart from other vertex faults.
+    static const bool vertex_read_now = [] {
+      const char* value = std::getenv("XENON_VERTEX_READ_NOW");
+      return value && *value == '1';
+    }();
+    const auto vertex_read_epoch = vertex_read_now ? 0u : guest_reads.read_epoch(*memory);
     std::array<bool, 96> fetched{};
 #ifdef XENON_HAS_DXC
     bool all_fetched = false;
@@ -304,6 +316,15 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   };
   mark_used(draw->vertex_shader);
   mark_used(draw->pixel_shader);
+  // The filters each slot's fetches ask for, over both shaders.
+  const auto slot_filters = [&](const ir::ShaderReference& shader, std::uint32_t slot) {
+    std::optional<TextureFilterOverride> result;
+    const auto found = shader_texture_filters.find(shader.hash);
+    if (!shader.valid || found == shader_texture_filters.end()) return result;
+    for (const auto& filters : found->second)
+      if (filters.fetch_constant == slot) result = filters;
+    return result;
+  };
   if (memory) {
     // Textures are read as guest memory stood at the latest GPU/CPU sync point
     // (sync_guest_reads()): the hardware samples them microseconds after it,
@@ -440,7 +461,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       } else {
         guest_reads.reused(key);
       }
-      if (!self().bind_texture(slot, descriptor, *textures.at(key))) {
+      // The sampler takes the filters the shaders' fetches override; fetches
+      // that disagree on one slot share a host sampler, so that is counted.
+      const auto filters = merge_texture_filters(slot_filters(draw->pixel_shader, slot),
+                                                 slot_filters(draw->vertex_shader, slot));
+      if (filters && filters->conflicting) ++unsupported.unsupported_sampler_behaviors;
+      const auto sampler_state =
+          filters && filters->overrides() ? with_filter_override(descriptor, *filters) : descriptor;
+      if (!self().bind_texture(slot, sampler_state, *textures.at(key))) {
         error = resources.error();
         return;
       }
@@ -743,6 +771,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
           write_masks.data(), color_count);
       const std::span<const BlendState> blend_state_span(
           blend_states.data(), color_count);
+      const perf::ScopedTime pipeline_time(perf::Counter::PipelineCreateNs,
+                                           perf::Counter::PipelineCreates);
       if (!pipeline->initialize(
               context.device(), self().pipeline_root(),
               *vertex_shader, *pixel_shader,

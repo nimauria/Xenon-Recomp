@@ -1,5 +1,6 @@
 #include "xenon/gpu/d3d12/command_queue.hpp"
 
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/logging/activity_trace.hpp"
 
 #define WIN32_LEAN_AND_MEAN
@@ -81,6 +82,7 @@ bool CommandQueue::wait_for_value(std::uint64_t value) {
       {"gpu", "fence wait", {"value", "completed", "submitted", ""}, false});
   xenon::logging::ActivityScope activity(
       activity_key, {value, fence_->GetCompletedValue(), last_submitted_value_, 0u});
+  const xenon::gpu::perf::ScopedTime wait_time(xenon::gpu::perf::Counter::FenceWaitNs, xenon::gpu::perf::Counter::FenceWaits);
   if (FAILED(fence_->SetEventOnCompletion(value, static_cast<HANDLE>(event_))) ||
       WaitForSingleObject(static_cast<HANDLE>(event_), INFINITE) !=
           WAIT_OBJECT_0) {

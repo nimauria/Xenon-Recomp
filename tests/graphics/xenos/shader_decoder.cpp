@@ -60,6 +60,54 @@ void test_texture_predicate_and_loop() {
   assert(decoded.instructions[0].texture_fetch.offsets_half_texels[0] == -1);
 }
 
+// Xenos texture fetches carry their own mag/min/mip/aniso filters, which
+// override the fetch constant's unless they say "use the fetch constant's"
+// (3; aniso 7). They were not decoded, so a texture a shader asked to sample
+// linearly was sampled with whatever its constant held (point for AC6's
+// smoke, drawn as blocks).
+void test_texture_fetch_filter_overrides() {
+  using namespace xenon::gpu;
+  const auto fetch = [](std::uint32_t opcode, std::uint32_t constant, std::uint32_t mag,
+                        std::uint32_t min, std::uint32_t mip, std::uint32_t aniso) {
+    return std::array<std::uint32_t, 3>{
+        opcode | (1u << 5) | (2u << 12) | (constant << 20) | (0x24u << 26),
+        0x688u | (mag << 12) | (min << 14) | (mip << 16) | (aniso << 18) | (3u << 24) |
+            (3u << 26),
+        1u << 14};
+  };
+  const auto program = [&](const std::array<std::array<std::uint32_t, 3>, 3>& fetches) {
+    // One exec of three fetches (sequence bits 0, 2, 4).
+    const auto cf = pack_cf(1u | (3u << 12) | (0x15u << 16),
+                            std::uint16_t(std::uint16_t(ControlFlowOpcode::ExecEnd) << 12));
+    std::vector<std::uint32_t> words{cf[0], cf[1], cf[2]};
+    for (const auto& f : fetches) words.insert(words.end(), f.begin(), f.end());
+    return ShaderDecoder::decode(ShaderProgram(ShaderStage::Pixel, words));
+  };
+  // Two tfetches of constant 2 agree on linear mag/min, the mip filter and
+  // anisotropy left to the constant; constant 5 keeps all of its own.
+  const auto agreed = program({fetch(1, 2, 1, 1, 3, 7), fetch(1, 2, 1, 1, 3, 7),
+                               fetch(1, 5, 3, 3, 3, 7)});
+  assert(agreed.complete && agreed.instructions.size() == 3);
+  const auto& first = agreed.instructions[0].texture_fetch;
+  assert(first.mag_filter == 1 && first.min_filter == 1 && first.mip_filter == 3 &&
+         first.aniso_filter == 7);
+  const auto& filters = agreed.reflection.texture_filter_overrides;
+  assert(filters.size() == 2);
+  assert(filters[0].fetch_constant == 2 && filters[0].overrides() && !filters[0].conflicting);
+  assert(filters[0].mag_filter == 1 && filters[0].min_filter == 1 &&
+         filters[0].mip_filter == kTextureFilterUseFetchConstant &&
+         filters[0].aniso_filter == kAnisoFilterUseFetchConstant);
+  assert(filters[1].fetch_constant == 5 && !filters[1].overrides() && !filters[1].conflicting);
+
+  // Point and linear fetches of one constant disagree; a setTextureLod (24)
+  // carries no filter and is not counted.
+  const auto disagreeing = program({fetch(1, 2, 1, 1, 3, 7), fetch(1, 2, 0, 0, 3, 7),
+                                    fetch(24, 5, 0, 0, 0, 0)});
+  const auto& mixed = disagreeing.reflection.texture_filter_overrides;
+  assert(mixed.size() == 1 && mixed[0].fetch_constant == 2 && mixed[0].conflicting);
+  assert(mixed[0].mag_filter == 1);  // the first fetch's
+  assert((disagreeing.reflection.texture_fetch_constants == std::vector<std::uint8_t>{2, 5}));
+}
 
 void test_pixel_depth_export_reflection() {
   using namespace xenon::gpu;
@@ -245,6 +293,7 @@ void test_memexport_raw_e4_swizzle_is_not_identity() {
 int main() {
   test_mixed_exec_and_reflection();
   test_texture_predicate_and_loop();
+  test_texture_fetch_filter_overrides();
   test_pixel_depth_export_reflection();
   test_memexport_reflection_and_stream_constant();
   test_noncanonical_memexport_address_stays_dynamic();

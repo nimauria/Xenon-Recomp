@@ -53,10 +53,19 @@ class RenderTargetImage {
   void reset() noexcept;
   [[nodiscard]] ID3D12Resource* resource() const noexcept { return resource_.Get(); }
   [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE rtv() const noexcept { return rtv_; }
-  // A shader-visible heap holding this image's SRV (multisampled when the
-  // image is), created on first use; for GPU-side EDRAM transfers.
+  // A shader-visible heap holding this image's SRV in transfer_format()
+  // (multisampled when the image is), created on first use; for GPU-side
+  // EDRAM transfers.
   [[nodiscard]] ID3D12DescriptorHeap* shader_resource_heap();
   [[nodiscard]] DXGI_FORMAT format() const noexcept { return format_; }
+  // The view EDRAM transfers read and write: format() itself, or for 16-bit
+  // float storage the same bits as unsigned integers
+  // (color_host_transfers_as_integer(); the resource is then typeless), so a
+  // transfer never canonicalizes a half NaN.
+  [[nodiscard]] DXGI_FORMAT transfer_format() const noexcept { return transfer_format_; }
+  [[nodiscard]] D3D12_CPU_DESCRIPTOR_HANDLE transfer_rtv() const noexcept {
+    return transfer_rtv_;
+  }
   [[nodiscard]] ColorRenderTargetFormat guest_format() const noexcept {
     return guest_format_;
   }
@@ -71,8 +80,10 @@ class RenderTargetImage {
   Microsoft::WRL::ComPtr<ID3D12Resource> resource_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtv_heap_{};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_{};
+  D3D12_CPU_DESCRIPTOR_HANDLE transfer_rtv_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> srv_heap_{};
   DXGI_FORMAT format_{DXGI_FORMAT_UNKNOWN};
+  DXGI_FORMAT transfer_format_{DXGI_FORMAT_UNKNOWN};
   ColorRenderTargetFormat guest_format_{ColorRenderTargetFormat::R8G8B8A8};
   std::uint32_t width_{};
   std::uint32_t height_{};

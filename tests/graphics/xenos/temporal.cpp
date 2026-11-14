@@ -1,4 +1,5 @@
 #include <array>
+#include <memory>
 #include <bit>
 #include <cassert>
 #include <cmath>
@@ -285,8 +286,10 @@ class Frames {
     const std::array<std::uint32_t, 3> dwords{seed, seed * 7u + 1u, seed * 13u + 5u};
     ir::ShaderLoad load{};
     load.program = ShaderProgram(ShaderStage::Vertex, dwords);
-    load.decoded.stage = ShaderStage::Vertex;
-    load.decoded.reflection.float_constants = std::move(reads);
+    auto decoded = std::make_shared<DecodedShader>();
+    decoded->stage = ShaderStage::Vertex;
+    decoded->reflection.float_constants = std::move(reads);
+    load.decoded = std::move(decoded);
     analyzer_.observe(load);
     return load.program.hash();
   }
@@ -294,7 +297,9 @@ class Frames {
     const std::array<std::uint32_t, 3> dwords{seed, seed + 3u, seed + 9u};
     ir::ShaderLoad load{};
     load.program = ShaderProgram(ShaderStage::Pixel, dwords);
-    load.decoded.stage = ShaderStage::Pixel;
+    auto decoded = std::make_shared<DecodedShader>();
+    decoded->stage = ShaderStage::Pixel;
+    load.decoded = std::move(decoded);
     analyzer_.observe(load);
     return load.program.hash();
   }

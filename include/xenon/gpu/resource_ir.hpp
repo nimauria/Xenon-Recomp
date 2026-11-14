@@ -456,6 +456,20 @@ struct HostDepthTransform {
     std::span<const std::byte> physical_memory,
     std::uint32_t physical_base = 0u);
 
+// The sampler state a draw samples a fetch constant's texture with when its
+// shaders' fetches override the constant's filters (Xenos fetch instructions
+// carry their own mag/min/mip/aniso filters, "use the fetch constant's" by
+// default): each field the override sets replaces the constant's.
+[[nodiscard]] TextureDescriptor with_filter_override(TextureDescriptor descriptor,
+                                                     const TextureFilterOverride& filters) noexcept;
+
+// The filters one fetch constant is sampled with across a draw's shaders,
+// `pixel` first: its own when they agree; otherwise marked conflicting, the
+// pixel shader's kept (a host sampler per slot gives every fetch the same).
+[[nodiscard]] std::optional<TextureFilterOverride> merge_texture_filters(
+    const std::optional<TextureFilterOverride>& pixel,
+    const std::optional<TextureFilterOverride>& vertex) noexcept;
+
 // Decodes a texture fetch constant (six dwords, as in the fetch-constant
 // registers or a Direct3D texture header in memory). Nullopt when the
 // constant is not a texture fetch.
