@@ -363,6 +363,15 @@ class MemoryAccessContext {
   void read_bytes(GuestAddress address, std::span<std::byte> destination);
   void write_bytes(GuestAddress address, std::span<const std::byte> source);
   void fill_bytes(GuestAddress address, std::uint32_t size, std::uint8_t value);
+  // read_bytes()/write_bytes() of a range inside one aligned 16-byte block
+  // (the VMX partial loads and stores): an aligned block never crosses a
+  // page, so native RAM takes one page-table lookup and the bytes are copied
+  // as they are - no other byte of the block is touched - with a store's
+  // write watch and dirty-page publication as write128() has them.
+  XENON_CPU_FORCEINLINE void read_quadword_part(GuestAddress address,
+                                                std::span<std::byte> destination);
+  XENON_CPU_FORCEINLINE void write_quadword_part(GuestAddress address,
+                                                 std::span<const std::byte> source);
   void zero_cache_block(GuestAddress address, std::uint32_t bytes);
 
   // Reservation operations use the same Memory V2 fast view as ordinary RAM.
@@ -1577,6 +1586,39 @@ inline void MemoryAccessContext::read_bytes(
     cursor += static_cast<GuestAddress>(chunk);
     remaining = remaining.subspan(chunk);
   }
+}
+
+inline void MemoryAccessContext::read_quadword_part(GuestAddress address,
+                                                    std::span<std::byte> destination) {
+  if (destination.empty()) return;
+  if ((address & 15u) + destination.size() <= 16u) {
+    std::uint32_t physical_page{};
+    if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                           fast_memory::kRead, physical_page)) [[likely]] {
+      detail::atomic_copy_from_guest(block + (address & 15u), destination);
+      return;
+    }
+  }
+  read_bytes(address, destination);
+}
+
+inline void MemoryAccessContext::write_quadword_part(GuestAddress address,
+                                                     std::span<const std::byte> source) {
+  if (source.empty()) return;
+  if ((address & 15u) + source.size() <= 16u) {
+    std::uint32_t physical_page{};
+    if (auto* block = native_ram<16u, 16u>(GuestAddress(address & ~GuestAddress{15}),
+                                           fast_memory::kWrite, physical_page)) [[likely]] {
+      const auto size = static_cast<std::uint32_t>(source.size());
+      const auto physical = (physical_page << kNativePageShift) | (address & kNativePageMask);
+      if (write_watch_hit(physical, size)) [[unlikely]]
+        debug_signal_write_watch(address, physical, size, source.data(), size);
+      detail::atomic_copy_to_guest(block + (address & 15u), source);
+      native_note_store(physical_page);
+      return;
+    }
+  }
+  write_bytes(address, source);
 }
 
 inline void MemoryAccessContext::write_bytes(

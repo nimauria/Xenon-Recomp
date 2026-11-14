@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
 
@@ -892,14 +893,43 @@ Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& memory,
                               GuestAddress ea, unsigned width);
 void vector_store_element(const Vector128& value, MemoryAccessContext& memory,
                           GuestAddress ea, unsigned width);
-Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
-                           GuestAddress ea);
-Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
-                            GuestAddress ea);
-void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
-                       GuestAddress ea);
-void vector_store_right(const Vector128& value, MemoryAccessContext& memory,
-                        GuestAddress ea);
+
+// lvlx/lvrx/stvlx/stvrx (and the 128 forms): the part of the aligned 16-byte
+// block holding ea from ea up (left) or below ea (right), against the first
+// or last bytes of the register. Inline over MemoryAccessContext's
+// quadword-part accessors: AC6's audio mixer stores its unaligned output
+// with stvlx/stvrx pairs, and the general byte-range path cost it 8% of its
+// thread.
+inline Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& memory,
+                                  GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto n = static_cast<unsigned>(ea & 15u);
+  memory.read_quadword_part(ea, std::as_writable_bytes(std::span(result.bytes)).first(16u - n));
+  return result;
+}
+inline Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& memory,
+                                   GuestAddress ea) {
+  (void)old;
+  Vector128 result{};
+  const auto n = static_cast<unsigned>(ea & 15u);
+  if (n)
+    memory.read_quadword_part(GuestAddress(ea & ~15u),
+                              std::as_writable_bytes(std::span(result.bytes)).subspan(16u - n, n));
+  return result;
+}
+inline void vector_store_left(const Vector128& value, MemoryAccessContext& memory,
+                              GuestAddress ea) {
+  const auto n = static_cast<unsigned>(ea & 15u);
+  memory.write_quadword_part(ea, std::as_bytes(std::span(value.bytes)).first(16u - n));
+}
+inline void vector_store_right(const Vector128& value, MemoryAccessContext& memory,
+                               GuestAddress ea) {
+  const auto n = static_cast<unsigned>(ea & 15u);
+  if (n)
+    memory.write_quadword_part(GuestAddress(ea & ~15u),
+                               std::as_bytes(std::span(value.bytes)).subspan(16u - n, n));
+}
 
 void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                  std::uint32_t count, unsigned first_reg);
@@ -907,3 +937,6 @@ void string_store(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                   std::uint32_t count, unsigned first_reg);
 
 }  // namespace xenon::cpu::aot
+
+#include "xenon/cpu/aot_vector_inline.hpp"
+

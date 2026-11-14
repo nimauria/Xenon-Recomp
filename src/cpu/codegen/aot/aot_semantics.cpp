@@ -70,11 +70,15 @@ void write_vmx_f32(Vector128& v, unsigned lane, float f, const CpuState& state) 
 // gives 0x4013D70B), and flushes a subnormal product like any other result.
 // Passing the product through the flush also keeps a compiler from fusing
 // the two back into one rounding.
+// NaN operands propagate in operand order (vmx_nan_order): the product's x
+// before y, then the product before z.
 float vmx_multiply_add(float x, float y, float z, const CpuState& state) noexcept {
-  return vmx_flush_subnormal(x * y, state) + z;
+  const auto product = vmx_flush_subnormal(vmx_nan_order(x * y, x, y), state);
+  return vmx_nan_order(product + z, product, z);
 }
 float vmx_negative_multiply_subtract(float x, float y, float z, const CpuState& state) noexcept {
-  return -(vmx_flush_subnormal(x * y, state) - z);
+  const auto product = vmx_flush_subnormal(vmx_nan_order(x * y, x, y), state);
+  return -vmx_nan_order(product - z, product, z);
 }
 
 
@@ -176,7 +180,7 @@ Vector128 fp_binary(const Vector128&a,const Vector128&b,char op,const CpuState& 
   Vector128 r{};
   for(unsigned i=0;i<4;++i){
     float x=read_vmx_f32(a,i,state),y=read_vmx_f32(b,i,state),z{};
-    switch(op){case '+':z=x+y;break;case '-':z=x-y;break;case '*':z=x*y;break;case 'x':z=std::fmax(x,y);break;case 'n':z=std::fmin(x,y);break;}
+    switch(op){case '+':z=vmx_nan_order(x+y,x,y);break;case '-':z=vmx_nan_order(x-y,x,y);break;case '*':z=vmx_nan_order(x*y,x,y);break;case 'x':z=std::fmax(x,y);break;case 'n':z=std::fmin(x,y);break;}
     write_vmx_f32(r,i,z,state);
   }
   return r;
@@ -511,8 +515,12 @@ Vector128 execute_vector(VectorSemantic s, std::uint32_t w, CpuState& state,
     case VectorSemantic::vnmsubfp:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(a,i,state),read_vmx_f32(c,i,state),read_vmx_f32(b,i,state),state),state);return r;}
     // VMX128 inputs are (old vD, vA, vB): vD = -(vA * vB - old vD).
     case VectorSemantic::vnmsubfp128:{for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,vmx_negative_multiply_subtract(read_vmx_f32(b,i,state),read_vmx_f32(c,i,state),read_vmx_f32(a,i,state),state),state);return r;}
-    case VectorSemantic::vmsum3fp128:{float z=0;for(unsigned i=0;i<3;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
-    case VectorSemantic::vmsum4fp128:{float z=0;for(unsigned i=0;i<4;++i)z+=read_vmx_f32(b,i,state)*read_vmx_f32(c,i,state);for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
+    case VectorSemantic::vmsum3fp128:case VectorSemantic::vmsum4fp128:{
+      // Products summed in lane order from 0.0f, NaNs in operand order.
+      const unsigned lanes=s==VectorSemantic::vmsum3fp128?3u:4u;
+      float z=0;
+      for(unsigned i=0;i<lanes;++i){const float x=read_vmx_f32(b,i,state),y=read_vmx_f32(c,i,state);const float p=vmx_nan_order(x*y,x,y);z=vmx_nan_order(z+p,z,p);}
+      for(unsigned i=0;i<4;++i)write_vmx_f32(r,i,z,state);return r;}
 
     case VectorSemantic::vmladduhm:{for(unsigned i=0;i<8;++i)r.set_u16_be(i,std::uint16_t(std::uint32_t(a.u16_be(i))*b.u16_be(i)+c.u16_be(i)));return r;}
     case VectorSemantic::vmhaddshs:case VectorSemantic::vmhraddshs:{for(unsigned i=0;i<8;++i){std::int32_t p=std::int32_t(read_be<std::int16_t>(a,i))*read_be<std::int16_t>(b,i);if(s==VectorSemantic::vmhraddshs)p+=0x4000;p=(p>>15)+read_be<std::int16_t>(c,i);write_be<std::int16_t>(r,i,sat_cast<std::int16_t>(p,state));}return r;}
@@ -606,41 +614,6 @@ Vector128 vector_load_element(const Vector128& old, MemoryAccessContext& m, Gues
   return m.read128(GuestAddress(ea & ~GuestAddress{15}));
 }
 void vector_store_element(const Vector128& v,MemoryAccessContext&m,GuestAddress ea,unsigned width){unsigned p=unsigned(ea&15u);if(width==1)m.write8(ea,v.bytes[p]);else if(width==2){ea&=~GuestAddress{1};m.write16_be(ea,v.u16_be((p&14u)/2));}else{ea&=~GuestAddress{3};m.write32_be(ea,v.u32_be((p&12u)/4));}}
-Vector128 vector_load_left(const Vector128& old, MemoryAccessContext& m,
-                           GuestAddress ea) {
-  (void)old;
-  Vector128 result{};
-  const auto n = static_cast<unsigned>(ea & 15u);
-  auto bytes = std::as_writable_bytes(std::span(result.bytes));
-  m.read_bytes(ea, bytes.first(16u - n));
-  return result;
-}
-
-Vector128 vector_load_right(const Vector128& old, MemoryAccessContext& m,
-                            GuestAddress ea) {
-  (void)old;
-  Vector128 result{};
-  const auto base = GuestAddress(ea & ~15u);
-  const auto n = static_cast<unsigned>(ea & 15u);
-  auto bytes = std::as_writable_bytes(std::span(result.bytes));
-  if (n) m.read_bytes(base, bytes.subspan(16u - n, n));
-  return result;
-}
-
-void vector_store_left(const Vector128& value, MemoryAccessContext& m,
-                       GuestAddress ea) {
-  const auto n = static_cast<unsigned>(ea & 15u);
-  const auto bytes = std::as_bytes(std::span(value.bytes));
-  m.write_bytes(ea, bytes.first(16u - n));
-}
-
-void vector_store_right(const Vector128& value, MemoryAccessContext& m,
-                        GuestAddress ea) {
-  const auto base = GuestAddress(ea & ~15u);
-  const auto n = static_cast<unsigned>(ea & 15u);
-  const auto bytes = std::as_bytes(std::span(value.bytes));
-  if (n) m.write_bytes(base, bytes.subspan(16u - n, n));
-}
 
 void string_load(CpuState& state, MemoryAccessContext& memory, GuestAddress ea,
                  std::uint32_t count, unsigned first) {

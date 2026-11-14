@@ -316,9 +316,12 @@ std::string emit_one(const Instruction&i, const std::vector<Type>& value_types){
         if (m == "vsubuwm") return decl(i, "aot::vector_sub_modular<std::uint32_t>(" + arg(i,0) + "," + arg(i,1) + ")");
       }
       
+      // The semantic is a compile-time constant here, so vector_compute<S>()
+      // inlines the hot ones (aot_vector_inline.hpp) and calls
+      // execute_vector() for the rest.
       if(is_vector_compute(i.op)){
         std::string args="state,"+arg(i,0)+","+arg(i,1)+","+arg(i,2)+","+arg(i,3);
-        return decl(i,"aot::execute_vector("+enum_name(i)+","+std::to_string(i.guest_word)+"u,"+args+")");
+        return decl(i,"aot::vector_compute<"+enum_name(i)+">("+std::to_string(i.guest_word)+"u,"+args+")");
       }
       throw std::runtime_error("CppAotBackend: unsupported IR op " + std::to_string(static_cast<unsigned>(i.op)) + " from " + std::string(guest_mnemonic(i)));
   }
