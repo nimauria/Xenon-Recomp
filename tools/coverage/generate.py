@@ -419,12 +419,11 @@ def source_signals(items: list[Item]) -> dict[str, dict]:
     fallback, fallback_prefixes = literals("src/cpu/codegen/fallback/interpreter")
     lower = source("src/graphics/xenos/shader_translation.cpp")
     lowered: dict[str, set[int]] = {}
-    for kind, signature in (("vector", "float4 xenon_vector_op("), ("scalar", "float4 xenon_scalar_op(")):
+    # One HLSL emitter per unit, a `case N:` per opcode it lowers.
+    for kind, signature in (("vector", "std::string vector_operation("),
+                            ("scalar", "std::string scalar_operation(")):
         body = function_body(lower, signature)
-        ops = {int(n) for n in re.findall(r'\bop\s*==\s*(\d+)', body)}
-        for low, high in re.findall(r'\bop\s*>=\s*(\d+)\s*&&\s*op\s*<=\s*(\d+)', body):
-            ops.update(range(int(low), int(high) + 1))
-        lowered[kind] = ops
+        lowered[kind] = {int(n) for n in re.findall(r'\bcase\s+(\d+)\s*:', body)}
     fetch = list(re.finditer(r'switch \(fetch\.opcode\)\s*\{(.*?)\n\s*default:', lower, re.S))[-1].group(1)
     fetch_state: dict[int, str] = {}
     for labels, body in re.findall(r'((?:\s*case\s+\d+\s*:[^\n]*\n)+)(.*?)(?=\n\s*case\s+\d+\s*:|\Z)', fetch, re.S):
