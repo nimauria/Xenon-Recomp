@@ -9,7 +9,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdarg>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <span>
+#include <string>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -31,32 +36,228 @@ namespace {
       .count();
 }
 
-// Decode speed per context, summarised once a second into
-// audio_xma_rate_diag.log: frames decoded and samples per second against the
-// stream's own sample rate (1.00x is real time). The per-frame trace fills
-// its cap within minutes; this stays small enough to cover a whole session.
-void record_decode_rate(std::size_t context, int sample_rate) {
-  if (!logging::probe_logs_enabled()) return;
-  static std::mutex mutex;
-  static std::int64_t second = -1;
-  static std::map<std::size_t, std::pair<std::uint64_t, int>> frames;
-  const auto now = trace_milliseconds() / 1000;
-  std::scoped_lock lock(mutex);
-  if (now != second) {
-    for (const auto& [ctx, counted] : frames) {
-      logging::append_probe_log(
-          "audio_xma_rate_diag.log", "%llds ctx=%zu frames=%llu rate=%d speed=%.2fx\n",
-          static_cast<long long>(second), ctx, static_cast<unsigned long long>(counted.first),
-          counted.second,
-          counted.second ? double(counted.first) * 512.0 / double(counted.second) : 0.0);
-    }
-    frames.clear();
-    second = now;
-  }
-  auto& counted = frames[context];
-  ++counted.first;
-  counted.second = sample_rate;
+// Stream speed per context, summarised once a second into
+// audio_xma_rate_diag.log (it stays small enough to cover a whole session;
+// the per-frame trace fills its cap within minutes):
+//   decoded   - frames decoded, as samples per second against the stream's
+//               own rate (1.00x is real time);
+//   consumed  - how far the title's read offset moved through the output
+//               ring, as the same ratio: the speed the title actually plays
+//               the stream at. A voice consumed at 2x plays at double speed.
+// A line marks each change of a context's stream format (rate, channel mode,
+// output ring, subframes) as the title set it.
+struct StreamStats {
+  std::uint64_t frames{};
+  std::uint64_t written_blocks{};
+  std::uint64_t consumed_blocks{};
+  int last_read{-1};
+  std::uint32_t output{};
+  std::uint8_t block_count{};
+  std::uint8_t subframes{};
+  std::uint8_t rate_id{0xFF};
+  bool stereo{};
+};
+std::mutex g_stream_mutex;
+std::int64_t g_stream_second = -1;
+std::map<std::size_t, StreamStats> g_streams;
+
+[[nodiscard]] int sample_rate_hz(std::uint8_t id) noexcept {
+  constexpr int kRates[] = {24000, 32000, 44100, 48000};
+  return id < 4u ? kRates[id] : 0;
 }
+
+// Called with g_stream_mutex held.
+void flush_stream_second_locked(std::int64_t now) {
+  if (now == g_stream_second) return;
+  for (auto& [ctx, stats] : g_streams) {
+    if (!stats.frames && !stats.consumed_blocks && !stats.written_blocks) continue;
+    const auto rate = sample_rate_hz(stats.rate_id);
+    // A 256-byte output block holds 128 samples of 16-bit mono or 64 of stereo.
+    const double samples_per_block = stats.stereo ? 64.0 : 128.0;
+    const double decoded = rate ? double(stats.frames) * 512.0 / rate : 0.0;
+    const double consumed = rate ? double(stats.consumed_blocks) * samples_per_block / rate : 0.0;
+    logging::append_probe_log(
+        "audio_xma_rate_diag.log",
+        "%llds ctx=%zu frames=%llu rate=%d ch=%d speed=%.2fx consumed=%.2fx written_blocks=%llu "
+        "consumed_blocks=%llu\n",
+        static_cast<long long>(g_stream_second), ctx,
+        static_cast<unsigned long long>(stats.frames), rate, stats.stereo ? 2 : 1, decoded,
+        consumed, static_cast<unsigned long long>(stats.written_blocks),
+        static_cast<unsigned long long>(stats.consumed_blocks));
+    stats.frames = stats.written_blocks = stats.consumed_blocks = 0;
+  }
+  g_stream_second = now;
+}
+
+// Each decode pass: the stream's format and the title's read offset.
+void record_stream_pass(std::size_t context, const XmaContextData& data) {
+  if (!logging::probe_logs_enabled()) return;
+  std::scoped_lock lock(g_stream_mutex);
+  flush_stream_second_locked(trace_milliseconds() / 1000);
+  auto& stats = g_streams[context];
+  if (stats.output != data.output_buffer_ptr || stats.block_count != data.output_buffer_block_count ||
+      stats.rate_id != data.sample_rate || stats.stereo != data.is_stereo ||
+      stats.subframes != data.subframe_decode_count) {
+    logging::append_probe_log(
+        "audio_xma_rate_diag.log",
+        "%llds ctx=%zu stream: rate=%d (id %u) %s out=%08X blocks=%u subframes=%u padding=%u "
+        "loop=%u in0=%08X/%u in1=%08X/%u\n",
+        static_cast<long long>(trace_milliseconds() / 1000), context,
+        sample_rate_hz(data.sample_rate), unsigned(data.sample_rate),
+        data.is_stereo ? "stereo" : "mono", data.output_buffer_ptr,
+        unsigned(data.output_buffer_block_count), unsigned(data.subframe_decode_count),
+        unsigned(data.output_buffer_padding), unsigned(data.loop_count), data.input_buffer_0_ptr,
+        unsigned(data.input_buffer_0_packet_count), data.input_buffer_1_ptr,
+        unsigned(data.input_buffer_1_packet_count));
+    stats.output = data.output_buffer_ptr;
+    stats.block_count = data.output_buffer_block_count;
+    stats.rate_id = data.sample_rate;
+    stats.stereo = data.is_stereo;
+    stats.subframes = data.subframe_decode_count;
+    stats.last_read = -1;
+  }
+  const int read = data.output_buffer_read_offset;
+  if (stats.last_read >= 0 && stats.block_count)
+    stats.consumed_blocks +=
+        static_cast<std::uint64_t>((read - stats.last_read + stats.block_count) % stats.block_count);
+  stats.last_read = read;
+}
+
+void record_stream_frame(std::size_t context) {
+  if (!logging::probe_logs_enabled()) return;
+  std::scoped_lock lock(g_stream_mutex);
+  flush_stream_second_locked(trace_milliseconds() / 1000);
+  ++g_streams[context].frames;
+}
+
+void record_stream_written(std::size_t context, std::size_t blocks) {
+  if (!logging::probe_logs_enabled()) return;
+  std::scoped_lock lock(g_stream_mutex);
+  flush_stream_second_locked(trace_milliseconds() / 1000);
+  g_streams[context].written_blocks += blocks;
+}
+
+// Stream dumps (XENON_XMA_DUMP=<directory>): each context's streams as two
+// files per stream, ctx<N>_s<serial>.xma - every input buffer the context
+// decodes from, its raw 2048-byte packets in the order they were first used
+// - and ctx<N>_s<serial>.pcm - the PCM written to the output ring, 16-bit
+// big-endian as the title reads it - plus a line per stream in streams.txt
+// (rate, channels, loop). tools/audio/xma_stream_frames.py walks the .xma
+// straight through and counts the frames it holds, independently of this
+// decoder's frame gathering, against the samples the .pcm holds.
+// A new serial starts when the title changes the context's stream
+// format or output ring. events.txt orders it all: a PASS line per decode
+// pass with the context state the pass starts from (current buffer, read
+// offset, valid flags, both input buffers, output ring offsets) and an
+// APPEND line, with its packet position in the .xma, for each buffer added
+// to a stream's .xma - enough to replay a stream's buffer hand-offs.
+class StreamDump {
+ public:
+  static StreamDump& instance() {
+    static StreamDump dump;
+    return dump;
+  }
+  [[nodiscard]] bool enabled() const noexcept { return !directory_.empty(); }
+
+  void pass(std::size_t context, const XmaContextData& data) {
+    if (!enabled()) return;
+    std::scoped_lock lock(mutex_);
+    auto& stream = streams_[context];
+    if (stream.serial == 0 || stream.output != data.output_buffer_ptr ||
+        stream.rate_id != data.sample_rate || stream.stereo != data.is_stereo) {
+      ++stream.serial;
+      stream.output = data.output_buffer_ptr;
+      stream.rate_id = data.sample_rate;
+      stream.stereo = data.is_stereo;
+      stream.buffer_hashes.clear();
+      stream.xma_packets = 0;
+      if (std::FILE* index = open("streams.txt", "ab")) {
+        std::fprintf(index, "ctx%zu_s%u rate=%d channels=%d loop=%u out=%08X\n", context,
+                     stream.serial, sample_rate_hz(data.sample_rate), data.is_stereo ? 2 : 1,
+                     unsigned(data.loop_count), data.output_buffer_ptr);
+        std::fclose(index);
+      }
+    }
+    event("%lld ctx%zu_s%u PASS cur=%u rd=%u v0=%d v1=%d in0=%08X/%u in1=%08X/%u outr=%u "
+          "outw=%u outv=%d loop=%u\n",
+          static_cast<long long>(trace_milliseconds()), context, stream.serial,
+          unsigned(data.current_buffer), unsigned(data.input_buffer_read_offset),
+          data.input_buffer_0_valid ? 1 : 0, data.input_buffer_1_valid ? 1 : 0,
+          data.input_buffer_0_ptr, unsigned(data.input_buffer_0_packet_count),
+          data.input_buffer_1_ptr, unsigned(data.input_buffer_1_packet_count),
+          unsigned(data.output_buffer_read_offset), unsigned(data.output_buffer_write_offset),
+          data.output_buffer_valid ? 1 : 0, unsigned(data.loop_count));
+  }
+
+  // An input buffer decoded from: appended once per distinct content.
+  void input(std::size_t context, std::uint32_t physical, std::span<const std::byte> bytes) {
+    if (!enabled()) return;
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const auto b : bytes) {
+      hash ^= std::to_integer<std::uint8_t>(b);
+      hash *= 1099511628211ull;
+    }
+    std::scoped_lock lock(mutex_);
+    auto& stream = streams_[context];
+    auto& last = stream.buffer_hashes[physical];
+    if (last == hash) return;
+    last = hash;
+    event("%lld ctx%zu_s%u APPEND phys=%08X packets=%zu at=%llu\n",
+          static_cast<long long>(trace_milliseconds()), context, stream.serial, physical,
+          bytes.size() / kXmaPacketBytes, static_cast<unsigned long long>(stream.xma_packets));
+    stream.xma_packets += bytes.size() / kXmaPacketBytes;
+    append(context, stream.serial, ".xma", bytes);
+  }
+
+  void output(std::size_t context, std::span<const std::byte> bytes) {
+    if (!enabled()) return;
+    std::scoped_lock lock(mutex_);
+    append(context, streams_[context].serial, ".pcm", bytes);
+  }
+
+ private:
+  StreamDump() {
+    if (const char* value = std::getenv("XENON_XMA_DUMP"); value && *value) {
+      directory_ = value;
+      std::error_code ec;
+      std::filesystem::create_directories(directory_, ec);
+    }
+  }
+  // events.txt stays open for the run; each line is flushed so a run that
+  // ends abruptly keeps what it logged. Called with mutex_ held.
+  void event(const char* format, ...) {
+    if (!events_) events_ = open("events.txt", "ab");
+    if (!events_) return;
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(events_, format, args);
+    va_end(args);
+    std::fflush(events_);
+  }
+  std::FILE* open(const std::string& name, const char* mode) const {
+    return std::fopen((directory_ / name).string().c_str(), mode);
+  }
+  void append(std::size_t context, unsigned serial, const char* extension,
+              std::span<const std::byte> bytes) {
+    const auto name = "ctx" + std::to_string(context) + "_s" + std::to_string(serial) + extension;
+    if (std::FILE* file = open(name, "ab")) {
+      std::fwrite(bytes.data(), 1, bytes.size(), file);
+      std::fclose(file);
+    }
+  }
+  struct Stream {
+    unsigned serial{};
+    std::uint32_t output{};
+    std::uint8_t rate_id{0xFF};
+    bool stereo{};
+    std::map<std::uint32_t, std::uint64_t> buffer_hashes;
+    std::uint64_t xma_packets{};
+  };
+  std::filesystem::path directory_;
+  std::FILE* events_{};
+  std::mutex mutex_;
+  std::map<std::size_t, Stream> streams_;
+};
 
 constexpr std::uint32_t kBitsPerPacket = kXmaPacketBytes * 8u;
 constexpr std::uint32_t kMaxFrameBits = 0x7FFFu;
@@ -240,6 +441,14 @@ bool XmaDecoder::decode_one(std::size_t index) {
 
   const cpu::GuestAddress context =
       context_guest_base_ + static_cast<cpu::GuestAddress>(index * kXmaContextBytes);
+  {
+    PassObserver observer;
+    {
+      std::lock_guard lock(pass_observer_mutex_);
+      observer = pass_observer_;
+    }
+    if (observer) observer(context);
+  }
   const auto finish = [&](bool continue_work = false, bool completed = false,
                           bool interrupt_requested = false) {
     bool publish_completion = false;
@@ -262,6 +471,8 @@ bool XmaDecoder::decode_one(std::size_t index) {
   }
   const XmaContextData initial = data;
   decode_passes_.fetch_add(1, std::memory_order_relaxed);
+  record_stream_pass(index, data);
+  StreamDump::instance().pass(index, data);
 
   if (!data.output_buffer_valid || !data.output_buffer_ptr ||
       !data.output_buffer_block_count) {
@@ -317,6 +528,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
       return false;
     }
 
+    StreamDump::instance().output(index, source);
     logging::append_probe_log(
         "audio_trace_xma.log",
         "%lld write ctx=%zu out=%08X blocks=%u read=%u write=%zu->%zu bytes=%zu valid_in=%d%d\n",
@@ -325,6 +537,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
         write_offset / kXmaOutputBlockBytes,
         ((write_offset + bytes_to_write) % capacity) / kXmaOutputBlockBytes, bytes_to_write,
         data.input_buffer_0_valid ? 1 : 0, data.input_buffer_1_valid ? 1 : 0);
+    record_stream_written(index, blocks_to_write);
     runtime.pending_offset += bytes_to_write;
     if (runtime.pending_offset == runtime.pending_bytes) {
       runtime.pending_offset = 0;
@@ -406,6 +619,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
     finish();
     return false;
   }
+  StreamDump::instance().input(index, input_physical, input);
 
   // Rolling XMA streams may split a frame across input buffer 0/1. Copy the
   // next valid buffer after the current one into a logical packet sequence so
@@ -606,7 +820,7 @@ bool XmaDecoder::decode_one(std::size_t index) {
   }
   if (frame_decoded) {
     frames_decoded_.fetch_add(1, std::memory_order_relaxed);
-    record_decode_rate(index, sample_rate);
+    record_stream_frame(index);
   }
   logging::append_probe_log(
       "audio_trace_xma.log", "%lld frame ctx=%zu in=%08X bit=%zu rate=%d ch=%d peak=%.5f loop=%u\n",
@@ -658,6 +872,18 @@ bool XmaDecoder::decode_one(std::size_t index) {
   if (gathered_frame.follows_in_packet &&
       gathered_frame.final_source_bit < (gathered_frame.final_packet + 1u) * kBitsPerPacket) {
     next_bit = gathered_frame.final_source_bit;
+  } else if (gathered_frame.final_packet != start_packet &&
+             gathered_frame.final_source_bit <
+                 (gathered_frame.final_packet + 1u) * kBitsPerPacket) {
+    // Regression (AC6 briefing voice at double speed, choppy, "Garuda team"
+    // heard as "green"; music skipping): the last frame to start in a packet
+    // ran on into the stream's next packet, and the next frame starts in
+    // that packet, straight after the run-on (at its header's first-frame
+    // offset). Taking "the packet after the one the frame ended in" skipped
+    // every frame of that packet - half of each voice line, whose frames
+    // run on across every packet. xenia and rexglue step from the packet the
+    // frame started in (packet_index + skip + 1), which is this packet.
+    next_bit = xma_frame_start_bit(input, gathered_frame.final_source_bit);
   } else {
     const auto final_packet_span = std::span<const std::byte>(input).subspan(
         gathered_frame.final_packet * kXmaPacketBytes, kXmaPacketBytes);

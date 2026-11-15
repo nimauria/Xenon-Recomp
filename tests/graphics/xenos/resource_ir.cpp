@@ -370,6 +370,50 @@ void test_texture_descriptor() {
   assert(texture->hash() == tracker.texture(slot)->hash());
 }
 
+// A draw samples a fetch constant's texture with the filters its shaders'
+// fetches override (each field "use the fetch constant's" keeps the
+// constant's), merged across the pixel and vertex shader; disagreeing shaders
+// are flagged, the pixel shader's filters kept.
+void test_texture_filter_overrides_apply_to_the_sampler() {
+  using namespace xenon::gpu;
+  TextureDescriptor constant{};
+  constant.mag_filter = 0;   // point
+  constant.min_filter = 0;
+  constant.mip_filter = 1;   // linear
+  constant.aniso_filter = 3;
+  constant.format = 6;
+  constant.width = 640;
+  TextureFilterOverride linear{2, 1, 1, kTextureFilterUseFetchConstant,
+                               kAnisoFilterUseFetchConstant};
+  auto sampled = with_filter_override(constant, linear);
+  assert(sampled.mag_filter == 1 && sampled.min_filter == 1);
+  assert(sampled.mip_filter == 1 && sampled.aniso_filter == 3);  // the constant's
+  assert(sampled.format == 6 && sampled.width == 640);
+  TextureFilterOverride all{2, 0, 0, 0, 0};
+  sampled = with_filter_override(constant, all);
+  assert(sampled.mip_filter == 0 && sampled.aniso_filter == 0);
+  const TextureFilterOverride keep{2};
+  assert(!keep.overrides());
+  sampled = with_filter_override(constant, keep);
+  assert(sampled.mag_filter == 0 && sampled.mip_filter == 1 && sampled.aniso_filter == 3);
+
+  assert(!merge_texture_filters(std::nullopt, std::nullopt));
+  auto merged = merge_texture_filters(linear, std::nullopt);
+  assert(merged && merged->same_filters(linear) && !merged->conflicting);
+  merged = merge_texture_filters(std::nullopt, linear);
+  assert(merged && merged->same_filters(linear) && !merged->conflicting);
+  merged = merge_texture_filters(linear, linear);
+  assert(merged && !merged->conflicting);
+  // The vertex shader keeps the constant's filters where the pixel shader
+  // overrides them: one host sampler cannot give both.
+  merged = merge_texture_filters(linear, keep);
+  assert(merged && merged->conflicting && merged->same_filters(linear));
+  auto inner = linear;
+  inner.conflicting = true;
+  assert(merge_texture_filters(inner, std::nullopt)->conflicting);
+  std::cout << "  [PASS] texture fetch filter overrides reach the sampler" << std::endl;
+}
+
 void test_vertex_and_render_state() {
   using namespace xenon::gpu;
   ResourceStateTracker tracker;
@@ -1085,6 +1129,7 @@ int main() {
   test_memexport_stream_planning();
   test_memexport_dynamic_and_invalid_streams_stay_explicit();
   test_texture_descriptor();
+  test_texture_filter_overrides_apply_to_the_sampler();
   test_vertex_and_render_state();
   test_constant_buffer_abi();
   test_constant_buffer_carries_vertex_index_offset_and_clamp();

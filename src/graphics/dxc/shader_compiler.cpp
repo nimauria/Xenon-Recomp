@@ -1,4 +1,5 @@
 #include "xenon/gpu/dxc_shader_compiler.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 
 #include <array>
 #include <chrono>
@@ -354,6 +355,36 @@ ShaderCache::ShaderCache(std::shared_ptr<DxcShaderCompiler> compiler)
 
 std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
     const LoweredShader& shader, const ShaderCompileOptions& options) {
+  return get_or_compile(shader, options, *compiler_);
+}
+
+std::shared_ptr<const CompiledShader> ShaderCache::find(const LoweredShader& shader,
+                                                        const ShaderCompileOptions& options) {
+  const auto key = cache_key(shader, options);
+  {
+    std::scoped_lock lock(mutex_);
+    if (auto found = entries_.find(key); found != entries_.end()) {
+      ++hits_;
+      return found->second;
+    }
+  }
+  const auto persistent_directory = disk_directory();
+  if (persistent_directory.empty()) return nullptr;
+  const auto persistent_key = disk_key(shader, options, compiler_->version());
+  auto stored = read_disk_entry(disk_path(persistent_directory, persistent_key), persistent_key,
+                                shader, options);
+  if (!stored) return nullptr;
+  auto loaded = std::make_shared<const CompiledShader>(std::move(*stored));
+  std::scoped_lock lock(mutex_);
+  ++disk_hits_;
+  const auto [iterator, inserted] = entries_.emplace(key, loaded);
+  if (!inserted) ++hits_;
+  return iterator->second;
+}
+
+std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
+    const LoweredShader& shader, const ShaderCompileOptions& options,
+    const DxcShaderCompiler& compiler) {
   const auto key = cache_key(shader, options);
   {
     std::scoped_lock lock(mutex_);
@@ -375,7 +406,7 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
   std::string persistent_key;
   std::filesystem::path persistent_path;
   if (!persistent_directory.empty()) {
-    persistent_key = disk_key(shader, options, compiler_->version());
+    persistent_key = disk_key(shader, options, compiler.version());
     persistent_path = disk_path(persistent_directory, persistent_key);
     if (auto stored = read_disk_entry(persistent_path, persistent_key, shader, options)) {
       auto loaded = std::make_shared<const CompiledShader>(std::move(*stored));
@@ -387,7 +418,12 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
     }
   }
   const auto compile_start = std::chrono::steady_clock::now();
-  auto compiled = std::make_shared<const CompiledShader>(compiler_->compile(shader, options));
+  std::shared_ptr<const CompiledShader> compiled;
+  {
+    const xenon::gpu::perf::ScopedTime compile_time(xenon::gpu::perf::Counter::ShaderCompileNs,
+                                        xenon::gpu::perf::Counter::ShaderCompiles);
+    compiled = std::make_shared<const CompiledShader>(compiler.compile(shader, options));
+  }
   if (!persistent_path.empty() && compiled->succeeded &&
       write_disk_entry(persistent_path, persistent_key, *compiled)) {
     std::scoped_lock lock(mutex_);
@@ -396,8 +432,8 @@ std::shared_ptr<const CompiledShader> ShaderCache::get_or_compile(
   const auto compile_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               std::chrono::steady_clock::now() - compile_start)
                               .count();
-  // Compiles run on the GPU pump thread; a slow one delays everything the
-  // pump does, vsync interrupts included.
+  // A compile on the GPU worker (not a background one) delays everything the
+  // worker does, vsync interrupts included.
   if (compile_ms >= 50) {
     xenon::logging::append_probe_log(
         "shader_compile_diag.log", "DXC compile %lld ms: %s %s, %zu HLSL bytes, source 0x%016llX\n",

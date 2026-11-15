@@ -119,6 +119,14 @@ enum class ColorHostStorage : std::uint8_t {
     ColorRenderTargetFormat format) noexcept;
 [[nodiscard]] bool color_host_requires_conversion(
     ColorRenderTargetFormat format) noexcept;
+// True when the host stores `format` as 16-bit floats: GPUs canonicalize a
+// half NaN read or written through a float view (0xFF00 comes back 0x7FFF),
+// yet any EDRAM word is a valid 16-bit float view's pixel (an 8_8_8_8 word
+// with alpha 255 is a NaN high half). EDRAM transfers into or out of such an
+// image go through an integer view of the same bits (R16G16_UINT,
+// R16G16B16A16_UINT), so they keep every word.
+[[nodiscard]] bool color_host_transfers_as_integer(
+    ColorRenderTargetFormat format) noexcept;
 [[nodiscard]] bool encode_host_color_sample(
     ColorRenderTargetFormat format, const ColorSample& sample,
     std::span<std::byte> destination) noexcept;

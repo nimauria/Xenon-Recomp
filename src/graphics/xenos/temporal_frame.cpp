@@ -85,8 +85,8 @@ TemporalPass TemporalFrameAnalyzer::observe(const ir::Command& command) {
     return TemporalPass::None;
   }
   if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
-    if (load->program.stage() == ShaderStage::Vertex)
-      vertex_constants_[load->program.hash()] = load->decoded.reflection.float_constants;
+    if (load->decoded && load->program.stage() == ShaderStage::Vertex)
+      vertex_constants_[load->program.hash()] = load->decoded->reflection.float_constants;
     return TemporalPass::None;
   }
   if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) {

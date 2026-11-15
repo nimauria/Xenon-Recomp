@@ -124,9 +124,16 @@ void XmaDecoder::mmio_write(cpu::GuestAddress address, std::uint32_t width,
                      })) {
     return;
   }
+  // Locking a context stops the engine from touching it: the write returns
+  // once a decode pass in flight has finished (xenia's XmaContext::Disable
+  // takes the lock Work holds). The title edits the context next - new
+  // input buffers, valid flags, read offset - and a pass still running
+  // would publish its own read offset, buffer and valid flags over those
+  // edits when it ends: buffers the title had just queued were lost, and
+  // the stream skipped (AC6's briefing voice and hangar music).
   if (dispatch_group(kRegContextLockBase,
                      [this](cpu::GuestAddress context) {
-                       (void)disable_context(context, false);
+                       (void)disable_context(context, true);
                      })) {
     return;
   }

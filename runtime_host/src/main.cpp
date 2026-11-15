@@ -269,6 +269,8 @@ int main(int argc, char** argv) {
 #if defined(XENON_HAS_PRESENTATION_HOST)
   xenon::runtime_host::PresentationHost presentation;
   bool presentation_active = false;
+  // A new window takes focus; focus events keep this current.
+  bool window_focused = true;
   if (session.gpu() != nullptr) {
     std::string presentation_error;
     presentation_active = presentation.create(launch.display_width, launch.display_height,
@@ -371,7 +373,11 @@ int main(int argc, char** argv) {
       }
       if (events.focus_changed) {
         session.set_focused(events.focused);
+        window_focused = events.focused;
       }
+      // A context that steers with the mouse needs the cursor captured; it is
+      // released while the window is in the background so the desktop works.
+      presentation.set_mouse_capture(window_focused && session.wants_mouse_capture());
       for (const auto& input : events.input) {
         using Kind = xenon::runtime_host::PresentationInput::Kind;
         switch (input.kind) {

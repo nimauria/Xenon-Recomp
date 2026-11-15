@@ -553,6 +553,14 @@ class GuestMemoryGpuCoherency {
   // stores across all of memory is thousands of runs against sets thousands
   // of ranges long, and per-write rebuilding made planning one 84-byte upload
   // take tens of milliseconds.
+  //
+  // A run already folded in - CPU-dirty, in the same ordering domain, its
+  // pages touched, nothing of it GPU-owned or device-valid - changes none of
+  // the sets, so it is skipped before any set is rebuilt. Most of a frame's
+  // stores are of that kind: generated code dirties whole pages of the game's
+  // heap every frame, pages no GPU consumer ever uploads, and folding them in
+  // again at every resolve and readback rebuilt every set each time - 28% of
+  // the GPU thread in AC6's missions.
   void mark_cpu_writes_unlocked(const std::vector<GpuCpuVisibilityRange>& sorted_runs) {
     std::vector<GpuCpuVisibilityRange> domains;  // clamped, with their domains
     std::vector<GpuCoherencyRange> runs;         // the same bytes, coalesced
@@ -562,7 +570,7 @@ class GuestMemoryGpuCoherency {
     pages.reserve(sorted_runs.size());
     for (const auto& run : sorted_runs) {
       const auto range = clamp(run.address, run.size);
-      if (!range.size) continue;
+      if (!range.size || already_folded_in_unlocked(range, run.ordering_domain)) continue;
       domains.push_back({range.address, range.size, run.ordering_domain});
       if (!runs.empty() && runs.back().end() >= range.address) {
         runs.back().size = static_cast<std::uint32_t>(
@@ -588,9 +596,11 @@ class GuestMemoryGpuCoherency {
     subtract_all(device_valid_, runs);
     add_all(cpu_dirty_, runs);
     subtract_all(cpu_visibility_, runs);
+    // Insert the domains (their bytes are free now); a piece merges with a
+    // touching neighbour of the same domain. The stretches of the set between
+    // insertions are copied whole.
     std::vector<GpuCpuVisibilityRange> visibility;
     visibility.reserve(cpu_visibility_.size() + domains.size());
-    std::size_t next = 0;
     const auto push = [&](GpuCpuVisibilityRange range) {
       if (!visibility.empty() && visibility.back().end() == range.address &&
           visibility.back().ordering_domain == range.ordering_domain) {
@@ -599,19 +609,73 @@ class GuestMemoryGpuCoherency {
         visibility.push_back(range);
       }
     };
-    for (const auto& range : cpu_visibility_) {
-      while (next < domains.size() && domains[next].address < range.address)
-        push(domains[next++]);
-      push(range);
+    std::size_t next = 0;
+    for (const auto& domain : domains) {
+      const auto stop = static_cast<std::size_t>(
+          std::lower_bound(cpu_visibility_.begin() + static_cast<std::ptrdiff_t>(next),
+                           cpu_visibility_.end(), domain.address,
+                           [](const GpuCpuVisibilityRange& range, std::uint32_t address) {
+                             return range.address < address;
+                           }) -
+          cpu_visibility_.begin());
+      if (stop > next) {
+        push(cpu_visibility_[next]);
+        visibility.insert(visibility.end(),
+                          cpu_visibility_.begin() + static_cast<std::ptrdiff_t>(next + 1u),
+                          cpu_visibility_.begin() + static_cast<std::ptrdiff_t>(stop));
+        next = stop;
+      }
+      push(domain);
     }
-    for (; next < domains.size(); ++next) push(domains[next]);
+    if (next < cpu_visibility_.size()) {
+      push(cpu_visibility_[next]);
+      visibility.insert(visibility.end(),
+                        cpu_visibility_.begin() + static_cast<std::ptrdiff_t>(next + 1u),
+                        cpu_visibility_.end());
+    }
     cpu_visibility_ = std::move(visibility);
   }
 
-  // Union of a sorted set and sorted, disjoint insertions, in one pass.
+  // True when folding a CPU write of `range` in `domain` would change no set:
+  // see mark_cpu_writes_unlocked(). Binary searches only.
+  [[nodiscard]] bool already_folded_in_unlocked(
+      GpuCoherencyRange range, xenon::cpu::MemoryOrderingDomain domain) const {
+    if (!contains(cpu_dirty_, range) || overlaps(gpu_dirty_, range) ||
+        overlaps(device_valid_, range))
+      return false;
+    const auto visible = std::lower_bound(
+        cpu_visibility_.begin(), cpu_visibility_.end(), std::uint64_t{range.address},
+        [](const GpuCpuVisibilityRange& v, std::uint64_t value) { return v.end() <= value; });
+    if (visible == cpu_visibility_.end() || visible->address > range.address ||
+        visible->end() < range.end() || visible->ordering_domain != domain)
+      return false;
+    const auto first = range.address & ~(kBasePageSize - 1u);
+    const auto end = (std::min)(std::uint64_t{size_}, (range.end() + kBasePageSize - 1u) &
+                                                          ~std::uint64_t{kBasePageSize - 1u});
+    return contains(touched_pages_, {first, static_cast<std::uint32_t>(end - first)});
+  }
+
+  // Whether one range of a sorted, coalesced set covers all of `query`.
+  [[nodiscard]] static bool contains(const std::vector<GpuCoherencyRange>& ranges,
+                                     GpuCoherencyRange query) {
+    if (!query.size) return true;
+    const auto found = std::lower_bound(
+        ranges.begin(), ranges.end(), std::uint64_t{query.address},
+        [](const GpuCoherencyRange& range, std::uint64_t value) { return range.end() <= value; });
+    return found != ranges.end() && found->address <= query.address &&
+           found->end() >= query.end();
+  }
+
+  // Union of a sorted set and sorted, disjoint insertions, in one pass. The
+  // stretches of the set no insertion reaches are found by binary search and
+  // copied whole: the sets run to thousands of ranges and a fold inserts a
+  // handful, so the pass costs a copy rather than a branch per range. Nothing
+  // is rebuilt when the set already covers every insertion.
   static void add_all(std::vector<GpuCoherencyRange>& ranges,
                       const std::vector<GpuCoherencyRange>& inserted) {
-    if (inserted.empty()) return;
+    if (std::all_of(inserted.begin(), inserted.end(),
+                    [&](const GpuCoherencyRange& range) { return contains(ranges, range); }))
+      return;
     std::vector<GpuCoherencyRange> merged;
     merged.reserve(ranges.size() + inserted.size());
     const auto push = [&](GpuCoherencyRange range) {
@@ -623,48 +687,94 @@ class GuestMemoryGpuCoherency {
       }
     };
     std::size_t i = 0;
-    std::size_t j = 0;
-    while (i < ranges.size() || j < inserted.size()) {
-      if (j >= inserted.size() ||
-          (i < ranges.size() && ranges[i].address <= inserted[j].address)) {
-        push(ranges[i++]);
-      } else {
-        push(inserted[j++]);
-      }
+    for (const auto& range : inserted) {
+      // ranges[i] starts after everything merged so far; those ending before
+      // this insertion (not touching it) are copied unchanged.
+      const auto stop = static_cast<std::size_t>(
+          std::lower_bound(ranges.begin() + static_cast<std::ptrdiff_t>(i), ranges.end(),
+                           std::uint64_t{range.address},
+                           [](const GpuCoherencyRange& r, std::uint64_t value) {
+                             return r.end() < value;
+                           }) -
+          ranges.begin());
+      merged.insert(merged.end(), ranges.begin() + static_cast<std::ptrdiff_t>(i),
+                    ranges.begin() + static_cast<std::ptrdiff_t>(stop));
+      i = stop;
+      // A range reaching this insertion from below goes first, so that the
+      // merge keeps its head.
+      while (i < ranges.size() && ranges[i].address <= range.address) push(ranges[i++]);
+      push(range);
+      while (i < ranges.size() && ranges[i].address <= merged.back().end()) push(ranges[i++]);
     }
+    merged.insert(merged.end(), ranges.begin() + static_cast<std::ptrdiff_t>(i), ranges.end());
     ranges = std::move(merged);
   }
 
   // A sorted set minus sorted, disjoint removals, in one pass; pieces keep
-  // their other fields (generation, ordering domain).
+  // their other fields (generation, ordering domain). Like add_all(), the
+  // stretches no removal reaches are copied whole, and a set no removal
+  // overlaps is left as it is.
   template <typename Range>
   static void subtract_all(std::vector<Range>& ranges,
                            const std::vector<GpuCoherencyRange>& removed) {
-    if (ranges.empty() || removed.empty()) return;
+    if (ranges.empty() ||
+        std::none_of(removed.begin(), removed.end(),
+                     [&](const GpuCoherencyRange& range) { return overlaps(ranges, range); }))
+      return;
     std::vector<Range> result;
     result.reserve(ranges.size() + removed.size());
-    std::size_t first = 0;
-    for (const auto& range : ranges) {
-      std::uint64_t cursor = range.address;
-      const std::uint64_t end = range.end();
-      while (first < removed.size() && removed[first].end() <= cursor) ++first;
-      for (std::size_t k = first; cursor < end; ++k) {
-        if (k >= removed.size() || removed[k].address >= end) {
+    std::size_t i = 0;
+    // What is left of ranges[i - 1] after the removals so far cut its head.
+    bool carrying = false;
+    Range carry{};
+    for (const auto& cut : removed) {
+      if (carrying) {
+        if (carry.end() <= cut.address) {
+          result.push_back(carry);
+          carrying = false;
+        } else {
+          if (carry.address < cut.address) {
+            auto piece = carry;
+            piece.size = static_cast<std::uint32_t>(cut.address - carry.address);
+            result.push_back(piece);
+          }
+          if (carry.end() > cut.end()) {
+            const auto end = carry.end();
+            carry.address = static_cast<std::uint32_t>(cut.end());
+            carry.size = static_cast<std::uint32_t>(end - cut.end());
+            continue;  // ranges[i] start beyond the carry, past this cut
+          }
+          carrying = false;
+        }
+      }
+      const auto stop = static_cast<std::size_t>(
+          std::lower_bound(ranges.begin() + static_cast<std::ptrdiff_t>(i), ranges.end(),
+                           std::uint64_t{cut.address},
+                           [](const Range& range, std::uint64_t value) {
+                             return range.end() <= value;
+                           }) -
+          ranges.begin());
+      result.insert(result.end(), ranges.begin() + static_cast<std::ptrdiff_t>(i),
+                    ranges.begin() + static_cast<std::ptrdiff_t>(stop));
+      i = stop;
+      while (i < ranges.size() && ranges[i].address < cut.end()) {
+        const auto& range = ranges[i++];
+        if (range.address < cut.address) {
           auto piece = range;
-          piece.address = static_cast<std::uint32_t>(cursor);
-          piece.size = static_cast<std::uint32_t>(end - cursor);
+          piece.size = static_cast<std::uint32_t>(cut.address - range.address);
           result.push_back(piece);
+        }
+        if (range.end() > cut.end()) {
+          carry = range;
+          carry.address = static_cast<std::uint32_t>(cut.end());
+          carry.size = static_cast<std::uint32_t>(range.end() - cut.end());
+          carrying = true;
           break;
         }
-        if (removed[k].address > cursor) {
-          auto piece = range;
-          piece.address = static_cast<std::uint32_t>(cursor);
-          piece.size = static_cast<std::uint32_t>(removed[k].address - cursor);
-          result.push_back(piece);
-        }
-        cursor = (std::max)(cursor, removed[k].end());
       }
     }
+    if (carrying) result.push_back(carry);
+    result.insert(result.end(), ranges.begin() + static_cast<std::ptrdiff_t>(i), ranges.end());
     ranges = std::move(result);
   }
 

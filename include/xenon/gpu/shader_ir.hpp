@@ -93,6 +93,35 @@ struct VertexFetchInstruction {
   Predicate predicate{};
 };
 
+// A texture fetch instruction's sampler filters (Xenos TextureFilter: 0
+// point, 1 linear, 2 base map, 3 use the fetch constant's; AnisoFilter: 0
+// off, 1-5 1:1 to 16:1, 7 use the fetch constant's). A field other than "use
+// the fetch constant's" overrides the fetch constant for that fetch.
+inline constexpr std::uint8_t kTextureFilterUseFetchConstant = 3;
+inline constexpr std::uint8_t kAnisoFilterUseFetchConstant = 7;
+
+struct TextureFilterOverride {
+  std::uint8_t fetch_constant{};
+  std::uint8_t mag_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t min_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t mip_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t aniso_filter{kAnisoFilterUseFetchConstant};
+  // Fetches of one constant asking for different filters: one host sampler
+  // per slot cannot give each its own.
+  bool conflicting{};
+
+  [[nodiscard]] bool overrides() const noexcept {
+    return mag_filter != kTextureFilterUseFetchConstant ||
+           min_filter != kTextureFilterUseFetchConstant ||
+           mip_filter != kTextureFilterUseFetchConstant ||
+           aniso_filter != kAnisoFilterUseFetchConstant;
+  }
+  [[nodiscard]] bool same_filters(const TextureFilterOverride& other) const noexcept {
+    return mag_filter == other.mag_filter && min_filter == other.min_filter &&
+           mip_filter == other.mip_filter && aniso_filter == other.aniso_filter;
+  }
+};
+
 struct TextureFetchInstruction {
   std::uint32_t address{};
   std::uint8_t opcode{};
@@ -111,6 +140,11 @@ struct TextureFetchInstruction {
   bool use_computed_lod{};
   bool use_register_lod{};
   bool use_register_gradients{};
+  // The instruction's own filters (TextureFilterOverride's encoding).
+  std::uint8_t mag_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t min_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t mip_filter{kTextureFilterUseFetchConstant};
+  std::uint8_t aniso_filter{kAnisoFilterUseFetchConstant};
   Predicate predicate{};
 };
 
@@ -131,6 +165,11 @@ struct ShaderReflection {
   // (three 2-dword vertex fetch constants share each 6-dword slot).
   std::vector<std::uint8_t> vertex_fetches{};
   std::vector<std::uint8_t> texture_fetch_constants{};
+  // The filters each fetch constant's sampling fetches (tfetch,
+  // getCompTexLOD, getWeights) ask for, one entry per constant sampled -
+  // "use the fetch constant's" included, so another shader's override of the
+  // same constant shows up as a disagreement.
+  std::vector<TextureFilterOverride> texture_filter_overrides{};
   std::vector<std::uint8_t> exports{};
   // Float-constant indices used by the conventional Xenos eA memexport
   // address setup pattern (mad eA, r#, const0100, c#). Stage selection is

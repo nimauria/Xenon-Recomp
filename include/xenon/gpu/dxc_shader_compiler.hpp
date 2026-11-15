@@ -64,6 +64,15 @@ class ShaderCache {
 
   [[nodiscard]] std::shared_ptr<const CompiledShader> get_or_compile(
       const LoweredShader& shader, const ShaderCompileOptions& options = {});
+  // The same, compiling with `compiler` (a background worker's own; DXC
+  // objects are used by one thread at a time). Thread-safe.
+  [[nodiscard]] std::shared_ptr<const CompiledShader> get_or_compile(
+      const LoweredShader& shader, const ShaderCompileOptions& options,
+      const DxcShaderCompiler& compiler);
+  // A compile already in memory or on disk, without compiling; null when
+  // there is none.
+  [[nodiscard]] std::shared_ptr<const CompiledShader> find(
+      const LoweredShader& shader, const ShaderCompileOptions& options = {});
   void clear();
   [[nodiscard]] std::size_t size() const;
   [[nodiscard]] std::size_t hits() const;

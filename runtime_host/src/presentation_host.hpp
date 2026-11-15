@@ -62,7 +62,13 @@ class PresentationHost {
   // events); the caller still gets resized/width/height for logging/status.
   void pump_events(PresentationEvents& out_events);
 
+  // Captures the mouse (hidden cursor, relative motion that never leaves the
+  // window) while `capture` is set, as a title steering with the mouse
+  // needs; released whenever the window loses focus. Idempotent.
+  void set_mouse_capture(bool capture);
+
  private:
+  bool mouse_captured_{false};
   SDL_Window* window_{nullptr};
   xenon::gpu::Backend* backend_{nullptr};
 };

@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include "xenon/gpu/d3d12/command_queue.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 
 namespace xenon::gpu::d3d12 {
@@ -62,6 +63,10 @@ class DepthTargetImage {
   [[nodiscard]] bool requires_float24_conversion() const noexcept {
     return float24_;
   }
+  // How depth written into this image (uploads, transfers, GPU clears) encodes
+  // a D24 code: the device's calibrated encoding (calibrate_unorm24_depth_write).
+  [[nodiscard]] Unorm24DepthWrite unorm24_depth_write() const noexcept { return unorm24_write_; }
+  void set_unorm24_depth_write(Unorm24DepthWrite write) noexcept { unorm24_write_ = write; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -73,6 +78,7 @@ class DepthTargetImage {
   DepthRenderTargetFormat guest_format_{DepthRenderTargetFormat::D24S8};
   MsaaSamples host_msaa_{MsaaSamples::X1};
   bool float24_{};
+  Unorm24DepthWrite unorm24_write_{Unorm24DepthWrite::Midpoint};
   std::uint32_t width_{};
   std::uint32_t height_{};
   EdramSurfaceLayout surface_{};

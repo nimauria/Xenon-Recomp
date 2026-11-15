@@ -136,9 +136,88 @@ void test_readback_planning_skips_ranges_the_gpu_never_wrote() {
   std::cout << "  [PASS] readback planning skips ranges the GPU never wrote\n";
 }
 
+// Regression (AC6 missions at 6-8 fps, 28% of the GPU thread folding CPU
+// writes): generated code dirties whole pages of the game's heap every frame,
+// pages no GPU consumer uploads, and each resolve and readback folded them in
+// again by rebuilding every set. A fold of bytes already CPU-dirty in the same
+// domain is now skipped, and the rest copy untouched stretches whole. Over
+// rounds that re-dirty the same pages, mix domains, upload, and give ranges
+// to the GPU, every set and every byte's domain must match applying the same
+// writes one at a time.
+void test_refolding_dirty_pages_matches_per_write_folding() {
+  using xenon::cpu::MemoryOrderingDomain;
+  constexpr std::uint32_t kSize = 0x40000u;
+  GuestMemoryCoherency stores;
+  GuestMemoryCoherency no_stores;
+  GuestMemoryGpuCoherency batched;
+  GuestMemoryGpuCoherency reference;
+  batched.reset(kSize, false);
+  reference.reset(kSize, false);
+  std::uint32_t state = 4242u;
+  const auto next = [&] {
+    state = state * 1103515245u + 12345u;
+    return state >> 8;
+  };
+  const auto same = [](const std::vector<GpuCoherencyRange>& a,
+                       const std::vector<GpuCoherencyRange>& b) {
+    return a.size() == b.size() &&
+           std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+             return x.address == y.address && x.size == y.size;
+           });
+  };
+  // A heap of pages written every round, never uploaded.
+  std::vector<std::uint32_t> heap_pages;
+  for (std::uint32_t page = 0; page < 24u; ++page) heap_pages.push_back(0x20000u + page * 0x1800u);
+  for (std::uint32_t round = 0; round < 12u; ++round) {
+    for (const auto page : heap_pages) {
+      const auto domain = round % 5u == 4u ? MemoryOrderingDomain::Normal
+                                           : MemoryOrderingDomain::CacheInhibited;
+      stores.mark_write(page, kBasePageSize, domain);
+      reference.mark_cpu_write(page, kBasePageSize, domain);
+    }
+    for (std::uint32_t i = 0; i < 300u; ++i) {
+      const auto address = next() % 0x20000u;
+      const auto size = 1u + next() % 0x200u;
+      const auto domain = static_cast<MemoryOrderingDomain>(next() % 4u);
+      stores.mark_write(address, size, domain);
+      reference.mark_cpu_write(address, size, domain);
+    }
+    // Fold in through a sync point.
+    (void)batched.plan_upload(stores, 0u, 4u, 0u, GpuRangeUsage::Generic);
+    (void)reference.plan_upload(no_stores, 0u, 4u, 0u, GpuRangeUsage::Generic);
+    reference.commit_cpu_upload(0u, 4u);
+    batched.commit_cpu_upload(0u, 4u);
+    // Uploads and GPU writes fragment the sets for the next round.
+    for (std::uint32_t i = 0; i < 6u; ++i) {
+      const auto address = next() % 0x1F000u;
+      const auto size = 0x40u + next() % 0x800u;
+      batched.commit_cpu_upload(address, size);
+      reference.commit_cpu_upload(address, size);
+      const auto gpu = next() % 0x1F000u;
+      (void)batched.mark_gpu_write(gpu, 0x100u);
+      (void)reference.mark_gpu_write(gpu, 0x100u);
+    }
+    assert(same(batched.cpu_dirty_ranges(), reference.cpu_dirty_ranges()));
+    assert(same(batched.gpu_dirty_ranges(), reference.gpu_dirty_ranges()));
+    assert(same(batched.touched_page_ranges(), reference.touched_page_ranges()));
+  }
+  for (std::uint32_t address = 0; address < kSize; address += 0x10u) {
+    assert(batched.device_range_valid(address, 0x10u) ==
+           reference.device_range_valid(address, 0x10u));
+    const auto batch_plan =
+        batched.plan_upload(stores, address, 0x10u, 0u, GpuRangeUsage::VertexBuffer);
+    const auto reference_plan =
+        reference.plan_upload(no_stores, address, 0x10u, 0u, GpuRangeUsage::VertexBuffer);
+    assert(batch_plan.source_domain == reference_plan.source_domain);
+    assert(same(batch_plan.ranges, reference_plan.ranges));
+  }
+  std::cout << "  [PASS] refolding dirty pages matches per-write folding\n";
+}
+
 }  // namespace
 
 int main() {
+  test_refolding_dirty_pages_matches_per_write_folding();
   test_native_stores_keep_upload_planning_exact();
   test_upload_planning_folds_in_writes_through_the_read_epoch();
   test_readback_planning_skips_ranges_the_gpu_never_wrote();

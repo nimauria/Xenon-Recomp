@@ -7,6 +7,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/shader.cpp
     xenos/shader_decoder.cpp
     xenos/shader_translation.cpp
+    xenos/vertex_position_evaluator.cpp
     xenos/depth_format.cpp
     xenos/resource_ir.cpp
     xenos/resource_barrier.cpp
@@ -29,6 +30,7 @@ if(XENON_ENABLE_GRAPHICS)
     common/backend_capabilities.cpp
     common/display_vblank.cpp
     common/failure_log.cpp
+    common/perf_stats.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)
@@ -51,7 +53,8 @@ if(XENON_ENABLE_GRAPHICS)
     xenon_resolve_dxc(XENON_DXC_TARGET XENON_DXC_INCLUDE_DIR)
     if(XENON_DXC_TARGET AND XENON_DXC_INCLUDE_DIR)
       add_library(xenon_graphics_dxc STATIC
-        dxc/shader_compiler.cpp)
+        dxc/shader_compiler.cpp
+        dxc/shader_compile_queue.cpp)
       target_include_directories(xenon_graphics_dxc
         PUBLIC "${XENON_SOURCE_DIR}/include"
         PRIVATE "${XENON_DXC_INCLUDE_DIR}")

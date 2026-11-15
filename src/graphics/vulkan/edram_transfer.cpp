@@ -30,6 +30,15 @@ EdramTransferEndpoint endpoint_of(const DepthTargetImage& image) noexcept {
   return {true, static_cast<std::uint8_t>(image.guest_format())};
 }
 
+// The descriptor set a transfer reads its source through: a color image's
+// transfer view (integer for 16-bit float storage), a depth image's planes.
+VkDescriptorSet transfer_set(RenderTargetImage& source, VkDescriptorSetLayout layout) {
+  return source.transfer_descriptor_set(layout);
+}
+VkDescriptorSet transfer_set(DepthTargetImage& source, VkDescriptorSetLayout layout) {
+  return source.sampled_descriptor_set(layout);
+}
+
 // Makes a source image readable by the transfer's fragment shader, and
 // returns it to attachment use afterwards.
 void begin_sampling(VkCommandBuffer command, RenderTargetImage& source) {
@@ -254,7 +263,7 @@ VkPipeline EdramColorTransfer::pipeline(VkDevice device, EdramTransferEndpoint s
   error_ = "Vulkan EDRAM transfer requires DXC";
   return VK_NULL_HANDLE;
 #else
-  const auto format = destination.format();
+  const auto format = destination.transfer_format();
   const auto destination_host = destination.host_msaa();
   // Same-format pipelines depend only on the formats and sample counts.
   const auto key = std::uint64_t(format) | (std::uint64_t(source_host) << 32u) |
@@ -269,7 +278,9 @@ VkPipeline EdramColorTransfer::pipeline(VkDevice device, EdramTransferEndpoint s
   if (!layouts_.create(device, error_)) return VK_NULL_HANDLE;
   const auto pixel = converting ? make_edram_converting_color_transfer_shader(
                                       source_host, source, destination.guest_format())
-                                : make_edram_color_transfer_shader(source_host);
+                                : make_edram_color_transfer_shader(
+                                      source_host, destination.transfer_format() !=
+                                                       destination.format());
   const auto pipeline =
       create_transfer_pipeline(device, layouts_.pipeline_layout(source.depth), pixel, false,
                                format, false, destination_host,
@@ -290,7 +301,7 @@ bool EdramColorTransfer::run(VkDevice device, CommandQueue& queue, Source& sourc
   const auto state = pipeline(device, endpoint, source.host_msaa(), destination, converting);
   if (!state) return false;
   const auto layout = layouts_.pipeline_layout(endpoint.depth);
-  const auto source_set = source.sampled_descriptor_set(layouts_.set_layout(endpoint.depth));
+  const auto source_set = transfer_set(source, layouts_.set_layout(endpoint.depth));
   if (!source_set) {
     error_ = source.error();
     return false;
@@ -300,7 +311,7 @@ bool EdramColorTransfer::run(VkDevice device, CommandQueue& queue, Source& sourc
         begin_sampling(command, source);
         destination.transition_to_color_attachment(command);
         VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        color.imageView = destination.view();
+        color.imageView = destination.transfer_view();
         color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -385,13 +396,17 @@ VkPipeline EdramDepthTransfer::pipeline(VkDevice device, EdramTransferEndpoint s
                                      (std::uint64_t(source.depth) << 44u) |
                                      (std::uint64_t(source.format) << 46u) |
                                      (std::uint64_t(destination.guest_format()) << 54u)
-                               : 0u);
+                               : 0u) |
+                   (std::uint64_t(destination.unorm24_depth_write()) << 63u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end()) return found->second;
   device_ = device;
   if (!layouts_.create(device, error_)) return VK_NULL_HANDLE;
-  const auto pixel = converting ? make_edram_converting_depth_transfer_shader(
-                                      source_host, source, destination.guest_format(), pass)
-                                : make_edram_depth_transfer_shader(source_host, pass);
+  const auto write = destination.unorm24_depth_write();
+  const auto pixel =
+      converting ? make_edram_converting_depth_transfer_shader(
+                       source_host, source, destination.guest_format(), pass, write)
+                 : make_edram_depth_transfer_shader(source_host, pass,
+                                                    destination.guest_format(), write);
   const auto pipeline = create_transfer_pipeline(
       device, layouts_.pipeline_layout(source.depth), pixel,
       pass == EdramDepthTransferPass::DepthAndStencil, format, true, destination_host, pass,
@@ -437,7 +452,7 @@ bool EdramDepthTransfer::run(VkDevice device, VkPhysicalDevice physical_device,
     if (!stencil_bits) return false;
   }
   const auto layout = layouts_.pipeline_layout(endpoint.depth);
-  const auto source_set = source.sampled_descriptor_set(layouts_.set_layout(endpoint.depth));
+  const auto source_set = transfer_set(source, layouts_.set_layout(endpoint.depth));
   if (!source_set) {
     error_ = source.error();
     return false;

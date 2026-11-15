@@ -46,14 +46,21 @@ std::uint16_t float_to_half(float value) noexcept {
   const auto sign = std::uint16_t((bits >> 16u) & 0x8000u);
   const auto magnitude = bits & 0x7FFFFFFFu;
   if (magnitude >= 0x7F800000u) {
-    return std::uint16_t(sign | (magnitude == 0x7F800000u ? 0x7C00u : 0x7E00u));
+    // Infinity, or a NaN keeping its payload's top bits (half_to_float() puts
+    // a half NaN's there, so the pair round-trips); a NaN whose top bits are
+    // zero stays a NaN.
+    if (magnitude == 0x7F800000u) return std::uint16_t(sign | 0x7C00u);
+    const auto payload = std::uint16_t((magnitude >> 13u) & 0x03FFu);
+    return std::uint16_t(sign | 0x7C00u | (payload ? payload : 0x0200u));
   }
   if (magnitude >= 0x477FF000u) return std::uint16_t(sign | 0x7C00u);
   if (magnitude < 0x33000000u) return sign;
   std::uint32_t rounded{};
   if (magnitude < 0x38800000u) {
+    // A half denormal is m * 2^-24: the 24-bit significand of 2^(e-127)
+    // shifted right by 126 - e.
     const auto mantissa = (magnitude & 0x7FFFFFu) | 0x800000u;
-    const auto shift = 113u - (magnitude >> 23u);
+    const auto shift = 126u - (magnitude >> 23u);
     rounded = mantissa >> shift;
     const auto remainder = mantissa & ((1u << shift) - 1u);
     const auto halfway = 1u << (shift - 1u);
@@ -346,6 +353,12 @@ bool color_host_requires_conversion(ColorRenderTargetFormat format) noexcept {
     default:
       return false;
   }
+}
+
+bool color_host_transfers_as_integer(ColorRenderTargetFormat format) noexcept {
+  const auto storage = color_host_storage(format);
+  return storage == ColorHostStorage::R16G16Float ||
+         storage == ColorHostStorage::R16G16B16A16Float;
 }
 
 bool encode_host_color_sample(ColorRenderTargetFormat format,
@@ -805,6 +818,7 @@ bool converting_transfer_format(EdramTransferEndpoint endpoint) noexcept {
   switch (storage_color_format(static_cast<ColorRenderTargetFormat>(endpoint.format))) {
     case ColorRenderTargetFormat::R8G8B8A8:
     case ColorRenderTargetFormat::R10G10B10A2:
+    case ColorRenderTargetFormat::R16G16Float:
     case ColorRenderTargetFormat::R32Float:
       return true;
     default:

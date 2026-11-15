@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <set>
 
 namespace xenon::gpu {
@@ -29,6 +30,8 @@ struct Usage {
   std::set<std::uint8_t> vertices;
   std::set<std::uint8_t> vertex_fetches;
   std::set<std::uint8_t> textures;
+  // Per fetch constant, the filters its sampling fetches ask for.
+  std::map<std::uint8_t, TextureFilterOverride> texture_filters;
   std::set<std::uint8_t> exports;
   std::set<std::uint16_t> memexport_stream_constants;
 };
@@ -251,6 +254,10 @@ DecodedInstruction decode_fetch(const ShaderInstruction96& raw,
     out.unnormalized_coordinates = bits(w0, 25, 1);
     out.source_swizzle = static_cast<std::uint8_t>(bits(w0, 26, 6));
     out.destination_swizzle = static_cast<std::uint16_t>(bits(w1, 0, 12));
+    out.mag_filter = static_cast<std::uint8_t>(bits(w1, 12, 2));
+    out.min_filter = static_cast<std::uint8_t>(bits(w1, 14, 2));
+    out.mip_filter = static_cast<std::uint8_t>(bits(w1, 16, 2));
+    out.aniso_filter = static_cast<std::uint8_t>(bits(w1, 18, 3));
     out.use_computed_lod = bits(w1, 28, 1);
     out.use_register_lod = bits(w1, 29, 1);
     out.predicate = decode_predicate(bits(w1, 31, 1), bits(w2, 31, 1));
@@ -261,6 +268,14 @@ DecodedInstruction decode_fetch(const ShaderInstruction96& raw,
                                static_cast<std::int8_t>(signed_bits(w2, 21, 5)),
                                static_cast<std::int8_t>(signed_bits(w2, 26, 5))};
     usage.textures.insert(out.fetch_constant);
+    // The fetches that sample through the constant's sampler: tfetch (1),
+    // getCompTexLOD (17) and getWeights (19). The others carry no filter.
+    if (opcode == 1u || opcode == 17u || opcode == 19u) {
+      const TextureFilterOverride wanted{out.fetch_constant, out.mag_filter, out.min_filter,
+                                         out.mip_filter, out.aniso_filter};
+      const auto [found, inserted] = usage.texture_filters.try_emplace(out.fetch_constant, wanted);
+      if (!inserted && !found->second.same_filters(wanted)) found->second.conflicting = true;
+    }
     reflection.uses_dynamic_addressing |= out.source_relative || out.destination_relative;
     reflection.uses_predication |= out.predicate.enabled;
   }
@@ -326,6 +341,8 @@ DecodedShader ShaderDecoder::decode(const ShaderProgram& program) {
   assign_sorted(usage.vertices, result.reflection.vertex_fetch_constants);
   assign_sorted(usage.vertex_fetches, result.reflection.vertex_fetches);
   assign_sorted(usage.textures, result.reflection.texture_fetch_constants);
+  for (const auto& [constant, filters] : usage.texture_filters)
+    result.reflection.texture_filter_overrides.push_back(filters);
   assign_sorted(usage.exports, result.reflection.exports);
   assign_sorted(usage.memexport_stream_constants,
                 result.reflection.memexport_stream_constants);

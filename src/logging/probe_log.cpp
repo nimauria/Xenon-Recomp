@@ -94,13 +94,11 @@ std::string probe_log_directory() {
   return g_directory;
 }
 
-void append_probe_log(const char* file_name, const char* format, ...) {
-  if (!probe_logs_enabled()) return;
+namespace {
+
+void append_record(const char* file_name, const char* format, va_list arguments) {
   char record[1024];
-  va_list arguments;
-  va_start(arguments, format);
   const int formatted = std::vsnprintf(record, sizeof(record), format, arguments);
-  va_end(arguments);
   if (formatted < 0) return;
   const auto length =
       std::min<std::size_t>(static_cast<std::size_t>(formatted), sizeof(record) - 1);
@@ -135,6 +133,23 @@ void append_probe_log(const char* file_name, const char* format, ...) {
   // Each record reaches the file as it is written, as before: a probe's last
   // lines are the ones a crash or hang investigation needs.
   std::fflush(probe.file);
+}
+
+}  // namespace
+
+void append_probe_log(const char* file_name, const char* format, ...) {
+  if (!probe_logs_enabled()) return;
+  va_list arguments;
+  va_start(arguments, format);
+  append_record(file_name, format, arguments);
+  va_end(arguments);
+}
+
+void append_run_log(const char* file_name, const char* format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  append_record(file_name, format, arguments);
+  va_end(arguments);
 }
 
 }  // namespace xenon::logging

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "xenon/gpu/dxc_shader_compiler.hpp"
+#include "xenon/gpu/shader_compile_queue.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 
 namespace {
@@ -645,12 +647,28 @@ void test_sample_transfer_shaders() {
     assert(compiler.compile(fallback, {}).succeeded);
     assert(compiler.compile(fallback, spirv).succeeded);
   }
-  // Direct EDRAM depth transfers: every pass at every source sample count.
+  // Direct EDRAM depth transfers: every pass at every source sample count,
+  // for both depth formats and each D24 encoding. D24S8 depth is re-encoded
+  // as its code under the device's encoding (the CI regression: a sampled
+  // value passed through lands a code off where the conversion truncates);
+  // D24FS8's float passes through.
   for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
     for (const auto pass : {EdramDepthTransferPass::DepthAndStencil, EdramDepthTransferPass::Depth,
-                            EdramDepthTransferPass::StencilBit}) {
-      const auto shader = make_edram_depth_transfer_shader(samples, pass);
+                            EdramDepthTransferPass::StencilBit})
+    for (const auto format : {DepthRenderTargetFormat::D24S8, DepthRenderTargetFormat::D24FS8})
+    for (const auto write : kUnorm24DepthWrites) {
+      const auto shader = make_edram_depth_transfer_shader(samples, pass, format, write);
       assert(shader.complete);
+      const bool unorm24 = format == DepthRenderTargetFormat::D24S8;
+      assert((shader.hlsl.find(unorm24_depth_write_hlsl(write)) != std::string::npos) == unorm24);
+      if (pass != EdramDepthTransferPass::StencilBit)
+        assert((shader.hlsl.find("xe_unorm24_depth_out(xe_pack_unorm24(") != std::string::npos) ==
+               unorm24);
+      // Each format and encoding is its own shader.
+      if (write != kUnorm24DepthWrites[0] && unorm24)
+        assert(shader.source_hash !=
+               make_edram_depth_transfer_shader(samples, pass, format, kUnorm24DepthWrites[0])
+                   .source_hash);
       assert(shader.hlsl.find("SV_SampleIndex") != std::string::npos);
       assert((shader.hlsl.find("SV_StencilRef") != std::string::npos) ==
              (pass == EdramDepthTransferPass::DepthAndStencil));
@@ -668,8 +686,10 @@ void test_sample_transfer_shaders() {
   }
   // It shares the color transfer's EDRAM mapping verbatim.
   const auto color = make_edram_color_transfer_shader(MsaaSamples::X1).hlsl;
-  const auto depth =
-      make_edram_depth_transfer_shader(MsaaSamples::X1, EdramDepthTransferPass::Depth).hlsl;
+  const auto depth = make_edram_depth_transfer_shader(MsaaSamples::X1, EdramDepthTransferPass::Depth,
+                                                      DepthRenderTargetFormat::D24S8,
+                                                      Unorm24DepthWrite::Midpoint)
+                         .hlsl;
   const auto mapping_at = [](const std::string& hlsl) {
     const auto begin = hlsl.find("  const uint x = uint(position.x);");
     const auto end = hlsl.find(": source_guest);");
@@ -717,10 +737,17 @@ void test_sample_transfer_shaders() {
         }
         for (const auto pass : {EdramDepthTransferPass::DepthAndStencil,
                                 EdramDepthTransferPass::Depth, EdramDepthTransferPass::StencilBit})
-          require(make_edram_converting_depth_transfer_shader(
-                      samples, source, static_cast<DepthRenderTargetFormat>(destination.format),
-                      pass),
-                  pass == EdramDepthTransferPass::DepthAndStencil);
+          for (const auto write : kUnorm24DepthWrites) {
+            const auto format = static_cast<DepthRenderTargetFormat>(destination.format);
+            const auto shader =
+                make_edram_converting_depth_transfer_shader(samples, source, format, pass, write);
+            require(shader, pass == EdramDepthTransferPass::DepthAndStencil);
+            // A D24S8 destination writes the word's code under the encoding.
+            if (format == DepthRenderTargetFormat::D24S8 &&
+                pass != EdramDepthTransferPass::StencilBit)
+              assert(shader.hlsl.find("xe_unorm24_depth_out(word >> 8u)") != std::string::npos &&
+                     shader.hlsl.find(unorm24_depth_write_hlsl(write)) != std::string::npos);
+          }
       }
     }
   }
@@ -784,7 +811,10 @@ void test_scalar_source_and_export_constants_compile() {
     alu.scalar_destination_relative = true;
     const auto lowered = HlslShaderLowerer::lower(shader);
     assert(lowered.complete);
-    assert(lowered.hlsl.find("xenon_scalar_op(45, s2, s3t, ps") != std::string::npos);
+    // addsc: the scalar unit adds source 3's W and the constant temporary's X.
+    assert(lowered.hlsl.find("// vector op 0, scalar op 45") != std::string::npos);
+    assert(lowered.hlsl.find("float4 b = s3t;") != std::string::npos);
+    assert(lowered.hlsl.find("v = x + b.x;") != std::string::npos);
     DxcShaderCompiler compiler;
     const auto dxil = compiler.compile(lowered, {});
     if (!dxil.succeeded) {
@@ -886,10 +916,68 @@ void test_persistent_shader_cache() {
   std::filesystem::remove_all(directory, ec);
 }
 
+// Background compiles: the first request returns at once and queues the
+// compile; the result is the same compile the cache makes in the foreground,
+// it is stored on disk, and a later queue over that disk finds it without a
+// worker.
+void test_background_compile_queue() {
+  using namespace xenon::gpu;
+  const auto directory = std::filesystem::temp_directory_path() / "xenon_shader_queue_test";
+  std::error_code ec;
+  std::filesystem::remove_all(directory, ec);
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  const auto vertex = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
+  const auto pixel = HlslShaderLowerer::lower(make_shader(ShaderStage::Pixel));
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Dxil;
+  std::shared_ptr<const CompiledShader> compiled_vertex;
+  {
+    ShaderCache cache(compiler);
+    cache.set_disk_directory(directory);
+    ShaderCompileQueue queue(cache, 2);
+    assert(queue.worker_count() == 2u);
+    const auto started = std::chrono::steady_clock::now();
+    const auto first = queue.request(1u, vertex, options);
+    const auto requested = std::chrono::steady_clock::now();
+    // Nothing compiled yet, so the first request cannot have the result -
+    // and returns well before a compile could finish.
+    assert(!first);
+    assert(requested - started < std::chrono::milliseconds(20));
+    assert(!queue.request(2u, pixel, options));
+    // A second request of a pending key queues nothing more.
+    (void)queue.request(1u, vertex, options);
+    compiled_vertex = queue.wait(1u, std::chrono::steady_clock::now() + std::chrono::seconds(60));
+    const auto compiled_pixel =
+        queue.wait(2u, std::chrono::steady_clock::now() + std::chrono::seconds(60));
+    assert(compiled_vertex && compiled_vertex->succeeded);
+    assert(compiled_pixel && compiled_pixel->succeeded);
+    assert(queue.pending() == 0u);
+    // The finished key is returned by request() from now on.
+    assert(queue.request(1u, vertex, options) == compiled_vertex);
+    // The same binary the foreground path makes.
+    ShaderCache foreground(compiler);
+    assert(foreground.get_or_compile(vertex, options)->binary == compiled_vertex->binary);
+    // A key never requested has nothing to wait for.
+    assert(!queue.wait(99u, std::chrono::steady_clock::now()));
+    assert(cache.disk_writes() == 2u);
+  }
+  {
+    // The next session finds both on disk without compiling.
+    ShaderCache cache(compiler);
+    cache.set_disk_directory(directory);
+    ShaderCompileQueue queue(cache, 1);
+    const auto loaded = queue.request(7u, vertex, options);
+    assert(loaded && loaded->binary == compiled_vertex->binary);
+    assert(cache.disk_hits() == 1u && cache.misses() == 0u && queue.pending() == 0u);
+  }
+  std::filesystem::remove_all(directory, ec);
+}
+
 int main() {
   test_lowering_is_deterministic();
   test_dxc_dual_target_and_cache();
   test_persistent_shader_cache();
+  test_background_compile_queue();
   test_pixel_target_and_incomplete_rejection();
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();

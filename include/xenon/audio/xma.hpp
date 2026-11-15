@@ -177,6 +177,10 @@ class XmaDecoder final {
   [[nodiscard]] bool block_while_in_use(cpu::GuestAddress context);
   [[nodiscard]] std::uint64_t decoded_samples(cpu::GuestAddress context) const;
   void set_completion_sink(CompletionSink sink);
+  // Called on the engine's worker at the start of every decode pass, while
+  // the context is busy (diagnostics; tests hold a pass in flight with it).
+  using PassObserver = std::function<void(cpu::GuestAddress context)>;
+  void set_pass_observer(PassObserver observer);
 
   // Engine-wide totals for diagnostics: whether contexts decode, what they
   // fail with (XMA error_status/parser_error_status), and how loud the
@@ -226,6 +230,9 @@ class XmaDecoder final {
   std::atomic_bool worker_running_{false};
   mutable std::mutex worker_mutex_{};
   std::condition_variable worker_cv_{};
+  // Set under worker_mutex_ by a kick, so a kick landing between the worker's
+  // scan and its wait is not lost (the kick waits for the worker).
+  bool work_signalled_{};
   std::thread worker_{};
 
   // XMA hardware is exposed through the 0x7FEA0000 MMIO aperture as well as
@@ -235,6 +242,8 @@ class XmaDecoder final {
   std::shared_ptr<MmioBridge> mmio_bridge_{};
   bool mmio_registered_{};
   mutable std::mutex mmio_mutex_{};
+  std::mutex pass_observer_mutex_{};
+  PassObserver pass_observer_{};
   std::array<std::uint32_t, kXmaMmioSize / 4u> mmio_registers_{};
   std::uint32_t next_context_index_{1};
 

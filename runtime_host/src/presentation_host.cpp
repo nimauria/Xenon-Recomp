@@ -137,6 +137,11 @@ bool PresentationHost::create(std::uint32_t width, std::uint32_t height,
   return false;
 }
 
+void PresentationHost::set_mouse_capture(bool capture) {
+  if (!window_ || capture == mouse_captured_) return;
+  if (SDL_SetWindowRelativeMouseMode(window_, capture)) mouse_captured_ = capture;
+}
+
 void PresentationHost::destroy() noexcept {
   if (window_) {
     SDL_DestroyWindow(window_);
@@ -244,6 +249,8 @@ void PresentationHost::destroy() noexcept {
 void PresentationHost::pump_events(PresentationEvents& out_events) {
   out_events = {};
 }
+
+void PresentationHost::set_mouse_capture(bool) {}
 
 #endif  // XENON_HAS_PRESENTATION_HOST
 

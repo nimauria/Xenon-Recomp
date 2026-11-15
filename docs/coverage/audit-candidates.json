@@ -1,8 +1,8 @@
 {
-  "content_digest": "sha256:7fcd453a4f6bc41a9b479ac5a50310e08a77196a909eaa7fd14935528b7094bc",
+  "content_digest": "sha256:799d2f6f5c0a91aa194e8a52088485b0a4d31a5300cd80200e1cdaafbd345ac4",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "978ceb96fa16a7a3802c448eda0e9e060fec2568",
+    "assessed_commit": "0e2ee8cb9b8818cde09d409f7d3e8a1b3320a47e",
     "worktree": "clean"
   },
   "problems": [],
@@ -389,7 +389,7 @@
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:EventWriteShaderDone", "kind": "test_evidence_found"},
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:EventWriteZPassDone", "kind": "test_evidence_found"},
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:ImLoad", "kind": "test_evidence_found"},
-    {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:ImLoadImmediate", "kind": "test_evidence_found"},
+    {"category": "pm4", "detail": "mentioned by xenon_backend_ownership_integration_tests, xenon_gpu_frontend_tests, xenon_shader_load_reuse_tests", "id": "pm4:type3:ImLoadImmediate", "kind": "test_evidence_found"},
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:ImStore", "kind": "test_evidence_found"},
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:IndirectBuffer", "kind": "test_evidence_found"},
     {"category": "pm4", "detail": "mentioned by xenon_gpu_frontend_tests", "id": "pm4:type3:Interrupt", "kind": "test_evidence_found"},
@@ -991,8 +991,10 @@
     {"category": "shader", "detail": "lowering: none", "id": "shader:control:MarkVsFetchDone", "kind": "possibly_unimplemented"},
     {"category": "shader", "detail": "lowering: none", "id": "shader:control:Nop", "kind": "possibly_unimplemented"},
     {"category": "shader", "detail": "mentioned by xenon_shader_lowering_tests", "id": "shader:control:Alloc", "kind": "test_evidence_found"},
-    {"category": "shader", "detail": "mentioned by xenon_gpu_frontend_tests, xenon_shader_lowering_tests, xenon_shader_translation_tests", "id": "shader:control:Exec", "kind": "test_evidence_found"},
-    {"category": "shader", "detail": "mentioned by xenon_shader_translation_tests", "id": "shader:control:LoopEnd", "kind": "test_evidence_found"},
-    {"category": "shader", "detail": "mentioned by xenon_shader_decoder_tests, xenon_shader_translation_tests", "id": "shader:control:LoopStart", "kind": "test_evidence_found"}
+    {"category": "shader", "detail": "mentioned by xenon_vertex_position_evaluator_tests", "id": "shader:control:CondExecEnd", "kind": "test_evidence_found"},
+    {"category": "shader", "detail": "mentioned by xenon_vertex_position_evaluator_tests", "id": "shader:control:CondExecPred", "kind": "test_evidence_found"},
+    {"category": "shader", "detail": "mentioned by xenon_gpu_frontend_tests, xenon_shader_lowering_tests, xenon_shader_translation_tests, xenon_vertex_position_evaluator_tests", "id": "shader:control:Exec", "kind": "test_evidence_found"},
+    {"category": "shader", "detail": "mentioned by xenon_shader_translation_tests, xenon_vertex_position_evaluator_tests", "id": "shader:control:LoopEnd", "kind": "test_evidence_found"},
+    {"category": "shader", "detail": "mentioned by xenon_shader_decoder_tests, xenon_shader_translation_tests, xenon_vertex_position_evaluator_tests", "id": "shader:control:LoopStart", "kind": "test_evidence_found"}
   ]
 }

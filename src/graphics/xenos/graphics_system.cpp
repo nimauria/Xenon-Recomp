@@ -134,8 +134,9 @@ void replay_shader_preamble(Backend& backend,
   const auto emit_program = [&](const std::optional<ShaderProgram>& program) {
     if (!program) return;
     const Type3Opcode opcode = Type3Opcode::ImLoadImmediate;
-    backend.consume(ir::ShaderLoad{opcode, true, 0u, *program,
-                                   ShaderDecoder::decode(*program), {}});
+    backend.consume(ir::ShaderLoad{
+        opcode, true, 0u, *program,
+        std::make_shared<const DecodedShader>(ShaderDecoder::decode(*program)), {}});
   };
   emit_program(capture.initial_vertex_program);
   emit_program(capture.initial_pixel_program);
@@ -222,7 +223,7 @@ bool build_portable_capture(memory::AddressSpace& memory, Edram& edram,
       continue;
     }
     if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
-      shaders.insert_or_assign(load->program.hash(), load->decoded);
+      if (load->decoded) shaders.insert_or_assign(load->program.hash(), *load->decoded);
       if (load->program.stage() == ShaderStage::Vertex) {
         active_vertex = load->program;
       } else {

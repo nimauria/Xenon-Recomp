@@ -180,9 +180,12 @@ ID3D12PipelineState* EdramColorTransfer::pipeline(ID3D12Device* device, DXGI_FOR
   auto* root_signature = transfer_root_signature(device, root_signatures_[0], 1u,
                                                  sizeof(EdramTransferConstants) / 4u, error_);
   if (!root_signature) return nullptr;
-  auto state = create_color_transfer_pipeline(device, root_signature,
-                                              make_edram_color_transfer_shader(source_host),
-                                              format, destination_host, error_);
+  // The integer views are exactly the formats that are not format() itself.
+  const bool integer = format == DXGI_FORMAT_R16G16_UINT ||
+                       format == DXGI_FORMAT_R16G16B16A16_UINT;
+  auto state = create_color_transfer_pipeline(
+      device, root_signature, make_edram_color_transfer_shader(source_host, integer), format,
+      destination_host, error_);
   if (!state) return nullptr;
   return pipelines_.emplace(key, std::move(state)).first->second.Get();
 #endif
@@ -195,7 +198,7 @@ ID3D12PipelineState* EdramColorTransfer::converting_pipeline(
   error_ = "D3D12 EDRAM transfer requires DXC";
   return nullptr;
 #else
-  const auto key = std::uint64_t(destination.format()) |
+  const auto key = std::uint64_t(destination.transfer_format()) |
                    (std::uint64_t(destination.guest_format()) << 8u) |
                    (std::uint64_t(source.endpoint.depth) << 16u) |
                    (std::uint64_t(source.endpoint.format) << 24u) |
@@ -212,7 +215,7 @@ ID3D12PipelineState* EdramColorTransfer::converting_pipeline(
       device, root_signature,
       make_edram_converting_color_transfer_shader(source.host_msaa, source.endpoint,
                                                   destination.guest_format()),
-      destination.format(), destination.host_msaa(), error_);
+      destination.transfer_format(), destination.host_msaa(), error_);
   if (!state) return nullptr;
   return converting_pipelines_.emplace(key, std::move(state)).first->second.Get();
 #endif
@@ -239,7 +242,7 @@ bool EdramColorTransfer::draw(CommandQueue& queue, ID3D12PipelineState* state,
         list->SetDescriptorHeaps(1, heaps);
         list->SetGraphicsRoot32BitConstants(0, sizeof(constants) / 4u, &constants, 0);
         list->SetGraphicsRootDescriptorTable(1, source_heap->GetGPUDescriptorHandleForHeapStart());
-        const auto rtv = destination.rtv();
+        const auto rtv = destination.transfer_rtv();
         list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(destination.width()),
                                       float(destination.height()), 0.0f, 1.0f};
@@ -265,7 +268,7 @@ bool EdramColorTransfer::transfer(ID3D12Device* device, CommandQueue& queue,
     return false;
   }
   if (regions.empty()) return true;
-  auto* state = pipeline(device, destination.format(), source.host_msaa(),
+  auto* state = pipeline(device, destination.transfer_format(), source.host_msaa(),
                          destination.host_msaa());
   if (!state) return false;
   auto* source_heap = source.shader_resource_heap();
@@ -312,7 +315,8 @@ ID3D12PipelineState* EdramDepthTransfer::pipeline(ID3D12Device* device,
                    (std::uint64_t(source.endpoint.depth) << 13u) |
                    (std::uint64_t(source.endpoint.format) << 16u) |
                    (std::uint64_t(source_host) << 32u) | (std::uint64_t(destination_host) << 40u) |
-                   (std::uint64_t(pass) << 48u) | (std::uint64_t(stencil_bit & 7u) << 56u);
+                   (std::uint64_t(pass) << 48u) | (std::uint64_t(stencil_bit & 7u) << 56u) |
+                   (std::uint64_t(destination.unorm24_depth_write()) << 60u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end())
     return found->second.Get();
   const auto srv_count = source_srv_count(source);
@@ -320,10 +324,12 @@ ID3D12PipelineState* EdramDepthTransfer::pipeline(ID3D12Device* device,
       transfer_root_signature(device, root_signatures_[srv_count - 1u], srv_count,
                               sizeof(EdramDepthTransferConstants) / 4u, error_);
   if (!root_signature) return nullptr;
+  const auto write = destination.unorm24_depth_write();
   const auto pixel =
-      converting ? make_edram_converting_depth_transfer_shader(source_host, source.endpoint,
-                                                               destination.guest_format(), pass)
-                 : make_edram_depth_transfer_shader(source_host, pass);
+      converting ? make_edram_converting_depth_transfer_shader(
+                       source_host, source.endpoint, destination.guest_format(), pass, write)
+                 : make_edram_depth_transfer_shader(source_host, pass,
+                                                    destination.guest_format(), write);
   auto state = create_depth_transfer_pipeline(device, root_signature, pixel, format,
                                               destination_host, pass, stencil_bit, error_);
   if (!state) return nullptr;

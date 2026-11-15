@@ -387,11 +387,18 @@ bool Backend::initialize(const ContextConfig& config) {
       return false;
     }
   }
+  // Before any guest depth is written: every D24 write path then stores the
+  // guest's exact codes on this device.
+  if (!impl_->calibrate_depth_writes()) return false;
   impl_->ready = true;
   return true;
 }
 VkInstance Backend::instance() const noexcept {
   return impl_ ? impl_->context.instance() : VK_NULL_HANDLE;
+}
+
+std::optional<Unorm24DepthCalibration> Backend::unorm24_depth_calibration() const {
+  return impl_ ? impl_->unorm24_depth_calibration : std::nullopt;
 }
 
 bool Backend::configure_presentation(VkSurfaceKHR surface,
@@ -488,6 +495,12 @@ std::size_t Backend::realized_texture_count() const noexcept {
 }
 std::size_t Backend::realized_render_target_count() const noexcept {
   return impl_->render_targets.size();
+}
+std::uint32_t Backend::tallest_render_target_rows() const noexcept {
+  std::uint32_t rows = 0;
+  for (const auto& [key, image] : impl_->render_targets)
+    if (image) rows = (std::max)(rows, image->height());
+  return rows;
 }
 const DeviceProperties& Backend::device_properties() const noexcept {
   return impl_->context.properties();

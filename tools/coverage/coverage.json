@@ -139,14 +139,14 @@
       "id": "shader:vector:0",
       "state": "implemented_unverified",
       "implementation": "src/graphics/xenos/shader_translation.cpp",
-      "implementation_token": "if (op == 0) return a + b;",
+      "implementation_token": "case 0: return \"pv = s0 + s1;\";",
       "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"
     },
     {
       "id": "shader:scalar:50",
       "state": "implemented_unverified",
       "implementation": "src/graphics/xenos/shader_translation.cpp",
-      "implementation_token": "op==50) return previous",
+      "implementation_token": "case 50: return \"ps_new = ps;\";",
       "note": "HLSL lowering exists; no opcode-specific semantic assertion traced"
     },
     {

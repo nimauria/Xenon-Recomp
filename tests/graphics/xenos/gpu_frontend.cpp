@@ -1176,6 +1176,24 @@ void test_shader_loads(AddressSpace& memory, CommandProcessor& cp,
   assert(immediate_load.immediate);
   assert(immediate_load.program.hash() == pointer_load.program.hash());
   assert(immediate_load.program.dwords().size() == 6);
+
+  // The same program is decoded once: titles reload the same microcode many
+  // times a frame (AC6 every draw batch), and re-decoding each load kept the
+  // command thread saturated at 2-4 fps.
+  assert(pointer_load.decoded && immediate_load.decoded);
+  assert(immediate_load.decoded.get() == pointer_load.decoded.get());
+  assert(pointer_load.decoded->stage == xenon::gpu::ShaderStage::Vertex);
+
+  // A different start slot is a different program, with its own decode.
+  write_words(memory, immediate_cmd,
+              {make_packet_type3(Type3Opcode::ImLoadImmediate, 8),
+               0u, (1u << 16) | 6u,
+               code[0], code[1], code[2], code[3], code[4], code[5]});
+  cp.execute_buffer(immediate_cmd, 9);
+  const auto shifted_load = std::get<xenon::gpu::ir::ShaderLoad>(stream.commands().back());
+  assert(shifted_load.program.hash() != pointer_load.program.hash());
+  assert(shifted_load.decoded && shifted_load.decoded.get() != pointer_load.decoded.get());
+  assert(shifted_load.decoded->start_slot == 1u);
 }
 
 

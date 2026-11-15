@@ -184,22 +184,27 @@ Output main() {
   return shader;
 }
 
-// Host APIs may round a float-to-UNORM24 depth write to either neighbouring
-// integer when the scaled value is not exact (Vulkan "Conversion from
-// Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875 up to
-// 0xE00000). D24S8 depth therefore allows one unit of error; stencil and
-// D24FS8, which is stored as host float32, must match exactly.
+// Host APIs may round a float-to-UNORM24 depth conversion to either
+// neighbouring integer when the scaled value is not exact (Vulkan "Conversion
+// from Floating-Point to Normalized Fixed-Point"; Mesa llvmpipe rounds 0.875
+// up to 0xE00000). Depth Xenon writes uses the device's calibrated encoding
+// and must come back exact; only a host clear to an arbitrary float
+// (`unorm24_clear_tolerance`) may land a code either side. Stencil and
+// D24FS8, which is stored as host float32, always match exactly.
 bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
                          const std::vector<std::uint32_t>& actual,
                          const std::vector<std::uint32_t>& expected,
-                         std::string_view backend_label, std::uint32_t sample) {
+                         std::string_view backend_label, std::uint32_t sample,
+                         bool unorm24_clear_tolerance = false) {
   const bool unorm24 = format == xenon::gpu::DepthRenderTargetFormat::D24S8;
   bool match = actual.size() == expected.size();
   for (std::size_t pixel = 0; match && pixel < actual.size(); ++pixel) {
     const auto a = actual[pixel], e = expected[pixel];
     const auto a_depth = a >> 8u, e_depth = e >> 8u;
     const auto depth_error = a_depth > e_depth ? a_depth - e_depth : e_depth - a_depth;
-    if ((a & 0xFFu) == (e & 0xFFu) && depth_error <= (unorm24 ? 1u : 0u)) continue;
+    if ((a & 0xFFu) == (e & 0xFFu) &&
+        depth_error <= (unorm24 && unorm24_clear_tolerance ? 1u : 0u))
+      continue;
     std::cerr << backend_label << " depth mismatch: format="
               << static_cast<unsigned>(format) << " sample=" << sample
               << " pixel=" << pixel << " expected=0x" << std::hex << e
@@ -210,6 +215,66 @@ bool depth_samples_match(xenon::gpu::DepthRenderTargetFormat format,
     std::cerr << backend_label << " depth readback returned " << actual.size()
               << " pixels, expected " << expected.size() << '\n';
   return match;
+}
+
+// Regression (CI: WARP and llvmpipe stored a post-resolve depth clear of
+// 0x556677 one code low): the device must have a D24 depth-write encoding
+// under which every calibration code is stored exactly - what the backends
+// measure at initialize() - and it is the one returned.
+template <typename DepthTarget, typename Queue, typename Create>
+xenon::gpu::Unorm24DepthWrite exact_unorm24_depth_write(Queue& queue, Create&& create,
+                                                        std::string_view backend_label) {
+  constexpr std::uint32_t kWidth = 320u, kHeight = 208u;
+  DepthTarget probe;
+  assert(create(probe, xenon::gpu::EdramSurfaceLayout{0u, kWidth, kHeight,
+                                                      xenon::gpu::MsaaSamples::X1, false, true}));
+  const auto words = xenon::gpu::unorm24_depth_calibration_words(kWidth * kHeight);
+  const auto measured = xenon::gpu::calibrate_unorm24_depth_write(
+      words, [&](xenon::gpu::Unorm24DepthWrite write, std::span<const std::uint32_t> source,
+                 std::vector<std::uint32_t>& stored) {
+        probe.set_unorm24_depth_write(write);
+        std::uint32_t pitch{};
+        return probe.upload_sample(queue, 0u, 0u, 0u, kWidth, kHeight, source, kWidth * 4u) &&
+               probe.readback_sample(queue, 0u, 0u, 0u, kWidth, kHeight, stored, pitch);
+      });
+  assert(measured);
+  const auto name = xenon::gpu::unorm24_depth_write_name(measured->write);
+  std::cout << backend_label << " D24 depth writes: " << name;
+  if (!measured->exact) {
+    std::cout << " leaves " << measured->mismatches << " codes wrong (0x" << std::hex
+              << (measured->first_expected >> 8u) << " stored as 0x"
+              << (measured->first_stored >> 8u) << std::dec << ")\n";
+    // What this device does instead, per encoding: how many codes go wrong
+    // in each sixteenth of the range, by how much, and the first few.
+    for (const auto write : xenon::gpu::kUnorm24DepthWrites) {
+      probe.set_unorm24_depth_write(write);
+      std::vector<std::uint32_t> stored;
+      std::uint32_t pitch{};
+      if (!probe.upload_sample(queue, 0u, 0u, 0u, kWidth, kHeight, words, kWidth * 4u) ||
+          !probe.readback_sample(queue, 0u, 0u, 0u, kWidth, kHeight, stored, pitch))
+        continue;
+      std::array<std::uint32_t, 16> by_range{};
+      std::array<std::uint32_t, 3> by_delta{};  // -1, +1, other
+      std::uint32_t shown = 0;
+      std::cout << "  " << xenon::gpu::unorm24_depth_write_name(write) << ":";
+      for (std::size_t i = 0; i < words.size(); ++i) {
+        const auto want = words[i] >> 8u, got = stored[i] >> 8u;
+        if (want == got) continue;
+        ++by_range[want >> 20u];
+        ++by_delta[got + 1u == want ? 0 : got == want + 1u ? 1 : 2];
+        if (shown++ < 12u)
+          std::cout << std::hex << " 0x" << want << "->0x" << got << std::dec;
+      }
+      std::cout << "\n    by sixteenth:";
+      for (const auto count : by_range) std::cout << ' ' << count;
+      std::cout << "\n    one low " << by_delta[0] << ", one high " << by_delta[1] << ", other "
+                << by_delta[2] << '\n';
+    }
+  } else {
+    std::cout << '\n';
+  }
+  assert(measured->exact);
+  return measured->write;
 }
 
 template <typename DepthTarget, typename Queue>
@@ -263,14 +328,15 @@ void validate_depth_sample_transfer_matrix(
   }
 
   const auto read_native = [&](std::uint32_t host_sample,
-                               const std::vector<std::uint32_t>& wanted) {
+                               const std::vector<std::uint32_t>& wanted,
+                               bool host_clear = false) {
     std::vector<std::uint32_t> returned;
     std::uint32_t pitch{};
     assert(target.readback_native_sample(
         queue, host_sample, 0, 0, kWidth, kHeight, returned, pitch));
     assert(pitch == kWidth * 4u);
     assert(depth_samples_match(depth_format, returned, wanted, backend_label,
-                               host_sample));
+                               host_sample, host_clear));
   };
 
   if (guest_msaa == xenon::gpu::MsaaSamples::X1) {
@@ -298,8 +364,8 @@ void validate_depth_sample_transfer_matrix(
       const auto clear_word = xenon::gpu::host_to_depth_stencil(
           depth_format, kClearHostDepth, kClearStencil);
       const std::vector<std::uint32_t> untouched(kWidth * kHeight, clear_word);
-      read_native(1, untouched);
-      read_native(2, untouched);
+      read_native(1, untouched, true);
+      read_native(2, untouched, true);
     }
   }
 }
@@ -549,6 +615,13 @@ int main() {
                          xenon::gpu::DepthRenderTargetFormat::D24S8,
                          1.0f, 0));
 #if defined(XENON_TEST_DXC)
+  const auto vulkan_unorm24_write = exact_unorm24_depth_write<xenon::gpu::vulkan::DepthTargetImage>(
+      vulkan_queue,
+      [&](xenon::gpu::vulkan::DepthTargetImage& image, const xenon::gpu::EdramSurfaceLayout& surface) {
+        return image.initialize(vulkan_context.physical_device(), vulkan_context.device(), surface,
+                                xenon::gpu::DepthRenderTargetFormat::D24S8);
+      },
+      "Vulkan");
   for (const auto depth_format : {
            xenon::gpu::DepthRenderTargetFormat::D24S8,
            xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
@@ -573,6 +646,7 @@ int main() {
       assert(transfer_target.initialize(
           vulkan_context.physical_device(), vulkan_context.device(),
           transfer_surface, depth_format, test_case.native_2x));
+      transfer_target.set_unorm24_depth_write(vulkan_unorm24_write);
       validate_depth_sample_transfer_matrix(
           transfer_target, vulkan_queue, depth_format, test_case.msaa,
           test_case.force_x2_on_x4, "Vulkan");
@@ -998,6 +1072,14 @@ int main() {
                                  xenon::gpu::DepthRenderTargetFormat::D24S8));
     assert(d3d_depth.clear(queue, 1.0f, 0));
 #if defined(XENON_TEST_DXC)
+    const auto d3d12_unorm24_write = exact_unorm24_depth_write<xenon::gpu::d3d12::DepthTargetImage>(
+        queue,
+        [&](xenon::gpu::d3d12::DepthTargetImage& image,
+            const xenon::gpu::EdramSurfaceLayout& surface) {
+          return image.initialize(context.device(), surface,
+                                  xenon::gpu::DepthRenderTargetFormat::D24S8);
+        },
+        "D3D12");
     for (const auto depth_format : {
              xenon::gpu::DepthRenderTargetFormat::D24S8,
              xenon::gpu::DepthRenderTargetFormat::D24FS8}) {
@@ -1021,6 +1103,7 @@ int main() {
         xenon::gpu::d3d12::DepthTargetImage transfer_target;
         assert(transfer_target.initialize(context.device(), transfer_surface,
                                           depth_format, test_case.native_2x));
+        transfer_target.set_unorm24_depth_write(d3d12_unorm24_write);
         validate_depth_sample_transfer_matrix(
             transfer_target, queue, depth_format, test_case.msaa,
             test_case.force_x2_on_x4, "D3D12");

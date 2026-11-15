@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "xenon/gpu/shader_ir.hpp"
+#include "xenon/gpu/depth_format.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 
 namespace xenon::gpu {
@@ -83,8 +84,11 @@ class HlslShaderLowerer {
 // format: drawn into the destination at sample frequency, each sample loads
 // the source sample holding the same EDRAM word (EdramTransferConstants; the
 // CPU reference is edram_transfer_source()). The constants are D3D12 root
-// constants at b0 or Vulkan push constants.
-[[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples);
+// constants at b0 or Vulkan push constants. `integer`: both images are bound
+// through their integer views (color_host_transfers_as_integer()), so the
+// copy keeps every bit.
+[[nodiscard]] LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples,
+                                                             bool integer = false);
 // The same transfer between two native depth images of one format. The
 // source depth plane is t0 and its stencil plane t1 (stencil in .y); the
 // constants are EdramDepthTransferConstants. Which output the pass writes:
@@ -93,15 +97,26 @@ class HlslShaderLowerer {
 // bit that keeps only samples whose source stencil has the bit
 // EdramDepthTransferConstants::stencil[0] names (the pipeline writes that
 // bit alone).
+// A D24S8 image's depth is re-encoded as the code it holds, written as
+// `unorm24_write` stores it on this device (passing the sampled value through
+// would land a code off on devices whose conversion differs); D24FS8's float
+// depth passes through.
 enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, StencilBit };
 [[nodiscard]] LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
-                                                             EdramDepthTransferPass pass);
+                                                             EdramDepthTransferPass pass,
+                                                             DepthRenderTargetFormat format,
+                                                             Unorm24DepthWrite unorm24_write);
+// HLSL defining `float xe_unorm24_depth_out(uint code)`: the depth a shader
+// writes for a D24 attachment to store `code` under `write`, bit-exact with
+// unorm24_depth_for_write().
+[[nodiscard]] std::string unorm24_depth_write_hlsl(Unorm24DepthWrite write);
 // The transfers between two different views edram_converting_transfer_supported()
 // accepts: each destination sample takes the EDRAM word of the source sample
 // the shared mapping selects - packed from the source's host value as its
 // format stores it - and writes that word unpacked as the destination's
 // format. A color source is t0; a depth source is t0 (depth) and t1 (stencil,
-// in .y). The color variant's constants are EdramTransferConstants, the depth
+// in .y). A color image color_host_transfers_as_integer() accepts is read and
+// written through its integer view. The color variant's constants are EdramTransferConstants, the depth
 // variant's EdramDepthTransferConstants, with the passes of the depth transfer.
 [[nodiscard]] LoweredShader make_edram_converting_color_transfer_shader(
     MsaaSamples source_host_samples, EdramTransferEndpoint source,
@@ -110,9 +125,12 @@ enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, Stenc
 // unpacks and the color packs) the converting transfers use, bit-exact with
 // pack_depth_stencil() and unpack_depth_stencil(); GPU resolves share them.
 [[nodiscard]] std::string_view edram_word_codec_hlsl() noexcept;
+// A D24S8 destination's depth is written as `unorm24_write` stores the word's
+// code on this device.
 [[nodiscard]] LoweredShader make_edram_converting_depth_transfer_shader(
     MsaaSamples source_host_samples, EdramTransferEndpoint source,
-    DepthRenderTargetFormat destination, EdramDepthTransferPass pass);
+    DepthRenderTargetFormat destination, EdramDepthTransferPass pass,
+    Unorm24DepthWrite unorm24_write);
 
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};

@@ -1,5 +1,6 @@
 #include "xenon/gpu/vulkan/command_queue.hpp"
 
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/logging/activity_trace.hpp"
 
 namespace xenon::gpu::vulkan {
@@ -81,6 +82,12 @@ bool CommandQueue::wait_for_value(std::uint64_t value) {
   static const auto activity_key = xenon::logging::intern_activity(
       {"gpu", "fence wait", {"value", "submitted", "", ""}, false});
   xenon::logging::ActivityScope activity(activity_key, {value, last_submitted_value_, 0u, 0u});
+  // Only a wait that blocks is counted.
+  std::uint64_t completed = 0;
+  if (vkGetSemaphoreCounterValue(device_, timeline_, &completed) == VK_SUCCESS &&
+      completed >= value)
+    return true;
+  const xenon::gpu::perf::ScopedTime wait_time(xenon::gpu::perf::Counter::FenceWaitNs, xenon::gpu::perf::Counter::FenceWaits);
   VkSemaphoreWaitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
   wait.semaphoreCount = 1;
   wait.pSemaphores = &timeline_;

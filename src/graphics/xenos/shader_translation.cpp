@@ -86,6 +86,131 @@ std::string destination(const AluInstruction& alu, bool scalar) {
   return out.str();
 }
 
+// The vector unit's operation, as HLSL for this opcode alone: sources s0, s1
+// and s2, result pv, and the p0, a0 and vector_killed side effects. Emitting
+// only the instruction's own operation - instead of a call to one function
+// holding every opcode, which DXC had to inline and fold again for each
+// instruction - is most of what a shader's compile time was. The semantics
+// are the Xenos ones the CPU twin (vertex_position_evaluator.cpp) evaluates.
+std::string vector_operation(unsigned op) {
+  switch (op) {
+    case 0: return "pv = s0 + s1;";
+    case 1: return "pv = xenon_legacy_mul4(s0, s1);";
+    case 2: return "pv = max(s0, s1);";
+    case 3: return "pv = min(s0, s1);";
+    case 4: return "pv = float4(s0 == s1);";
+    case 5: return "pv = float4(s0 > s1);";
+    case 6: return "pv = float4(s0 >= s1);";
+    case 7: return "pv = float4(s0 != s1);";
+    case 8: return "pv = frac(s0);";
+    case 9: return "pv = trunc(s0);";
+    case 10: return "pv = floor(s0);";
+    case 11: return "pv = xenon_legacy_mul4(s0, s1) + s2;";
+    case 12: return "pv = select(s0 == 0.0, s1, s2);";
+    case 13: return "pv = select(s0 >= 0.0, s1, s2);";
+    case 14: return "pv = select(s0 > 0.0, s1, s2);";
+    // Dot products are sums of Xenos multiplications, each with the Shader
+    // Model 3 rule (0 * anything = 0, infinity and NaN included). The host's
+    // dot() gives NaN for 0 * inf: AC6's luminance and bloom reductions
+    // weight channels by 0, and the NaN those products left spread through
+    // the downsample chain (8-pixel blocks on screen, the exposure collapsing).
+    case 15: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = (((p.x + p.y) + p.z) + p.w).xxxx; }";
+    case 16: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = ((p.x + p.y) + p.z).xxxx; }";
+    case 17: return "{ float4 p = xenon_legacy_mul4(s0, s1); pv = ((p.x + p.y) + s2.x).xxxx; }";
+    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
+    // and the D3DCUBEMAP_FACES face.
+    case 18:
+      return "{ float x = s0.z, y = s0.w, z = s0.x; float3 q = abs(float3(x, y, z));\n"
+             "            if (q.z >= q.x && q.z >= q.y) pv = float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);\n"
+             "            else if (q.y >= q.x) pv = float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);\n"
+             "            else pv = float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0); }";
+    case 19: return "pv = max(max(s0.x, s0.y), max(s0.z, s0.w)).xxxx;";
+    case 20:
+    case 21:
+    case 22:
+    case 23: {
+      static constexpr const char* compare[] = {"== 0.0", "!= 0.0", "> 0.0", ">= 0.0"};
+      const std::string c = compare[op - 20u];
+      return "p0 = s0.w == 0.0 && s1.w " + c + "; pv = (s1.x " + c +
+             " && s0.x == 0.0) ? 0.0.xxxx : (s0.x + 1.0).xxxx;";
+    }
+    case 24:
+    case 25:
+    case 26:
+    case 27: {
+      static constexpr const char* compare[] = {"==", ">", ">=", "!="};
+      return std::string("vector_killed = any(s0 ") + compare[op - 24u] +
+             " s1); pv = (vector_killed ? 1.0 : 0.0).xxxx;";
+    }
+    case 28: return "pv = float4(1.0, xenon_legacy_mul(s0.y, s1.y), s0.z, s1.w);";
+    case 29: return "a0 = (int)clamp(floor(s0.w + 0.5), -256.0, 255.0); pv = max(s0, s1);";
+    default: return "pv = 0.0.xxxx;";
+  }
+}
+
+// The scalar unit's operation for this opcode: operand x is source 3's w
+// (s2.w), y its x (s2.x), b the mulsc/addsc/subsc temporary and ps the
+// previous scalar result; it sets v (written to ps_new as v.xxxx) and the
+// p0, a0 and scalar_killed side effects. retain_prev (50) sets ps_new itself.
+std::string scalar_operation(unsigned op) {
+  switch (op) {
+    case 0: return "v = x + y;";
+    case 1: return "v = x + pp;";
+    case 2: return "v = xenon_legacy_mul(x, y);";
+    case 3: return "v = xenon_legacy_mul(x, pp);";
+    case 4:
+      return "v = (pp == -XENON_FLT_MAX || !isfinite(pp) || !isfinite(y) || y <= 0.0) "
+             "? -XENON_FLT_MAX : xenon_legacy_mul(x, pp);";
+    case 5: return "v = x >= y ? x : y;";
+    case 6: return "v = x < y ? x : y;";
+    case 7: return "v = x == 0.0;";
+    case 8: return "v = x > 0.0;";
+    case 9: return "v = x >= 0.0;";
+    case 10: return "v = x != 0.0;";
+    case 11: return "v = x - floor(x);";
+    case 12: return "v = trunc(x);";
+    case 13: return "v = floor(x);";
+    case 14: return "v = exp2(x);";
+    case 15: return "v = x == 1.0 ? 0.0 : log2(x); if (isinf(v) && v < 0.0) v = -XENON_FLT_MAX;";
+    case 16: return "v = x == 1.0 ? 0.0 : log2(x);";
+    case 17: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / x, false);";
+    case 18: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / x, true);";
+    case 19: return "v = x == 1.0 ? 1.0 : 1.0 / x;";
+    case 20: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / sqrt(x), false);";
+    case 21: return "v = xenon_clamp_infinity(x == 1.0 ? 1.0 : 1.0 / sqrt(x), true);";
+    case 22: return "v = x == 1.0 ? 1.0 : 1.0 / sqrt(x);";
+    case 23: return "a0 = (int)clamp(floor(x + 0.5), -256.0, 255.0); v = x >= y ? x : y;";
+    case 24: return "a0 = (int)clamp(floor(x), -256.0, 255.0); v = x >= y ? x : y;";
+    case 25: return "v = x - y;";
+    case 26: return "v = x - pp;";
+    case 27: return "p0 = x == 0.0; v = p0 ? 0.0 : 1.0;";
+    case 28: return "p0 = x != 0.0; v = p0 ? 0.0 : 1.0;";
+    case 29: return "p0 = x > 0.0; v = p0 ? 0.0 : 1.0;";
+    case 30: return "p0 = x >= 0.0; v = p0 ? 0.0 : 1.0;";
+    case 31: return "p0 = x == 1.0; v = p0 ? 0.0 : (x == 0.0 ? 1.0 : x);";
+    case 32: return "p0 = x - 1.0 <= 0.0; v = p0 ? 0.0 : x - 1.0;";
+    case 33: return "p0 = false; v = XENON_FLT_MAX;";
+    case 34: return "p0 = x == 0.0; v = p0 ? 0.0 : x;";
+    case 35: return "scalar_killed = x == 0.0; v = scalar_killed;";
+    case 36: return "scalar_killed = x > 0.0; v = scalar_killed;";
+    case 37: return "scalar_killed = x >= 0.0; v = scalar_killed;";
+    case 38: return "scalar_killed = x != 0.0; v = scalar_killed;";
+    case 39: return "scalar_killed = x == 1.0; v = scalar_killed;";
+    case 40: return "v = sqrt(x);";
+    case 42:
+    case 43: return "v = xenon_legacy_mul(x, b.x);";
+    case 44:
+    case 45: return "v = x + b.x;";
+    case 46:
+    case 47: return "v = x - b.x;";
+    case 48: return "v = sin(x);";
+    case 49: return "v = cos(x);";
+    // retain_prev: the whole previous result, not its X replicated.
+    case 50: return "ps_new = ps;";
+    default: return "v = 0.0;";
+  }
+}
+
 void emit_alu(std::ostringstream& out, const AluInstruction& alu,
               ShaderStage stage, bool memexport_enabled) {
   const bool a0_constants = alu.constant_address_register_relative;
@@ -105,10 +230,19 @@ void emit_alu(std::ostringstream& out, const AluInstruction& alu,
     scalar_b = "s3t";
   }
   out << "          bool vector_killed = false, scalar_killed = false;\n"
-      << "          float4 pv = xenon_vector_op(" << unsigned(alu.vector_opcode)
-      << ", s0, s1, s2, p0, a0, vector_killed);\n"
-      << "          float4 ps_new = xenon_scalar_op(" << unsigned(alu.scalar_opcode)
-      << ", s2, " << scalar_b << ", ps, p0, a0, scalar_killed);\n";
+      << "          // vector op " << unsigned(alu.vector_opcode) << ", scalar op "
+      << unsigned(alu.scalar_opcode) << "\n"
+      << "          float4 pv = 0.0.xxxx;\n"
+      << "          " << vector_operation(alu.vector_opcode) << "\n"
+      << "          float4 ps_new;\n";
+  if (alu.scalar_opcode == 50u) {
+    out << "          " << scalar_operation(alu.scalar_opcode) << "\n";
+  } else {
+    out << "          { float x = s2.w; float y = s2.x; float4 b = " << scalar_b
+        << "; float pp = ps.x; float v = 0.0;\n"
+        << "            " << scalar_operation(alu.scalar_opcode) << "\n"
+        << "            ps_new = v.xxxx; }\n";
+  }
   if (alu.vector_clamp) out << "          pv = saturate(pv);\n";
   if (alu.scalar_clamp) out << "          ps_new = saturate(ps_new);\n";
   // Both results of an export go to vector_dest. A component selected by both
@@ -394,59 +528,6 @@ float4 xenon_legacy_mul4(float4 a, float4 b) {
                 xenon_legacy_mul(a.z,b.z), xenon_legacy_mul(a.w,b.w));
 }
 
-float4 xenon_vector_op(uint op, float4 a, float4 b, float4 c,
-                       inout bool p0, inout int a0, out bool killed) {
-  killed = false;
-  if (op == 0) return a + b;
-  if (op == 1) return xenon_legacy_mul4(a, b);
-  if (op == 2) return max(a, b);
-  if (op == 3) return min(a, b);
-  if (op == 4) return float4(a == b);
-  if (op == 5) return float4(a > b);
-  if (op == 6) return float4(a >= b);
-  if (op == 7) return float4(a != b);
-  if (op == 8) return frac(a);
-  if (op == 9) return trunc(a);
-  if (op == 10) return floor(a);
-  if (op == 11) return xenon_legacy_mul4(a, b) + c;
-  if (op == 12) return select(a == 0.0, b, c);
-  if (op == 13) return select(a >= 0.0, b, c);
-  if (op == 14) return select(a > 0.0, b, c);
-  if (op == 15) return dot(a, b).xxxx;
-  if (op == 16) return dot(a.xyz, b.xyz).xxxx;
-  if (op == 17) return (dot(a.xy, b.xy) + c.x).xxxx;
-  if (op == 18) {
-    // cube: source 1 is the direction as .z_xy. Returns T, S, 2 * major axis
-    // and the D3DCUBEMAP_FACES face.
-    float x = a.z, y = a.w, z = a.x;
-    float3 q = abs(float3(x, y, z));
-    if (q.z >= q.x && q.z >= q.y)
-      return float4(-y, z < 0.0 ? -x : x, 2.0 * z, z < 0.0 ? 5.0 : 4.0);
-    if (q.y >= q.x)
-      return float4(y < 0.0 ? -z : z, x, 2.0 * y, y < 0.0 ? 3.0 : 2.0);
-    return float4(-y, x < 0.0 ? z : -z, 2.0 * x, x < 0.0 ? 1.0 : 0.0);
-  }
-  if (op == 19) return max(max(a.x, a.y), max(a.z, a.w)).xxxx;
-  if (op >= 20 && op <= 23) {
-    p0 = op == 20 ? (a.w == 0.0 && b.w == 0.0) :
-         op == 21 ? (a.w == 0.0 && b.w != 0.0) :
-         op == 22 ? (a.w == 0.0 && b.w > 0.0) : (a.w == 0.0 && b.w >= 0.0);
-    return ((op == 20 ? b.x == 0.0 : op == 21 ? b.x != 0.0 :
-             op == 22 ? b.x > 0.0 : b.x >= 0.0) && a.x == 0.0) ? 0.0.xxxx : (a.x + 1.0).xxxx;
-  }
-  if (op >= 24 && op <= 27) {
-    killed = op == 24 ? any(a == b) : op == 25 ? any(a > b) :
-             op == 26 ? any(a >= b) : any(a != b);
-    return (killed ? 1.0 : 0.0).xxxx;
-  }
-  if (op == 28) return float4(1.0, a.y * b.y, a.z, b.w);
-  if (op == 29) {
-    a0 = (int)clamp(floor(a.w + 0.5), -256.0, 255.0);
-    return max(a, b);
-  }
-  return 0.0.xxxx;
-}
-
 )hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
 R"hlsl(static const float XENON_FLT_MAX = 3.402823466e+38;
 // Infinite results of the clamping reciprocal forms: _CLAMP saturates to
@@ -455,52 +536,6 @@ float xenon_clamp_infinity(float value, bool to_zero) {
   if (!isinf(value)) return value;
   if (to_zero) return value < 0.0 ? -0.0 : 0.0;
   return value < 0.0 ? -XENON_FLT_MAX : XENON_FLT_MAX;
-}
-
-// `a` is the scalar operand (source 3) and `b` the mulsc/addsc/subsc
-// temporary. Operand `a` is a.w, operand `b` is a.x (or b.x for the constant
-// forms).
-float4 xenon_scalar_op(uint op, float4 a, float4 b, float4 previous,
-                       inout bool p0, inout int a0, out bool killed) {
-  killed = false; float x = a.w; float y = a.x; float ps = previous.x; float v = 0.0;
-  if (op == 0) v=x+y; else if (op == 1) v=x+ps;
-  else if (op == 2) v=xenon_legacy_mul(x,y); else if (op==3) v=xenon_legacy_mul(x,ps);
-  else if (op==4) v=(ps==-XENON_FLT_MAX || !isfinite(ps) || !isfinite(y) || y<=0.0)
-                    ? -XENON_FLT_MAX : xenon_legacy_mul(x,ps);
-  else if (op==5) v=x>=y?x:y; else if (op==6) v=x<y?x:y;
-  else if (op==7) v=x==0.0; else if (op==8) v=x>0.0; else if (op==9) v=x>=0.0; else if (op==10) v=x!=0.0;
-  else if (op==11) v=x-floor(x); else if (op==12) v=trunc(x); else if (op==13) v=floor(x);
-  else if (op==14) v=exp2(x);
-  else if (op==15 || op==16) {
-    v=x==1.0 ? 0.0 : log2(x);
-    if (op==15 && isinf(v) && v<0.0) v=-XENON_FLT_MAX;
-  }
-  else if (op>=17 && op<=19) {
-    v=x==1.0 ? 1.0 : 1.0/x;
-    if (op!=19) v=xenon_clamp_infinity(v, op==18);
-  }
-  else if (op>=20 && op<=22) {
-    v=x==1.0 ? 1.0 : 1.0/sqrt(x);
-    if (op!=22) v=xenon_clamp_infinity(v, op==21);
-  }
-  else if (op==23 || op==24) {
-    a0=(int)clamp(floor(x + (op==23 ? 0.5 : 0.0)), -256.0, 255.0);
-    v=x>=y?x:y;
-  }
-  else if (op==25) v=x-y; else if (op==26) v=x-ps;
-  else if (op>=27 && op<=30) {
-    p0=op==27?x==0.0:op==28?x!=0.0:op==29?x>0.0:x>=0.0;
-    v=p0 ? 0.0 : 1.0;
-  }
-  else if (op==31) { p0=x==1.0; v=p0 ? 0.0 : (x==0.0 ? 1.0 : x); }
-  else if (op==32) { p0=x-1.0<=0.0; v=p0 ? 0.0 : x-1.0; }
-  else if (op==33) { p0=false; v=XENON_FLT_MAX; }
-  else if (op==34) { p0=x==0.0; v=p0 ? 0.0 : x; }
-  else if (op>=35 && op<=39) { killed=op==35?x==0.0:op==36?x>0.0:op==37?x>=0.0:op==38?x!=0.0:x==1.0; v=killed; }
-  else if (op==40) v=sqrt(x); else if (op==42 || op==43) v=xenon_legacy_mul(x, b.x);
-  else if (op==44 || op==45) v=x+b.x; else if (op==46 || op==47) v=x-b.x;
-  else if (op==48) v=sin(x); else if (op==49) v=cos(x); else if (op==50) return previous;
-  return v.xxxx;
 }
 
 )hlsl"  // MSVC limits one literal to 16 KB (C2026); adjacent literals join.
@@ -1610,9 +1645,34 @@ ConstantBuffer<TransferConstants> transfer : register(b0);
 
 }  // namespace
 
+std::string unorm24_depth_write_hlsl(Unorm24DepthWrite write) {
+  // uint -> float rounds to nearest even, as unorm24_depth_for_write() does;
+  // the power-of-two scales are exact.
+  if (write == Unorm24DepthWrite::PowerOfTwo)
+    return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  return float(code & 0xFFFFFFu) * (1.0 / 16777216.0);
+}
+)hlsl";
+  if (write == Unorm24DepthWrite::Split)
+    return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  code &= 0xFFFFFFu;
+  if (code < 0x800000u) return float(code) * (1.0 / 16777216.0);
+  return float(2u * code + 1u + (code >> 23u)) * (1.0 / 33554432.0);
+}
+)hlsl";
+  return R"hlsl(float xe_unorm24_depth_out(uint code) {
+  code &= 0xFFFFFFu;
+  return float(2u * code + 1u + (code >> 23u)) * (1.0 / 33554432.0);
+}
+)hlsl";
+}
+
 LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
-                                               EdramDepthTransferPass pass) {
+                                               EdramDepthTransferPass pass,
+                                               DepthRenderTargetFormat format,
+                                               Unorm24DepthWrite unorm24_write) {
   const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const bool unorm24 = format == DepthRenderTargetFormat::D24S8;
   LoweredShader result{};
   result.stage = ShaderStage::Pixel;
   result.entry_point = "main";
@@ -1628,6 +1688,7 @@ LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
     out << "Texture2DMS<float," << count << "> SourceDepth : register(t0);\n"
         << "Texture2DMS<uint4," << count << "> SourceStencil : register(t1);\n";
   }
+  if (unorm24) out << edram_word_codec_hlsl() << unorm24_depth_write_hlsl(unorm24_write);
   switch (pass) {
     case EdramDepthTransferPass::DepthAndStencil:
       out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
@@ -1644,7 +1705,11 @@ LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
   out << kEdramTransferMappingHlsl;
   const std::string at = count == 1 ? "int3(int2(source_x, source_y), 0)"
                                     : "int2(source_x, source_y), source_host";
-  const std::string depth = "SourceDepth.Load(" + at + ")";
+  // A D24 source samples as code / (2^24 - 1); its code (xe_pack_unorm24, as
+  // resolves read it) is written back as this device stores it.
+  const std::string sampled = "SourceDepth.Load(" + at + ")";
+  const std::string depth =
+      unorm24 ? "xe_unorm24_depth_out(xe_pack_unorm24(" + sampled + "))" : sampled;
   const std::string stencil = "SourceStencil.Load(" + at + ").y";
   switch (pass) {
     case EdramDepthTransferPass::DepthAndStencil:
@@ -1659,16 +1724,18 @@ LoweredShader make_edram_depth_transfer_shader(MsaaSamples source_host_samples,
       break;
   }
   result.hlsl = out.str();
-  result.source_hash = hash_text("xenon.transfer.edram.depth.v1") ^ count ^
-                       (std::uint64_t(pass) << 8u);
+  result.source_hash = hash_text("xenon.transfer.edram.depth.v2") ^ count ^
+                       (std::uint64_t(pass) << 8u) ^ (std::uint64_t(unorm24) << 16u) ^
+                       (std::uint64_t(unorm24_write) << 17u);
   result.translation_hash = hash_text(result.hlsl);
   result.complete = count == 1 || count == 2 || count == 4;
   if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
   return result;
 }
 
-LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) {
+LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples, bool integer) {
   const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  const std::string_view type = integer ? "uint4" : "float4";
   LoweredShader result{};
   result.stage = ShaderStage::Pixel;
   result.entry_point = "main";
@@ -1677,10 +1744,10 @@ LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) 
   out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
       << kEdramTransferConstantsBinding;
   if (count == 1)
-    out << "Texture2D<float4> Source : register(t0);\n";
+    out << "Texture2D<" << type << "> Source : register(t0);\n";
   else
-    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
-  out << R"hlsl(float4 main(float4 position : SV_Position,
+    out << "Texture2DMS<" << type << "," << count << "> Source : register(t0);\n";
+  out << type << R"hlsl( main(float4 position : SV_Position,
             uint host_sample : SV_SampleIndex) : SV_Target0 {
 )hlsl" << kEdramTransferMappingHlsl;
   if (count == 1)
@@ -1688,7 +1755,9 @@ LoweredShader make_edram_color_transfer_shader(MsaaSamples source_host_samples) 
   else
     out << "  return Source.Load(int2(source_x, source_y), source_host);\n}\n";
   result.hlsl = out.str();
-  result.source_hash = hash_text("xenon.transfer.edram.color.v1") ^ count;
+  result.source_hash = hash_text(integer ? "xenon.transfer.edram.color.uint.v1"
+                                         : "xenon.transfer.edram.color.v1") ^
+                       count;
   result.translation_hash = hash_text(result.hlsl);
   result.complete = count == 1 || count == 2 || count == 4;
   if (!result.complete) result.diagnostics.emplace_back("unsupported EDRAM transfer sample count");
@@ -1718,6 +1787,9 @@ uint xe_pack_rgb10a2(float4 v) {
 float4 xe_unpack_rgb10a2(uint w) {
   return float4(float3(uint3(w, w >> 10u, w >> 20u) & 0x3FFu) / 1023.0, float(w >> 30u) / 3.0);
 }
+// 16_16_FLOAT through the image's R16G16_UINT view: the halves are the word.
+uint xe_pack_rg16(uint4 v) { return (v.x & 0xFFFFu) | (v.y << 16u); }
+uint4 xe_unpack_rg16(uint w) { return uint4(w & 0xFFFFu, w >> 16u, 0u, 0u); }
 uint xe_pack_r32f(float4 v) { return asuint(v.x); }
 float4 xe_unpack_r32f(uint w) { return float4(asfloat(w), 0.0, 0.0, 1.0); }
 // nearbyint(clamp(d, 0, 1) * 16777215) without doubles: x = i + (f - d) with
@@ -1768,6 +1840,7 @@ std::pair<std::string_view, std::string_view> color_word_codec(ColorRenderTarget
   switch (storage_color_format(format)) {
     case ColorRenderTargetFormat::R8G8B8A8: return {"xe_pack_rgba8", "xe_unpack_rgba8"};
     case ColorRenderTargetFormat::R10G10B10A2: return {"xe_pack_rgb10a2", "xe_unpack_rgb10a2"};
+    case ColorRenderTargetFormat::R16G16Float: return {"xe_pack_rg16", "xe_unpack_rg16"};
     case ColorRenderTargetFormat::R32Float: return {"xe_pack_r32f", "xe_unpack_r32f"};
     default: return {};
   }
@@ -1801,10 +1874,14 @@ bool write_converting_source(std::ostringstream& out, MsaaSamples source_host_sa
     return format == DepthRenderTargetFormat::D24S8 || format == DepthRenderTargetFormat::D24FS8;
   }
   if (declarations) {
+    const std::string_view type =
+        color_host_transfers_as_integer(static_cast<ColorRenderTargetFormat>(source.format))
+            ? "uint4"
+            : "float4";
     if (count == 1)
-      out << "Texture2D<float4> Source : register(t0);\n";
+      out << "Texture2D<" << type << "> Source : register(t0);\n";
     else
-      out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
+      out << "Texture2DMS<" << type << "," << count << "> Source : register(t0);\n";
     return true;
   }
   const auto pack = color_word_codec(static_cast<ColorRenderTargetFormat>(source.format)).first;
@@ -1840,15 +1917,15 @@ LoweredShader make_edram_converting_color_transfer_shader(MsaaSamples source_hos
   out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
       << kEdramTransferConstantsBinding;
   write_converting_source(out, source_host_samples, source, true);
-  out << kEdramWordCodecHlsl
-      << "float4 main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
+  out << kEdramWordCodecHlsl << (color_host_transfers_as_integer(destination) ? "uint4" : "float4")
+      << " main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
          " : SV_Target0 {\n"
       << kEdramTransferMappingHlsl;
   const bool source_ok = write_converting_source(out, source_host_samples, source, false);
   out << "  return " << unpack << "(word);\n}\n";
   result.hlsl = out.str();
   const EdramTransferEndpoint destination_endpoint{false, static_cast<std::uint8_t>(destination)};
-  result.source_hash = hash_text("xenon.transfer.edram.converting.color.v1") ^
+  result.source_hash = hash_text("xenon.transfer.edram.converting.color.v2") ^
                        converting_transfer_hash(source_host_samples, source,
                                                 destination_endpoint, 0u);
   result.translation_hash = hash_text(result.hlsl);
@@ -1862,7 +1939,8 @@ LoweredShader make_edram_converting_color_transfer_shader(MsaaSamples source_hos
 LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_host_samples,
                                                           EdramTransferEndpoint source,
                                                           DepthRenderTargetFormat destination,
-                                                          EdramDepthTransferPass pass) {
+                                                          EdramDepthTransferPass pass,
+                                                          Unorm24DepthWrite unorm24_write) {
   const auto count = 1u << static_cast<unsigned>(source_host_samples);
   LoweredShader result{};
   result.stage = ShaderStage::Pixel;
@@ -1873,7 +1951,7 @@ LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_hos
          "uint4 stencil; };\n"
       << kEdramTransferConstantsBinding;
   write_converting_source(out, source_host_samples, source, true);
-  out << kEdramWordCodecHlsl;
+  out << kEdramWordCodecHlsl << unorm24_depth_write_hlsl(unorm24_write);
   switch (pass) {
     case EdramDepthTransferPass::DepthAndStencil:
       out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
@@ -1892,7 +1970,7 @@ LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_hos
   // The host stores D24FS8 depth at half its guest value (depth_stencil_to_host).
   const std::string depth = destination == DepthRenderTargetFormat::D24FS8
                                 ? "xe_unpack_float20e4(word >> 8u) * 0.5"
-                                : "xe_unpack_unorm24(word >> 8u)";
+                                : "xe_unorm24_depth_out(word >> 8u)";
   switch (pass) {
     case EdramDepthTransferPass::DepthAndStencil:
       out << "  Output o; o.depth = " << depth << "; o.stencil = word & 0xFFu; return o;\n}\n";
@@ -1906,9 +1984,10 @@ LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_hos
   }
   result.hlsl = out.str();
   const EdramTransferEndpoint destination_endpoint{true, static_cast<std::uint8_t>(destination)};
-  result.source_hash = hash_text("xenon.transfer.edram.converting.depth.v1") ^
+  result.source_hash = hash_text("xenon.transfer.edram.converting.depth.v3") ^
                        converting_transfer_hash(source_host_samples, source,
-                                                destination_endpoint, std::uint32_t(pass));
+                                                destination_endpoint, std::uint32_t(pass)) ^
+                       (std::uint64_t(unorm24_write) << 60u);
   result.translation_hash = hash_text(result.hlsl);
   result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
                     edram_converting_transfer_supported(source, destination_endpoint);

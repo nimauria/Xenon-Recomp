@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -261,6 +263,10 @@ class CommandProcessor {
   ir::ShaderReference active_pixel_shader_{};
   std::optional<ShaderProgram> active_vertex_program_{};
   std::optional<ShaderProgram> active_pixel_program_{};
+  // One decode per distinct program (ShaderProgram::hash() covers stage,
+  // start slot and microcode); repeated loads share it.
+  std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> decoded_programs_{};
+  [[nodiscard]] std::shared_ptr<const DecodedShader> decode_program(const ShaderProgram& program);
   ShaderPartitionState shader_partition_{};
   std::uint32_t bin_base_offset_{};
   std::uint64_t bin_mask_{};

@@ -37,6 +37,8 @@ std::optional<GpuResolvePack> convert_pack(std::uint8_t destination_format) noex
     case 36: return GpuResolvePack::R32Float;
     case 37: return GpuResolvePack::R32G32Float;
     case 38: return GpuResolvePack::R32G32B32A32Float;
+    case 31: return GpuResolvePack::R16G16Float;
+    case 32: return GpuResolvePack::R16G16B16A16Float;
     default: return std::nullopt;
   }
 }
@@ -174,14 +176,22 @@ ConstantBuffer<ClearConstants> c : register(b0);
 // pass may write: whole 4 KiB tile rows covering the rectangle's 32x32 macro
 // tiles (tiled 2D addressing keeps each macro tile in whole pages; address
 // bits from 12 up are the macro tile's offset >> 8).
+//
+// The destination pitch shapes the tiled storage; it does not clip. A
+// rectangle reaching past it is written where tiled addressing puts those
+// columns, as write_raw_resolve() does - the macro tile index
+// (y / 32) * (pitch / 32) + x / 32 grows with x and y alike, so the first and
+// last tiles still bound the bytes. Regression (AC6 missions): every frame's
+// 128/64/32-pixel resolves reached past their pitch and were refused, so each
+// ran on the CPU path, a GPU readback and a stall apiece.
 bool plan_destination(const CopyResolveState& copy, const ResolveRectangle& rectangle,
                       GpuResolvePlan& result) {
   auto& c = result.constants;
   const auto pitch = (std::uint32_t(copy.destination_pitch) + 31u) & ~31u;
   const auto right = std::uint32_t(rectangle.right);
   const auto bottom = std::uint32_t(rectangle.bottom);
-  if (!pitch || right > pitch) {
-    result.error = "resolve rectangle is wider than its destination";
+  if (!pitch) {
+    result.error = "resolve destination has no pitch";
     return false;
   }
   c.left = std::uint32_t(rectangle.left);
@@ -360,7 +370,8 @@ bool plan_gpu_depth_clear(const ResolveRectangle& rectangle, std::uint32_t depth
                           DepthRenderTargetFormat format,
                           const EdramSurfaceLayout& resolve_surface,
                           const EdramSurfaceLayout& owner, MsaaSamples owner_host_samples,
-                          DepthRenderTargetFormat owner_format, GpuClearConstants& constants,
+                          DepthRenderTargetFormat owner_format,
+                          Unorm24DepthWrite unorm24_write, GpuClearConstants& constants,
                           std::uint8_t& stencil) {
   constants = {};
   stencil = 0u;
@@ -374,7 +385,7 @@ bool plan_gpu_depth_clear(const ResolveRectangle& rectangle, std::uint32_t depth
   constants.top = std::uint32_t(rectangle.top);
   constants.right = std::uint32_t(rectangle.right);
   constants.bottom = std::uint32_t(rectangle.bottom);
-  const auto host = depth_stencil_to_host(format, depth_clear);
+  const auto host = depth_stencil_to_host(format, depth_clear, unorm24_write);
   constants.color[0] = host.depth;
   stencil = host.stencil;
   return true;
@@ -397,7 +408,7 @@ LoweredShader make_edram_depth_clear_shader() {
   return result;
 }
 
-LoweredShader make_gpu_resolve_shader(MsaaSamples owner_host_samples) {
+LoweredShader make_gpu_resolve_shader(MsaaSamples owner_host_samples, bool integer) {
   const auto count = 1u << static_cast<unsigned>(owner_host_samples);
   LoweredShader result{};
   result.stage = ShaderStage::Compute;
@@ -405,15 +416,26 @@ LoweredShader make_gpu_resolve_shader(MsaaSamples owner_host_samples) {
   result.profile = "cs_6_0";
   std::ostringstream out;
   out << kResolvePrologueHlsl;
+  const std::string_view type = integer ? "uint4" : "float4";
   if (count == 1)
-    out << "Texture2D<float4> Source : register(t0);\n";
+    out << "Texture2D<" << type << "> Source : register(t0);\n";
   else
-    out << "Texture2DMS<float4," << count << "> Source : register(t0);\n";
-  out << kOwnerSampleHlsl << "\nfloat4 load_owner(int2 position, uint host) {\n";
+    out << "Texture2DMS<" << type << "," << count << "> Source : register(t0);\n";
+  out << kOwnerSampleHlsl << "\n" << type << " load_owner_view(int2 position, uint host) {\n";
   if (count == 1)
     out << "  return Source.Load(int3(position, 0));\n}\n";
   else
     out << "  return Source.Load(position, host);\n}\n";
+  // The integer view holds 16-bit float bits: decoded for averaging, kept
+  // whole for a raw copy of one sample.
+  out << "static const bool kIntegerOwner = " << (integer ? "true" : "false") << ";\n"
+      << "uint4 owner_bits(int2 position, uint host) {\n"
+      << (integer ? "  return load_owner_view(position, host);\n"
+                  : "  return uint4(0u, 0u, 0u, 0u);\n")
+      << "}\nfloat4 load_owner(int2 position, uint host) {\n"
+      << (integer ? "  return f16tof32(load_owner_view(position, host));\n"
+                  : "  return load_owner_view(position, host);\n")
+      << "}\n";
   out << R"hlsl(
 // A decoded sample as decode_host_color_sample() gives it.
 float4 decoded(float4 v) {
@@ -441,6 +463,44 @@ float4 host_quantized(float4 v) {
 }
 
 uint unorm_bits(float v, float maximum) { return uint(round(saturate(v) * maximum)); }
+
+// A half NaN quieted, as the CPU path's float arithmetic (the exponent bias
+// it always applies) quiets a signaling one: the payload's top bit set.
+uint xe_quiet_half(uint h) {
+  return (h & 0x7C00u) == 0x7C00u && (h & 0x3FFu) != 0u ? h | 0x200u : h;
+}
+
+// float_to_half() (edram_surface.cpp) in integer steps: round to nearest
+// even, overflow to infinity, a NaN keeping its payload's top bits - quieted,
+// as it reaches float_to_half() on the CPU path. The shader's own f32tof16
+// leaves rounding and NaNs to the device.
+uint xe_float_to_half(float value) {
+  const uint bits = asuint(value);
+  const uint sign = (bits >> 16) & 0x8000u;
+  const uint magnitude = bits & 0x7FFFFFFFu;
+  if (magnitude >= 0x7F800000u) {
+    if (magnitude == 0x7F800000u) return sign | 0x7C00u;
+    return sign | 0x7C00u | 0x200u | ((magnitude >> 13) & 0x3FFu);
+  }
+  if (magnitude >= 0x477FF000u) return sign | 0x7C00u;
+  if (magnitude < 0x33000000u) return sign;
+  uint rounded;
+  uint remainder;
+  uint halfway;
+  if (magnitude < 0x38800000u) {
+    const uint mantissa = (magnitude & 0x7FFFFFu) | 0x800000u;
+    const uint shift = 126u - (magnitude >> 23);
+    rounded = mantissa >> shift;
+    remainder = mantissa & ((1u << shift) - 1u);
+    halfway = 1u << (shift - 1u);
+  } else {
+    rounded = (magnitude - 0x38000000u) >> 13;
+    remainder = magnitude & 0x1FFFu;
+    halfway = 0x1000u;
+  }
+  if (remainder > halfway || (remainder == halfway && (rounded & 1u) != 0u)) ++rounded;
+  return sign | rounded;
+}
 )hlsl" << kResolveStoreHlsl << R"hlsl(
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -450,13 +510,15 @@ void main(uint3 id : SV_DispatchThreadID) {
 
   // Read the selected guest samples; average them as the CPU resolve does.
   float4 samples[4];
+  uint4 first_bits = uint4(0u, 0u, 0u, 0u);
   uint count = 0u;
   [unroll] for (uint s = 0u; s < 4u; ++s) {
     if ((c.sample_mask & (1u << s)) == 0u) continue;
     int2 position;
     uint host;
-    samples[count] = owner_sample(x, y, s, position, host)
-                         ? decoded(load_owner(position, host)) : float4(0.0, 0.0, 0.0, 0.0);
+    const bool owned = owner_sample(x, y, s, position, host);
+    samples[count] = owned ? decoded(load_owner(position, host)) : float4(0.0, 0.0, 0.0, 0.0);
+    if (count == 0u && owned) first_bits = owner_bits(position, host);
     ++count;
   }
   float4 color = samples[0];
@@ -484,9 +546,17 @@ void main(uint3 id : SV_DispatchThreadID) {
       case 1u: words.x = unorm_bits(color.x, 1023.0) | (unorm_bits(color.y, 1023.0) << 10) |
                          (unorm_bits(color.z, 1023.0) << 20) | (unorm_bits(color.w, 3.0) << 30);
                break;
-      case 2u: words.x = f32tof16(color.x) | (f32tof16(color.y) << 16); break;
-      case 3u: words.x = f32tof16(color.x) | (f32tof16(color.y) << 16);
-               words.y = f32tof16(color.z) | (f32tof16(color.w) << 16);
+      case 2u: words.x = kIntegerOwner && count == 1u
+                             ? (first_bits.x & 0xFFFFu) | (first_bits.y << 16)
+                             : f32tof16(color.x) | (f32tof16(color.y) << 16);
+               break;
+      case 3u: if (kIntegerOwner && count == 1u) {
+                 words.x = (first_bits.x & 0xFFFFu) | (first_bits.y << 16);
+                 words.y = (first_bits.z & 0xFFFFu) | (first_bits.w << 16);
+               } else {
+                 words.x = f32tof16(color.x) | (f32tof16(color.y) << 16);
+                 words.y = f32tof16(color.z) | (f32tof16(color.w) << 16);
+               }
                word_count = 2u;
                break;
       case 4u: words.x = asuint(color.x); break;
@@ -510,6 +580,30 @@ void main(uint3 id : SV_DispatchThreadID) {
                break;
       case 5u: words.x = asuint(v.x); break;
       case 6u: words.x = asuint(v.x); words.y = asuint(v.y); word_count = 2u; break;
+      case 8u: case 9u: {
+        uint4 halves;
+        if (kIntegerOwner && count == 1u && c.exponent_bias == 0 && (c.flags & 2u) == 0u &&
+            (c.source_storage == 2u || c.source_storage == 3u)) {
+          // One 16-bit float sample, unscaled: decoding and re-encoding it
+          // gives back its own bits, a NaN quieted, so they are taken whole;
+          // a two-channel source's missing blue and alpha decode as 0 and 1.
+          halves = c.source_storage == 3u
+                       ? (first_bits & 0xFFFFu)
+                       : uint4(first_bits.x & 0xFFFFu, first_bits.y & 0xFFFFu, 0u, 0x3C00u);
+          halves = uint4(xe_quiet_half(halves.x), xe_quiet_half(halves.y),
+                         xe_quiet_half(halves.z), xe_quiet_half(halves.w));
+        } else {
+          halves = uint4(xe_float_to_half(v.x), xe_float_to_half(v.y), xe_float_to_half(v.z),
+                         xe_float_to_half(v.w));
+        }
+        words.x = halves.x | (halves.y << 16);
+        if (c.destination_format == 9u) {
+          words.y = halves.z | (halves.w << 16);
+          word_count = 2u;
+        }
+        break;
+      }
+      case 7u: words = asuint(v); word_count = 4u; break;
       default: words = asuint(v); word_count = 4u; break;
     }
   }
@@ -524,7 +618,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 )hlsl";
   result.hlsl = out.str();
-  result.source_hash = 0x6E50171Eull ^ count;
+  result.source_hash = 0x6E50171Full ^ count;
   result.translation_hash = std::hash<std::string>{}(result.hlsl);
   result.complete = count == 1 || count == 2 || count == 4;
   if (!result.complete) result.diagnostics.emplace_back("unsupported resolve owner sample count");

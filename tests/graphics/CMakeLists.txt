@@ -43,6 +43,33 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_backend_ownership_integration_tests)
     add_test(NAME xenon_backend_ownership_integration_tests
       COMMAND xenon_backend_ownership_integration_tests)
+    set_tests_properties(xenon_backend_ownership_integration_tests PROPERTIES
+      RUN_SERIAL TRUE)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      # The same on WARP, Windows' software rasterizer and what GPU-less
+      # hosts (CI's Windows runners) render on: its depth conversion
+      # truncates, where most GPUs round, so the D3D12 backend must calibrate
+      # to a different D24 depth-write encoding there.
+      add_test(NAME xenon_backend_ownership_integration_warp_tests
+        COMMAND xenon_backend_ownership_integration_tests)
+      set_tests_properties(xenon_backend_ownership_integration_warp_tests PROPERTIES
+        RUN_SERIAL TRUE ENVIRONMENT "XENON_D3D12_ADAPTER=warp")
+    endif()
+    add_executable(xenon_shader_load_reuse_tests backends/shader_load_reuse.cpp)
+    target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics)
+    if(WIN32 AND TARGET xenon_graphics_d3d12)
+      target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics_d3d12)
+      target_compile_definitions(xenon_shader_load_reuse_tests PRIVATE XENON_TEST_D3D12=1)
+    endif()
+    if(TARGET xenon_graphics_vulkan)
+      target_link_libraries(xenon_shader_load_reuse_tests PRIVATE xenon_graphics_vulkan)
+      target_compile_definitions(xenon_shader_load_reuse_tests PRIVATE XENON_TEST_VULKAN=1)
+    endif()
+    if(TARGET xenon_graphics_dxc)
+      xenon_stage_runtime_dependencies(xenon_shader_load_reuse_tests)
+    endif()
+    xenon_enable_test_asserts(xenon_shader_load_reuse_tests)
+    add_test(NAME xenon_shader_load_reuse_tests COMMAND xenon_shader_load_reuse_tests)
     add_executable(xenon_gpu_texture_load_tests
       backends/gpu_texture_load.cpp)
     target_link_libraries(xenon_gpu_texture_load_tests PRIVATE xenon_graphics)
@@ -102,6 +129,11 @@ if(XENON_BUILD_TESTS)
     xenon_enable_test_asserts(xenon_cross_backend_canonical_tests)
     add_test(NAME xenon_cross_backend_canonical_tests
       COMMAND xenon_cross_backend_canonical_tests)
+    add_executable(xenon_vertex_position_evaluator_tests xenos/vertex_position_evaluator.cpp)
+    target_link_libraries(xenon_vertex_position_evaluator_tests PRIVATE xenon_graphics)
+    xenon_enable_test_asserts(xenon_vertex_position_evaluator_tests)
+    add_test(NAME xenon_vertex_position_evaluator_tests COMMAND xenon_vertex_position_evaluator_tests)
+
     add_executable(xenon_shader_decoder_tests xenos/shader_decoder.cpp)
     set_target_properties(xenon_shader_decoder_tests PROPERTIES
       OUTPUT_NAME xenon_shader_decoder_gpu09_tests)
@@ -185,12 +217,15 @@ if(XENON_BUILD_TESTS)
       xenos/register_aperture_tests.cpp xenon_graphics xenon_memory)
     xenon_add_standalone_test(xenon_display_vblank_tests
       display_vblank_tests.cpp xenon_graphics)
+    set_tests_properties(xenon_display_vblank_tests PROPERTIES RUN_SERIAL TRUE)
     xenon_add_standalone_test(xenon_guest_read_sync_tests
       guest_read_sync_tests.cpp xenon_graphics xenon_memory)
     xenon_add_standalone_test(xenon_temporal_tests
       xenos/temporal.cpp xenon_graphics)
     xenon_add_standalone_test(xenon_sampler_address_tests
       sampler_address_tests.cpp xenon_graphics)
+    xenon_add_standalone_test(xenon_perf_stats_tests
+      perf_stats_tests.cpp xenon_graphics)
     xenon_add_standalone_test(xenon_gpu_failure_log_tests
       failure_log_tests.cpp xenon_graphics)
   endif()

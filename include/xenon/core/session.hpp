@@ -308,6 +308,9 @@ class XenonSession final : public cpu::RuntimeServices {
   void input_key(std::uint16_t key, bool pressed);
   void input_mouse_button(std::uint8_t button, bool pressed);
   void input_mouse_motion(float dx, float dy);
+  // True while the module's active input context steers with the mouse, so
+  // the presentation window should capture the cursor (relative motion).
+  [[nodiscard]] bool wants_mouse_capture() const;
 
   // Subsystem access
   [[nodiscard]] memory::AddressSpace* memory() noexcept { return memory_.get(); }
@@ -419,8 +422,13 @@ class XenonSession final : public cpu::RuntimeServices {
   bool external_call(std::string_view module, std::uint32_t ordinal,
                     cpu::CpuState& state, cpu::MemoryPort& memory) override;
   bool is_recognized_import_thunk(cpu::GuestAddress target) override;
+  const cpu::ModuleServicesV1* module_services() noexcept override { return &module_services_; }
 
  private:
+  // Applies the module's input profile (input.json beside its analysis) to
+  // the keyboard + mouse controller: its contexts and initial context.
+  bool configure_module_input();
+  static std::int32_t module_set_input_context(void* context, const char* name);
   friend struct SessionExecutionTestAccess;
   bool init_memory();
   bool init_filesystem();
@@ -732,6 +740,9 @@ class XenonSession final : public cpu::RuntimeServices {
   // targeted, so guest input calls reach the active session through the one
   // canonical dispatch path. Declared after input_ so it is destroyed first.
   std::unique_ptr<input::xam::guest::GuestInputBridge> input_bridge_{};
+  cpu::ModuleServicesV1 module_services_{cpu::ModuleServicesV1::kAbiVersion,
+                                         sizeof(cpu::ModuleServicesV1), this,
+                                         &XenonSession::module_set_input_context};
   std::unique_ptr<gpu::Backend> gpu_{};
   // See graphics_system()'s doc comment above. Declared after gpu_ (destroyed
   // first) since nothing here holds a reference the other way.
@@ -839,6 +850,14 @@ class XenonSession final : public cpu::RuntimeServices {
   // joined/released in shutdown() before kernel_process_ is destroyed.
   std::shared_ptr<kernel::KernelThread> audio_thread_{};
   GuestThreadTlsContext audio_thread_tls_{};
+  // XENON_AUDIO_STALL_PROBE: a host thread that, while a guest audio render
+  // callback overruns, logs what every guest thread is doing
+  // (audio_stall_probe.log) - what the callback is waiting on when the
+  // device underruns.
+  std::thread audio_stall_probe_thread_{};
+  std::atomic<bool> audio_stall_probe_running_{false};
+  void run_audio_stall_probe();
+  void stop_audio_stall_probe();
 #endif
 
   // GPU pump thread state. Not gated behind a feature macro like
