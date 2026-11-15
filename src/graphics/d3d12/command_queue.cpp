@@ -43,7 +43,8 @@ bool CommandQueue::initialize(ID3D12Device* device) {
     }
   }
   event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-  if (!event_) {
+  concurrent_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  if (!event_ || !concurrent_event_) {
     error_ = "failed to create D3D12 fence event";
     reset();
     return false;
@@ -54,6 +55,8 @@ bool CommandQueue::initialize(ID3D12Device* device) {
 void CommandQueue::reset() noexcept {
   if (event_) CloseHandle(static_cast<HANDLE>(event_));
   event_ = nullptr;
+  if (concurrent_event_) CloseHandle(static_cast<HANDLE>(concurrent_event_));
+  concurrent_event_ = nullptr;
   fence_.Reset();
   for (auto& frame : frames_) {
     frame.list.Reset();
@@ -90,6 +93,20 @@ bool CommandQueue::wait_for_value(std::uint64_t value) {
     return false;
   }
   return true;
+}
+
+bool CommandQueue::wait_completed_concurrent(std::uint64_t value,
+                                             std::uint32_t timeout_ms) const noexcept {
+  if (!value) return true;
+  if (!fence_ || !concurrent_event_) return false;
+  // ID3D12Fence is free-threaded; the event is this waiter's own.
+  if (fence_->GetCompletedValue() >= value) return true;
+  if (FAILED(fence_->SetEventOnCompletion(value, static_cast<HANDLE>(concurrent_event_))))
+    return false;
+  // A timed-out registration may still signal later; the auto-reset event
+  // then only wakes a later wait early, which rechecks the value.
+  (void)WaitForSingleObject(static_cast<HANDLE>(concurrent_event_), timeout_ms);
+  return fence_->GetCompletedValue() >= value;
 }
 
 bool CommandQueue::begin_batch() {

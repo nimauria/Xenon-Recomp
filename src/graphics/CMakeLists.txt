@@ -31,6 +31,8 @@ if(XENON_ENABLE_GRAPHICS)
     common/display_vblank.cpp
     common/failure_log.cpp
     common/perf_stats.cpp
+    common/readback_publisher.cpp
+    common/texture_replacement.cpp
   )
   target_link_libraries(xenon_graphics PUBLIC xenon_memory xenon_logging)
   if(CMAKE_DL_LIBS)

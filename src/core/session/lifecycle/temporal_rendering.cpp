@@ -20,6 +20,14 @@ bool XenonSession::configure_temporal_rendering() {
     set_error(load.error);
     return false;
   }
+  if (gpu_) {
+    gpu_->set_resolve_readback(load.resolve_readback);
+    if (config_.enable_logging && load.resolve_readback != gpu::ResolveReadback::Always) {
+      std::scoped_lock console_log_lock(console_log_mutex());
+      std::cout << "[XenonSession] Resolve readback: "
+                << gpu::resolve_readback_name(load.resolve_readback) << std::endl;
+    }
+  }
   if (!graphics_system_) return true;
   auto& temporal = graphics_system_->temporal();
   temporal.set_profile(std::move(load.profile));

@@ -25,11 +25,16 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       static Totals value;
       return value;
     }
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    // Both reports go to probe logs; without them the draw reads no clock
+    // (nine reads a draw were 8% of the GPU thread in AC6 cutscenes).
+    const bool timed = xenon::logging::probe_logs_enabled();
+    std::chrono::steady_clock::time_point start =
+        timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::chrono::steady_clock::time_point mark = start;
     std::array<std::pair<const char*, long long>, 8> phases{};
     std::size_t count = 0;
     void at(const char* name) {
+      if (!timed) return;
       const auto now = std::chrono::steady_clock::now();
       const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - mark).count();
       // Each phase name (a literal) owns one totals slot, whichever phase a
@@ -45,6 +50,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       mark = now;
     }
     ~DrawPhases() {
+      if (!timed) return;
       at("record and finish");
       auto& sums = totals();
       if (xenon::logging::probe_logs_enabled() && (++sums.draws & 4095u) == 0u) {
@@ -111,10 +117,14 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   // The surfaces bound to this draw never share EDRAM, so each one ends where
   // the next bound surface begins (AC6's 640x360 4x MSAA color target at tile
   // 0 is followed by its depth at tile 720).
-  std::vector<std::uint32_t> bound_bases;
+  // At most four colors and a depth: no allocation per draw.
+  std::array<std::uint32_t, 5> bound_base_storage{};
+  std::size_t bound_base_count = 0;
   for (std::size_t slot = 0; slot < color_count; ++slot)
-    if (color_plan.enabled[slot]) bound_bases.push_back(state.color_targets[slot].base_tile);
-  if (depth_bound) bound_bases.push_back(state.depth_target.base_tile);
+    if (color_plan.enabled[slot])
+      bound_base_storage[bound_base_count++] = state.color_targets[slot].base_tile;
+  if (depth_bound) bound_base_storage[bound_base_count++] = state.depth_target.base_tile;
+  const std::span<const std::uint32_t> bound_bases(bound_base_storage.data(), bound_base_count);
   if (color_count && (!state.raster.surface_pitch ||
                       state.raster.scissor_bottom <= 0)) {
     error = named("Xenos MRT draw has an invalid EDRAM surface extent");
@@ -277,7 +287,9 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         if (!all_fetched && !fetched[slot * 3u + select]) continue;
         if (!fetch || !fetch->valid || !fetch->size_dwords) continue;
         const auto bytes64 = std::uint64_t{fetch->size_dwords} * 4u;
-        const auto sync_start = std::chrono::steady_clock::now();
+        const bool probe_sync = xenon::logging::probe_logs_enabled();
+        const auto sync_start =
+            probe_sync ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         if (bytes64 > UINT32_MAX ||
             !mirror.synchronize_range(
                 fetch->physical_address, static_cast<std::uint32_t>(bytes64),
@@ -288,7 +300,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
           return;
         }
         static std::atomic_uint32_t vertex_sync_probe_count{};
-        if (vertex_sync_probe_count.fetch_add(1u, std::memory_order_relaxed) < 200u) {
+        if (probe_sync &&
+            vertex_sync_probe_count.fetch_add(1u, std::memory_order_relaxed) < 200u) {
           xenon::logging::append_probe_log(
               "vertex_sync_diag.log", "fetch %u.%u address=0x%08X bytes=%llu took %lld ms\n",
               slot, select, fetch->physical_address,
@@ -448,6 +461,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         }
         ++performance.gpu_texture_loads;
         texture_dirty.track_clean(key, layout, dirty_epoch);
+        if (texture_mods.active())
+          note_texture_contents(key, layout, capture_bytes, texture_base, texture_size);
         if (created) {
           if (already_cached) {
             auto retired = std::move(existing->second);
@@ -468,7 +483,21 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       if (filters && filters->conflicting) ++unsupported.unsupported_sampler_behaviors;
       const auto sampler_state =
           filters && filters->overrides() ? with_filter_override(descriptor, *filters) : descriptor;
-      if (!self().bind_texture(slot, sampler_state, *textures.at(key))) {
+      TextureImage* bound = textures.at(key).get();
+      auto bound_state = sampler_state;
+      if (!replaced_texture_keys.empty()) {
+        if (const auto replaced = replaced_texture_keys.find(key);
+            replaced != replaced_texture_keys.end()) {
+          // A texture mod: the replacement's own extent and mip chain, the
+          // guest fetch's sampling state otherwise.
+          bound = replaced->second->image.get();
+          bound_state.width = replaced->second->descriptor.width;
+          bound_state.height = replaced->second->descriptor.height;
+          bound_state.mip_min_level = 0u;
+          bound_state.mip_max_level = replaced->second->descriptor.mip_max_level;
+        }
+      }
+      if (!self().bind_texture(slot, bound_state, *bound)) {
         error = resources.error();
         return;
       }
@@ -902,6 +931,57 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     }
   }
 #endif
+}
+
+template <typename Derived, typename Api>
+void BackendCore<Derived, Api>::note_texture_contents(std::uint64_t key,
+                                                      const TextureLayout& layout,
+                                                      std::span<const std::byte> capture,
+                                                      std::uint32_t base, std::uint32_t size) {
+  replaced_texture_keys.erase(key);
+  // A render target the GPU wrote is not an asset; its bytes in guest memory
+  // may not even be current.
+  if (!memory || mirror.has_gpu_dirty(base, size)) return;
+  std::vector<std::byte> copy;
+  std::span<const std::byte> bytes = capture;
+  if (bytes.size() < size) {
+    copy.resize(size);
+    if (!memory->copy_physical_range(base, copy)) return;
+    bytes = copy;
+  }
+  const auto hash = texture_content_hash(layout, bytes, base);
+  if (!hash) return;
+  if (texture_mods.dumping()) {
+    const auto decoded = decode_texture(layout.descriptor, bytes, base);
+    std::string failure;
+    if (decoded.valid && !texture_mods.dump(*hash, decoded, &failure) && !failure.empty())
+      logging::Logger::instance().log(logging::Level::Warning, "gpu", failure);
+  }
+  if (!texture_mods.replacing() || !texture_mods.find(*hash)) return;
+  auto found = replacement_textures.find(*hash);
+  if (found == replacement_textures.end()) {
+    ReplacementTexture entry{};
+    std::string failure;
+    if (auto decoded = texture_mods.load(*hash, layout, &failure)) {
+      auto image = std::make_unique<TextureImage>();
+      if (self().create_replacement_texture(*image, *decoded)) {
+        entry.image = std::move(image);
+        entry.descriptor = decoded->layout.descriptor;
+        logging::Logger::instance().log(
+            logging::Level::Info, "gpu",
+            "texture mod " + TextureReplacements::file_stem(*hash) + " loaded (" +
+                std::to_string(entry.descriptor.width) + "x" +
+                std::to_string(entry.descriptor.height) + ", " +
+                std::to_string(entry.descriptor.mip_max_level + 1u) + " mips)");
+      } else {
+        failure = "texture mod " + TextureReplacements::file_stem(*hash) +
+                  " could not be created: " + image->error();
+      }
+    }
+    if (!failure.empty()) logging::Logger::instance().log(logging::Level::Warning, "gpu", failure);
+    found = replacement_textures.emplace(*hash, std::move(entry)).first;
+  }
+  if (found->second.image) replaced_texture_keys[key] = &found->second;
 }
 
 }  // namespace xenon::gpu::detail

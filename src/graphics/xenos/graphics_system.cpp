@@ -636,9 +636,18 @@ void GraphicsSystem::execute_ir(Backend& backend, bool submit) {
   if (const auto ms = elapsed_ms(begin_start); ms >= 50)
     logging::append_probe_log("ir_timing_diag.log", "begin_submission %lld ms\n", ms);
   // The pump thread runs this between ring drains and vsync interrupts, so a
-  // slow command delays both; name the slow ones.
+  // slow command delays both; with probe logs on, name the slow ones.
+  // Regression (AC6 missions at 20 fps): the two clock reads per command ran
+  // regardless - tens of thousands of register writes a frame made them 13%
+  // of the pump thread.
   const bool temporal = temporal_.active();
+  const bool timed = logging::probe_logs_enabled();
   for (const auto& command : stream_.commands()) {
+    if (!timed) {
+      if (temporal) temporal_.observe(command);
+      backend.consume(command);
+      continue;
+    }
     const auto start = Clock::now();
     if (temporal) temporal_.observe(command);
     backend.consume(command);

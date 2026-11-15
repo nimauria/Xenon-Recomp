@@ -93,6 +93,19 @@ class ResourceLayout {
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> staging_sampler_heap_{};
   std::array<FrameBindings, kFrameCount> frames_{};
   std::array<std::byte, kConstantBufferBytes> constants_staging_{};
+  // What each staging texture descriptor and sampler holds, so a draw that
+  // binds the same view or sampler state as the last one to use the slot
+  // skips recreating it (a driver call each; AC6 binds the same few textures
+  // across hundreds of draws). Holding a reference keeps the resource alive,
+  // so a released image's address cannot come back as a different one.
+  struct BoundView {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+    D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+  };
+  std::array<BoundView, kSrvCount> bound_views_{};
+  std::array<D3D12_SAMPLER_DESC, kSamplerCount> bound_samplers_{};
+  std::array<bool, kSamplerCount> sampler_known_{};
+  std::uint64_t descriptor_writes_skipped_{};
   std::uint32_t resource_increment_{};
   std::uint32_t sampler_increment_{};
   std::string error_{};

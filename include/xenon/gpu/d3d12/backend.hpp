@@ -45,6 +45,7 @@ class Backend final : public xenon::gpu::Backend {
   void sync_guest_reads() override;
   void end_guest_read_sync() override;
   [[nodiscard]] bool publish_gpu_writes(bool wait) override;
+  void set_resolve_readback(ResolveReadback policy) override;
   void set_shader_cache_directory(const std::string& directory) override;
 
   [[nodiscard]] bool ready() const noexcept;

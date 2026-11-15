@@ -33,6 +33,10 @@ void test_line_reports_the_window_and_resets() {
   perf::add(perf::Counter::PipelineCreates, 4u);
   perf::add(perf::Counter::Draws, 2000u);
   perf::add(perf::Counter::Resolves, 20u);
+  perf::add(perf::Counter::ReadbackBytes, 3u * 1024u * 1024u);
+  perf::add(perf::Counter::ReadbackWaitNs, 7'000'000u);
+  perf::add(perf::Counter::ReadbackWaits, 5u);
+  perf::add(perf::Counter::ReadbackWindowNs, 9'000'000u);
   const auto line = perf::take_line(1.0);
   assert(contains(line, "frames 3.0/s"));
   assert(contains(line, "p50 33.3"));
@@ -42,6 +46,7 @@ void test_line_reports_the_window_and_resets() {
   assert(contains(line, "shader 2 (250 ms)"));
   assert(contains(line, "pso 4 (40 ms)"));
   assert(contains(line, "draws 2000/s resolves 20/s"));
+  assert(contains(line, "readback 3.0 MB wait 7 ms (5) window 9 ms"));
   // Taken: the next window starts empty (the last present still anchors the
   // next interval).
   const auto empty = perf::take_line(1.0);

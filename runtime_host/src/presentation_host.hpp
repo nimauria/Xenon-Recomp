@@ -57,9 +57,9 @@ class PresentationHost {
   [[nodiscard]] void* native_window() const noexcept;
 
   // Pumps the SDL event queue once, aggregating everything that happened
-  // since the last call. Resize is applied directly to the backend here
-  // (resize_presentation() is safe to call from the same thread that pumps
-  // events); the caller still gets resized/width/height for logging/status.
+  // since the last call. A resize is handed to the backend here; the backend
+  // applies it at its next present, on the GPU thread that owns the
+  // swapchain. The caller still gets resized/width/height for logging/status.
   void pump_events(PresentationEvents& out_events);
 
   // Captures the mouse (hidden cursor, relative motion that never leaves the

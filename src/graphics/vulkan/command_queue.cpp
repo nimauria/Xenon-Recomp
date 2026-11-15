@@ -99,6 +99,19 @@ bool CommandQueue::wait_for_value(std::uint64_t value) {
   return true;
 }
 
+bool CommandQueue::wait_completed_concurrent(std::uint64_t value,
+                                             std::uint32_t timeout_ms) const noexcept {
+  if (!value) return true;
+  if (!device_ || !timeline_) return false;
+  // Waiting on a timeline semaphore needs no external synchronization.
+  VkSemaphoreWaitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+  wait.semaphoreCount = 1;
+  wait.pSemaphores = &timeline_;
+  wait.pValues = &value;
+  return vkWaitSemaphores(device_, &wait,
+                          std::uint64_t{timeout_ms} * 1000000ull) == VK_SUCCESS;
+}
+
 bool CommandQueue::begin_batch() {
   if (current_frame_ != UINT32_MAX) return true;
   if (!device_ || !queue_ || !timeline_) {

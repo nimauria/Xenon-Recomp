@@ -38,6 +38,9 @@
 // cameraCut: a frame whose view direction turns by more than `degrees`, or
 //   whose camera moves by more than `distance` world units (optional), has no
 //   usable history.
+// memory.resolveReadback (optional): "always" (the default) or "onRequest" -
+//   see gpu::ResolveReadback. Only a revision whose CPU never reads what it
+//   resolves may declare "onRequest".
 
 #include <cstdint>
 #include <filesystem>
@@ -46,6 +49,7 @@
 #include <string_view>
 #include <vector>
 
+#include "xenon/gpu/resolve_readback.hpp"
 #include "xenon/gpu/temporal.hpp"
 
 namespace xenon::gpu {
@@ -72,8 +76,14 @@ inline constexpr std::string_view kRenderingProfileFile = "rendering.json";
 [[nodiscard]] std::optional<TemporalRenderProfile> parse_temporal_render_profile(
     std::string_view json, std::string* error);
 
+// Parses rendering.json's "memory" section: ResolveReadback::Always when
+// there is none, nullopt (with `error`) when it is malformed.
+[[nodiscard]] std::optional<ResolveReadback> parse_rendering_resolve_readback(
+    std::string_view json, std::string* error);
+
 struct TemporalProfileLoad {
   std::optional<TemporalRenderProfile> profile{};
+  ResolveReadback resolve_readback{ResolveReadback::Always};
   std::filesystem::path path{};  // the file read, empty when there was none
   std::string error{};           // non-empty: the file exists and is invalid
 };

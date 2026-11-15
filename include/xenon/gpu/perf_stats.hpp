@@ -18,6 +18,9 @@
 //   shader      shader compiles on the draw path: count and time
 //   pso         pipeline creations: count and time
 //   draws/resolves  per second
+//   readback    MB of GPU-written bytes copied into guest memory; the time the
+//               GPU worker waited for them (and how often); the time guest
+//               CPU writes were held off while they were written ("window")
 
 #include <atomic>
 #include <chrono>
@@ -39,6 +42,10 @@ enum class Counter : std::uint32_t {
   PipelineCreates,
   Draws,
   Resolves,
+  ReadbackBytes,
+  ReadbackWaitNs,
+  ReadbackWaits,
+  ReadbackWindowNs,
   Count,
 };
 

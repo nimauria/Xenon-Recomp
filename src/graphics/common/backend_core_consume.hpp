@@ -104,8 +104,13 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       }
     }
     const auto state = resource_state.snapshot();
-    const auto draw_start = std::chrono::steady_clock::now();
+    // The slow-draw report goes to a probe log; without probe logs no clock
+    // is read per draw.
+    const bool timed = xenon::logging::probe_logs_enabled();
+    const auto draw_start =
+        timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto report_slow = [&](const char* kind) {
+      if (!timed) return;
       const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - draw_start)
                           .count();
@@ -323,8 +328,10 @@ void BackendCore<Derived, Api>::consume_resolve(
         if (!self().gpu_depth_resolve(*owner, gpu.constants)) return;
         mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
         note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
-        // Guest code may read what it resolved; the copy lands with the work.
-        if (!mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+        // Guest code may read what it resolved; the copy lands with the work
+        // (unless the title's module says its CPU never does).
+        if (resolve_readback == ResolveReadback::Always &&
+            !mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
                                          memory::GpuRangeUsage::RenderReadback)) {
           error = mirror.error();
           return;
@@ -471,7 +478,10 @@ void BackendCore<Derived, Api>::consume_resolve(
       // command processor waits for it only before the guest can observe
       // the GPU having passed this point (Backend::publish_gpu_writes()).
       // Waiting here instead cost a GPU round trip per resolve, dozens a frame.
-      if (!mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
+      // With ResolveReadback::OnRequest the bytes stay GPU-owned until Xenon
+      // itself reads them (make_guest_memory_cpu_visible()).
+      if (resolve_readback == ResolveReadback::Always &&
+          !mirror.queue_cpu_visibility(gpu.range_address, gpu.range_size,
                                        memory::GpuRangeUsage::RenderReadback)) {
         error = mirror.error();
         return;

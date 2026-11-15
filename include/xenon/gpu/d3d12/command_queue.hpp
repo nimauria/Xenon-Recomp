@@ -45,6 +45,11 @@ class CommandQueue {
     return queue_.Get();
   }
   [[nodiscard]] std::uint64_t completed_value() const noexcept;
+  // For one waiter on another thread (the readback publisher) while this
+  // queue's owner keeps recording and submitting: true once `value` has
+  // completed, false after about `timeout_ms` when it has not.
+  [[nodiscard]] bool wait_completed_concurrent(std::uint64_t value,
+                                               std::uint32_t timeout_ms) const noexcept;
   [[nodiscard]] std::uint64_t last_submitted_value() const noexcept {
     return last_submitted_value_;
   }
@@ -73,6 +78,8 @@ class CommandQueue {
   std::array<FrameContext, kFrameCount> frames_{};
   Microsoft::WRL::ComPtr<ID3D12Fence> fence_{};
   void* event_{};
+  // Owned by the one concurrent waiter (wait_completed_concurrent()).
+  void* concurrent_event_{};
   std::uint32_t next_frame_{};
   std::uint32_t current_frame_{UINT32_MAX};
   std::uint64_t next_fence_value_{1};

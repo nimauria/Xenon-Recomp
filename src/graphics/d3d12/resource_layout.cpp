@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <span>
 
 #include "xenon/gpu/sampler_address.hpp"
@@ -193,6 +194,8 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
     device_->CreateSampler(&sampler, sampler_handle);
     sampler_handle.ptr += sampler_increment_;
   }
+  for (auto& bound : bound_views_) bound = {};
+  sampler_known_.fill(false);
 
   std::fill(constants_staging_.begin(), constants_staging_.end(), std::byte{});
   for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
@@ -244,9 +247,17 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
       view.TextureCube.MipLevels = mip_levels;
       break;
   }
-  auto resource_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
-  resource_handle.ptr += std::uint64_t(descriptor_index) * resource_increment_;
-  device_->CreateShaderResourceView(resource, &view, resource_handle);
+  auto& bound_view = bound_views_[descriptor_index];
+  if (bound_view.resource.Get() == resource &&
+      std::memcmp(&bound_view.desc, &view, sizeof(view)) == 0) {
+    ++descriptor_writes_skipped_;
+  } else {
+    auto resource_handle = staging_resource_heap_->GetCPUDescriptorHandleForHeapStart();
+    resource_handle.ptr += std::uint64_t(descriptor_index) * resource_increment_;
+    device_->CreateShaderResourceView(resource, &view, resource_handle);
+    bound_view.resource = resource;
+    bound_view.desc = view;
+  }
 
   const auto address_mode = [this](std::uint8_t clamp) {
     SamplerAddress address{};
@@ -275,9 +286,16 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   sampler.MaxAnisotropy = max_anisotropy(state.aniso_filter);
   sampler.MinLOD = float(state.mip_min_level);
   sampler.MaxLOD = float(state.mip_max_level);
+  if (sampler_known_[slot] &&
+      std::memcmp(&bound_samplers_[slot], &sampler, sizeof(sampler)) == 0) {
+    ++descriptor_writes_skipped_;
+    return true;
+  }
   auto sampler_handle = staging_sampler_heap_->GetCPUDescriptorHandleForHeapStart();
   sampler_handle.ptr += std::uint64_t(slot) * sampler_increment_;
   device_->CreateSampler(&sampler, sampler_handle);
+  bound_samplers_[slot] = sampler;
+  sampler_known_[slot] = true;
   return true;
 }
 
@@ -348,6 +366,8 @@ void ResourceLayout::reset() noexcept {
       draw.resource_heap.Reset();
     }
   }
+  for (auto& bound : bound_views_) bound = {};
+  sampler_known_.fill(false);
   staging_sampler_heap_.Reset();
   staging_resource_heap_.Reset();
   root_signature_.Reset();
