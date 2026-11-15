@@ -1,5 +1,6 @@
 #include "xenon/gpu/primitive_processor.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace xenon::gpu {
@@ -21,9 +22,30 @@ void append_triangle(std::vector<std::uint32_t>& out, std::uint32_t a,
   out.push_back(a); out.push_back(b); out.push_back(c);
 }
 
+// Room for `more` indices on top of what `out` holds, growing geometrically:
+// a primitive-reset batch converts many short runs into the same vector.
+void reserve_more(std::vector<std::uint32_t>& out, std::size_t more) {
+  const auto need = out.size() + more;
+  if (out.capacity() < need) out.reserve((std::max)(need, out.capacity() * 2u));
+}
+
 bool convert_topology(PrimitiveType type, std::span<const std::uint32_t> input,
                       ProcessedPrimitiveBatch& result) {
   auto& output = result.indices;
+  // The most each expansion can emit (degenerate triangles are dropped).
+  const auto runs = input.size() > 2u ? input.size() - 2u : 0u;
+  switch (type) {
+    case PrimitiveType::LineStrip:
+    case PrimitiveType::TwoDLineStrip:
+    case PrimitiveType::LineLoop: reserve_more(output, input.size() * 2u + 2u); break;
+    case PrimitiveType::TriangleStrip:
+    case PrimitiveType::TwoDTriStrip:
+    case PrimitiveType::TriangleFan:
+    case PrimitiveType::Polygon: reserve_more(output, runs * 3u); break;
+    case PrimitiveType::QuadList:
+    case PrimitiveType::QuadStrip: reserve_more(output, input.size() / 2u * 6u + 6u); break;
+    default: break;
+  }
   switch (type) {
     case PrimitiveType::PointList:
       result.topology = HostPrimitiveTopology::PointList;
@@ -139,9 +161,9 @@ ProcessedPrimitiveBatch process_primitives(
     const PrimitiveProcessingOptions& options, std::uint32_t physical_base) {
   ProcessedPrimitiveBatch result{};
   std::vector<std::uint32_t> source;
-  source.reserve(draw.index_count);
   if (draw.source == DrawSource::AutoIndex) {
-    for (std::uint32_t i = 0; i < draw.index_count; ++i) source.push_back(i);
+    source.resize(draw.index_count);
+    for (std::uint32_t i = 0; i < draw.index_count; ++i) source[i] = i;
   } else if (draw.source == DrawSource::Dma) {
     const auto& buffer = draw.index_buffer;
     const auto bytes_per_index = buffer.format == IndexFormat::UInt32 ? 4u : 2u;
@@ -156,18 +178,23 @@ ProcessedPrimitiveBatch process_primitives(
     }
     const auto* data =
         physical_memory.data() + (buffer.physical_address - physical_base);
-    for (std::uint32_t i = 0; i < count; ++i) {
-      if (buffer.format == IndexFormat::UInt32) {
+    source.resize(count);
+    auto* out = source.data();
+    if (buffer.format == IndexFormat::UInt32) {
+      for (std::uint32_t i = 0; i < count; ++i) {
         std::uint32_t value{};
         std::memcpy(&value, data + i * 4u, 4);
-        source.push_back(gpu_swap(value, buffer.endian) & 0x00FFFFFFu);
-      } else {
+        out[i] = gpu_swap(value, buffer.endian) & 0x00FFFFFFu;
+      }
+    } else {
+      for (std::uint32_t i = 0; i < count; ++i) {
         std::uint16_t value{};
         std::memcpy(&value, data + i * 2u, 2);
-        source.push_back(swap16(value, buffer.endian));
+        out[i] = swap16(value, buffer.endian);
       }
     }
   } else if (draw.source == DrawSource::Immediate) {
+    source.reserve(draw.immediate_index_dwords.size() * 2u);
     for (const auto dword : draw.immediate_index_dwords) {
       if (draw.index_format == IndexFormat::UInt32) source.push_back(dword & 0x00FFFFFFu);
       else {

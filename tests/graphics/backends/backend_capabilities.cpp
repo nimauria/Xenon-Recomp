@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -1395,6 +1397,26 @@ int main() {
       assert(acceptable_present_status(backend.present(frame)));
       std::cout << "D3D12 presentation: resized present\n";
       report_debug_layer_messages("D3D12 presentation: resize and present");
+      // Regression (AC6 crashed in the driver on going fullscreen): the
+      // window thread resizes while the GPU thread presents. Resizes from
+      // another thread are applied by the presents, never under them.
+      {
+        std::atomic<bool> resizing{true};
+        std::thread window_thread([&] {
+          for (int i = 0; i < 40; ++i) {
+            const std::uint32_t width = (i & 1) ? 160u : 128u;
+            const std::uint32_t height = (i & 1) ? 90u : 72u;
+            assert(backend.resize_presentation(width, height));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+          resizing = false;
+        });
+        while (resizing) assert(acceptable_present_status(backend.present(frame)));
+        window_thread.join();
+        assert(acceptable_present_status(backend.present(frame)));
+      }
+      std::cout << "D3D12 presentation: resized from another thread while presenting\n";
+      report_debug_layer_messages("D3D12 presentation: concurrent resize");
     }
     report_debug_layer_messages("D3D12 presentation: backend teardown");
     DestroyWindow(window);

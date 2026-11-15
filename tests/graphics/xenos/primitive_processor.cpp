@@ -84,5 +84,47 @@ int main() {
     assert(batch.valid && batch.requires_rectangle_expansion);
     assert(batch.indices == rectangle_indices);
   }
+
+  // 32-bit DMA indices, byte-swapped and masked to 24 bits, as a strip.
+  {
+    std::array<std::byte, 32> words{};
+    const std::array<std::uint32_t, 4> big_endian{0x07000000u, 0x08000000u, 0x090000FFu,
+                                                  0x0A000000u};
+    std::memcpy(words.data(), big_endian.data(), sizeof(big_endian));
+    draw = {};
+    draw.source = DrawSource::Dma;
+    draw.primitive_type = PrimitiveType::TriangleStrip;
+    draw.index_count = 4;
+    draw.index_buffer = {true, 0, 16, 4, IndexFormat::UInt32, Endian::Swap8In32};
+    batch = process_primitives(draw, words);
+    assert(batch.valid && batch.indexed);
+    assert((batch.indices == std::vector<std::uint32_t>{7, 8, 0xFF000009u & 0x00FFFFFFu, 0xFF000009u & 0x00FFFFFFu, 8, 10}));
+  }
+
+  // A long strip cut by many primitive resets: every run converts in place
+  // and the output is the runs' triangles in order.
+  {
+    std::vector<std::uint32_t> dwords;
+    std::vector<std::uint32_t> expected;
+    std::uint32_t next = 0;
+    for (int run = 0; run < 300; ++run) {
+      // Four indices, then the reset marker 0xFFFF, packed two per dword.
+      const std::uint32_t a = next, b = next + 1, c = next + 2, d = next + 3;
+      next += 4;
+      dwords.push_back(a | (b << 16u));
+      dwords.push_back(c | (d << 16u));
+      dwords.push_back(0xFFFFu | (0xFFFFu << 16u));
+      expected.insert(expected.end(), {a, b, c, c, b, d});
+    }
+    draw = {};
+    draw.source = DrawSource::Immediate;
+    draw.primitive_type = PrimitiveType::TriangleStrip;
+    draw.index_format = IndexFormat::UInt16;
+    draw.index_count = static_cast<std::uint32_t>(dwords.size() * 2u);
+    draw.immediate_index_dwords = dwords;
+    batch = process_primitives(draw, memory, {true, 0xFFFFu});
+    assert(batch.valid && batch.indexed);
+    assert(batch.indices == expected);
+  }
   std::cout << "xenon_primitive_processor_tests: ok\n";
 }

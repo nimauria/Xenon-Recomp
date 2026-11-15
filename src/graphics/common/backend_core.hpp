@@ -72,6 +72,7 @@
 #include "xenon/gpu/guest_read_sync.hpp"
 #include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
+#include "xenon/gpu/texture_replacement.hpp"
 #include "xenon/gpu/transient_arena.hpp"
 #include "xenon/gpu/vertex_position_evaluator.hpp"
 #include "xenon/gpu/blend_constant.hpp"
@@ -111,6 +112,7 @@ class BackendCore {
   //   bool load_texture(TextureImage&, const TextureLayout&,
   //                     std::span<const std::byte> capture, std::uint32_t capture_base);
   //   bool bind_texture(std::uint32_t slot, const TextureDescriptor&, TextureImage&);
+  //   bool create_replacement_texture(TextureImage&, const DecodedTexture&);
   //   <root object> pipeline_root();
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
@@ -171,6 +173,8 @@ class BackendCore {
                                      std::uint32_t size);
   // See Backend::publish_gpu_writes().
   bool publish_gpu_writes(bool wait);
+  // When resolves are copied back into guest memory (Backend::set_resolve_readback()).
+  ResolveReadback resolve_readback{ResolveReadback::Always};
   bool invalidate_edram_native_state();
   PresentStatus present(const PresentationFrame& frame);
   // Plans scan-out of `frame` to a width x height target and makes its source
@@ -180,7 +184,11 @@ class BackendCore {
   // Scan-out drawn on the GPU into an offscreen image and read back.
   bool capture_scanout(const PresentationFrame& frame, std::uint32_t width,
                        std::uint32_t height, PreparedPresentationFrame& output);
+  // Records a new window size; present() applies it (see the definition).
   bool resize_presentation(std::uint32_t width, std::uint32_t height);
+  bool apply_pending_resize();
+  std::mutex pending_resize_mutex;
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> pending_resize;
   GpuPerformanceCounters performance_counters() const noexcept;
   GpuUnsupportedCounters unsupported_counters() const noexcept;
   GpuShaderCoverage shader_coverage() const noexcept;
@@ -227,6 +235,20 @@ class BackendCore {
   // or found unlowerable); a repeated load of one is a no-op.
   std::unordered_set<std::uint64_t> handled_shader_loads{};
   TextureDirtyTracker texture_dirty{};
+  // Texture mods (texture_replacement.hpp): dumping guest-authored textures
+  // and sampling replacements in their place.
+  TextureReplacements texture_mods{TextureReplacements::from_environment()};
+  struct ReplacementTexture {
+    std::unique_ptr<TextureImage> image{};  // null: the file was unusable
+    TextureDescriptor descriptor{};         // its extent and mip chain
+  };
+  // By content hash, loaded once per run.
+  std::unordered_map<std::uint64_t, ReplacementTexture> replacement_textures{};
+  // By texture cache key: the replacement its current contents select.
+  std::unordered_map<std::uint64_t, const ReplacementTexture*> replaced_texture_keys{};
+  void note_texture_contents(std::uint64_t key, const TextureLayout& layout,
+                             std::span<const std::byte> capture, std::uint32_t base,
+                             std::uint32_t size);
   // Texture reads as of GPU/CPU sync points (sync_guest_reads()).
   GuestReadSync guest_reads{};
   memory::AddressSpace* memory{};
@@ -610,8 +632,15 @@ class BackendCore {
                          const EdramSurfaceLayout& ownership_surface, ToNative to_native,
                          bool (BackendCore::*flush_self)(EdramOwnerId), const char* stale,
                          DirectSupported direct_supported, Direct direct) {
+    // A draw that keeps rendering to the target that already holds these
+    // tiles - most draws - changes nothing: no tile list, no plan.
+    if (edram_ownership.known_to_hold(requested_owner, ownership_surface)) return true;
     auto plan = edram_ownership.plan(requested_owner, ownership_surface);
-    if (!plan.valid || plan.changes.empty()) return plan.valid;
+    if (!plan.valid) return false;
+    if (plan.changes.empty()) {
+      edram_ownership.note_holds(requested_owner, ownership_surface);
+      return true;
+    }
     // Which changes go directly. The rest arrive through canonical storage and
     // must still map to whole pixels of the requested image: otherwise that
     // image is reloaded whole below, over anything copied in directly, so
@@ -671,6 +700,7 @@ class BackendCore {
       ++unsupported.unexpected_ownership_transitions;
       return false;
     }
+    edram_ownership.note_holds(requested_owner, ownership_surface);
     return true;
   }
 

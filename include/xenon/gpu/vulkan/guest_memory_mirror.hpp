@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
+#include "xenon/gpu/readback_publisher.hpp"
 #include "xenon/gpu/staging_ring.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -42,12 +43,10 @@ class GuestMemoryMirror {
   // Writes every queued readback the GPU has finished into guest memory;
   // with `wait`, first submits and waits for all of them.
   [[nodiscard]] bool complete_cpu_visibility(bool wait);
-  [[nodiscard]] bool cpu_visibility_pending() const noexcept {
-    return !pending_readbacks_.empty();
-  }
+  [[nodiscard]] bool cpu_visibility_pending() const { return publisher_.pending(); }
   // The readbacks written into guest memory since the last call.
   [[nodiscard]] std::vector<memory::GpuPublishedWrite> take_published_writes() {
-    return std::exchange(published_writes_, {});
+    return publisher_.take_published_writes();
   }
   [[nodiscard]] bool has_gpu_dirty(std::uint32_t address,
                                    std::uint32_t width) const;
@@ -64,12 +63,9 @@ class GuestMemoryMirror {
   // Room for a frame's resolves in flight (AC6 resolves ~20 MiB a frame).
   static constexpr std::uint32_t kReadbackSize = 64u * 1024u * 1024u;
 
-  struct PendingReadback {
-    memory::GpuReadbackRange range{};
-    std::uint64_t offset{};
-    std::uint64_t value{};
-  };
-  [[nodiscard]] bool complete_through(std::uint64_t completed);
+  // Submits the open batch and waits until every readback whose GPU value is
+  // <= `value` is in guest memory.
+  [[nodiscard]] bool wait_readbacks(std::uint64_t value);
 
   memory::AddressSpace* memory_{};
   CommandQueue* queue_{};
@@ -78,15 +74,15 @@ class GuestMemoryMirror {
   // Regions of upload_ the GPU may still be copying from.
   StagingRing upload_ring_{};
   Buffer readback_{};
-  // Regions of readback_ the GPU may still be writing or the CPU has not
-  // read yet; pending_readbacks_ holds them in queue order.
+  // Regions of readback_ the GPU may still be writing or the publisher has
+  // not written into guest memory yet.
   StagingRing readback_ring_{};
-  std::deque<PendingReadback> pending_readbacks_{};
-  std::vector<memory::GpuPublishedWrite> published_writes_{};
   memory::GuestMemoryGpuCoherency coherency_{};
   bool shader_read_state_{};
   bool shader_write_state_{};
   std::string error_{};
+  // Writes finished readbacks into guest memory on a thread of its own.
+  ReadbackPublisher publisher_{};
 };
 
 }  // namespace xenon::gpu::vulkan

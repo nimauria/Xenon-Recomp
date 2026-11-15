@@ -37,6 +37,11 @@ class CommandQueue {
   }
   [[nodiscard]] VkQueue native_queue() const noexcept { return queue_; }
   [[nodiscard]] std::uint64_t completed_value() const noexcept;
+  // For a waiter on another thread (the readback publisher) while this
+  // queue's owner keeps recording and submitting: true once `value` has
+  // completed, false after about `timeout_ms` when it has not.
+  [[nodiscard]] bool wait_completed_concurrent(std::uint64_t value,
+                                               std::uint32_t timeout_ms) const noexcept;
   [[nodiscard]] std::uint64_t last_submitted_value() const noexcept {
     return last_submitted_value_;
   }

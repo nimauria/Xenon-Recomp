@@ -216,6 +216,30 @@ std::optional<TemporalRenderProfile> parse_temporal_render_profile(std::string_v
   return profile;
 }
 
+std::optional<ResolveReadback> parse_rendering_resolve_readback(std::string_view json,
+                                                               std::string* error) {
+  if (error) error->clear();
+  JsonValue root;
+  std::string parse_error;
+  if (!JsonValue::parse(json, root, &parse_error) || !root.is_object()) {
+    fail(error, parse_error.empty() ? "the document must be an object"
+                                    : "invalid JSON: " + parse_error);
+    return std::nullopt;
+  }
+  const auto* memory = root.find("memory");
+  if (!memory) return ResolveReadback::Always;
+  if (!memory->is_object()) {
+    fail(error, "memory must be an object");
+    return std::nullopt;
+  }
+  const auto* readback = memory->find("resolveReadback");
+  if (!readback) return ResolveReadback::Always;
+  const auto policy =
+      readback->is_string() ? parse_resolve_readback(readback->as_string()) : std::nullopt;
+  if (!policy) fail(error, "memory.resolveReadback must be \"always\" or \"onRequest\"");
+  return policy;
+}
+
 TemporalProfileLoad load_temporal_render_profile(const std::filesystem::path& package,
                                                  std::string_view effective_hash_hex) {
   TemporalProfileLoad result{};
@@ -233,11 +257,19 @@ TemporalProfileLoad load_temporal_render_profile(const std::filesystem::path& pa
   std::ostringstream text;
   text << in.rdbuf();
   std::string error;
-  result.profile = parse_temporal_render_profile(text.str(), &error);
+  const auto json = text.str();
+  result.profile = parse_temporal_render_profile(json, &error);
   if (!error.empty()) {
     result.profile.reset();
     result.error = error + " (" + path.string() + ")";
+    return result;
   }
+  const auto readback = parse_rendering_resolve_readback(json, &error);
+  if (!readback) {
+    result.error = error + " (" + path.string() + ")";
+    return result;
+  }
+  result.resolve_readback = *readback;
   return result;
 }
 

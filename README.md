@@ -287,6 +287,16 @@ The hardware samples textures microseconds after the command processor passes a 
 
 See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the historical validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
 
+### Texture mods
+
+Both backends can dump a game's textures and sample replacements in their place. This works for every title.
+
+- **Naming.** A texture is named by a hash of its own guest bytes and shape, so the same asset has the same name on every run.
+- **Dumping.** With `XENON_TEXTURE_DUMP` set to a directory, each texture the game loads from its own data is written once as `<hash>_<width>x<height>_<format>.dds`.
+- **Replacing.** With `XENON_TEXTURE_MODS` set to a directory, any `.dds` file under it whose name starts with that hash is sampled instead. A replacement may have a different size and its own mip chain. It must keep the original's format, except that a four-channel colour texture may use any of RGBA8 or BC1, BC2 or BC3.
+- **Not covered.** Render targets the GPU wrote are never dumped or replaced.
+- **Channel order.** Dumps hold texels in the order the texture stores them; the game's fetch swizzle is applied afterwards.
+
 ### Planned upscaling and frame generation
 
 The existing [temporal groundwork](docs/graphics/TEMPORAL_RENDERING.md) observes camera and pass information; it does not yet change rendered output. The new [XeSS, FSR, DLSS and frame-generation plan](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md) stages shared GPU inputs, FSR native AA on D3D12, scaled rendering, XeSS/DLSS reconstruction, then frame generation and Vulkan integration. Reconstruction and frame generation are intended to be independently selectable where validated.

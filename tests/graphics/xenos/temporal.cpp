@@ -254,6 +254,32 @@ void test_profile_loading() {
   load = load_temporal_render_profile(root, hash);
   assert(!load.profile && load.error.find("vertexConstant is required") != std::string::npos &&
          load.error.find("rendering.json") != std::string::npos);
+
+  // memory.resolveReadback: a title that never reads its resolves with the
+  // CPU (AC6 copied ~1 GB a second back otherwise). A file with only that
+  // section declares no temporal profile and still sets the policy.
+  assert(load.resolve_readback == ResolveReadback::Always);
+  {
+    std::ofstream out(dir / "rendering.json", std::ios::binary | std::ios::trunc);
+    out << R"({"schema":"xenon.rendering.v1","memory":{"resolveReadback":"onRequest"}})";
+  }
+  load = load_temporal_render_profile(root, hash);
+  assert(!load.profile && load.error.empty() &&
+         load.resolve_readback == ResolveReadback::OnRequest);
+  {
+    std::ofstream out(dir / "rendering.json", std::ios::binary | std::ios::trunc);
+    out << R"({"schema":"xenon.rendering.v1","memory":{"resolveReadback":"never"}})";
+  }
+  load = load_temporal_render_profile(root, hash);
+  assert(load.error.find("memory.resolveReadback") != std::string::npos &&
+         load.resolve_readback == ResolveReadback::Always);
+  std::string error;
+  assert(parse_rendering_resolve_readback(R"({"schema":"xenon.rendering.v1"})", &error) ==
+         ResolveReadback::Always);
+  assert(parse_rendering_resolve_readback(
+             R"({"schema":"xenon.rendering.v1","memory":{"resolveReadback":"always"}})", &error) ==
+         ResolveReadback::Always);
+  assert(!parse_rendering_resolve_readback(R"({"memory":7})", &error) && !error.empty());
   std::filesystem::remove_all(root);
 }
 

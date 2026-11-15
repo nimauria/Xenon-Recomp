@@ -213,6 +213,11 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     if (!loaded) error = named(texture_loader.error());
     return loaded;
   }
+  // A texture mod's texels, uploaded once and waited for (the first draw
+  // that samples it waits one copy).
+  bool create_replacement_texture(TextureImage& image, const DecodedTexture& texture) {
+    return image.initialize(context.physical_device(), context.device(), queue, texture);
+  }
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
     return resources.bind_texture(slot, descriptor.dimension, image.view(),
@@ -439,6 +444,7 @@ bool Backend::invalidate_edram_native_state() {
 void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
 bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
+void Backend::set_resolve_readback(ResolveReadback policy) { impl_->resolve_readback = policy; }
 void Backend::set_shader_cache_directory(const std::string& directory) {
   impl_->shader_cache.set_disk_directory(directory);
 }

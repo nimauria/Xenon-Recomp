@@ -37,12 +37,22 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
   coherency_.reset(memory::kPhysicalMemorySize, false);
   upload_ring_.reset(kTransferSize);
   readback_ring_.reset(kReadbackSize);
-  pending_readbacks_.clear();
-  published_writes_.clear();
+  std::span<std::byte> readback_bytes;
+  if (!readback_.map(readback_bytes)) {
+    error_ = "failed to map Vulkan guest-memory readback buffer";
+    reset();
+    return false;
+  }
+  publisher_.start(memory, coherency_, readback_bytes, kTransferSize,
+                   [&queue](std::uint64_t value, std::uint32_t timeout_ms) {
+                     return queue.wait_completed_concurrent(value, timeout_ms);
+                   });
   return true;
 }
 
 void GuestMemoryMirror::reset() noexcept {
+  // The publisher reads readback_ and coherency_; it stops first.
+  publisher_.stop();
   memory_ = nullptr;
   queue_ = nullptr;
   readback_.reset();
@@ -51,7 +61,6 @@ void GuestMemoryMirror::reset() noexcept {
   coherency_.clear();
   upload_ring_.reset(0);
   readback_ring_.reset(0);
-  pending_readbacks_.clear();
   shader_read_state_ = false;
   shader_write_state_ = false;
 }
@@ -180,13 +189,12 @@ bool GuestMemoryMirror::queue_cpu_visibility(
   const auto plan = coherency_.plan_readback(memory_->coherency(), address, width,
                                              kTransferSize, usage);
   for (const auto& range : plan.ranges) {
-    // Readbacks the GPU has finished are written out before the ring can hand
-    // their regions out again; the same completed value bounds both.
-    const auto completed = queue_->completed_value();
-    if (!complete_through(completed)) return false;
-    const auto offset = readback_ring_.reserve(range.size, completed, [&](std::uint64_t value) {
-      return queue_->flush() && queue_->wait_for_completion(value) && complete_through(value);
-    });
+    // A region is free again once the publisher has written its readback
+    // into guest memory, which it does only after the GPU finished the copy.
+    const auto consumed =
+        (std::min)(publisher_.published_through(), queue_->completed_value());
+    const auto offset = readback_ring_.reserve(
+        range.size, consumed, [&](std::uint64_t value) { return wait_readbacks(value); });
     if (!offset) {
       if (error_.empty())
         error_ = queue_->error().empty() ? "Vulkan readback ring reservation failed"
@@ -232,64 +240,36 @@ bool GuestMemoryMirror::queue_cpu_visibility(
     shader_read_state_ = true;
     const auto value = queue_->retirement_value();
     readback_ring_.commit(*offset, range.size, value);
-    pending_readbacks_.push_back({range, *offset, value});
+    publisher_.push(range, *offset, value);
+  }
+  return true;
+}
+
+bool GuestMemoryMirror::wait_readbacks(std::uint64_t value) {
+  if (!queue_->flush()) {
+    error_ = queue_->error();
+    return false;
+  }
+  if (!publisher_.wait_published(value)) {
+    error_ = "Vulkan guest-memory readback failed: " + publisher_.error();
+    return false;
   }
   return true;
 }
 
 bool GuestMemoryMirror::complete_cpu_visibility(bool wait) {
-  if (pending_readbacks_.empty()) return true;
   if (!memory_ || !queue_) {
+    if (!publisher_.pending()) return true;
     error_ = "Vulkan guest-memory mirror is not initialized";
     return false;
   }
-  if (wait) {
-    const auto last = pending_readbacks_.back().value;
-    if (queue_->completed_value() < last &&
-        !(queue_->flush() && queue_->wait_for_completion(last))) {
-      error_ = queue_->error();
-      return false;
-    }
-  }
-  return complete_through(queue_->completed_value());
-}
-
-bool GuestMemoryMirror::complete_through(std::uint64_t completed) {
-  if (pending_readbacks_.empty() || pending_readbacks_.front().value > completed) return true;
-  std::span<std::byte> readback_bytes;
-  if (!readback_.map(readback_bytes)) {
-    error_ = "failed to map Vulkan guest-memory readback buffer";
+  // The publisher writes each readback into guest memory as soon as the GPU
+  // finishes it; waiting means submitting the open batch and letting it
+  // catch up with everything queued so far.
+  if (wait && publisher_.pending() && !wait_readbacks(publisher_.last_value())) return false;
+  if (const auto failure = publisher_.error(); !failure.empty()) {
+    error_ = "Vulkan guest-memory readback failed: " + failure;
     return false;
-  }
-  // CPU threads may have written the same Xbox bytes while the copies were in
-  // flight. Xenon Memory briefly quiesces physical writers, re-ingests those
-  // CPU publications and applies only the subranges still owned by each
-  // readback's exact GPU generation.
-  auto write_window = memory_->physical_write_window();
-  if (!write_window) {
-    error_ = "failed to acquire Vulkan guest-memory readback window";
-    return false;
-  }
-  while (!pending_readbacks_.empty() && pending_readbacks_.front().value <= completed) {
-    const auto pending = pending_readbacks_.front();
-    pending_readbacks_.pop_front();
-    const auto safe_ranges =
-        coherency_.prepare_gpu_download(memory_->coherency(), pending.range, kTransferSize);
-    for (const auto& safe : safe_ranges) {
-      const auto offset = pending.offset + (safe.address - pending.range.address);
-      const auto previous_epoch =
-          memory_->coherency().newest_page_epoch(safe.address, safe.size);
-      std::uint64_t publication_epoch = 0u;
-      if (!write_window.write(safe.address, readback_bytes.subspan(offset, safe.size),
-                              &publication_epoch)) {
-        error_ = "Vulkan guest-memory readback destination is outside physical RAM";
-        return false;
-      }
-      (void)coherency_.commit_gpu_download(memory_->coherency(), safe, safe.address, safe.size,
-                                           publication_epoch);
-      if (publication_epoch)
-        published_writes_.push_back({publication_epoch, previous_epoch, safe.address, safe.size});
-    }
   }
   return true;
 }

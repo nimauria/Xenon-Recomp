@@ -10,6 +10,7 @@
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/register_file.hpp"
+#include "xenon/gpu/resolve_readback.hpp"
 #include "xenon/memory/address_space.hpp"
 
 namespace xenon::gpu {
@@ -217,6 +218,11 @@ class Backend {
     static_cast<void>(wait);
     return true;
   }
+
+  // When resolves reach guest memory (gpu::ResolveReadback). A backend that
+  // keeps no device-side copy of guest memory writes resolves straight into
+  // it, so has no readback to schedule.
+  virtual void set_resolve_readback(ResolveReadback policy) { static_cast<void>(policy); }
 };
 
 class NullBackend final : public Backend {

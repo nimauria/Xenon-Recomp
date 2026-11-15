@@ -39,6 +39,7 @@ void BackendCore<Derived, Api>::begin_submission(
   }
   if (memory != &new_memory) {
     textures.clear();
+    replaced_texture_keys.clear();
     texture_dirty.clear();
     guest_reads.clear();
     if (!self().initialize_mirror(new_memory)) {
@@ -154,6 +155,7 @@ PresentStatus BackendCore<Derived, Api>::present(
     const PresentationFrame& frame) {
   if (!presentation.ready()) return PresentStatus::NotConfigured;
   if (!ready || !memory) return PresentStatus::Error;
+  if (!apply_pending_resize()) return PresentStatus::Error;
   if (!presentation.width() || !presentation.height())
     return PresentStatus::Minimized;
   ScanoutPlan plan{};
@@ -186,7 +188,26 @@ bool BackendCore<Derived, Api>::capture_scanout(const PresentationFrame& frame,
 template <typename Derived, typename Api>
 bool BackendCore<Derived, Api>::resize_presentation(std::uint32_t width,
                                                      std::uint32_t height) {
-  if (!presentation.resize(width, height)) {
+  // Regression (AC6 crashed in the driver on going fullscreen): the window's
+  // event thread resized the swapchain - waiting the queue idle, releasing
+  // and recreating its back buffers - while the GPU thread was recording and
+  // presenting into them. The new size is only recorded here and applied by
+  // present(), on the thread that owns the swapchain; a failure to resize is
+  // reported by that present.
+  std::scoped_lock lock(pending_resize_mutex);
+  pending_resize = {width, height};
+  return true;
+}
+
+template <typename Derived, typename Api>
+bool BackendCore<Derived, Api>::apply_pending_resize() {
+  std::optional<std::pair<std::uint32_t, std::uint32_t>> size;
+  {
+    std::scoped_lock lock(pending_resize_mutex);
+    size.swap(pending_resize);
+  }
+  if (!size) return true;
+  if (!presentation.resize(size->first, size->second)) {
     error = presentation.error();
     return false;
   }

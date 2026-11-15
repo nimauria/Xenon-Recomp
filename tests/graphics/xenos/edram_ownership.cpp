@@ -27,10 +27,62 @@ void test_release_tiles_is_partial() {
   assert(ownership.owned_tile_count(0x7) == held - 2u);
 }
 
+// The per-draw fast path: an owner noted as holding a surface is known to
+// hold it until any tile changes owner - another owner taking tiles, a
+// release, a partial release, making tiles canonical or a reset - and only
+// for that exact surface (a taller one covers more tiles).
+void test_known_holdings_end_on_any_owner_change() {
+  EdramOwnershipTracker ownership;
+  const EdramSurfaceLayout surface{0, 640, 32, MsaaSamples::X1, false, false};
+  const EdramSurfaceLayout taller{0, 640, 64, MsaaSamples::X1, false, false};
+  const EdramSurfaceLayout elsewhere{1000, 640, 32, MsaaSamples::X1, false, false};
+  assert(!ownership.known_to_hold(0x7, surface));
+  const auto take = [&](EdramOwnerId owner, const EdramSurfaceLayout& s) {
+    const auto plan = ownership.plan(owner, s);
+    assert(plan.valid && ownership.commit(plan));
+    ownership.note_holds(owner, s);
+  };
+  take(0x7, surface);
+  assert(ownership.known_to_hold(0x7, surface));
+  assert(!ownership.known_to_hold(0x7, taller));
+  assert(!ownership.known_to_hold(0x8, surface));
+  // Re-taking what it already holds changes no owner: still known.
+  const auto again = ownership.plan(0x7, surface);
+  assert(again.valid && again.changes.empty() && ownership.commit(again));
+  assert(ownership.known_to_hold(0x7, surface));
+
+  // Any owner change anywhere ends what is known (it could be one of these
+  // tiles), even one on tiles far away.
+  take(0x9, elsewhere);
+  assert(!ownership.known_to_hold(0x7, surface));
+  ownership.note_holds(0x7, surface);
+  assert(ownership.known_to_hold(0x7, surface));
+
+  const std::uint16_t one[] = {0u};
+  ownership.release_tiles(0x7, one);
+  assert(!ownership.known_to_hold(0x7, surface));
+  take(0x7, surface);
+  ownership.make_canonical_region(surface, {0, 0, 80, 16});
+  assert(!ownership.known_to_hold(0x7, surface));
+  take(0x7, surface);
+  ownership.make_canonical(elsewhere);
+  assert(!ownership.known_to_hold(0x7, surface));
+  take(0x7, surface);
+  ownership.release(0x9);
+  assert(!ownership.known_to_hold(0x7, surface));
+  take(0x7, surface);
+  ownership.reset();
+  assert(!ownership.known_to_hold(0x7, surface));
+  // The canonical store is never "known" to hold anything.
+  ownership.note_holds(kCanonicalEdramOwner, surface);
+  assert(!ownership.known_to_hold(kCanonicalEdramOwner, surface));
+}
+
 }  // namespace
 
 int main() {
   test_release_tiles_is_partial();
+  test_known_holdings_end_on_any_owner_change();
   EdramOwnershipTracker ownership;
   const EdramSurfaceLayout wrapped{2040, 1280, 32, MsaaSamples::X1,
                                     false, false};
