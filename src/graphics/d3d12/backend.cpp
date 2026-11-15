@@ -82,6 +82,26 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     // snapshots and upload arenas owned by this Impl. Drain them before member
     // destruction starts.
     (void)queue.wait_idle();
+    if (pipeline_library) pipeline_library->save();
+  }
+
+  // Persistent pipeline library (GPU V3): pipelines this device built in
+  // earlier sessions load from their stored driver state instead of being
+  // compiled again. Opened beside the shader cache once it has a directory
+  // (set_shader_cache_directory()); saved when the backend is destroyed or
+  // the directory changes. Each pipeline created through it holds it.
+  std::shared_ptr<PipelineLibrary> pipeline_library{};
+  [[nodiscard]] std::shared_ptr<PipelineLibrary> native_pipeline_cache() const {
+    return pipeline_library;
+  }
+  void open_pipeline_library(const std::string& directory) {
+    if (pipeline_library) pipeline_library->save();
+    pipeline_library.reset();
+    if (directory.empty() || !ready) return;
+    pipeline_library =
+        PipelineLibrary::open(context.device(),
+                              std::filesystem::path(directory) / "d3d12_pipelines.bin",
+                              resources.root_signature_hash());
   }
   std::unordered_map<std::uint64_t, std::unique_ptr<RenderTargetImage>> dummy_render_targets{};
   EdramColorTransfer edram_color_transfer{};
@@ -326,96 +346,185 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   bool statistics_requested{};
   bool statistics_recorded{};
 
+  // GPU V3 draw recording. A draw is prepared here, in order: its slot's
+  // descriptor tables and constants are snapshotted, its indices uploaded,
+  // any barrier it needs recorded as ordered work - every decision made and
+  // every value copied into a PreparedDraw that refers to nothing mutable.
+  // Consecutive prepared draws form a run, recorded by record_prepared_run()
+  // (a pure function of the run) when ordered work or a submission closes it:
+  // here into the primary segment when it is short, or on a recording worker
+  // into a segment of its own (CommandQueue::record_run()).
+  struct PreparedDraw {
+    ID3D12PipelineState* pipeline{};
+    ID3D12RootSignature* root_signature{};
+    D3D12_PRIMITIVE_TOPOLOGY topology{D3D_PRIMITIVE_TOPOLOGY_UNDEFINED};
+    ID3D12DescriptorHeap* resource_heap{};
+    ID3D12DescriptorHeap* sampler_heap{};
+    ResourceLayout::DrawTables tables{};
+    bool indexed{};
+    D3D12_INDEX_BUFFER_VIEW index_view{};
+    UINT element_count{};
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtvs{};
+    UINT color_count{};
+    bool has_depth{};
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv{};
+    D3D12_VIEWPORT viewport{};
+    D3D12_RECT scissor{};
+    std::array<float, 4> blend_factor{};
+    bool stencil{};
+    bool separate_back_stencil{};
+    UINT stencil_reference{};
+    UINT stencil_back_reference{};
+    bool statistics{};
+  };
+  std::vector<PreparedDraw> open_run{};
+  // Runs at least this long are recorded on a worker (shorter ones cost more
+  // to hand over than to record here).
+  std::uint32_t parallel_run_draws{8};
+
   bool record_draw(const DrawRecording& draw, bool& record_failed) {
-    return queue.execute_async([&](ID3D12GraphicsCommandList* list,
-                                   std::uint32_t frame_index,
-                                   std::uint32_t draw_slot) {
-      resources.prepare_draw(frame_index, draw_slot);
-      D3D12_INDEX_BUFFER_VIEW index_view{};
-      std::size_t index_offset = 0;
-      if (!upload_draw_indices(draw, frame_index, index_offset)) {
-        record_failed = true;
-        return;
-      }
-      if (draw.batch.indexed) {
-        index_view.BufferLocation =
-            transient_uploads[frame_index].resource()->GetGPUVirtualAddress() +
-            index_offset;
-        index_view.SizeInBytes = static_cast<UINT>(draw.index_byte_size);
-        index_view.Format = DXGI_FORMAT_R32_UINT;
-      }
-      mirror.prepare_shader_access(list, draw.memexport_writable);
-      list->SetPipelineState(draw.pipeline.pipeline());
-      list->SetGraphicsRootSignature(resources.root_signature());
-      ID3D12DescriptorHeap* heaps[]{
-          resources.resource_heap(frame_index, draw_slot),
-          resources.sampler_heap(frame_index, draw_slot)};
-      list->SetDescriptorHeaps(2, heaps);
-      list->SetGraphicsRootConstantBufferView(
-          0, resources.constants_resource(frame_index, draw_slot)->GetGPUVirtualAddress());
-      list->SetGraphicsRootDescriptorTable(
-          1, resources.resource_heap(frame_index, draw_slot)
-                 ->GetGPUDescriptorHandleForHeapStart());
-      list->SetGraphicsRootDescriptorTable(
-          2, resources.sampler_heap(frame_index, draw_slot)
-                 ->GetGPUDescriptorHandleForHeapStart());
-      list->SetGraphicsRootDescriptorTable(
-          3, resources.memory_export_handle(frame_index, draw_slot));
-      list->OMSetBlendFactor(draw.blend_constant.data());
-      // The guest X/Y viewport transform runs in the vertex shader; the host
-      // viewport is the whole render target. Its depth range is the host
-      // depth transform's, which the vertex shader's Z part keeps ordered.
-      // A D24FS8 target holds half the guest depth on the host (see
-      // host_viewport_depth), so its draws use the halved range too.
-      const auto depth_format = draw.depth && draw.depth->requires_float24_conversion()
-                                    ? DepthRenderTargetFormat::D24FS8
-                                    : DepthRenderTargetFormat::D24S8;
-      const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(draw.render_width),
-                                    float(draw.render_height),
-                                    host_viewport_depth(depth_format, draw.z_min),
-                                    host_viewport_depth(depth_format, draw.z_max)};
-      const D3D12_RECT scissor{draw.scissor_left, draw.scissor_top,
-                               draw.scissor_right, draw.scissor_bottom};
-      list->RSSetViewports(1, &viewport);
-      list->RSSetScissorRects(1, &scissor);
-      std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtvs{};
-      for (std::size_t i = 0; i < draw.color_count; ++i)
-        rtvs[i] = draw.targets[i]->rtv();
-      const auto dsv = draw.depth ? draw.depth->dsv()
-                                    : D3D12_CPU_DESCRIPTOR_HANDLE{};
-      list->OMSetRenderTargets(static_cast<UINT>(draw.color_count),
-                               draw.color_count ? rtvs.data() : nullptr, FALSE,
-                               draw.depth ? &dsv : nullptr);
-      if (draw.depth && draw.state.depth_target.stencil_enabled) {
-        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList8> list8;
-        if (draw.state.depth_target.backface_stencil_enabled &&
-            SUCCEEDED(list->QueryInterface(IID_PPV_ARGS(&list8)))) {
-          list8->OMSetFrontAndBackStencilRef(
-              draw.state.depth_target.stencil_reference,
-              draw.state.depth_target.stencil_back_reference);
-        } else {
-          list->OMSetStencilRef(draw.state.depth_target.stencil_reference);
-        }
-      }
-      list->IASetPrimitiveTopology(draw.pipeline.native_topology());
-      const bool statistics = statistics_requested;
+    // The guest-memory mirror's barrier, when this draw needs one, is ordered
+    // work: it ends the open run and goes before the draw.
+    if (mirror.needs_shader_access_barrier(draw.memexport_writable) &&
+        !queue.execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t, std::uint32_t) {
+          mirror.prepare_shader_access(list, draw.memexport_writable);
+        }))
+      return false;
+    std::uint32_t frame_index = 0;
+    std::uint32_t draw_slot = 0;
+    if (!queue.reserve_slot(frame_index, draw_slot)) return false;
+    PreparedDraw prepared{};
+    prepared.tables = resources.prepare_draw(frame_index, draw_slot);
+    std::size_t index_offset = 0;
+    if (!upload_draw_indices(draw, frame_index, index_offset)) {
+      record_failed = true;
+      return true;
+    }
+    prepared.pipeline = draw.pipeline.pipeline();
+    prepared.root_signature = resources.root_signature();
+    prepared.topology = draw.pipeline.native_topology();
+    prepared.resource_heap = resources.resource_heap(frame_index);
+    prepared.sampler_heap = resources.sampler_heap(frame_index);
+    prepared.indexed = draw.batch.indexed;
+    if (draw.batch.indexed) {
+      prepared.index_view.BufferLocation =
+          transient_uploads[frame_index].resource()->GetGPUVirtualAddress() + index_offset;
+      prepared.index_view.SizeInBytes = static_cast<UINT>(draw.index_byte_size);
+      prepared.index_view.Format = DXGI_FORMAT_R32_UINT;
+      prepared.element_count = static_cast<UINT>(draw.batch.indices.size());
+    } else {
+      prepared.element_count = draw.batch.vertex_count;
+    }
+    prepared.color_count = static_cast<UINT>(draw.color_count);
+    for (std::size_t i = 0; i < draw.color_count; ++i) prepared.rtvs[i] = draw.targets[i]->rtv();
+    prepared.has_depth = draw.depth != nullptr;
+    if (draw.depth) prepared.dsv = draw.depth->dsv();
+    // The guest X/Y viewport transform runs in the vertex shader; the host
+    // viewport is the whole render target. Its depth range is the host
+    // depth transform's, which the vertex shader's Z part keeps ordered.
+    // A D24FS8 target holds half the guest depth on the host (see
+    // host_viewport_depth), so its draws use the halved range too.
+    const auto depth_format = draw.depth && draw.depth->requires_float24_conversion()
+                                  ? DepthRenderTargetFormat::D24FS8
+                                  : DepthRenderTargetFormat::D24S8;
+    prepared.viewport = {0.0f, 0.0f, float(draw.render_width), float(draw.render_height),
+                         host_viewport_depth(depth_format, draw.z_min),
+                         host_viewport_depth(depth_format, draw.z_max)};
+    prepared.scissor = {draw.scissor_left, draw.scissor_top, draw.scissor_right,
+                        draw.scissor_bottom};
+    std::copy(draw.blend_constant.begin(), draw.blend_constant.end(),
+              prepared.blend_factor.begin());
+    prepared.stencil = draw.depth && draw.state.depth_target.stencil_enabled;
+    prepared.separate_back_stencil = draw.state.depth_target.backface_stencil_enabled;
+    prepared.stencil_reference = draw.state.depth_target.stencil_reference;
+    prepared.stencil_back_reference = draw.state.depth_target.stencil_back_reference;
+    prepared.statistics = statistics_requested;
+    if (statistics_requested) {
       statistics_requested = false;
-      if (statistics)
-        list->BeginQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
-      if (draw.batch.indexed) {
-        list->IASetIndexBuffer(&index_view);
-        list->DrawIndexedInstanced(
-            static_cast<UINT>(draw.batch.indices.size()), 1, 0, 0, 0);
-      } else {
-        list->DrawInstanced(draw.batch.vertex_count, 1, 0, 0);
+      statistics_recorded = true;
+    }
+    open_run.push_back(prepared);
+    return true;
+  }
+
+  // Closes the open run (CommandQueue's before-ordered-work hook).
+  void close_draw_run() {
+    if (open_run.empty()) return;
+    auto run = std::move(open_run);
+    open_run.clear();
+    const bool parallel = run.size() >= parallel_run_draws;
+    if (!queue.record_run(
+            [this, run = std::move(run)](ID3D12GraphicsCommandList* list) {
+              record_prepared_run(list, run);
+            },
+            parallel) &&
+        error.empty())
+      error = named(queue.error());
+  }
+
+  // Records `run` into `list`: API calls only, from the prepared values, with
+  // state the list already holds from the run's previous draw not set again.
+  // Safe on any thread (it reads nothing but the run and immutable objects).
+  void record_prepared_run(ID3D12GraphicsCommandList* list,
+                           const std::vector<PreparedDraw>& run) const {
+    ID3D12PipelineState* bound_pipeline = nullptr;
+    ID3D12RootSignature* bound_root = nullptr;
+    ID3D12DescriptorHeap* bound_heaps[2]{};
+    D3D12_PRIMITIVE_TOPOLOGY bound_topology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList8> list8;
+    bool list8_queried = false;
+    for (const auto& draw : run) {
+      if (bound_pipeline != draw.pipeline) {
+        list->SetPipelineState(draw.pipeline);
+        bound_pipeline = draw.pipeline;
       }
-      if (statistics) {
+      if (bound_root != draw.root_signature) {
+        list->SetGraphicsRootSignature(draw.root_signature);
+        bound_root = draw.root_signature;
+      }
+      if (bound_heaps[0] != draw.resource_heap || bound_heaps[1] != draw.sampler_heap) {
+        ID3D12DescriptorHeap* heaps[]{draw.resource_heap, draw.sampler_heap};
+        list->SetDescriptorHeaps(2, heaps);
+        bound_heaps[0] = draw.resource_heap;
+        bound_heaps[1] = draw.sampler_heap;
+      }
+      list->SetGraphicsRootConstantBufferView(0, draw.tables.constants);
+      list->SetGraphicsRootDescriptorTable(1, draw.tables.resources);
+      list->SetGraphicsRootDescriptorTable(2, draw.tables.samplers);
+      list->SetGraphicsRootDescriptorTable(3, draw.tables.memory_export);
+      list->OMSetBlendFactor(draw.blend_factor.data());
+      list->RSSetViewports(1, &draw.viewport);
+      list->RSSetScissorRects(1, &draw.scissor);
+      list->OMSetRenderTargets(draw.color_count, draw.color_count ? draw.rtvs.data() : nullptr,
+                               FALSE, draw.has_depth ? &draw.dsv : nullptr);
+      if (draw.stencil) {
+        if (draw.separate_back_stencil && !list8_queried) {
+          list8_queried = true;
+          (void)list->QueryInterface(IID_PPV_ARGS(&list8));
+        }
+        if (draw.separate_back_stencil && list8)
+          list8->OMSetFrontAndBackStencilRef(draw.stencil_reference, draw.stencil_back_reference);
+        else
+          list->OMSetStencilRef(draw.stencil_reference);
+      }
+      if (bound_topology != draw.topology) {
+        list->IASetPrimitiveTopology(draw.topology);
+        bound_topology = draw.topology;
+      }
+      if (draw.statistics)
+        list->BeginQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
+      if (draw.indexed) {
+        list->IASetIndexBuffer(&draw.index_view);
+        list->DrawIndexedInstanced(draw.element_count, 1, 0, 0, 0);
+      } else {
+        list->DrawInstanced(draw.element_count, 1, 0, 0);
+      }
+      if (draw.statistics) {
         list->EndQuery(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0);
         list->ResolveQueryData(statistics_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0, 1,
                                statistics_readback.Get(), 0);
-        statistics_recorded = true;
       }
-    });
+    }
   }
 };
 
@@ -436,6 +545,8 @@ bool Backend::initialize(const ContextConfig& config) {
     impl_->error = impl_->resources.error();
     return false;
   }
+  // Ordered work and submissions close the open draw run first.
+  impl_->queue.set_before_ordered_work([impl = impl_.get()] { impl->close_draw_run(); });
   for (std::uint32_t i = 0; i < CommandQueue::kFrameCount; ++i) {
     if (!impl_->transient_uploads[i].initialize(
             impl_->context.device(), Impl::kTransientUploadBytes,
@@ -492,11 +603,42 @@ bool Backend::invalidate_edram_native_state() {
 }
 
 void Backend::sync_guest_reads() { impl_->sync_guest_reads(); }
+void Backend::prefetch_shaders(std::span<const ir::Command> commands) {
+  if (impl_) impl_->prefetch_shaders(commands);
+}
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
 bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
 void Backend::set_resolve_readback(ResolveReadback policy) { impl_->resolve_readback = policy; }
+bool Backend::set_parallel_recording(unsigned threads, std::uint32_t min_run_draws) {
+  if (!impl_ || !impl_->queue.set_recording_threads(threads)) return false;
+  impl_->parallel_run_draws = (std::max)(1u, min_run_draws);
+  return true;
+}
+
+std::uint64_t Backend::parallel_runs_recorded() const noexcept {
+  return impl_ ? impl_->queue.parallel_runs() : 0u;
+}
+
+Backend::GpuTiming Backend::gpu_timing() {
+  if (!impl_ || !impl_->queue.wait_idle()) return {};
+  impl_->queue.collect_timestamps();
+  return {impl_->queue.timed_batches(), impl_->queue.timed_gpu_ns()};
+}
+
+Backend::ShaderPrefetchStatistics Backend::shader_prefetch_statistics() const noexcept {
+  if (!impl_) return {};
+  return {impl_->prefetched_variants, impl_->prefetched_variant_hits,
+          impl_->variants_compiled_at_draw};
+}
+
+Backend::PipelineLibraryStatistics Backend::pipeline_library_statistics() const noexcept {
+  if (!impl_ || !impl_->pipeline_library) return {};
+  return {true, impl_->pipeline_library->loaded(), impl_->pipeline_library->stored()};
+}
+
 void Backend::set_shader_cache_directory(const std::string& directory) {
   impl_->shader_cache.set_disk_directory(directory);
+  impl_->open_pipeline_library(directory);
 }
 
 bool Backend::capture_scanout(const PresentationFrame& frame, std::uint32_t width,

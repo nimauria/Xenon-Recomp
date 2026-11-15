@@ -16,6 +16,9 @@ namespace xenon::gpu::vulkan {
 
 class GraphicsPipeline {
  public:
+  // The VkPipelineCache initialize() creates through (the backend's
+  // persistent cache); none by default.
+  void set_pipeline_cache(VkPipelineCache cache) noexcept { cache_ = cache; }
   GraphicsPipeline() = default;
   ~GraphicsPipeline();
   GraphicsPipeline(const GraphicsPipeline&) = delete;
@@ -38,6 +41,7 @@ class GraphicsPipeline {
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
+  VkPipelineCache cache_{VK_NULL_HANDLE};
   VkDevice device_{VK_NULL_HANDLE};
   VkPipeline pipeline_{VK_NULL_HANDLE};
   std::string error_{};

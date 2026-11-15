@@ -461,10 +461,8 @@ void CommandProcessor::emit_register_write(std::uint32_t index,
       const std::array<std::byte, 4> bytes{
           static_cast<std::byte>(value >> 24), static_cast<std::byte>(value >> 16),
           static_cast<std::byte>(value >> 8), static_cast<std::byte>(value)};
-      before_guest_visible_effect();
-      if (!memory_.write_physical(destination, bytes)) {
-        throw std::runtime_error("Xenos scratch register write-back has no backing");
-      }
+      write_guest_effect(destination, bytes,
+                         "Xenos scratch register write-back has no backing");
       ++stats_.scratch_writebacks;
     }
   }
@@ -487,10 +485,7 @@ void CommandProcessor::write_physical_dword(std::uint32_t address_with_endian,
   // The Xenos memory path is little-endian before the packet-selected endian
   // transformation; CPU-visible big-endian access is supplied by MemoryPort.
   const auto bytes = encode_le32(stored);
-  before_guest_visible_effect();
-  if (!memory_.write_physical(address, bytes)) {
-    throw std::runtime_error("Xenos physical write has no backing");
-  }
+  write_guest_effect(address, bytes, "Xenos physical write has no backing");
   stream_.emit(ir::PhysicalMemoryWrite{address, logical_value, endian});
   ++stats_.physical_writes;
 }
@@ -502,6 +497,17 @@ std::shared_ptr<const DecodedShader> CommandProcessor::decode_program(
   return slot;
 }
 
+void CommandProcessor::write_guest_effect(std::uint32_t address,
+                                          std::span<const std::byte> bytes,
+                                          const char* failure) {
+  if (guest_write_sink_) {
+    guest_write_sink_(address, std::vector<std::byte>(bytes.begin(), bytes.end()), false);
+    return;
+  }
+  before_guest_visible_effect();
+  if (!memory_.write_physical(address, bytes)) throw std::runtime_error(failure);
+}
+
 std::uint32_t CommandProcessor::read_physical_dword(
     std::uint32_t address_with_endian) const {
   const Endian endian = static_cast<Endian>(address_with_endian & 0x3u);
@@ -510,6 +516,7 @@ std::uint32_t CommandProcessor::read_physical_dword(
   if (std::uint64_t(address) + 4u > memory::kPhysicalMemorySize) {
     throw std::out_of_range("Xenos physical read outside RAM");
   }
+  before_guest_memory_read(address, 4u);
   std::array<std::byte, 4> snapshot{};
   if (!memory_.copy_physical_range(address, snapshot)) {
     throw std::runtime_error("Xenos physical read has no backing");
@@ -821,6 +828,7 @@ void CommandProcessor::execute_load_alu_constant(
   }
 
   std::vector<std::byte> snapshot(std::size_t(size) * 4u);
+  before_guest_memory_read(address, size * 4u);
   if (!memory_.copy_physical_range(address, snapshot)) {
     throw std::runtime_error("PM4_LOAD_ALU_CONSTANT snapshot failed");
   }
@@ -989,6 +997,14 @@ void CommandProcessor::execute_event_write_extent(
     encoded[i * 2u] = value[0];
     encoded[i * 2u + 1u] = value[1];
   }
+  // Deferred (see set_guest_write_sink()): the sink compares when the work
+  // before the packet has executed, and drops a write that changes nothing.
+  if (guest_write_sink_) {
+    ++stats_.extent_event_writes;
+    ++stats_.event_packets;
+    guest_write_sink_(address, std::vector<std::byte>(encoded.begin(), encoded.end()), true);
+    return;
+  }
   // A write that leaves memory as it is cannot be observed, so it needs no
   // ordering against the work before it. AC6 issues one after nearly every
   // draw, each to a location already holding these extents; making each one
@@ -1076,6 +1092,19 @@ void CommandProcessor::execute_mem_write(std::span<const std::uint32_t> payload)
     throw std::out_of_range("Xenos physical write outside RAM");
   }
 
+  if (guest_write_sink_) {
+    std::vector<std::byte> bytes(static_cast<std::size_t>(byte_count64));
+    for (std::size_t i = 0; i < word_count; ++i) {
+      const auto encoded = encode_le32(gpu_swap(payload[i + 1u], endian));
+      std::copy(encoded.begin(), encoded.end(), bytes.begin() + std::ptrdiff_t(i * 4u));
+    }
+    guest_write_sink_(physical_base, std::move(bytes), false);
+    for (std::size_t i = 0; i < word_count; ++i)
+      stream_.emit(ir::PhysicalMemoryWrite{
+          static_cast<std::uint32_t>(physical_base + i * 4u), payload[i + 1u], endian});
+    stats_.physical_writes += word_count;
+    return;
+  }
   before_guest_visible_effect();
   auto write = memory_.physical_write_span(
       physical_base, static_cast<std::uint32_t>(byte_count64));
@@ -1215,6 +1244,7 @@ void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
   draw.raw_payload = std::move(payload);
   stream_.emit(std::move(draw));
   ++stats_.draws;
+  if (draw_emitted_callback_) draw_emitted_callback_();
 }
 
 void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
@@ -1408,6 +1438,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::out_of_range("PM4_IM_LOAD shader outside physical RAM");
     }
     std::vector<std::byte> microcode_snapshot(std::size_t(size) * 4u);
+    before_guest_memory_read(address, size * 4u);
     if (!memory_.copy_physical_range(address, microcode_snapshot)) {
       throw std::runtime_error("PM4_IM_LOAD shader snapshot failed");
     }
@@ -1472,6 +1503,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       throw std::out_of_range("PM4_LOAD_CONSTANT_CONTEXT outside physical RAM");
     }
     std::vector<std::byte> constant_snapshot(std::size_t(size) * 4u);
+    before_guest_memory_read(address, size * 4u);
     if (!memory_.copy_physical_range(address, constant_snapshot)) {
       throw std::runtime_error("PM4_LOAD_CONSTANT_CONTEXT snapshot failed");
     }

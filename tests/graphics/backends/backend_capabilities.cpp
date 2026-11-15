@@ -567,6 +567,56 @@ int main() {
                                    vulkan_decoded));
   assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                        vulkan_texture.view(), vulkan_texture.sampler()));
+  // Regression (AC6 on Vulkan ran its menus at 17 fps): resolve readbacks
+  // were read by the CPU from uncached host-visible memory, ~40 ms each. A
+  // buffer the CPU reads back takes cached memory wherever the device has it.
+  {
+    VkPhysicalDeviceMemoryProperties memory_properties{};
+    vkGetPhysicalDeviceMemoryProperties(vulkan_context.physical_device(), &memory_properties);
+    constexpr VkMemoryPropertyFlags kCachedCoherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                      VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    bool device_has_cached = false;
+    for (std::uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i)
+      device_has_cached |=
+          (memory_properties.memoryTypes[i].propertyFlags & kCachedCoherent) == kCachedCoherent;
+    xenon::gpu::vulkan::Buffer readback;
+    assert(readback.initialize(vulkan_context.physical_device(), vulkan_context.device(), 65536,
+                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               xenon::gpu::vulkan::Buffer::kCpuReadback));
+    assert((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0u);
+    if (device_has_cached)
+      assert((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0u);
+    std::cout << "Vulkan readback memory cached: "
+              << ((readback.memory_properties() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "yes" : "no")
+              << std::endl;
+  }
+  // GPU V3: draw constants live in one dynamic uniform buffer per frame; a
+  // draw with nothing rebound since an earlier draw of the same batch reuses
+  // that draw's descriptor set with its own constants offset.
+  {
+    const auto written_before = vulkan_resources.sets_written();
+    const auto first = vulkan_resources.prepare_draw(1, 0);
+    const auto second = vulkan_resources.prepare_draw(1, 1);
+    assert(first.set != VK_NULL_HANDLE && second.set == first.set);
+    assert(second.constants_offset > first.constants_offset);
+    assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                         vulkan_texture.view(), vulkan_texture.sampler()));
+    const auto third = vulkan_resources.prepare_draw(1, 2);
+    assert(third.set == first.set);
+    assert(vulkan_resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                         vulkan_texture.view(), vulkan_texture.sampler()));
+    const auto fourth = vulkan_resources.prepare_draw(1, 3);
+    assert(fourth.set != VK_NULL_HANDLE && fourth.set != first.set);
+    assert(vulkan_resources.prepare_draw(1, 4).set == fourth.set);
+    // A new batch on frame 1 starts again at slot 0 and writes its own set.
+    const auto restarted = vulkan_resources.prepare_draw(1, 0);
+    assert(restarted.set == first.set && restarted.constants_offset == first.constants_offset);
+    assert(vulkan_resources.prepare_draw(2, 5).set != fourth.set);
+    assert(vulkan_resources.sets_written() == written_before + 4u);
+  }
   xenon::gpu::EdramSurfaceLayout vulkan_surface{
       0, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
   xenon::gpu::vulkan::RenderTargetImage vulkan_target;
@@ -1039,6 +1089,50 @@ int main() {
     assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                   texture.resource(), texture.format(), 1,
                                   texture_descriptor));
+    // GPU V3: a frame's descriptor tables live in one heap pair, bound once
+    // per command list. A draw with nothing rebound since an earlier draw of
+    // the same batch reuses that draw's tables; a rebinding gets a fresh copy
+    // in its own slot; a new batch on the frame (slots restart at 0) never
+    // reuses the previous batch's tables; another frame uses its own heaps.
+    {
+      const auto copied_before = resources.tables_copied();
+      const auto reused_before = resources.tables_reused();
+      const auto first = resources.prepare_draw(1, 0);
+      const auto second = resources.prepare_draw(1, 1);
+      assert(first.resources.ptr && first.samplers.ptr && first.constants);
+      assert(second.resources.ptr == first.resources.ptr);
+      assert(second.samplers.ptr == first.samplers.ptr);
+      assert(second.constants != first.constants);
+      // Binding the same view and sampler again changes nothing.
+      assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                    texture.resource(), texture.format(), 1,
+                                    texture_descriptor));
+      const auto third = resources.prepare_draw(1, 2);
+      assert(third.resources.ptr == first.resources.ptr);
+      // A new binding (slot 1's view and sampler) is copied at the draw's slot.
+      assert(resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                    texture.resource(), texture.format(), 1,
+                                    texture_descriptor));
+      const auto fourth = resources.prepare_draw(1, 3);
+      const auto resource_stride = std::uint64_t(xenon::gpu::d3d12::ResourceLayout::kResourceCount) *
+                                   context.device()->GetDescriptorHandleIncrementSize(
+                                       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      assert(fourth.resources.ptr == first.resources.ptr + 3u * resource_stride);
+      assert(fourth.samplers.ptr != first.samplers.ptr);
+      assert(fourth.memory_export.ptr > fourth.resources.ptr);
+      const auto fifth = resources.prepare_draw(1, 4);
+      assert(fifth.resources.ptr == fourth.resources.ptr);
+      // A new batch on frame 1: slot 0 is copied again, in its own region.
+      const auto restarted = resources.prepare_draw(1, 0);
+      assert(restarted.resources.ptr == first.resources.ptr);
+      const auto other = resources.prepare_draw(2, 5);
+      assert(other.resources.ptr ==
+             resources.resource_heap(2)->GetGPUDescriptorHandleForHeapStart().ptr +
+                 5u * resource_stride);
+      assert(resources.resource_heap(1) != resources.resource_heap(2));
+      assert(resources.tables_copied() == copied_before + 4u);
+      assert(resources.tables_reused() == reused_before + 3u);
+    }
     xenon::gpu::EdramSurfaceLayout d3d_surface{
         0, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
     xenon::gpu::d3d12::RenderTargetImage d3d_target;
@@ -1220,19 +1314,16 @@ int main() {
       std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
     assert(d3d_pipeline_ready);
     std::cout << "D3D12 pipeline ready\n";
-    resources.prepare_draw(0, 0);
+    const auto d3d_tables = resources.prepare_draw(0, 0);
+    assert(d3d_tables.resources.ptr && d3d_tables.samplers.ptr && d3d_tables.constants);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());
       list->SetGraphicsRootSignature(resources.root_signature());
-      ID3D12DescriptorHeap* heaps[]{resources.resource_heap(0, 0),
-                                    resources.sampler_heap(0, 0)};
+      ID3D12DescriptorHeap* heaps[]{resources.resource_heap(0), resources.sampler_heap(0)};
       list->SetDescriptorHeaps(2, heaps);
-      list->SetGraphicsRootConstantBufferView(
-          0, resources.constants_resource(0, 0)->GetGPUVirtualAddress());
-      list->SetGraphicsRootDescriptorTable(
-          1, resources.resource_heap(0, 0)->GetGPUDescriptorHandleForHeapStart());
-      list->SetGraphicsRootDescriptorTable(
-          2, resources.sampler_heap(0, 0)->GetGPUDescriptorHandleForHeapStart());
+      list->SetGraphicsRootConstantBufferView(0, d3d_tables.constants);
+      list->SetGraphicsRootDescriptorTable(1, d3d_tables.resources);
+      list->SetGraphicsRootDescriptorTable(2, d3d_tables.samplers);
       const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(d3d_target.width()),
                                     float(d3d_target.height()), 0.0f, 1.0f};
       const D3D12_RECT scissor{0, 0, static_cast<LONG>(d3d_target.width()),

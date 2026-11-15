@@ -1,4 +1,6 @@
 #include "xenon/gpu/d3d12/resource_layout.hpp"
+#include "xenon/gpu/d3d12/pipeline_library.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/texture.hpp"
 
 #include <algorithm>
@@ -113,6 +115,11 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
     reset();
     return false;
   }
+  {
+    PipelineNameHash hash;
+    hash.add(serialized->GetBufferPointer(), serialized->GetBufferSize());
+    root_signature_hash_ = hash.value;
+  }
 
   resource_increment_ = device_->GetDescriptorHandleIncrementSize(
       D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -136,15 +143,23 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
     reset();
     return false;
   }
+  // One table per draw slot in each frame's heaps; the sampler heap's 2048
+  // shader-visible descriptors fit exactly 64 tables of 32.
+  static_assert(kSamplerCount * CommandQueue::kBatchCommandCount <= 2048u,
+                "a frame's sampler tables must fit one shader-visible sampler heap");
   for (auto& frame : frames_) {
+    if (!create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                     kResourceCount * CommandQueue::kBatchCommandCount,
+                     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, frame.resource_heap) ||
+        !create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                     kSamplerCount * CommandQueue::kBatchCommandCount,
+                     D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, frame.sampler_heap)) {
+      error_ = "D3D12 frame descriptor heap creation failed";
+      reset();
+      return false;
+    }
     for (auto& draw : frame.draws) {
-      if (!create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kResourceCount,
-                       D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-                       draw.resource_heap) ||
-          !create_heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerCount,
-                       D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
-                       draw.sampler_heap) ||
-          !draw.constants.initialize(device_, kConstantBufferBytes,
+      if (!draw.constants.initialize(device_, kConstantBufferBytes,
                                      D3D12_HEAP_TYPE_UPLOAD,
                                      D3D12_RESOURCE_STATE_GENERIC_READ) ||
           !draw.constants.map(draw.constants_mapping)) {
@@ -198,9 +213,10 @@ bool ResourceLayout::initialize(ID3D12Device* device) {
   sampler_known_.fill(false);
 
   std::fill(constants_staging_.begin(), constants_staging_.end(), std::byte{});
-  for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-    for (std::uint32_t draw = 0; draw < CommandQueue::kBatchCommandCount; ++draw)
-      prepare_draw(frame, draw);
+  ++resource_generation_;
+  ++sampler_generation_;
+  last_resources_ = {};
+  last_samplers_ = {};
   return true;
 }
 
@@ -257,6 +273,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
     device_->CreateShaderResourceView(resource, &view, resource_handle);
     bound_view.resource = resource;
     bound_view.desc = view;
+    ++resource_generation_;
   }
 
   const auto address_mode = [this](std::uint8_t clamp) {
@@ -296,6 +313,7 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   device_->CreateSampler(&sampler, sampler_handle);
   bound_samplers_[slot] = sampler;
   sampler_known_[slot] = true;
+  ++sampler_generation_;
   return true;
 }
 
@@ -323,38 +341,75 @@ bool ResourceLayout::bind_guest_memory(ID3D12Resource* resource,
   uav_handle.ptr +=
       std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
   device_->CreateUnorderedAccessView(resource, nullptr, &uav, uav_handle);
+  ++resource_generation_;
   return true;
 }
 
-void ResourceLayout::prepare_draw(std::uint32_t frame_index,
-                                  std::uint32_t draw_slot) {
-  if (!device_ || frame_index >= frames_.size() ||
-      draw_slot >= CommandQueue::kBatchCommandCount)
-    return;
-  auto& draw = frames_[frame_index].draws[draw_slot];
-  device_->CopyDescriptorsSimple(
-      kResourceCount, draw.resource_heap->GetCPUDescriptorHandleForHeapStart(),
-      staging_resource_heap_->GetCPUDescriptorHandleForHeapStart(),
-      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  device_->CopyDescriptorsSimple(
-      kSamplerCount, draw.sampler_heap->GetCPUDescriptorHandleForHeapStart(),
-      staging_sampler_heap_->GetCPUDescriptorHandleForHeapStart(),
-      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-  std::copy(constants_staging_.begin(), constants_staging_.end(),
-            draw.constants_mapping.begin());
+D3D12_GPU_DESCRIPTOR_HANDLE ResourceLayout::resource_table(std::uint32_t frame_index,
+                                                           std::uint32_t region) const noexcept {
+  auto handle = frames_[frame_index].resource_heap->GetGPUDescriptorHandleForHeapStart();
+  handle.ptr += std::uint64_t(region) * kResourceCount * resource_increment_;
+  return handle;
 }
 
-D3D12_GPU_DESCRIPTOR_HANDLE ResourceLayout::memory_export_handle(
-    std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
-  if (frame_index >= frames_.size() ||
-      draw_slot >= CommandQueue::kBatchCommandCount ||
-      !frames_[frame_index].draws[draw_slot].resource_heap)
-    return {};
-  auto handle = frames_[frame_index]
-                    .draws[draw_slot]
-                    .resource_heap->GetGPUDescriptorHandleForHeapStart();
-  handle.ptr += std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
+D3D12_GPU_DESCRIPTOR_HANDLE ResourceLayout::sampler_table(std::uint32_t frame_index,
+                                                          std::uint32_t region) const noexcept {
+  auto handle = frames_[frame_index].sampler_heap->GetGPUDescriptorHandleForHeapStart();
+  handle.ptr += std::uint64_t(region) * kSamplerCount * sampler_increment_;
   return handle;
+}
+
+ResourceLayout::DrawTables ResourceLayout::prepare_draw(std::uint32_t frame_index,
+                                                        std::uint32_t draw_slot) {
+  DrawTables tables{};
+  if (!device_ || frame_index >= frames_.size() ||
+      draw_slot >= CommandQueue::kBatchCommandCount || !frames_[frame_index].resource_heap)
+    return tables;
+  auto& frame = frames_[frame_index];
+  // A table written for an earlier slot of this batch (same frame, lower
+  // slot: a new batch on this frame starts again at slot 0) holding the
+  // current staging generation is reused: slots only increase within a batch,
+  // so nothing later in it overwrites that table while the GPU may read it.
+  const auto reuse = [&](const LastTables& last, std::uint64_t generation) {
+    return last.frame == frame_index && last.slot < draw_slot && last.generation == generation;
+  };
+  const auto copy_table = [&](LastTables& last, std::uint64_t generation,
+                              ID3D12DescriptorHeap* destination_heap,
+                              ID3D12DescriptorHeap* staging, std::uint32_t count,
+                              std::uint32_t increment, D3D12_DESCRIPTOR_HEAP_TYPE type) {
+    auto destination = destination_heap->GetCPUDescriptorHandleForHeapStart();
+    destination.ptr += std::uint64_t(draw_slot) * count * increment;
+    device_->CopyDescriptorsSimple(count, destination,
+                                   staging->GetCPUDescriptorHandleForHeapStart(), type);
+    last = {frame_index, draw_slot, draw_slot, generation};
+  };
+  if (reuse(last_resources_, resource_generation_)) {
+    last_resources_.slot = draw_slot;
+    ++tables_reused_;
+    perf::add(perf::Counter::BindingsReused, 1u);
+  } else {
+    copy_table(last_resources_, resource_generation_, frame.resource_heap.Get(),
+               staging_resource_heap_.Get(), kResourceCount, resource_increment_,
+               D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    ++tables_copied_;
+    perf::add(perf::Counter::BindingsWritten, 1u);
+  }
+  if (reuse(last_samplers_, sampler_generation_)) {
+    last_samplers_.slot = draw_slot;
+  } else {
+    copy_table(last_samplers_, sampler_generation_, frame.sampler_heap.Get(),
+               staging_sampler_heap_.Get(), kSamplerCount, sampler_increment_,
+               D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+  }
+  auto& draw = frame.draws[draw_slot];
+  std::copy(constants_staging_.begin(), constants_staging_.end(),
+            draw.constants_mapping.begin());
+  tables.resources = resource_table(frame_index, last_resources_.region);
+  tables.samplers = sampler_table(frame_index, last_samplers_.region);
+  tables.memory_export = tables.resources;
+  tables.memory_export.ptr += std::uint64_t(kMemoryExportDescriptor) * resource_increment_;
+  tables.constants = draw.constants.resource()->GetGPUVirtualAddress();
+  return tables;
 }
 
 void ResourceLayout::reset() noexcept {
@@ -362,10 +417,12 @@ void ResourceLayout::reset() noexcept {
     for (auto& draw : frame.draws) {
       draw.constants_mapping = {};
       draw.constants.reset();
-      draw.sampler_heap.Reset();
-      draw.resource_heap.Reset();
     }
+    frame.sampler_heap.Reset();
+    frame.resource_heap.Reset();
   }
+  last_resources_ = {};
+  last_samplers_ = {};
   for (auto& bound : bound_views_) bound = {};
   sampler_known_.fill(false);
   staging_sampler_heap_.Reset();

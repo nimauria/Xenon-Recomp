@@ -64,6 +64,11 @@ struct SessionConfig {
   // Where the graphics backend keeps compiled shaders between sessions;
   // empty keeps them for this session only.
   std::string shader_cache_directory{};
+  // Vulkan instance extensions the host's window system needs to give the
+  // backend a presentation surface (VK_KHR_surface and the platform's
+  // surface extension), supplied by the host that owns the window, so the
+  // renderer stays independent of the windowing library.
+  std::vector<std::string> vulkan_instance_extensions{};
   bool enable_input{false};
   std::vector<std::string> input_drivers{};
 
@@ -588,14 +593,17 @@ class XenonSession final : public cpu::RuntimeServices {
   // AudioSystem's guest-callback pump loop until stop_guest_callback_pump().
   [[nodiscard]] std::uint32_t run_audio_callback_thread();
 #endif
-  // Single combined GPU pump thread: drains the guest's PM4 command ring
-  // buffer into graphics_system_/gpu_ and, at ~60Hz, presents the current
-  // front buffer and fires the guest's registered vsync interrupt callback -
-  // all serialized on this ONE dedicated host thread. This is deliberate:
-  // gpu::Backend's begin_submission()/consume()/end_submission()/present()
-  // have no internal synchronization over shared mutable state (pipeline
-  // caches, EDRAM trackers, presentation state), so ring-drain and present
-  // must never run concurrently on two different threads. Mirrors the audio
+  // GPU pump thread (the ordered frontend): drains the guest's PM4 command
+  // ring through graphics_system_'s command processor, raises PM4 interrupts
+  // and, at each vblank, asks for the current front buffer to be presented.
+  // The graphics IR it decodes, and the presents, are executed by
+  // graphics_system_'s backend thread (gpu::BackendExecutor) in the order
+  // they were handed over. gpu::Backend's begin_submission()/consume()/
+  // end_submission()/present() have no internal synchronization over shared
+  // mutable state (pipeline caches, EDRAM trackers, presentation state), so
+  // the executor never lets two backend operations overlap: each runs on the
+  // backend thread, or inline on the pump while that thread is idle and held
+  // off. Mirrors the audio
   // callback thread's KernelThread/KPCR/TLS machinery exactly (see
   // start_audio_guest_thread()/invoke_audio_callback() above) because vsync
   // also needs to call INTO GUEST CODE (the registered graphics interrupt
@@ -627,9 +635,14 @@ class XenonSession final : public cpu::RuntimeServices {
   // and delivers the vsync interrupt, whatever the worker is doing - as on
   // hardware, vertical blank does not wait for the GPU.
   [[nodiscard]] std::uint32_t run_gpu_vsync_thread();
-  // Presents the front buffer if the title swapped in a frame since
-  // `last_presented_generation` (GPU pump thread only).
-  void present_front_buffer(std::uint64_t& last_presented_generation);
+  // Presents `front_buffer` (the front buffer as the pump saw it at the
+  // vblank) if the title swapped in a frame since the last one presented.
+  // Runs as a GPU backend task, in order behind the work decoded before the
+  // vblank (GraphicsSystem::post_backend_task()).
+  void present_front_buffer(const kernel::KernelProcess::GpuFrontBufferState& front_buffer);
+  // The front buffer generation (VdSwap count) last presented successfully;
+  // GPU backend tasks only.
+  std::uint64_t last_presented_generation_{0};
   // Signals the pump loop to stop and joins gpu_pump_thread_ if it was ever
   // started. Safe to call unconditionally (including when the thread was
   // never created, e.g. graphics disabled or start_gpu_pump_thread() never

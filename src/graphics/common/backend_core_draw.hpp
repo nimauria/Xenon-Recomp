@@ -77,7 +77,9 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
   xenon::logging::ActivityScope activity(
       activity_key, {static_cast<std::uint64_t>(draw->primitive_type), draw->index_count,
                      draw->vertex_shader.hash, draw->pixel_shader.hash});
-  pipeline_states.insert(state.pipeline_hash(*draw));
+  // Hashed once: the statistics set here and the pipeline key below.
+  const auto state_pipeline_hash = state.pipeline_hash(*draw);
+  pipeline_states.insert(state_pipeline_hash);
   std::array<RenderTargetImage*, 4> active_targets{};
   std::array<std::uint8_t, 4> active_write_masks{};
   std::array<BlendState, 4> active_blends{};
@@ -586,14 +588,19 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                 std::shared_ptr<const CompiledShader> base) {
       if (!memexport_writable || decoded.reflection.memory_exports != 0)
         return base;
-      const std::uint64_t variant_key =
-          shader_hash ^ 0x4D454D4558505257ull;
+      const std::uint64_t variant_key = writable_variant_key(shader_hash);
       auto found = writable_guest_memory_shaders.find(variant_key);
       if (found != writable_guest_memory_shaders.end())
         return found->second;
-      ShaderLoweringOptions lowering_options{};
-      lowering_options.force_guest_memory_rw = true;
-      const auto lowered = HlslShaderLowerer::lower(decoded, lowering_options);
+      // Usually lowered and compiled already, on a worker
+      // (prefetch_variants()).
+      const auto prepared =
+          prepare_variant(variant_key, decoded, writable_variant_options());
+      if (!prepared.lowered) {
+        error = named("writable guest-memory shader lowering failed: " + prepared.error);
+        return std::shared_ptr<const CompiledShader>{};
+      }
+      const auto& lowered = *prepared.lowered;
       unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
       unsupported.unsupported_shader_features += lowered.unsupported_features;
       unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
@@ -603,10 +610,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                            : lowered.diagnostics.front();
         return std::shared_ptr<const CompiledShader>{};
       }
-      ShaderCompileOptions compile_options{};
-      compile_options.format = Api::kShaderBinaryFormat;
-      const auto compiled =
-          shader_cache.get_or_compile(lowered, compile_options);
+      const auto compiled = prepared.compiled;
       if (!compiled->succeeded) {
         error = compiled->diagnostics.empty()
                            ? named("writable guest-memory shader compilation failed")
@@ -631,27 +635,20 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         (state.depth_target.test_enabled || state.depth_target.write_enabled);
     const auto param_gen = state.program.param_gen_interpolator();
     const bool point_primitive = draw->primitive_type == PrimitiveType::PointList;
-    if (float20_depth || param_gen != ShaderProgramState::kNoParamGen) {
-      const bool per_sample = float20_depth && samples != MsaaSamples::X1;
-      const std::uint64_t variant_key =
-          draw->pixel_shader.hash ^ (float20_depth ? 0xD24F20E4D24F20E4ull : 0ull) ^
-          (per_sample ? 0x8000000000000000ull : 0ull) ^
-          (memexport_writable ? 0x0400000000000000ull : 0ull) ^
-          (param_gen != ShaderProgramState::kNoParamGen
-               ? 0x5041524D47454E00ull ^ (std::uint64_t(param_gen) << 40u) ^
-                     (point_primitive ? 0x0000100000000000ull : 0ull)
-               : 0ull);
+    if (const auto request = pixel_variant(draw->pixel_shader.hash, float20_depth, samples,
+                                           memexport_writable, param_gen, point_primitive)) {
+      const std::uint64_t variant_key = request->key;
       auto variant = float20_depth_shaders.find(variant_key);
       if (variant == float20_depth_shaders.end()) {
-        ShaderLoweringOptions lowering_options{};
-        if (float20_depth)
-          lowering_options.pixel_depth_output = PixelDepthOutputMode::Float20e4NearestEven;
-        lowering_options.force_sample_frequency = per_sample;
-        lowering_options.force_guest_memory_rw = memexport_writable;
-        lowering_options.param_gen_interpolator = param_gen;
-        lowering_options.param_gen_point = point_primitive;
-        const auto lowered =
-            HlslShaderLowerer::lower(decoded_pixel->second, lowering_options);
+        // Usually lowered and compiled already, on a worker
+        // (prefetch_variants()).
+        const auto prepared =
+            prepare_variant(variant_key, decoded_pixel->second, request->options);
+        if (!prepared.lowered) {
+          error = "pixel shader variant lowering failed: " + prepared.error;
+          return;
+        }
+        const auto& lowered = *prepared.lowered;
         unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
         unsupported.unsupported_shader_features += lowered.unsupported_features;
         unsupported.unsupported_fetch_formats += lowered.unsupported_fetch_formats;
@@ -661,10 +658,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                              : lowered.diagnostics.front();
           return;
         }
-        ShaderCompileOptions compile_options{};
-        compile_options.format = Api::kShaderBinaryFormat;
-        const auto compiled =
-            shader_cache.get_or_compile(lowered, compile_options);
+        const auto compiled = prepared.compiled;
         if (!compiled->succeeded) {
           error = compiled->diagnostics.empty()
                              ? "pixel shader variant compilation failed"
@@ -725,7 +719,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     const bool point_sprites = batch.topology == HostPrimitiveTopology::PointList;
     if (point_sprites && !point_sprite_shader) {
       ShaderCompileOptions options{};
-      options.format = Api::kShaderBinaryFormat;
+      options = guest_shader_options();
       point_sprite_shader =
           shader_cache.get_or_compile(make_point_sprite_geometry_shader(), options);
       if (!point_sprite_shader->succeeded) {
@@ -744,7 +738,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       ++unsupported.fallback_shader_uses;
       if (!rectangle_list_shader) {
         ShaderCompileOptions options{};
-        options.format = Api::kShaderBinaryFormat;
+        options = guest_shader_options();
         rectangle_list_shader = shader_cache.get_or_compile(
             make_rectangle_list_geometry_shader(), options);
         if (!rectangle_list_shader->succeeded) {
@@ -767,7 +761,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         !vertex_memexport) {
       return;
     }
-    auto pipeline_key = state.pipeline_hash(*draw);
+    auto pipeline_key = state_pipeline_hash;
     pipeline_key ^= std::uint64_t(batch.topology) << 61u;
     if (batch.requires_rectangle_expansion)
       pipeline_key ^= 0x52454354414E474Cull;
@@ -802,6 +796,9 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
           blend_states.data(), color_count);
       const perf::ScopedTime pipeline_time(perf::Counter::PipelineCreateNs,
                                            perf::Counter::PipelineCreates);
+      // A backend with a persistent pipeline cache creates through it.
+      if constexpr (requires { self().native_pipeline_cache(); })
+        pipeline->set_pipeline_cache(self().native_pipeline_cache());
       if (!pipeline->initialize(
               context.device(), self().pipeline_root(),
               *vertex_shader, *pixel_shader,

@@ -59,3 +59,11 @@ if(NOT WIN32)
   target_link_libraries(xenon-prepare PRIVATE ${CMAKE_DL_LIBS})
 endif()
 xenon_enable_warnings(xenon-prepare)
+
+# shader-bench: times DXC on the shaders a Xenon shader cache holds, per
+# compile setting (development: tuning compile options on real game shaders).
+if(TARGET xenon_graphics_dxc)
+  add_executable(shader-bench shader_bench.cpp)
+  target_link_libraries(shader-bench PRIVATE xenon_graphics_dxc)
+  xenon_enable_warnings(shader-bench)
+endif()

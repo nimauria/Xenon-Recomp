@@ -153,7 +153,10 @@ bool XenonSession::init_gpu() {
   if (want_vulkan) {
 #if defined(XENON_HAS_VULKAN)
     auto backend = std::make_unique<gpu::vulkan::Backend>();
-    if (!backend->initialize()) {
+    gpu::vulkan::ContextConfig context_config{};
+    for (const auto& extension : config_.vulkan_instance_extensions)
+      context_config.instance_extensions.push_back(extension.c_str());
+    if (!backend->initialize(context_config)) {
       set_error("Vulkan graphics backend initialization failed: " + backend->error());
       return false;
     }

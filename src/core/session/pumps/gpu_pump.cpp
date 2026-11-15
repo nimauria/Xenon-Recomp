@@ -105,6 +105,15 @@ bool XenonSession::start_gpu_pump_thread() {
   // true yet. Ring work published from now on wakes the worker.
   gpu_pump_running_.store(true);
   kernel_process_->set_gpu_work_notifier([this] { gpu_wake_.notify(kGpuWakeRingWork); });
+  // GPU V3: graphics IR is played, and frames presented, on a backend thread
+  // of its own while the pump decodes on (gpu::BackendExecutor).
+  // XENON_GPU_BACKEND_THREAD=0 keeps both on the pump thread, for A/B
+  // measurements against the single-threaded pipeline.
+  last_presented_generation_ = 0;
+  {
+    const char* value = std::getenv("XENON_GPU_BACKEND_THREAD");
+    if (!(value && value[0] == '0' && value[1] == '\0')) graphics_system_->start_backend_thread();
+  }
 
   if (!gpu_pump_thread_->start() || !gpu_vsync_thread_->start()) {
     set_error("Failed to start the GPU pump threads");
@@ -135,6 +144,9 @@ void XenonSession::stop_gpu_pump_thread() noexcept {
     static_cast<void>(gpu_pump_thread_->join());
     gpu_pump_thread_.reset();
   }
+  // The pump no longer hands work over: play what it handed over (presents
+  // included), then join the backend thread, before gpu_ can be destroyed.
+  if (graphics_system_) graphics_system_->stop_backend_thread();
 }
 
 // XENON_FRAME_DUMP=<directory>: every XENON_FRAME_DUMP_EVERY-th presented
@@ -215,8 +227,6 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   // which raises no notification; and a bounded idle fallback.
   constexpr auto kParkedWaitPoll = std::chrono::milliseconds(1);
   constexpr auto kIdleFallback = std::chrono::milliseconds(50);
-  // The front buffer generation (VdSwap count) last presented successfully.
-  std::uint64_t last_presented_generation = 0;
   // The VdSwap count last added to the frame statistics.
   std::uint64_t counted_swap_generation = 0;
 
@@ -232,11 +242,21 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
     // work the title queues after it: the vsync thread holds the interrupt
     // that releases the title to render into that buffer again until this
     // has been presented (scanout_latched_).
+    //
+    // The present is a backend operation behind the work decoded so far,
+    // which drew what the front buffer holds: it waits for that work (a
+    // pipelined drain may still be executing), and runs on this thread
+    // without a hand-off when the backend is idle (measured: posting it woke
+    // the backend thread at each vblank for no overlap).
     if ((reasons & kGpuWakePresent) != 0u) {
       const auto vblank = scanout_requested_.load(std::memory_order_acquire);
-      logging::ActivityScope present_activity(present_key, {last_presented_generation, 0, 0, 0});
-      present_front_buffer(last_presented_generation);
-      scanout_latched_.publish(vblank);
+      const auto front_buffer = kernel_process_->gpu_front_buffer();
+      graphics_system_->run_backend_task([this, vblank, front_buffer] {
+        logging::ActivityScope present_activity(present_key,
+                                                {last_presented_generation_, 0, 0, 0});
+        present_front_buffer(front_buffer);
+        scanout_latched_.publish(vblank);
+      });
     }
 
     const auto _tick_phase_start = Clock::now();
@@ -245,9 +265,10 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       logging::ActivityScope ring_activity(
           ring_key, {ring.read_index, ring.write_index, ring.capacity_dwords, 0u});
       try {
-        // Executes the drained work in order with its fences and interrupts,
-        // so the read pointer below is written back only once the commands
-        // before it, and the ring words they used, are done with.
+        // Executes the drained work in order with its fences and interrupts.
+        // The kernel's read index is where decoding goes on; the guest's copy
+        // below is written back only once the commands before it, and the
+        // ring words they used, are done with.
         const auto new_read_index = graphics_system_->submit_ring(
             *gpu_, ring.base_address, ring.capacity_dwords, ring.read_index,
             ring.write_index);
@@ -260,15 +281,23 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         // does VdInitializeRingBuffer), so write it as physical memory: treating
         // it as a guest virtual address faulted on the free page every drain and
         // the title never saw the read pointer advance.
+        // Behind the drain's work, which a pipelined drain leaves executing
+        // (GraphicsSystem::write_guest_after_work()).
         if (ring.rptr_writeback_address != 0 && memory_) {
-          const std::array<std::byte, 4> big_endian{
-              static_cast<std::byte>(new_read_index >> 24), static_cast<std::byte>(new_read_index >> 16),
-              static_cast<std::byte>(new_read_index >> 8), static_cast<std::byte>(new_read_index)};
-          if (!memory_->write_physical(ring.rptr_writeback_address, big_endian) &&
-              config_.enable_logging) {
-            std::scoped_lock console_log_lock(console_log_mutex());
-            std::cout << "[XenonSession] GPU pump: read-pointer writeback to physical 0x" << std::hex
-                      << ring.rptr_writeback_address << std::dec << " has no RAM backing" << std::endl;
+          if (!memory_->physical_data(ring.rptr_writeback_address)) {
+            if (config_.enable_logging) {
+              std::scoped_lock console_log_lock(console_log_mutex());
+              std::cout << "[XenonSession] GPU pump: read-pointer writeback to physical 0x"
+                        << std::hex << ring.rptr_writeback_address << std::dec
+                        << " has no RAM backing" << std::endl;
+            }
+          } else {
+            graphics_system_->write_guest_after_work(
+                ring.rptr_writeback_address,
+                {static_cast<std::byte>(new_read_index >> 24),
+                 static_cast<std::byte>(new_read_index >> 16),
+                 static_cast<std::byte>(new_read_index >> 8),
+                 static_cast<std::byte>(new_read_index)});
           }
         }
       } catch (const std::exception& ex) {
@@ -333,10 +362,11 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   return 0;
 }
 
-void XenonSession::present_front_buffer(std::uint64_t& last_presented_generation) {
+void XenonSession::present_front_buffer(
+    const kernel::KernelProcess::GpuFrontBufferState& front_buffer) {
   using Clock = std::chrono::steady_clock;
+  auto& last_presented_generation = last_presented_generation_;
   {
-    const auto front_buffer = kernel_process_->gpu_front_buffer();
     // What is scanned out is the front buffer as VdSwap's texture fetch
     // constant describes it; a front buffer published without one has no
     // known layout and is not presented.

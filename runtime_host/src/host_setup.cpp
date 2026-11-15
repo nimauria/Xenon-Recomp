@@ -1,6 +1,7 @@
 #include "host_setup.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -235,6 +236,22 @@ xenon::core::SessionConfig build_session_config(const LaunchConfig& launch) {
   // to a Null backend for a real Play request. See docs/runtime/RUNTIME_SESSION.md.
   config.enable_graphics = launch.renderer != "None";
   config.graphics_backend = launch.renderer;
+#if defined(XENON_HAS_PRESENTATION_HOST)
+  // A Vulkan renderer presents to this process's window: its instance needs
+  // the window system's surface extensions, which only the host knows.
+  {
+    std::string renderer = launch.renderer;
+    std::transform(renderer.begin(), renderer.end(), renderer.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (renderer == "vulkan" && !launch.headless_mode) {
+      std::string error;
+      config.vulkan_instance_extensions = PresentationHost::vulkan_instance_extensions(&error);
+      if (config.vulkan_instance_extensions.empty())
+        std::cerr << "[runtime_host] Vulkan window-system extensions unavailable: " << error
+                  << std::endl;
+    }
+  }
+#endif
   // "Persistent" keeps compiled shaders in the session directory between
   // runs; "Session only" (or the cache switched off) keeps them in memory.
   if (launch.shader_cache && launch.shader_cache_mode == "Persistent" &&

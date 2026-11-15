@@ -31,6 +31,32 @@ SDL_Window* create_window(const std::string& title, std::uint32_t width, std::ui
 
 PresentationHost::~PresentationHost() { destroy(); }
 
+std::vector<std::string> PresentationHost::vulkan_instance_extensions(std::string* error) {
+  std::vector<std::string> result;
+#if defined(XENON_HAS_VULKAN)
+  if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+    if (error) *error = std::string("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: ") + SDL_GetError();
+    return result;
+  }
+  if (!SDL_Vulkan_LoadLibrary(nullptr)) {
+    if (error) *error = std::string("SDL_Vulkan_LoadLibrary failed: ") + SDL_GetError();
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    return result;
+  }
+  Uint32 count = 0;
+  if (const char* const* names = SDL_Vulkan_GetInstanceExtensions(&count)) {
+    result.assign(names, names + count);
+  } else if (error) {
+    *error = std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError();
+  }
+  SDL_Vulkan_UnloadLibrary();
+  SDL_QuitSubSystem(SDL_INIT_VIDEO);
+#else
+  if (error) *error = "this runtime host was built without Vulkan";
+#endif
+  return result;
+}
+
 void* PresentationHost::native_window() const noexcept {
 #if defined(_WIN32)
   if (!window_) return nullptr;

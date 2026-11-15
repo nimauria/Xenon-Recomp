@@ -43,6 +43,12 @@ class PresentationHost {
  public:
   ~PresentationHost();
 
+  // The Vulkan instance extensions the window system needs for a
+  // presentation surface (SDL_Vulkan_GetInstanceExtensions), for the
+  // session to create the Vulkan backend's instance with. Empty, with
+  // *error set, when the Vulkan loader or video subsystem is unavailable.
+  [[nodiscard]] static std::vector<std::string> vulkan_instance_extensions(std::string* error);
+
   // Creates the window and wires it to `backend` (Vulkan or D3D12 - detected
   // via dynamic_cast; any other concrete xenon::gpu::Backend, notably
   // NullBackend, is rejected since headless/test sessions must not create a

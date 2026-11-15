@@ -15,6 +15,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
   buffer_ = std::exchange(other.buffer_, VK_NULL_HANDLE);
   memory_ = std::exchange(other.memory_, VK_NULL_HANDLE);
   size_ = std::exchange(other.size_, 0);
+  memory_properties_ = std::exchange(other.memory_properties_, 0);
   mapped_ = std::exchange(other.mapped_, nullptr);
   error_ = std::move(other.error_);
   return *this;
@@ -22,7 +23,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 
 bool Buffer::initialize(VkPhysicalDevice physical_device, VkDevice device,
                         VkDeviceSize size, VkBufferUsageFlags usage,
-                        VkMemoryPropertyFlags properties) {
+                        VkMemoryPropertyFlags properties, VkMemoryPropertyFlags preferred) {
   reset();
   error_.clear();
   if (!physical_device || !device || !size) {
@@ -43,19 +44,23 @@ bool Buffer::initialize(VkPhysicalDevice physical_device, VkDevice device,
   vkGetBufferMemoryRequirements(device_, buffer_, &requirements);
   VkPhysicalDeviceMemoryProperties memory{};
   vkGetPhysicalDeviceMemoryProperties(physical_device, &memory);
-  std::uint32_t type = UINT32_MAX;
-  for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
-    if ((requirements.memoryTypeBits & (1u << i)) &&
-        (memory.memoryTypes[i].propertyFlags & properties) == properties) {
-      type = i;
-      break;
+  const auto find_type = [&](VkMemoryPropertyFlags wanted) {
+    for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+      if ((requirements.memoryTypeBits & (1u << i)) &&
+          (memory.memoryTypes[i].propertyFlags & wanted) == wanted)
+        return i;
     }
-  }
+    return UINT32_MAX;
+  };
+  // A type with the preferred properties too, else any with the required.
+  std::uint32_t type = preferred ? find_type(properties | preferred) : UINT32_MAX;
+  if (type == UINT32_MAX) type = find_type(properties);
   if (type == UINT32_MAX) {
     error_ = "no Vulkan memory type satisfies the buffer requirements";
     reset();
     return false;
   }
+  memory_properties_ = memory.memoryTypes[type].propertyFlags;
   VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   allocate.allocationSize = requirements.size;
   allocate.memoryTypeIndex = type;
@@ -76,6 +81,7 @@ void Buffer::reset() noexcept {
   memory_ = VK_NULL_HANDLE;
   device_ = VK_NULL_HANDLE;
   size_ = 0;
+  memory_properties_ = 0;
 }
 
 bool Buffer::map(std::span<std::byte>& bytes) {

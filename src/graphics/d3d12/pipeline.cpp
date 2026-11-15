@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #include "xenon/logging/probe_log.hpp"
 
@@ -172,6 +173,21 @@ D3D12_DEPTH_STENCILOP_DESC1 native_stencil_face(
           read_mask, write_mask};
 }
 
+void hash_shader(PipelineNameHash& hash, const D3D12_SHADER_BYTECODE& shader) {
+  hash.add(shader.BytecodeLength);
+  if (shader.pShaderBytecode) hash.add(shader.pShaderBytecode, shader.BytecodeLength);
+}
+
+// Field by field: the stencil faces have padding.
+void hash_stencil_face(PipelineNameHash& hash, const D3D12_DEPTH_STENCILOP_DESC1& face) {
+  hash.add(face.StencilFailOp);
+  hash.add(face.StencilDepthFailOp);
+  hash.add(face.StencilPassOp);
+  hash.add(face.StencilFunc);
+  hash.add(face.StencilReadMask);
+  hash.add(face.StencilWriteMask);
+}
+
 }  // namespace
 
 bool GraphicsPipeline::initialize(ID3D12Device* device,
@@ -223,7 +239,10 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
       return false;
     }
   }
-  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+  loaded_from_library_ = false;
+  // Zeroed whole, padding included: the library name hashes its bytes.
+  D3D12_GRAPHICS_PIPELINE_STATE_DESC desc;
+  std::memset(&desc, 0, sizeof(desc));
   desc.pRootSignature = root_signature;
   desc.VS = {vertex_shader.binary.data(), vertex_shader.binary.size()};
   desc.PS = {pixel_shader.binary.data(), pixel_shader.binary.size()};
@@ -291,6 +310,23 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
   desc.NumRenderTargets = static_cast<UINT>(color_formats.size());
   desc.DSVFormat = depth_format;
   desc.SampleDesc.Count = sample_count(samples);
+  // The library name: everything the pipeline is made of. The root
+  // signature is the library's (PipelineLibrary::salt()).
+  PipelineNameHash name_hash;
+  if (library_) {
+    name_hash.add(library_->salt());
+    hash_shader(name_hash, desc.VS);
+    hash_shader(name_hash, desc.PS);
+    hash_shader(name_hash, desc.GS);
+    name_hash.add(desc.BlendState);
+    name_hash.add(desc.SampleMask);
+    name_hash.add(desc.RasterizerState);
+    name_hash.add(desc.PrimitiveTopologyType);
+    name_hash.add(desc.NumRenderTargets);
+    name_hash.add(desc.RTVFormats);
+    name_hash.add(desc.DSVFormat);
+    name_hash.add(desc.SampleDesc);
+  }
   Microsoft::WRL::ComPtr<ID3D12Device2> device2;
   if (independent_stencil_masks_supported(device) &&
       SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device2)))) {
@@ -327,11 +363,28 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
     stream.sample_desc.value = desc.SampleDesc;
     const D3D12_PIPELINE_STATE_STREAM_DESC stream_desc{
         sizeof(stream), &stream};
-    const HRESULT result =
-        device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pipeline_));
-    if (FAILED(result)) {
-      error_ = failure_text("CreatePipelineState", result);
-      return false;
+    std::wstring name;
+    if (library_) {
+      name_hash.add(std::uint8_t{2});  // the DEPTH_STENCIL2 stream
+      name_hash.add(depth.DepthEnable);
+      name_hash.add(depth.DepthWriteMask);
+      name_hash.add(depth.DepthFunc);
+      name_hash.add(depth.StencilEnable);
+      hash_stencil_face(name_hash, depth.FrontFace);
+      hash_stencil_face(name_hash, depth.BackFace);
+      name_hash.add(depth.DepthBoundsTestEnable);
+      name = name_hash.name();
+      pipeline_ = library_->load(name, stream_desc);
+      loaded_from_library_ = pipeline_ != nullptr;
+    }
+    if (!pipeline_) {
+      const HRESULT result =
+          device2->CreatePipelineState(&stream_desc, IID_PPV_ARGS(&pipeline_));
+      if (FAILED(result)) {
+        error_ = failure_text("CreatePipelineState", result);
+        return false;
+      }
+      if (library_) library_->store(name, pipeline_.Get());
     }
   } else if (depth_state && depth_state->stencil_enabled &&
              depth_state->backface_stencil_enabled &&
@@ -341,11 +394,24 @@ bool GraphicsPipeline::initialize(ID3D12Device* device,
                   depth_state->stencil_back_write_mask)) {
     error_ = "D3D12 device lacks independent front/back stencil-mask support";
     return false;
-  } else if (const HRESULT result = device->CreateGraphicsPipelineState(
-                 &desc, IID_PPV_ARGS(&pipeline_));
-             FAILED(result)) {
-    error_ = failure_text("CreateGraphicsPipelineState", result);
-    return false;
+  } else {
+    std::wstring name;
+    if (library_) {
+      name_hash.add(std::uint8_t{1});  // the classic description
+      name_hash.add(desc.DepthStencilState);
+      name = name_hash.name();
+      pipeline_ = library_->load(name, desc);
+      loaded_from_library_ = pipeline_ != nullptr;
+    }
+    if (!pipeline_) {
+      if (const HRESULT result = device->CreateGraphicsPipelineState(
+              &desc, IID_PPV_ARGS(&pipeline_));
+          FAILED(result)) {
+        error_ = failure_text("CreateGraphicsPipelineState", result);
+        return false;
+      }
+      if (library_) library_->store(name, pipeline_.Get());
+    }
   }
   topology_ = command_topology(topology);
   return true;

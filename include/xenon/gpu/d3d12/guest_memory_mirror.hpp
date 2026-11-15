@@ -64,6 +64,13 @@ class GuestMemoryMirror {
     return coherency_.device_range_valid(address, width);
   }
   void prepare_shader_access(ID3D12GraphicsCommandList* list, bool writable);
+  // Whether prepare_shader_access() would record a barrier now (a state
+  // transition, or the UAV barrier between memory-exporting accesses).
+  [[nodiscard]] bool needs_shader_access_barrier(bool writable) const noexcept {
+    const auto target = writable ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                 : D3D12_RESOURCE_STATE_GENERIC_READ;
+    return state_ != target || writable;
+  }
   [[nodiscard]] ID3D12Resource* resource() const noexcept {
     return mirror_.resource();
   }

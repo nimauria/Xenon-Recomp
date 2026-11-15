@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -156,6 +157,38 @@ class CommandProcessor {
   void set_sync_point_callback(std::function<void()> callback) {
     sync_point_callback_ = std::move(callback);
   }
+  // Called after each draw (a resolve is one) is emitted into the stream, so
+  // a renderer executing IR on another thread can hand work over while the
+  // drain continues (GraphicsSystem streams it to its backend thread).
+  void set_draw_emitted_callback(std::function<void()> callback) {
+    draw_emitted_callback_ = std::move(callback);
+  }
+  // GPU V3: with a sink installed, the guest memory writes the command
+  // stream makes - fences (EVENT_WRITE_SHD), MEM_WRITE, REG_TO_MEM, scratch
+  // write-back, EVENT_WRITE_EXT - are handed to it instead of performed here.
+  // The sink performs each after the work before it, as the hardware does
+  // when the GPU reaches the packet (GraphicsSystem: an ordered backend task),
+  // so decoding does not wait for that work. `skip_if_unchanged`: the write
+  // may be dropped when memory already holds the bytes (EVENT_WRITE_EXT; the
+  // sink reports the outcome through note_deferred_extent_write()). Without a
+  // sink, each write is made here after the guest-visible barrier.
+  using GuestWriteSink = std::function<void(std::uint32_t physical_address,
+                                            std::vector<std::byte> bytes,
+                                            bool skip_if_unchanged)>;
+  void set_guest_write_sink(GuestWriteSink sink) { guest_write_sink_ = std::move(sink); }
+  // Called with the physical range the command processor is about to read
+  // (COND_EXEC, COND_WRITE, memory waits, constant and microcode loads), so it
+  // reads what the stream wrote there before. The command stream's own words
+  // (ring, indirect buffers) are fetched without it, as the hardware's
+  // prefetching command fetch does.
+  void set_guest_read_fence(std::function<void(std::uint32_t address, std::uint32_t size)> fence) {
+    guest_read_fence_ = std::move(fence);
+  }
+  // The outcome of a deferred EVENT_WRITE_EXT; callable from any thread.
+  void note_deferred_extent_write(bool unchanged) noexcept {
+    (unchanged ? deferred_extent_unchanged_ : deferred_extent_written_)
+        .fetch_add(1u, std::memory_order_relaxed);
+  }
 
   // The WAIT_REG_MEM the most recent stalled drain is parked on (diagnostics: a
   // title stuck at this point is waiting on state nothing in the host model sets).
@@ -174,7 +207,19 @@ class CommandProcessor {
   // no notification, so the drainer polls while this holds.
   [[nodiscard]] bool parked_on_wait() const noexcept { return resume_pending_; }
 
-  [[nodiscard]] const Statistics& statistics() const noexcept { return stats_; }
+  // Counters so far. Deferred EVENT_WRITE_EXT outcomes are folded in.
+  [[nodiscard]] Statistics statistics() const noexcept {
+    auto result = stats_;
+    const auto unchanged = deferred_extent_unchanged_.load(std::memory_order_relaxed);
+    const auto written = deferred_extent_written_.load(std::memory_order_relaxed);
+    result.unchanged_event_writes += unchanged;
+    result.event_memory_writes += written;
+    result.physical_writes += 3u * written;
+    return result;
+  }
+  // Draws (resolves included) decoded so far: the cheap read of
+  // statistics().draws for per-barrier checks.
+  [[nodiscard]] std::uint64_t draw_count() const noexcept { return stats_.draws; }
   [[nodiscard]] std::uint32_t max_indirect_depth() const noexcept {
     return max_indirect_depth_;
   }
@@ -281,6 +326,18 @@ class CommandProcessor {
   std::function<void(const FrontBufferSwap&)> swap_callback_{};
   std::function<void()> guest_visible_barrier_{};
   std::function<void()> sync_point_callback_{};
+  std::function<void()> draw_emitted_callback_{};
+  GuestWriteSink guest_write_sink_{};
+  std::function<void(std::uint32_t, std::uint32_t)> guest_read_fence_{};
+  std::atomic<std::uint64_t> deferred_extent_unchanged_{0};
+  std::atomic<std::uint64_t> deferred_extent_written_{0};
+  // A guest memory write the stream makes at this point: through the sink,
+  // or here after the guest-visible barrier.
+  void write_guest_effect(std::uint32_t address, std::span<const std::byte> bytes,
+                          const char* failure);
+  void before_guest_memory_read(std::uint32_t address, std::uint32_t size) const {
+    if (guest_read_fence_) guest_read_fence_(address, size);
+  }
   void before_guest_visible_effect() {
     if (guest_visible_barrier_) guest_visible_barrier_();
   }

@@ -565,12 +565,27 @@ ResolveRectangle decode_resolve_rectangle(
 void ResourceStateTracker::reset() noexcept {
   registers_.fill(0);
   generation_ = 0;
+  targets_dirty_ = true;
+  textures_dirty_ = ~0u;
+  vertex_buffers_dirty_.fill(~0u);
 }
 
 void ResourceStateTracker::apply(const ir::RegisterWrite& write) noexcept {
   if (write.index >= registers_.size()) return;
   registers_[write.index] = write.value;
   ++generation_;
+  // What the write changes of snapshot(): a fetch constant dword its texture
+  // slot (six dwords each) and vertex fetch (two); the float constants
+  // (0x4000-0x47FF) nothing; anything else the target/raster/copy state.
+  if (write.index >= kFetchConstantBase &&
+      write.index < kFetchConstantBase + kFetchConstantDwords) {
+    const auto offset = write.index - kFetchConstantBase;
+    if (offset / 6u < 32u) textures_dirty_ |= 1u << (offset / 6u);
+    if (const auto fetch = offset / 2u; fetch < 96u)
+      vertex_buffers_dirty_[fetch / 32u] |= 1u << (fetch % 32u);
+  } else if (write.index < 0x4000u || write.index >= kFetchConstantBase + kFetchConstantDwords) {
+    targets_dirty_ = true;
+  }
 }
 
 std::optional<VertexBufferDescriptor> ResourceStateTracker::vertex_buffer(
@@ -674,12 +689,27 @@ std::optional<TextureDescriptor> decode_texture_fetch_constant(
 }
 
 DrawResourceState ResourceStateTracker::snapshot() const noexcept {
-  auto result = snapshot_targets();
-  for (unsigned i = 0; i < 32; ++i) {
-    result.textures[i] = texture(i);
-    for (unsigned j = 0; j < 3; ++j) result.vertex_buffers[i][j] = vertex_buffer(i, j);
+  if (targets_dirty_) {
+    auto targets = snapshot_targets();
+    targets.textures = decoded_.textures;
+    targets.vertex_buffers = decoded_.vertex_buffers;
+    decoded_ = targets;
+    targets_dirty_ = false;
   }
-  return result;
+  for (auto dirty = textures_dirty_; dirty; dirty &= dirty - 1u) {
+    const auto slot = static_cast<unsigned>(std::countr_zero(dirty));
+    decoded_.textures[slot] = texture(slot);
+  }
+  textures_dirty_ = 0u;
+  for (unsigned word = 0; word < vertex_buffers_dirty_.size(); ++word) {
+    for (auto dirty = vertex_buffers_dirty_[word]; dirty; dirty &= dirty - 1u) {
+      const auto fetch = word * 32u + static_cast<unsigned>(std::countr_zero(dirty));
+      decoded_.vertex_buffers[fetch / 3u][fetch % 3u] = vertex_buffer(fetch / 3u, fetch % 3u);
+    }
+    vertex_buffers_dirty_[word] = 0u;
+  }
+  decoded_.generation = generation_;
+  return decoded_;
 }
 
 DrawResourceState ResourceStateTracker::snapshot_targets() const noexcept {

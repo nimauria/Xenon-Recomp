@@ -25,6 +25,44 @@ std::string swizzle(std::uint8_t value) {
   return result;
 }
 
+// Temporary registers. A shader that addresses any temporary relative to the
+// loop index aL keeps all 64 in an array it can index; every other shader
+// names each one as a variable of its own (r_N), which the compiler takes
+// straight to SSA values. Indexing the array, even by constants, made DXC's
+// SPIR-V legalization most of a shader's compile time: AC6's mission shaders
+// compiled in 46 ms on average instead of 174 ms, the slowest in 229 ms
+// instead of 2.1 s. Set by lower() for the shader it is emitting (lowering
+// runs on several compile workers at once).
+thread_local bool t_register_array = true;
+
+std::string temporary(unsigned index, bool relative) {
+  if (t_register_array || relative)
+    return "r[(" + std::to_string(index) + (relative ? " + aL" : "") + ") & 63]";
+  return "r_" + std::to_string(index & 63u);
+}
+
+// Whether any instruction of `shader` addresses a temporary relative to aL.
+bool uses_relative_temporaries(const DecodedShader& shader) {
+  for (const auto& instruction : shader.instructions) {
+    if (instruction.kind == ShaderInstructionKind::Alu) {
+      const auto& alu = instruction.alu;
+      for (const auto& source : alu.sources)
+        if (source.temporary && source.relative) return true;
+      if (!alu.export_data &&
+          (alu.vector_destination_relative || alu.scalar_destination_relative))
+        return true;
+    } else if (instruction.kind == ShaderInstructionKind::VertexFetch) {
+      if (instruction.vertex_fetch.source_relative ||
+          instruction.vertex_fetch.destination_relative)
+        return true;
+    } else if (instruction.texture_fetch.source_relative ||
+               instruction.texture_fetch.destination_relative) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Relative temporaries add the loop index aL. Relative constants add a0 when
 // the instruction's const_address_register_relative bit is set, otherwise aL.
 std::string source(const AluSource& value, ShaderStage stage,
@@ -33,9 +71,7 @@ std::string source(const AluSource& value, ShaderStage stage,
   if (value.negate) out << "-";
   if (value.absolute_value) out << "abs(";
   if (value.temporary) {
-    out << "r[(" << value.index;
-    if (value.relative) out << " + aL";
-    out << ") & 63]";
+    out << temporary(value.index, value.relative);
   } else {
     out << "XenonFloatConstants[((" << value.index;
     if (value.relative) out << (constant_address_register_relative ? " + a0" : " + aL");
@@ -79,9 +115,7 @@ std::string destination(const AluInstruction& alu, bool scalar) {
   if (alu.export_data) {
     out << "e[" << unsigned(index) << "]";
   } else {
-    out << "r[(" << unsigned(index);
-    if (relative) out << " + aL";
-    out << ") & 63]";
+    out << temporary(index, relative);
   }
   return out.str();
 }
@@ -292,19 +326,18 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
     // AC6's characters came out contorted and its aircraft torn apart.
     if (!fetch.mini_fetch) {
       out << "          vfetch_base = xenon_vertex_fetch_base(" << unsigned(fetch.fetch_constant)
-          << ", " << unsigned(fetch.fetch_constant_select) << ", xenon_fetch_index(r[("
-          << unsigned(fetch.source_register);
-      if (fetch.source_relative) out << " + aL";
-      out << ") & 63][" << unsigned(fetch.source_swizzle & 3u) << "], "
+          << ", " << unsigned(fetch.fetch_constant_select) << ", xenon_fetch_index("
+          << temporary(fetch.source_register, fetch.source_relative) << "["
+          << unsigned(fetch.source_swizzle & 3u) << "], "
           << (fetch.index_rounded ? "true" : "false") << "), " << unsigned(fetch.stride_dwords)
           << ");\n";
     }
     out << "          float4 fetched = xenon_vertex_decode(vfetch_base, " << fetch.offset_dwords
         << ", " << unsigned(fetch.data_format) << ", " << (fetch.signed_data ? "true" : "false")
         << ", " << (fetch.normalized ? "true" : "false") << ");\n"
-        << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + aL";
-    out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
+        << "          xenon_write_fetch("
+        << temporary(fetch.destination_register, fetch.destination_relative) << ", fetched, "
+        << fetch.destination_swizzle << ");\n"
         << "        }\n";
   } else {
     const auto& fetch = instruction.texture_fetch;
@@ -316,9 +349,9 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
       return o.str();
     };
     out << "        if (" << predicate(fetch.predicate) << ") {\n"
-        << "          float4 coord = r[(" << unsigned(fetch.source_register);
-    if (fetch.source_relative) out << " + aL";
-    out << ") & 63]" << swizzle(fetch.source_swizzle) << ";\n";
+        << "          float4 coord = "
+        << temporary(fetch.source_register, fetch.source_relative)
+        << swizzle(fetch.source_swizzle) << ";\n";
     // Xenos setTextureLod / setTextureGradientsHorz / setTextureGradientsVert
     // write per-shader-invocation state that later tfetches read when their
     // use_register_lod / use_register_gradients flags are set.
@@ -362,9 +395,9 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
           << ", coord, " << (fetch.unnormalized_coordinates ? "true" : "false") << ", "
           << offsets() << ");\n";
     }
-    out << "          xenon_write_fetch(r[(" << unsigned(fetch.destination_register);
-    if (fetch.destination_relative) out << " + aL";
-    out << ") & 63], fetched, " << fetch.destination_swizzle << ");\n"
+    out << "          xenon_write_fetch("
+        << temporary(fetch.destination_register, fetch.destination_relative) << ", fetched, "
+        << fetch.destination_swizzle << ");\n"
         << "        }\n";
   }
 }
@@ -1124,8 +1157,22 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
     out << " uint coverage : SV_Coverage;";
     out << " };\nXenonOutput " << options.entry_point << "(XenonInput input) {\n";
   }
-  out << "  float4 r[64]; float4 e[64];\n"
-      << "  [unroll] for (uint i=0;i<64;++i) { r[i]=0.0.xxxx; e[i]=0.0.xxxx; }\n"
+  // The temporaries: an array only for a shader that indexes them (see
+  // temporary()).
+  struct RegisterMode {
+    explicit RegisterMode(bool array) { t_register_array = array; }
+    ~RegisterMode() { t_register_array = true; }
+  } register_mode{uses_relative_temporaries(shader)};
+  if (t_register_array) {
+    out << "  float4 r[64];\n"
+        << "  [unroll] for (uint i=0;i<64;++i) r[i]=0.0.xxxx;\n";
+  } else {
+    out << "  float4";
+    for (unsigned i = 0; i < 64; ++i) out << (i ? ", r_" : " r_") << i << "=0.0.xxxx";
+    out << ";\n";
+  }
+  out << "  float4 e[64];\n"
+      << "  [unroll] for (uint i=0;i<64;++i) e[i]=0.0.xxxx;\n"
       << "  bool p0=false; int a0=0; int aL=0; float4 ps=0.0.xxxx;\n"
       << "  uint2 vfetch_base=uint2(0u, 0u);\n"
       << "  float4 xenon_grad_h=0.0.xxxx, xenon_grad_v=0.0.xxxx; float xenon_register_lod=0.0;\n"
@@ -1133,11 +1180,11 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
       << "  uint call_stack[4], loop_remaining[4]; int loop_value[4], loop_step[4];\n";
   if (memexport_enabled) out << "  uint memexport_written_mask=0u;\n";
   if (shader.stage == ShaderStage::Vertex)
-    out << "  r[0].x = (float)xenon_vertex_index(vertex_id);\n";
+    out << "  " << temporary(0, false) << ".x = (float)xenon_vertex_index(vertex_id);\n";
   else {
     for (unsigned i=0;i<16;++i) {
       if (i == options.param_gen_interpolator) continue;
-      out << "  r[" << i << "] = input.i" << i << ";\n";
+      out << "  " << temporary(i, false) << " = input.i" << i << ";\n";
     }
     if (options.param_gen_interpolator < 16u) {
       // PsParamGen (SQ_PROGRAM_CNTL.PARAM_GEN): |XY| the pixel's position
@@ -1156,7 +1203,7 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
             << "      xenon_param.x = asfloat(asuint(xenon_param.x) | 0x80000000u);\n"
             << "    if ((xenon_primitive & 2u) != 0u) xenon_param.z = asfloat(0x80000000u);\n";
       }
-      out << "    r[" << unsigned(options.param_gen_interpolator) << "] = xenon_param;\n"
+      out << "    " << temporary(options.param_gen_interpolator, false) << " = xenon_param;\n"
           << "  }\n";
     }
   }

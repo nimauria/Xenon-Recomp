@@ -344,10 +344,12 @@ bool DepthTargetImage::readback_native_sample(
           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
       !depth_readback.initialize(physical_device_, device_,
           std::uint64_t(row_pitch) * copy_height, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          Buffer::kCpuReadback) ||
       !stencil_readback.initialize(physical_device_, device_,
           std::uint64_t(copy_width) * copy_height, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          Buffer::kCpuReadback)) {
     error_ = "Vulkan depth readback buffers could not be created"; cleanup(); return false;
   }
   std::span<std::byte> mapped;

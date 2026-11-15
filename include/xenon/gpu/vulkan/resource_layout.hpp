@@ -37,7 +37,21 @@ class ResourceLayout {
   [[nodiscard]] bool bind_guest_memory(VkBuffer buffer, VkDeviceSize size);
   [[nodiscard]] bool bind_texture(std::uint32_t slot, TextureDimension dimension,
                                   VkImageView view, VkSampler sampler);
-  void prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot);
+  // Where a recorded draw finds its bindings: the descriptor set to bind and
+  // the dynamic offset of its constants in the frame's constant buffer.
+  struct DrawBinding {
+    VkDescriptorSet set{VK_NULL_HANDLE};
+    std::uint32_t constants_offset{};
+  };
+  // Snapshots the staged bindings and constants for the draw recorded in
+  // `draw_slot` of the batch on `frame_index`. Slots increase within a batch.
+  // The constants go to the slot's own range of the frame's constant buffer
+  // (a dynamic uniform buffer); a draw whose textures, samplers and guest
+  // memory binding have not changed since an earlier draw of the same batch
+  // reuses that draw's descriptor set instead of writing its own.
+  [[nodiscard]] DrawBinding prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot);
+  [[nodiscard]] std::uint64_t sets_reused() const noexcept { return sets_reused_; }
+  [[nodiscard]] std::uint64_t sets_written() const noexcept { return sets_written_; }
 
   [[nodiscard]] bool ready() const noexcept { return pipeline_layout_ != VK_NULL_HANDLE; }
   [[nodiscard]] VkDescriptorSetLayout descriptor_set_layout() const noexcept {
@@ -45,12 +59,6 @@ class ResourceLayout {
   }
   [[nodiscard]] VkPipelineLayout pipeline_layout() const noexcept {
     return pipeline_layout_;
-  }
-  [[nodiscard]] VkDescriptorSet descriptor_set(
-      std::uint32_t frame_index, std::uint32_t draw_slot) const noexcept {
-    return frame_index < frames_.size() && draw_slot < CommandQueue::kBatchCommandCount
-               ? frames_[frame_index].descriptor_sets[draw_slot]
-               : VK_NULL_HANDLE;
   }
   [[nodiscard]] std::span<std::byte> constants() noexcept {
     return constants_staging_;
@@ -61,9 +69,9 @@ class ResourceLayout {
   struct FrameBindings {
     VkDescriptorPool descriptor_pool{VK_NULL_HANDLE};
     std::array<VkDescriptorSet, CommandQueue::kBatchCommandCount> descriptor_sets{};
-    std::array<Buffer, CommandQueue::kBatchCommandCount> constants{};
-    std::array<std::span<std::byte>, CommandQueue::kBatchCommandCount>
-        constants_mappings{};
+    // Every draw slot's constants, kConstantStride apart.
+    Buffer constants{};
+    std::span<std::byte> constants_mapping{};
   };
   struct TextureBinding {
     bool valid{};
@@ -81,6 +89,21 @@ class ResourceLayout {
       constants_staging_{};
   VkBuffer guest_memory_buffer_{VK_NULL_HANDLE};
   VkDeviceSize guest_memory_size_{};
+  // Bytes between draw slots' constants (minUniformBufferOffsetAlignment).
+  VkDeviceSize constant_stride_{};
+  // Bumped whenever a texture, sampler or the guest memory buffer the next
+  // draw binds differs; a set written at the current generation is reused.
+  std::uint64_t binding_generation_{1};
+  struct LastSet {
+    std::uint32_t frame{UINT32_MAX};
+    std::uint32_t slot{};
+    VkDescriptorSet set{VK_NULL_HANDLE};
+    std::uint64_t generation{};
+  };
+  LastSet last_set_{};
+  std::uint64_t sets_reused_{};
+  std::uint64_t sets_written_{};
+  void write_set(VkDescriptorSet set, VkBuffer constants);
   std::string error_{};
 };
 

@@ -43,10 +43,42 @@ class Backend final : public xenon::gpu::Backend {
   [[nodiscard]] GpuUnsupportedCounters unsupported_counters() const noexcept override;
   [[nodiscard]] GpuShaderCoverage shader_coverage() const noexcept override;
   void sync_guest_reads() override;
+  void prefetch_shaders(std::span<const ir::Command> commands) override;
   void end_guest_read_sync() override;
   [[nodiscard]] bool publish_gpu_writes(bool wait) override;
   void set_resolve_readback(ResolveReadback policy) override;
   void set_shader_cache_directory(const std::string& directory) override;
+  // GPU V3 parallel recording: `threads` recording workers (0 records every
+  // draw run on the backend thread) and the shortest run handed to one.
+  // Submits pending work first. Defaults: RecordingWorkers::
+  // default_thread_count() and 8 draws.
+  [[nodiscard]] bool set_parallel_recording(unsigned threads, std::uint32_t min_run_draws);
+  // Draw runs recorded on workers so far.
+  [[nodiscard]] std::uint64_t parallel_runs_recorded() const noexcept;
+  // GPU timestamps (perf_frame.log "gpu"): waits for the GPU, reads every
+  // batch's timestamps, and returns the batches timed and their GPU time.
+  struct GpuTiming {
+    std::uint64_t batches{};
+    std::uint64_t gpu_ns{};
+  };
+  [[nodiscard]] GpuTiming gpu_timing();
+  // GPU V3 shader-variant prefetch: variants the frontend predicted from the
+  // IR it handed over, draws that found theirs prefetched, and draws that
+  // lowered and compiled theirs themselves.
+  struct ShaderPrefetchStatistics {
+    std::uint64_t variants_predicted{};
+    std::uint64_t variants_prefetched_at_draw{};
+    std::uint64_t variants_compiled_at_draw{};
+  };
+  [[nodiscard]] ShaderPrefetchStatistics shader_prefetch_statistics() const noexcept;
+  // GPU V3 persistent pipeline library (beside the shader cache): whether
+  // one is open, and the pipelines loaded from it / stored into it so far.
+  struct PipelineLibraryStatistics {
+    bool open{};
+    std::uint64_t loaded{};
+    std::uint64_t stored{};
+  };
+  [[nodiscard]] PipelineLibraryStatistics pipeline_library_statistics() const noexcept;
 
   [[nodiscard]] bool ready() const noexcept;
   // How this device's D24 depth writes were measured to encode a code at

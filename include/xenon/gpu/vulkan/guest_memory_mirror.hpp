@@ -55,6 +55,17 @@ class GuestMemoryMirror {
     return coherency_.device_range_valid(address, width);
   }
   void prepare_shader_access(VkCommandBuffer command, bool writable);
+  // Whether prepare_shader_access() would record a barrier now: earlier
+  // shader writes are pending, or this access writes after reads.
+  [[nodiscard]] bool needs_shader_access_barrier(bool writable) const noexcept {
+    return shader_write_state_ || writable;
+  }
+  // A shader access that needed no barrier (needs_shader_access_barrier() was
+  // false): later writes must still wait for it.
+  void note_shader_access(bool writable) noexcept {
+    shader_read_state_ = true;
+    shader_write_state_ = writable;
+  }
   [[nodiscard]] VkBuffer buffer() const noexcept { return mirror_.buffer(); }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 

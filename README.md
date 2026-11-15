@@ -287,6 +287,34 @@ The hardware samples textures microseconds after the command processor passes a 
 
 See [`GPU_V1.md`](docs/graphics/GPU_V1.md), [`NATIVE_BACKENDS.md`](docs/graphics/NATIVE_BACKENDS.md), [`EDRAM_RENDERING.md`](docs/graphics/EDRAM_RENDERING.md), [`HLSL_DXC.md`](docs/graphics/HLSL_DXC.md) and the historical validation log in [`VALIDATION.md`](docs/graphics/VALIDATION.md).
 
+### GPU execution (GPU V3)
+
+GPU work is spread over several threads. What the guest observes stays in the order it issued it.
+
+- **Command processor (GPU pump thread).** It decodes the ring in order, raises interrupts, flips the front buffer and evaluates waits. It never waits for rendering, except where the guest could observe the result:
+  - an interrupt, a flip or a wait;
+  - a read of guest memory that a pending GPU write targets.
+
+  A drain that streamed does not wait for its last work. The next drain decodes while that work runs, and the read pointer goes back to the guest only once the work is done. The guest therefore reuses ring words only after the commands in them have executed.
+- **Backend thread.** Graphics IR streams here while decoding continues. This thread prepares each draw and makes the guest-visible writes the stream makes, such as fences and memory writes. Each write runs after the work before it, as the hardware does when the GPU reaches the packet. Short drains run on the pump thread itself, where a hand-off would cost more than it saves.
+- **Draw preparation and recording.** Each draw is prepared, in order, into a self-contained record: descriptor tables, constants, indices and barrier decisions. Consecutive draws form a run, recorded by a pure function of the run. Long runs are recorded on worker threads into command lists of their own. The queue submits every batch's lists together, in order.
+- **One heap pair per frame (Direct3D 12).** Descriptor tables live in one heap pair per frame, bound once per command list. A draw with nothing rebound reuses the previous draw's tables.
+- **Merged render passes (Vulkan).** A run of draws on the same attachments is one rendering instance, not one per draw.
+- **Shaders ahead of time.** Shaders are lowered and compiled on worker threads as soon as the command processor decodes their load. Each draw's shader variants are predicted from the registers at hand-off and compiled the same way. These are the D24FS8 depth-output, per-sample, PsParamGen and writable guest-memory variants. A draw whose variant was not predicted compiles it itself.
+- **Persistent pipelines.** Pipelines are kept beside the shader cache, so later sessions load them instead of compiling them again. Vulkan uses a pipeline cache and Direct3D 12 a pipeline library. A file from another driver or device, or a damaged one, is ignored and rebuilt.
+
+`perf_frame.log` reports, every second, the backend thread's time, and what the pump waited for and why. It also reports submissions, descriptor reuse, shader waits, and GPU time measured with timestamps around every submitted batch: busy, and idle between batches.
+
+Each part can be switched off to compare against it:
+
+| Variable | Effect |
+| --- | --- |
+| `XENON_GPU_BACKEND_THREAD=0` | IR is played on the pump thread |
+| `XENON_GPU_PIPELINED_DRAINS=0` | Each drain waits for its own work before the next one starts |
+| `XENON_GPU_RECORD_THREADS=<n>` | Recording workers; `0` records every run inline. The default is one per eight hardware threads, from one to four. |
+| `XENON_GPU_ASYNC_SHADERS=0` | Shaders compile where they are consumed |
+| `XENON_GPU_SHADER_THREADS=<n>` | Shader compile workers. The default is one per four hardware threads, from one to six. |
+
 ### Texture mods
 
 Both backends can dump a game's textures and sample replacements in their place. This works for every title.

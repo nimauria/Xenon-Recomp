@@ -1122,7 +1122,78 @@ void test_rectangle_lists_are_never_face_culled() {
   assert(host_raster_state(raster, PrimitiveType::TriangleList).cull_front);
 }
 
+// The tracker keeps its decoded snapshot between draws and decodes again
+// only what register writes changed. After any sequence of writes - render
+// target, raster and copy registers, fetch constants, float constants - the
+// snapshot equals one decoded from scratch by a tracker given the same
+// writes.
+void test_snapshot_matches_a_fresh_decode_after_any_writes() {
+  using namespace xenon::gpu;
+  ResourceStateTracker incremental;
+  std::vector<ir::RegisterWrite> writes;
+  std::uint64_t seed = 0x9E3779B97F4A7C15ull;
+  const auto next = [&] {
+    seed ^= seed << 13;
+    seed ^= seed >> 7;
+    seed ^= seed << 17;
+    return seed;
+  };
+  // Register ranges a draw's state comes from, and the float constants.
+  const std::array<std::pair<std::uint32_t, std::uint32_t>, 5> ranges{{
+      {0x2000u, 0x2400u},
+      {ResourceStateTracker::kFetchConstantBase,
+       ResourceStateTracker::kFetchConstantBase + ResourceStateTracker::kFetchConstantDwords},
+      {0x4000u, 0x4800u},
+      {0x4900u, 0x4928u},
+      {0x2100u, 0x2110u},
+  }};
+  ir::DrawPacket draw{};
+  draw.primitive_type = PrimitiveType::TriangleList;
+  for (int round = 0; round < 400; ++round) {
+    const auto count = 1u + next() % 12u;
+    for (std::uint32_t i = 0; i < count; ++i) {
+      const auto& range = ranges[next() % ranges.size()];
+      const auto index = range.first + static_cast<std::uint32_t>(next() % (range.second - range.first));
+      // Fetch constants with valid type bits often enough to decode.
+      auto value = static_cast<std::uint32_t>(next());
+      if (index >= ResourceStateTracker::kFetchConstantBase && (next() & 1u)) value |= 3u;
+      const ir::RegisterWrite write{index, value};
+      incremental.apply(write);
+      writes.push_back(write);
+    }
+    if (next() % 3u) continue;  // not every round of writes is followed by a draw
+    ResourceStateTracker fresh;
+    for (const auto& write : writes) fresh.apply(write);
+    const auto cached = incremental.snapshot();
+    const auto decoded = fresh.snapshot();
+    assert(cached.generation == decoded.generation);
+    assert(cached.pipeline_hash(draw) == decoded.pipeline_hash(draw));
+    assert(cached.edram_mode == decoded.edram_mode);
+    assert(cached.raster.scissor_left == decoded.raster.scissor_left &&
+           cached.raster.scissor_right == decoded.raster.scissor_right &&
+           cached.raster.scissor_top == decoded.raster.scissor_top &&
+           cached.raster.scissor_bottom == decoded.raster.scissor_bottom);
+    assert(cached.depth_target.base_tile == decoded.depth_target.base_tile &&
+           cached.depth_target.format == decoded.depth_target.format);
+    assert(cached.copy.destination_base == decoded.copy.destination_base);
+    for (unsigned slot = 0; slot < 32; ++slot) {
+      assert(cached.textures[slot].has_value() == decoded.textures[slot].has_value());
+      if (cached.textures[slot])
+        assert(cached.textures[slot]->hash() == decoded.textures[slot]->hash());
+      for (unsigned select = 0; select < 3; ++select) {
+        const auto& a = cached.vertex_buffers[slot][select];
+        const auto& b = decoded.vertex_buffers[slot][select];
+        assert(a.has_value() == b.has_value());
+        if (a)
+          assert(a->physical_address == b->physical_address && a->endian == b->endian &&
+                 a->size_dwords == b->size_dwords);
+      }
+    }
+  }
+}
+
 int main() {
+  test_snapshot_matches_a_fresh_decode_after_any_writes();
   test_rectangle_lists_are_never_face_culled();
   test_window_scissor_bounds_the_drawable_rectangle();
   test_guest_memory_coherency_ranges();
