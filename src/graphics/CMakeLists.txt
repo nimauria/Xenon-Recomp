@@ -23,11 +23,13 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/command_processor.cpp
     xenos/capture.cpp
     xenos/graphics_system.cpp
+    xenos/backend_executor.cpp
     xenos/temporal.cpp
     xenos/temporal_profile.cpp
     xenos/temporal_frame.cpp
     xenos/guest_read_sync.cpp
     common/backend_capabilities.cpp
+    common/recording_workers.cpp
     common/display_vblank.cpp
     common/failure_log.cpp
     common/perf_stats.cpp
@@ -118,6 +120,7 @@ if(XENON_ENABLE_GRAPHICS)
       d3d12/guest_memory_mirror.cpp
       d3d12/resource_layout.cpp
       d3d12/pipeline.cpp
+      d3d12/pipeline_library.cpp
       d3d12/render_target.cpp
       d3d12/edram_transfer.cpp
       d3d12/scanout.cpp

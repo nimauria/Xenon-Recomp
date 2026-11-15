@@ -243,21 +243,25 @@ void test_decoded_scalar_operations_read_source_three() {
   }
   assert(lowered.complete);
   const auto& hlsl = lowered.hlsl;
-  assert(hlsl.find("float4 s0 = r[(0) & 63].yzzz;") != std::string::npos);
+  // No temporary is addressed relative to aL: each is a variable of its own
+  // (the array cost SPIR-V legalization most of a compile).
+  assert(hlsl.find("float4 r[64]") == std::string::npos);
+  assert(hlsl.find("float4 r_0=0.0.xxxx, r_1=0.0.xxxx") != std::string::npos);
+  assert(hlsl.find("float4 s0 = r_0.yzzz;") != std::string::npos);
   assert(hlsl.find("float4 s1 = XenonFloatConstants[((40) & 255)].xyyy;") != std::string::npos);
   assert(hlsl.find("float4 s2 = XenonFloatConstants[((40) & 255)].wwww;") != std::string::npos);
-  assert(hlsl.find("float4 s2 = r[(0) & 63].xxxx;") != std::string::npos);
+  assert(hlsl.find("float4 s2 = r_0.xxxx;") != std::string::npos);
   // Each instruction carries its own operation: frcs takes source 3's W.
   assert(hlsl.find("scalar op 11") != std::string::npos);
   assert(hlsl.find("v = x - floor(x);") != std::string::npos);
   assert(hlsl.find("float4 s2 = XenonFloatConstants[((9) & 255)].xzww;") != std::string::npos);
-  assert(hlsl.find("float4 s3t = r[(23) & 63].xzww;") != std::string::npos);
+  assert(hlsl.find("float4 s3t = r_23.xzww;") != std::string::npos);
   assert(hlsl.find("scalar op 43") != std::string::npos);
   assert(hlsl.find("float4 b = s3t;") != std::string::npos);
   assert(hlsl.find("v = xenon_legacy_mul(x, b.x);") != std::string::npos);
   // sin reads r1's swizzled W: relative field 1 in X makes it .yyzw... and the
   // W field 0 makes `a` = (0 + 3) & 3 = W.
-  assert(hlsl.find("float4 s2 = r[(1) & 63].yyzw;") != std::string::npos);
+  assert(hlsl.find("float4 s2 = r_1.yyzw;") != std::string::npos);
   assert(hlsl.find("scalar op 48") != std::string::npos);
   assert(hlsl.find("v = sin(x);") != std::string::npos);
   // The scalar operand is always source 3 (s2), never the vector unit's s0.
@@ -336,6 +340,10 @@ void test_relative_addressing_registers() {
   assert(lowered.complete);
   const auto& hlsl = lowered.hlsl;
   assert(hlsl.find("float4 s0 = r[(0 + aL) & 63].xyzw;") != std::string::npos);
+  // A shader that indexes its temporaries keeps them in an array, every
+  // reference included.
+  assert(hlsl.find("float4 r[64];") != std::string::npos);
+  assert(hlsl.find("r_0") == std::string::npos);
   assert(hlsl.find("XenonFloatConstants[((12 + a0) & 255)]") != std::string::npos);
   assert(hlsl.find("XenonFloatConstants[((12 + aL) & 255)]") != std::string::npos);
   assert(hlsl.find("+ ar") == std::string::npos);

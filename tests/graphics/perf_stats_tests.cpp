@@ -37,6 +37,22 @@ void test_line_reports_the_window_and_resets() {
   perf::add(perf::Counter::ReadbackWaitNs, 7'000'000u);
   perf::add(perf::Counter::ReadbackWaits, 5u);
   perf::add(perf::Counter::ReadbackWindowNs, 9'000'000u);
+  perf::add(perf::Counter::BackendNs, 610'000'000u);
+  perf::add(perf::Counter::BackendWaitNs, 45'000'000u);
+  perf::add(perf::Counter::BackendWaits, 1900u);
+  perf::add(perf::Counter::Submits, 31u);
+  perf::add(perf::Counter::SubmitNs, 4'000'000u);
+  perf::add(perf::Counter::HoldsBarrier, 90u);
+  perf::add(perf::Counter::HoldsSync, 7u);
+  perf::add(perf::Counter::HoldsRead, 3u);
+  perf::add(perf::Counter::HoldsDrain, 570u);
+  perf::add(perf::Counter::BindingsReused, 1500u);
+  perf::add(perf::Counter::BindingsWritten, 400u);
+  perf::add(perf::Counter::ShaderWaitNs, 9'000'000u);
+  perf::add(perf::Counter::ShaderWaits, 12u);
+  perf::add(perf::Counter::GpuBusyNs, 21'000'000u);
+  perf::add(perf::Counter::GpuIdleNs, 640'000'000u);
+  perf::add(perf::Counter::GpuBatches, 540u);
   const auto line = perf::take_line(1.0);
   assert(contains(line, "frames 3.0/s"));
   assert(contains(line, "p50 33.3"));
@@ -47,6 +63,12 @@ void test_line_reports_the_window_and_resets() {
   assert(contains(line, "pso 4 (40 ms)"));
   assert(contains(line, "draws 2000/s resolves 20/s"));
   assert(contains(line, "readback 3.0 MB wait 7 ms (5) window 9 ms"));
+  assert(contains(line, "backend 610 ms wait 45 ms (1900)"));
+  assert(contains(line, "submit 31 (4 ms)"));
+  assert(contains(line, "holds barrier 90 sync 7 read 3 drain 570"));
+  assert(contains(line, "bindings reused 1500 written 400"));
+  assert(contains(line, "shader wait 9 ms (12)"));
+  assert(contains(line, "gpu busy 21 ms idle 640 ms (540 batches)"));
   // Taken: the next window starts empty (the last present still anchors the
   // next interval).
   const auto empty = perf::take_line(1.0);
@@ -54,6 +76,8 @@ void test_line_reports_the_window_and_resets() {
   assert(contains(empty, "swaps 0.0/s"));
   assert(contains(empty, "fence 0 ms (0 waits)"));
   assert(contains(empty, "draws 0/s"));
+  assert(contains(empty, "backend 0 ms wait 0 ms (0)"));
+  assert(contains(empty, "submit 0 (0 ms)"));
   for (const auto counter : {perf::Counter::Swaps, perf::Counter::Draws, perf::Counter::FenceWaits})
     assert(perf::peek(counter) == 0u);
 }

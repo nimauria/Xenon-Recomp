@@ -1,6 +1,8 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -749,6 +751,152 @@ ir::ShaderLoad decoded_shader_load(ShaderStage stage, std::uint32_t tag, Decoded
                         std::make_shared<const DecodedShader>(std::move(decoded)), {}};
 }
 
+// vfetch r1 = float4 at fetch constant 0; e62 = max(r1, r1).
+DecodedShader fetch_position_vertex_shader() {
+  DecodedShader vertex{};
+  DecodedControlFlow cf{};
+  cf.opcode = ControlFlowOpcode::ExecEnd;
+  cf.count = 2;
+  vertex.control_flow = {cf};
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::VertexFetch;
+  fetch.vertex_fetch.destination_register = 1;
+  fetch.vertex_fetch.destination_swizzle = 0x688;
+  fetch.vertex_fetch.data_format = 38;
+  fetch.vertex_fetch.stride_dwords = 4;
+  DecodedInstruction position{};
+  position.alu.address = 1;
+  position.alu.vector_opcode = 2;
+  position.alu.scalar_opcode = 50;
+  position.alu.vector_destination = 62;
+  position.alu.vector_write_mask = 0xF;
+  position.alu.export_data = true;
+  for (auto& source : position.alu.sources) source = {1u, 0xE4u, true};
+  vertex.instructions = {fetch, position};
+  vertex.reflection.vertex_fetch_constants = {0};
+  vertex.reflection.vertex_fetches = {0};
+  vertex.reflection.exports = {62};
+  vertex.reflection.position_exports = 1;
+  vertex.reflection.temporary_register_count = 2;
+  return vertex;
+}
+
+// oC0 = c0.
+DecodedShader constant_color_pixel_shader() {
+  DecodedShader pixel{};
+  DecodedControlFlow cf{};
+  cf.opcode = ControlFlowOpcode::ExecEnd;
+  cf.count = 1;
+  pixel.control_flow = {cf};
+  DecodedInstruction color{};
+  color.alu.vector_opcode = 2;
+  color.alu.scalar_opcode = 50;
+  color.alu.vector_write_mask = 0xF;
+  color.alu.export_data = true;
+  for (auto& source : color.alu.sources) source = {0u, 0xE4u, false};
+  pixel.instructions = {color};
+  pixel.reflection.float_constants = {0};
+  pixel.reflection.exports = {0};
+  pixel.reflection.color_exports = 1;
+  pixel.reflection.temporary_register_count = 1;
+  return pixel;
+}
+
+// GPU V3 shader-variant prefetch: a draw over D24FS8 depth with the depth
+// test on samples its pixel shader's float20e4 depth-output variant, which
+// the frontend predicts from the IR it hands over (Backend::
+// prefetch_shaders()) and starts on a compile worker - the draw finds it
+// prepared instead of lowering and compiling it on the backend thread. A
+// draw state the frontend has seen is not predicted again, and without the
+// prediction a draw still compiles its variant itself.
+template <typename Backend>
+void run_shader_variant_prefetch(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kPitch = 240, kHeight = 64, kVertices = 0x80000;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  const std::array<float, 12> triangle{-0.5f, -0.5f, 0.0f, 1.0f, 0.5f, -0.5f,
+                                       0.0f,  1.0f,  0.0f, 0.5f, 0.0f, 1.0f};
+  write_guest_bytes(memory, kVertices, triangle.data(), sizeof(triangle));
+  Edram edram;
+  edram.reset();
+  const auto vertex_load =
+      decoded_shader_load(ShaderStage::Vertex, 41, fetch_position_vertex_shader());
+  const auto pixel_load =
+      decoded_shader_load(ShaderStage::Pixel, 42, constant_color_pixel_shader());
+  const auto make_draw = [&] {
+    ir::DrawPacket packet{};
+    packet.opcode = Type3Opcode::DrawIndx2;
+    packet.primitive_type = PrimitiveType::TriangleList;
+    packet.source = DrawSource::AutoIndex;
+    packet.index_count = 3;
+    packet.vertex_shader = {true, vertex_load.program.hash(), 0};
+    packet.pixel_shader = {true, pixel_load.program.hash(), 0};
+    return packet;
+  };
+
+  std::vector<ir::Command> commands;
+  const auto reg = [&](std::uint32_t index, std::uint32_t value) {
+    commands.push_back(ir::RegisterWrite{index, value});
+  };
+  commands.push_back(vertex_load);
+  commands.push_back(pixel_load);
+  reg(0x2000, kPitch);
+  reg(0x200E, 0u);
+  reg(0x200F, kPitch | (kHeight << 16u));
+  reg(0x2081, 1u << 31u);
+  reg(0x2082, kPitch | (kHeight << 16u));
+  reg(0x2001, 0u | (static_cast<std::uint32_t>(ColorRenderTargetFormat::R8G8B8A8) << 16u));
+  reg(0x2002, 200u | (static_cast<std::uint32_t>(DepthRenderTargetFormat::D24FS8) << 16u));
+  reg(0x2208, static_cast<std::uint32_t>(EdramMode::ColorDepth));
+  reg(0x2104, 0xFu);
+  // Z_ENABLE, Z_WRITE_ENABLE, function ALWAYS.
+  reg(0x2200, (1u << 1u) | (1u << 2u) | (7u << 4u));
+  reg(0x2201, 0x00010001u);
+  reg(0x2204, 1u << 16u);
+  reg(0x2206, 1u << 10u);
+  reg(0x2100, 0xFFFFFFu);
+  const auto fetch_constant = ResourceStateTracker::kFetchConstantBase;
+  reg(fetch_constant, 3u | kVertices);
+  reg(fetch_constant + 1u, static_cast<std::uint32_t>(Endian::None) | (12u << 2u));
+  const std::array<float, 4> red{1.0f, 0.0f, 0.0f, 1.0f};
+  for (std::uint32_t i = 0; i < 4; ++i) reg(0x4400u + i, std::bit_cast<std::uint32_t>(red[i]));
+  commands.push_back(make_draw());
+  commands.push_back(make_draw());  // the same state: nothing more to predict
+
+  // Counts since this backend was created: earlier tests ran on it.
+  const auto before = backend.shader_prefetch_statistics();
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+  backend.prefetch_shaders(commands);
+  const auto predicted = backend.shader_prefetch_statistics();
+  if (predicted.variants_predicted - before.variants_predicted != 1u) {
+    std::cerr << name << ": the frontend predicted " << predicted.variants_predicted
+              << " shader variants for one D24FS8 draw state" << std::endl;
+    assert(false);
+  }
+  for (const auto& command : commands) backend.consume(command);
+  assert_backend_ok(backend, "draws with a prefetched variant");
+  const auto used = backend.shader_prefetch_statistics();
+  if (used.variants_prefetched_at_draw - before.variants_prefetched_at_draw != 1u ||
+      used.variants_compiled_at_draw != before.variants_compiled_at_draw) {
+    std::cerr << name << ": the D24FS8 variant was prefetched for "
+              << used.variants_prefetched_at_draw - before.variants_prefetched_at_draw << " draw(s) and compiled at "
+              << used.variants_compiled_at_draw - before.variants_compiled_at_draw << std::endl;
+    assert(false);
+  }
+
+  // The same state with multisampling, never handed to prefetch_shaders():
+  // the draw lowers and compiles its per-sample variant itself.
+  backend.consume(ir::Command{ir::RegisterWrite{0x2000, kPitch | (2u << 16u)}});
+  backend.consume(ir::Command{make_draw()});
+  assert_backend_ok(backend, "draw with an unpredicted variant");
+  assert(backend.shader_prefetch_statistics().variants_compiled_at_draw ==
+         before.variants_compiled_at_draw + 1u);
+  backend.end_submission();
+  assert_backend_ok(backend, "end_submission");
+  std::cout << name << " shader-variant prefetch: ok" << std::endl;
+}
+
 // Regression (AC6 cutscene hitches and mission frame drops): Direct3D clears
 // EDRAM by drawing a screen-space rectangle - clipping and the viewport
 // transform off - under an open 8192-row scissor. Its render target was
@@ -1439,6 +1587,43 @@ int main() {
       assert(dots.initialize({.enable_validation = false}));
       run_dot_products_follow_xenos_zero_rule(dots, "Vulkan");
     }
+    // GPU V3 parallel recording: the same draws, every run recorded on a
+    // worker into a command buffer of its own and submitted in order, give
+    // the same pixels.
+    // The pipelines built go to the persistent pipeline cache, written next
+    // to the shader cache when the backend is destroyed.
+    const auto cache_directory =
+        std::filesystem::temp_directory_path() / "xenon_vulkan_pipeline_cache_test";
+    std::error_code cache_error;
+    std::filesystem::remove_all(cache_directory, cache_error);
+    {
+      xenon::gpu::vulkan::Backend parallel;
+      assert(parallel.initialize({.enable_validation = false}));
+      parallel.set_shader_cache_directory(cache_directory.string());
+      assert(parallel.set_parallel_recording(2, 1));
+      run_unclipped_clear_is_sized_to_its_vertices(parallel, "Vulkan (parallel recording)");
+      run_dot_products_follow_xenos_zero_rule(parallel, "Vulkan (parallel recording)");
+      run_shader_variant_prefetch(parallel, "Vulkan");
+      assert(parallel.parallel_runs_recorded() > 0u);
+      // Every submitted batch is timed on the GPU.
+      const auto timing = parallel.gpu_timing();
+      assert(timing.batches > 0u && timing.gpu_ns > 0u);
+      std::cout << "Vulkan GPU timestamps: " << timing.batches << " batches, "
+                << timing.gpu_ns / 1000u << " us" << std::endl;
+    }
+    const auto pipeline_cache = cache_directory / "vulkan_pipelines.bin";
+    assert(std::filesystem::exists(pipeline_cache) &&
+           std::filesystem::file_size(pipeline_cache) > 0u);
+    std::cout << "Vulkan persistent pipeline cache: "
+              << std::filesystem::file_size(pipeline_cache) << " bytes" << std::endl;
+    {
+      // A later backend loads it (an incompatible cache would be ignored).
+      xenon::gpu::vulkan::Backend reloaded;
+      assert(reloaded.initialize({.enable_validation = false}));
+      reloaded.set_shader_cache_directory(cache_directory.string());
+      run_dot_products_follow_xenos_zero_rule(reloaded, "Vulkan (reloaded pipeline cache)");
+    }
+    std::filesystem::remove_all(cache_directory, cache_error);
     run_converting_transfers<xenon::gpu::vulkan::Backend>(
         [](auto& b) { return b.initialize({.enable_validation = false}); }, "Vulkan");
     ran_backend = true;
@@ -1492,6 +1677,74 @@ int main() {
       xenon::gpu::d3d12::Backend dots;
       assert(dots.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
       run_dot_products_follow_xenos_zero_rule(dots, "D3D12");
+    }
+    // GPU V3 parallel recording: the same draws, every run recorded on a
+    // worker into a command list of its own and submitted in order, give the
+    // same pixels.
+    {
+      xenon::gpu::d3d12::Backend parallel;
+      assert(parallel.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+      assert(parallel.set_parallel_recording(2, 1));
+      run_unclipped_clear_is_sized_to_its_vertices(parallel, "D3D12 (parallel recording)");
+      run_dot_products_follow_xenos_zero_rule(parallel, "D3D12 (parallel recording)");
+      run_shader_variant_prefetch(parallel, "D3D12");
+      assert(parallel.parallel_runs_recorded() > 0u);
+      // Every submitted batch is timed on the GPU.
+      const auto timing = parallel.gpu_timing();
+      assert(timing.batches > 0u && timing.gpu_ns > 0u);
+      std::cout << "D3D12 GPU timestamps: " << timing.batches << " batches, "
+                << timing.gpu_ns / 1000u << " us" << std::endl;
+    }
+    // GPU V3 persistent pipeline library: the pipelines one backend creates
+    // are stored beside the shader cache and saved when it is destroyed; a
+    // later backend loads every one of them instead of compiling it, and
+    // draws the same pixels.
+    {
+      const auto library_directory =
+          std::filesystem::temp_directory_path() / "xenon_d3d12_pipeline_library_test";
+      std::error_code library_error;
+      std::filesystem::remove_all(library_directory, library_error);
+      std::uint64_t stored = 0;
+      {
+        xenon::gpu::d3d12::Backend first;
+        assert(first.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+        first.set_shader_cache_directory(library_directory.string());
+        run_dot_products_follow_xenos_zero_rule(first, "D3D12 (new pipeline library)");
+        const auto created = first.pipeline_library_statistics();
+        assert(created.open && created.loaded == 0u && created.stored > 0u);
+        stored = created.stored;
+      }
+      const auto library_file = library_directory / "d3d12_pipelines.bin";
+      assert(std::filesystem::exists(library_file) &&
+             std::filesystem::file_size(library_file) > 0u);
+      {
+        xenon::gpu::d3d12::Backend reloaded;
+        assert(reloaded.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+        reloaded.set_shader_cache_directory(library_directory.string());
+        run_dot_products_follow_xenos_zero_rule(reloaded, "D3D12 (reloaded pipeline library)");
+        const auto loaded = reloaded.pipeline_library_statistics();
+        if (loaded.loaded != stored || loaded.stored != 0u) {
+          std::cerr << "D3D12 pipeline library: " << stored << " stored, then " << loaded.loaded
+                    << " loaded and " << loaded.stored << " stored again" << std::endl;
+          assert(false);
+        }
+      }
+      std::cout << "D3D12 persistent pipeline library: " << stored << " pipelines, "
+                << std::filesystem::file_size(library_file) << " bytes" << std::endl;
+      // A damaged library is refused and replaced, not trusted.
+      {
+        std::ofstream damaged(library_file, std::ios::binary | std::ios::trunc);
+        damaged << "not a pipeline library";
+      }
+      {
+        xenon::gpu::d3d12::Backend damaged;
+        assert(damaged.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+        damaged.set_shader_cache_directory(library_directory.string());
+        run_dot_products_follow_xenos_zero_rule(damaged, "D3D12 (damaged pipeline library)");
+        const auto replaced = damaged.pipeline_library_statistics();
+        assert(replaced.open && replaced.loaded == 0u && replaced.stored == stored);
+      }
+      std::filesystem::remove_all(library_directory, library_error);
     }
     run_converting_transfers<xenon::gpu::d3d12::Backend>(
         [](auto& b) {

@@ -753,6 +753,18 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
     assert(memory->write_physical(kRingBase + i * 4u, bytes));
   }
   kernel_process->configure_gpu_ring_buffer(kRingBase, 16u);
+  // The guest learns how far the GPU has read from its write-back copy of
+  // the read pointer (VdEnableRingBufferRPtrWriteBack).
+  constexpr std::uint32_t kWritebackPhysical = 0x2400u;
+  assert(memory->fill_physical(kWritebackPhysical, 4u, std::byte{0}));
+  kernel_process->set_gpu_ring_buffer_rptr_writeback(kWritebackPhysical);
+  const auto guest_read_pointer = [&] {
+    std::array<std::byte, 4> bytes{};
+    assert(memory->copy_physical_range(kWritebackPhysical, bytes));
+    return std::to_integer<std::uint32_t>(bytes[0]) << 24 |
+           std::to_integer<std::uint32_t>(bytes[1]) << 16 |
+           std::to_integer<std::uint32_t>(bytes[2]) << 8 | std::to_integer<std::uint32_t>(bytes[3]);
+  };
   kernel_process->set_gpu_ring_buffer_write_index(2u);
 
   for (int i = 0; i < 400 && blocking->draws_entered.load() == 0; ++i) {
@@ -764,13 +776,17 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
   const auto during = xenon::core::SessionExecutionTestAccess::gpu_interrupts_delivered(harness.session);
   // About 15 at 60 Hz; the old single thread delivered none.
   assert(during - before >= 5 && "vsync interrupts continue while a draw blocks the worker");
-  assert(kernel_process->gpu_ring_buffer().read_index == 0u &&
-         "the read pointer does not move past a draw still executing");
+  // The guest may reuse ring words only once the commands in them are done:
+  // the read pointer it sees does not move past a draw still executing
+  // (the command processor may decode ahead of it - pipelined drains).
+  assert(guest_read_pointer() == 0u &&
+         "the guest's read pointer does not move past a draw still executing");
 
   blocking->release.store(true);
-  for (int i = 0; i < 400 && kernel_process->gpu_ring_buffer().read_index != 2u; ++i) {
+  for (int i = 0; i < 400 && guest_read_pointer() != 2u; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
+  assert(guest_read_pointer() == 2u);
   assert(kernel_process->gpu_ring_buffer().read_index == 2u);
   const bool shutdown_completed = run_with_timeout(
       [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));

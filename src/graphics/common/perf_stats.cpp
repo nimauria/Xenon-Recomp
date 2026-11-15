@@ -60,12 +60,15 @@ std::string take_line(double seconds) {
   }
   std::sort(frames.begin(), frames.end());
   const double per = seconds > 0.0 ? 1.0 / seconds : 0.0;
-  char line[640];
+  char line[1152];
   std::snprintf(line, sizeof(line),
                 "frames %.1f/s ms p50 %.1f p99 %.1f max %.1f | swaps %.1f/s | ring %.0f ms "
                 "ir %.0f ms present %.0f ms | fence %.0f ms (%llu waits) | shader %llu (%.0f ms) "
                 "pso %llu (%.0f ms) | draws %.0f/s resolves %.0f/s | readback %.1f MB wait %.0f ms "
-                "(%llu) window %.0f ms\n",
+                "(%llu) window %.0f ms | backend %.0f ms wait %.0f ms (%llu) | submit %llu "
+                "(%.0f ms) | holds barrier %llu sync %llu read %llu drain %llu | bindings reused "
+                "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
+                "(%llu batches)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -81,7 +84,21 @@ std::string take_line(double seconds) {
                 static_cast<double>(take(Counter::ReadbackBytes)) / (1024.0 * 1024.0),
                 ms(take(Counter::ReadbackWaitNs)),
                 static_cast<unsigned long long>(take(Counter::ReadbackWaits)),
-                ms(take(Counter::ReadbackWindowNs)));
+                ms(take(Counter::ReadbackWindowNs)), ms(take(Counter::BackendNs)),
+                ms(take(Counter::BackendWaitNs)),
+                static_cast<unsigned long long>(take(Counter::BackendWaits)),
+                static_cast<unsigned long long>(take(Counter::Submits)),
+                ms(take(Counter::SubmitNs)),
+                static_cast<unsigned long long>(take(Counter::HoldsBarrier)),
+                static_cast<unsigned long long>(take(Counter::HoldsSync)),
+                static_cast<unsigned long long>(take(Counter::HoldsRead)),
+                static_cast<unsigned long long>(take(Counter::HoldsDrain)),
+                static_cast<unsigned long long>(take(Counter::BindingsReused)),
+                static_cast<unsigned long long>(take(Counter::BindingsWritten)),
+                ms(take(Counter::ShaderWaitNs)),
+                static_cast<unsigned long long>(take(Counter::ShaderWaits)),
+                ms(take(Counter::GpuBusyNs)), ms(take(Counter::GpuIdleNs)),
+                static_cast<unsigned long long>(take(Counter::GpuBatches)));
   return line;
 }
 

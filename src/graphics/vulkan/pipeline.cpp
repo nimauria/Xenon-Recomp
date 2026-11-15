@@ -287,7 +287,7 @@ bool GraphicsPipeline::initialize(VkDevice device, VkPipelineLayout layout,
   info.pColorBlendState = &blend;
   info.pDynamicState = &dynamic;
   info.layout = layout;
-  const auto result = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &info,
+  const auto result = vkCreateGraphicsPipelines(device_, cache_, 1, &info,
                                                 nullptr, &pipeline_);
   if (geometry_module) vkDestroyShaderModule(device_, geometry_module, nullptr);
   vkDestroyShaderModule(device_, pixel_module, nullptr);

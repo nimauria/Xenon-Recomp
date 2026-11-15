@@ -48,6 +48,7 @@ class DepthTargetImage {
       std::uint32_t top, std::uint32_t right, std::uint32_t bottom,
       std::span<const std::uint32_t> source, std::uint32_t row_pitch);
   void transition_to_depth_attachment(VkCommandBuffer command) noexcept;
+  [[nodiscard]] VkImageLayout layout() const noexcept { return layout_; }
   // Makes the image readable by fragment shaders as a direct EDRAM transfer
   // source (DEPTH_STENCIL_READ_ONLY_OPTIMAL); transition_to_depth_attachment
   // returns it.

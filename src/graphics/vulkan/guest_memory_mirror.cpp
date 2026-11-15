@@ -27,7 +27,8 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
       !readback_.initialize(physical_device, device, kReadbackSize,
                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            Buffer::kCpuReadback)) {
     error_ = "failed to allocate Vulkan Xbox physical-memory mirror transfers";
     reset();
     return false;
@@ -295,10 +296,13 @@ void GuestMemoryMirror::prepare_shader_access(VkCommandBuffer command,
   barrier.offset = 0;
   barrier.size = VK_WHOLE_SIZE;
 
-  // Keep an explicit shader-to-shader dependency even when the access class
-  // doesn't change. Consecutive memexport draws otherwise have no transition
-  // that makes the previous shader writes visible to a later vertex fetch.
-  if (barrier.srcStageMask != VK_PIPELINE_STAGE_2_NONE || writable) {
+  // Only a hazard needs a barrier: earlier shader writes (a resolve, a memory
+  // export) before any access, or earlier reads before this write. Uploads
+  // already make their copies visible to every later read (see
+  // synchronize_range()), so a read after reads needs none - a barrier on
+  // every draw serialized the GPU between draws. Consecutive memexport draws
+  // still get one: the earlier one's writes are pending.
+  if (needs_shader_access_barrier(writable)) {
     VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dependency.bufferMemoryBarrierCount = 1;
     dependency.pBufferMemoryBarriers = &barrier;

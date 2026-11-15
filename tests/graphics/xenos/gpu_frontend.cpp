@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -14,6 +16,7 @@
 
 #include "xenon/gpu/command_processor.hpp"
 #include "xenon/gpu/graphics_system.hpp"
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/types.hpp"
 #include "xenon/logging/diagnostic_events.hpp"
 #include "xenon/memory/address_space.hpp"
@@ -664,10 +667,11 @@ class OrderRecordingBackend final : public xenon::gpu::Backend {
 // a guest could see a fence pass (and reuse what the draw read, or read a
 // resolve's destination) before the draw had run. With a backend bound, the
 // work before each guest-visible effect executes first.
-void test_ring_effects_follow_the_work_before_them() {
+void test_ring_effects_follow_the_work_before_them(bool backend_thread) {
   AddressSpace memory;
   assert(memory.initialize());
   xenon::gpu::GraphicsSystem graphics(memory);
+  if (backend_thread) graphics.start_backend_thread();
   constexpr std::uint32_t ring = 0x01009000;
   constexpr std::uint32_t fence = 0x01219000;
   constexpr std::uint32_t mem_write_target = 0x01219010;
@@ -694,6 +698,8 @@ void test_ring_effects_follow_the_work_before_them() {
   constexpr std::uint32_t words = 2 + 4 + 2 + 2 + 3 + 4 + 2;
   const auto next = graphics.submit_ring(backend, ring, 64, 0, words);
   assert(next == words);
+  // The last draw has no effect after it to wait for; let it finish.
+  graphics.stop_backend_thread();
   // Each draw ran before the fence that follows it was written.
   assert(backend.draws_executed == 3);
   assert((backend.fence_when_drawn == std::vector<std::uint32_t>{0u, 1u, 2u}));
@@ -710,10 +716,11 @@ void test_ring_effects_follow_the_work_before_them() {
 // frame's queued draws and resolve. A swap record in the stream flips only when
 // the command processor reaches it, after the work before it has executed, and
 // advances the swap counter EVENT_WRITE_SHD reports; any other NOP stays a NOP.
-void test_front_buffer_swap_follows_the_work_before_it() {
+void test_front_buffer_swap_follows_the_work_before_it(bool backend_thread) {
   AddressSpace memory;
   assert(memory.initialize());
   xenon::gpu::GraphicsSystem graphics(memory);
+  if (backend_thread) graphics.start_backend_thread();
   constexpr std::uint32_t ring = 0x0100A000;
   constexpr std::uint32_t fence = 0x0121A000;
   store_be32(memory, fence, 0u);
@@ -742,6 +749,7 @@ void test_front_buffer_swap_follows_the_work_before_it() {
   const auto counter_before = graphics.command_processor().swap_counter();
   const auto words_count = static_cast<std::uint32_t>(words.size());
   assert(graphics.submit_ring(backend, ring, 64, 0, words_count) == words_count);
+  graphics.stop_backend_thread();
   assert((draws_at_swap == std::vector<int>{1}));
   assert(swaps.size() == 1u && swaps[0] == flip);
   assert(graphics.command_processor().swap_counter() == counter_before + 1u);
@@ -753,10 +761,11 @@ void test_front_buffer_swap_follows_the_work_before_it() {
 // The temporal analyzer sees the work execute_ir() runs and closes a frame at
 // the swap that shows it: the draw before the swap belongs to that frame, the
 // draw after it to the next, and the session's swap callback still runs.
-void test_temporal_frames_end_at_the_front_buffer_swap() {
+void test_temporal_frames_end_at_the_front_buffer_swap(bool backend_thread) {
   AddressSpace memory;
   assert(memory.initialize());
   xenon::gpu::GraphicsSystem graphics(memory);
+  if (backend_thread) graphics.start_backend_thread();
   constexpr std::uint32_t ring = 0x0100A000;
   constexpr std::uint32_t fence = 0x0121A000;
   store_be32(memory, fence, 0u);
@@ -789,12 +798,451 @@ void test_temporal_frames_end_at_the_front_buffer_swap() {
   for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
   const auto words_count = static_cast<std::uint32_t>(words.size());
   assert(graphics.submit_ring(backend, ring, 128, 0, words_count) == words_count);
+  graphics.stop_backend_thread();
   assert(swaps == 2);
   assert((draws_in_closed_frames == std::vector<std::uint32_t>{1u, 2u}));
   assert(graphics.temporal().last_frame().frame == 1u);
   assert(graphics.temporal().last_frame().pass_draws[static_cast<std::size_t>(
              xenon::gpu::TemporalPass::Unclassified)] == 2u);
   graphics.set_swap_callback({});
+}
+
+// Records, in order, every backend operation that affects what the guest or
+// the GPU sees, with the fence value guest memory held when it ran, and
+// fails if two operations ever overlap (gpu::Backend is not thread-safe).
+class EventRecordingBackend final : public xenon::gpu::Backend {
+ public:
+  EventRecordingBackend(AddressSpace& memory, std::uint32_t fence) : memory_(memory), fence_(fence) {}
+  void begin_submission(AddressSpace&, xenon::gpu::Edram&) override { Scope scope(*this); }
+  void consume(const xenon::gpu::ir::Command& command) override {
+    Scope scope(*this);
+    if (const auto* draw = std::get_if<xenon::gpu::ir::DrawPacket>(&command))
+      record("draw " + std::to_string(draw->index_count) + " fence " +
+             std::to_string(load_physical_be32(memory_, fence_)));
+    if (const auto* write = std::get_if<xenon::gpu::ir::RegisterWrite>(&command))
+      if (write->index == 0x100u) record("reg " + std::to_string(write->value));
+  }
+  void end_submission() override {
+    Scope scope(*this);
+    record("submit");
+  }
+  void end_submission_deferred() override { Scope scope(*this); }
+  void sync_guest_reads() override {
+    Scope scope(*this);
+    record("sync");
+  }
+  void end_guest_read_sync() override {
+    Scope scope(*this);
+    record("end sync");
+  }
+  bool publish_gpu_writes(bool wait) override {
+    Scope scope(*this);
+    if (wait) record("publish wait");
+    return true;
+  }
+  bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+  bool make_edram_canonical() override { return true; }
+  bool invalidate_edram_native_state() override { return true; }
+  xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+    Scope scope(*this);
+    record("present");
+    return xenon::gpu::PresentStatus::Success;
+  }
+  bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+  bool presentation_ready() const noexcept override { return true; }
+
+  std::vector<std::string> events;
+  std::atomic<int> overlaps{0};
+  std::atomic<int> consumed_off_caller{0};
+  std::thread::id caller{std::this_thread::get_id()};
+
+ private:
+  struct Scope {
+    explicit Scope(EventRecordingBackend& backend) : backend(backend) {
+      if (backend.active.fetch_add(1) != 0) ++backend.overlaps;
+      if (std::this_thread::get_id() != backend.caller) ++backend.consumed_off_caller;
+    }
+    ~Scope() { backend.active.fetch_sub(1); }
+    EventRecordingBackend& backend;
+  };
+  void record(std::string event) { events.push_back(std::move(event)); }
+  std::atomic<int> active{0};
+  AddressSpace& memory_;
+  std::uint32_t fence_;
+};
+
+std::vector<std::uint32_t> ordering_ring(std::uint32_t fence, std::uint32_t poll) {
+  const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
+  std::vector<std::uint32_t> words;
+  const auto draw = [&](std::uint32_t count) {
+    words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1),
+                               make_draw_initiator(PrimitiveType::TriangleList,
+                                                   DrawSource::AutoIndex, count)});
+  };
+  const auto reg = [&](std::uint32_t value) {
+    words.insert(words.end(), {make_packet_type0(0x100u, 1), value});
+  };
+  const auto fence_write = [&](std::uint32_t value) {
+    words.insert(words.end(), {make_packet_type3(Type3Opcode::EventWriteShaderDone, 3),
+                               0x00000006u, fence | swap, value});
+  };
+  // Draws streaming past several hand-offs, register writes between them,
+  // fences, an interrupt (a barrier and a sync point), a satisfied memory
+  // wait (another pair) and trailing work after the last effect.
+  for (std::uint32_t i = 1; i <= 40; ++i) {
+    reg(i);
+    draw(3 * i);
+    if (i % 10 == 0) fence_write(i / 10);
+    if (i == 20) words.insert(words.end(), {make_packet_type3(Type3Opcode::Interrupt, 1), 1u << 2u});
+    if (i == 30) {
+      // WAIT_REG_MEM: memory at `poll` == 0x5A (already true).
+      words.insert(words.end(), {make_packet_type3(Type3Opcode::WaitRegMem, 5), 0x13u,
+                                 poll | swap, 0x5Au, 0xFFFFFFFFu, 0u});
+    }
+  }
+  draw(999);
+  reg(77);
+  return words;
+}
+
+std::vector<std::string> run_ordering_ring(bool backend_thread, int* overlaps,
+                                           int* off_caller) {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100B000;
+  constexpr std::uint32_t fence = 0x0121B000;
+  constexpr std::uint32_t poll = 0x0121B010;
+  store_be32(memory, fence, 0u);
+  store_be32(memory, poll, 0x5Au);
+  EventRecordingBackend backend(memory, fence);
+  graphics.set_interrupt_callback([&](std::uint32_t) {
+    // The handler runs on the frontend after the work before it executed.
+    backend.events.push_back("interrupt");
+  });
+  if (backend_thread) graphics.start_backend_thread();
+  const auto words = ordering_ring(fence, poll);
+  for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+  const auto count = static_cast<std::uint32_t>(words.size());
+  assert(graphics.submit_ring(backend, ring, 1024, 0, count) == count);
+  graphics.stop_backend_thread();
+  assert(graphics.stream().commands().empty());
+  assert(load_physical_be32(memory, fence) == 4u);
+  *overlaps = backend.overlaps.load();
+  *off_caller = backend.consumed_off_caller.load();
+  return backend.events;
+}
+
+// GPU V3: with IR played on the backend thread, the backend sees exactly the
+// operations it saw when one thread decoded and played the ring - every
+// draw before the fence that follows it, every capture of guest memory at
+// its sync point, every readback wait before the effect it guards - and no
+// two of them overlap.
+void test_backend_thread_matches_inline_execution(bool backend_thread) {
+  int overlaps = -1;
+  int off_caller = -1;
+  const auto inline_events = run_ordering_ring(false, &overlaps, &off_caller);
+  assert(overlaps == 0 && off_caller == 0);
+  const auto events = run_ordering_ring(backend_thread, &overlaps, &off_caller);
+  assert(overlaps == 0);
+  if (!backend_thread) assert(off_caller == 0);
+  assert(events == inline_events);
+  // Spot checks of the expected order itself.
+  const auto find = [&](const std::string& event) {
+    const auto it = std::find(events.begin(), events.end(), event);
+    assert(it != events.end());
+    return it - events.begin();
+  };
+  assert(find("sync") == 0);
+  assert(find("draw 30 fence 0") < find("publish wait"));
+  assert(find("draw 33 fence 1") > find("draw 30 fence 0"));
+  assert(find("draw 60 fence 1") < find("interrupt"));
+  assert(find("draw 999 fence 4") < find("submit"));
+  assert(find("reg 77") < find("submit"));
+  assert(events.back() == "end sync");
+}
+
+// The backend consumes draws while the frontend is still decoding: with a
+// ring of draws and no guest-visible effect, draws reach a backend slowed
+// down per draw in groups as they are decoded, and it consumes every draw
+// exactly once, in order, on its own thread.
+void test_backend_thread_streams_draws_while_decoding() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100C000;
+  constexpr std::uint32_t read_pointer = 0x0121C000;
+  store_le32(memory, read_pointer, 0u);
+  struct SlowBackend final : xenon::gpu::Backend {
+    explicit SlowBackend(AddressSpace& memory) : memory(memory) {}
+    void begin_submission(AddressSpace&, xenon::gpu::Edram&) override {}
+    void consume(const xenon::gpu::ir::Command& command) override {
+      const auto* draw = std::get_if<xenon::gpu::ir::DrawPacket>(&command);
+      if (!draw) return;
+      if (load_le32_physical(memory, read_pointer) != 0u) ++after_publish;
+      if (std::this_thread::get_id() != caller) ++on_backend_thread;
+      counts.push_back(draw->index_count);
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+      consumed.fetch_add(1);
+    }
+    void end_submission() override {}
+    bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+    bool make_edram_canonical() override { return true; }
+    bool invalidate_edram_native_state() override { return true; }
+    xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+      return xenon::gpu::PresentStatus::NotConfigured;
+    }
+    bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+    bool presentation_ready() const noexcept override { return false; }
+    AddressSpace& memory;
+    std::thread::id caller{std::this_thread::get_id()};
+    std::atomic<int> consumed{0};
+    int on_backend_thread{0};
+    int after_publish{0};
+    std::vector<std::uint32_t> counts;
+  } backend(memory);
+  std::vector<std::uint32_t> words;
+  constexpr std::uint32_t kDraws = 200;
+  for (std::uint32_t i = 1; i <= kDraws; ++i)
+    words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1),
+                               make_draw_initiator(PrimitiveType::TriangleList,
+                                                   DrawSource::AutoIndex, i)});
+  for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+  graphics.start_backend_thread();
+  const auto count = static_cast<std::uint32_t>(words.size());
+  assert(graphics.submit_ring(backend, ring, 1024, 0, count) == count);
+  // The read pointer the caller writes back must not release ring words (or
+  // data placed among them) a draw still being recorded reads: a pipelined
+  // drain may return before its last draws execute, and the read pointer
+  // goes back behind them.
+  graphics.write_guest_after_work(read_pointer,
+                                  {std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0}});
+  graphics.run_backend_task([] {});
+  assert(backend.consumed.load() == static_cast<int>(kDraws));
+  assert(backend.after_publish == 0);
+  assert(load_le32_physical(memory, read_pointer) == 1u);
+  const auto stats = graphics.backend_executor().statistics();
+  graphics.stop_backend_thread();
+  assert(backend.counts.size() == kDraws);
+  for (std::uint32_t i = 0; i < kDraws; ++i) assert(backend.counts[i] == i + 1u);
+  assert(backend.on_backend_thread == static_cast<int>(kDraws));
+  // Handed over in groups while decoding went on (the first draw at once,
+  // to the idle backend; then one group per 16 decoded while it was busy),
+  // not as one batch when the drain's decode had finished.
+  assert(stats.posted >= kDraws / 16u);
+}
+
+// GPU V3: a short drain - AC6 runs hundreds a second, a few draws each -
+// executes on the frontend thread even with a backend thread running: handing
+// it over would cost more than it saves. A long drain streams.
+void test_short_drains_execute_without_a_hand_off() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  constexpr std::uint32_t ring = 0x0100E000;
+  constexpr std::uint32_t fence = 0x0121E000;
+  store_be32(memory, fence, 0u);
+  EventRecordingBackend backend(memory, fence);
+  graphics.start_backend_thread();
+  const auto swap = static_cast<std::uint32_t>(Endian::Swap8In32);
+  const auto initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto drain = [&](std::uint32_t draws, std::uint32_t fence_value) {
+    std::vector<std::uint32_t> words;
+    for (std::uint32_t i = 0; i < draws; ++i)
+      words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator,
+                                 make_packet_type3(Type3Opcode::EventWriteShaderDone, 3),
+                                 0x00000006u, fence | swap, fence_value});
+    for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+    const auto count = static_cast<std::uint32_t>(words.size());
+    assert(graphics.submit_ring(backend, ring, 1024, 0, count) == count);
+  };
+  drain(3, 1u);
+  assert(backend.consumed_off_caller.load() == 0);
+  assert(graphics.backend_executor().statistics().posted == 0u);
+  assert(load_physical_be32(memory, fence) == 1u);
+  drain(40, 2u);
+  // A long drain is pipelined: it may return before the backend thread has
+  // started on what it handed over, and its last fence lands behind that.
+  graphics.run_backend_task([] {});
+  assert(backend.consumed_off_caller.load() > 0);
+  assert(graphics.backend_executor().statistics().posted > 0u);
+  assert(load_physical_be32(memory, fence) == 2u);
+  assert(backend.overlaps.load() == 0);
+  graphics.stop_backend_thread();
+}
+
+// GPU V3: guest memory writes the stream makes are deferred behind the work
+// before them, and the frontend's own reads of guest memory still see them.
+// The drain streams (it has more than kStreamAfterDraws draws) and the
+// backend is slow per draw, so the MEM_WRITE is still queued behind the
+// draws when COND_EXEC decodes: it must wait for it and take the branch.
+// A repeated EVENT_WRITE_EXT is still recognised as changing nothing.
+void test_deferred_writes_reach_frontend_reads(bool backend_thread) {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  struct SlowDrawBackend final : xenon::gpu::Backend {
+    explicit SlowDrawBackend(AddressSpace& memory, std::uint32_t watched)
+        : memory(memory), watched(watched) {}
+    void begin_submission(AddressSpace&, xenon::gpu::Edram&) override {}
+    void consume(const xenon::gpu::ir::Command& command) override {
+      if (!std::holds_alternative<xenon::gpu::ir::DrawPacket>(command)) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      condition_when_drawn.push_back(load_le32_physical(memory, watched));
+    }
+    void end_submission() override {}
+    bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+    bool make_edram_canonical() override { return true; }
+    bool invalidate_edram_native_state() override { return true; }
+    xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+      return xenon::gpu::PresentStatus::NotConfigured;
+    }
+    bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+    bool presentation_ready() const noexcept override { return false; }
+    AddressSpace& memory;
+    std::uint32_t watched;
+    std::vector<std::uint32_t> condition_when_drawn;
+  };
+  constexpr std::uint32_t ring = 0x0100D000;
+  constexpr std::uint32_t condition0 = 0x0121D000;
+  constexpr std::uint32_t condition1 = 0x0121D004;
+  constexpr std::uint32_t extent = 0x0121D100;
+  constexpr std::uint32_t taken_register = 0x33Au;
+  store_le32(memory, condition0, 0u);
+  store_le32(memory, condition1, 5u);
+  SlowDrawBackend backend(memory, condition0);
+  if (backend_thread) graphics.start_backend_thread();
+  const auto initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto extent_address = extent | static_cast<std::uint32_t>(Endian::Swap8In16);
+  constexpr std::uint32_t kLeadingDraws = 12;
+  std::vector<std::uint32_t> words;
+  for (std::uint32_t i = 0; i < kLeadingDraws; ++i)
+    words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  constexpr std::uint32_t unrelated_constants = 0x0121D200;
+  write_words(memory, unrelated_constants, {0x11223344u, 0x55667788u});
+  words.insert(words.end(), {
+      make_packet_type3(Type3Opcode::MemWrite, 2), condition0, 1u,
+      // A constant load from memory no pending write touches: no wait.
+      make_packet_type3(Type3Opcode::LoadAluConstant, 3), unrelated_constants,
+      (1u << 16) | 0x10u, 2u,
+      make_packet_type3(Type3Opcode::CondExec, 4), condition0 >> 2u, condition1 >> 2u, 10u, 2u,
+      make_packet_type0(taken_register, 1), 0xCCCCCCCCu,
+      make_packet_type3(Type3Opcode::EventWriteExtent, 2), 0x09u, extent_address,
+      make_packet_type3(Type3Opcode::EventWriteExtent, 2), 0x09u, extent_address,
+      make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + i * 4u, words[i]);
+  const auto before = graphics.command_processor().statistics();
+  const auto holds_before = xenon::gpu::perf::peek(xenon::gpu::perf::Counter::HoldsRead);
+  const auto count = static_cast<std::uint32_t>(words.size());
+  assert(graphics.submit_ring(backend, ring, 128, 0, count) == count);
+  graphics.stop_backend_thread();
+  // COND_EXEC read the condition the MEM_WRITE before it set.
+  assert(graphics.registers().read(taken_register) == 0xCCCCCCCCu);
+  assert(graphics.registers().read(0x4810u) == 0x11223344u);
+  assert(graphics.registers().read(0x4811u) == 0x55667788u);
+  // Only the read of the written condition waited for the backend; the
+  // constant load from other memory went straight on.
+  const auto holds = xenon::gpu::perf::peek(xenon::gpu::perf::Counter::HoldsRead) - holds_before;
+  assert(holds == (backend_thread ? 1u : 0u));
+  // Each draw saw guest memory as the stream had written it at that point.
+  std::vector<std::uint32_t> expected(kLeadingDraws, 0u);
+  expected.push_back(1u);
+  assert(backend.condition_when_drawn == expected);
+  assert(load_le32_physical(memory, condition0) == 1u);
+  assert(load_physical_be16(memory, extent + 2u) == 1024u);
+  assert(load_physical_be16(memory, extent + 10u) == 1u);
+  const auto after = graphics.command_processor().statistics();
+  assert(after.extent_event_writes == before.extent_event_writes + 2u);
+  assert(after.event_memory_writes == before.event_memory_writes + 1u);
+  assert(after.unchanged_event_writes == before.unchanged_event_writes + 1u);
+  assert(after.conditional_exec_taken == before.conditional_exec_taken + 1u);
+}
+
+// GPU V3 pipelined drains: a drain that streamed returns without waiting for
+// its last work, so the next one decodes beside it - and nothing the guest
+// observes gets ahead of that work. The read pointer written back after the
+// drain (write_guest_after_work()) lands only once every draw before it has
+// executed, and a later drain's writes stay ordered after the earlier
+// drain's: regression, an unchanged-extent check made against guest memory
+// an earlier drain's still-pending MEM_WRITE was about to change skipped the
+// extent, and the MEM_WRITE then left the wrong value behind.
+void test_pipelined_drains_publish_after_their_work() {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  struct SlowDrawBackend final : xenon::gpu::Backend {
+    explicit SlowDrawBackend(AddressSpace& memory, std::uint32_t read_pointer)
+        : memory(memory), read_pointer(read_pointer) {}
+    void begin_submission(AddressSpace&, xenon::gpu::Edram&) override {}
+    void consume(const xenon::gpu::ir::Command& command) override {
+      if (!std::holds_alternative<xenon::gpu::ir::DrawPacket>(command)) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+      if (load_le32_physical(memory, read_pointer) != 0u) ++drawn_after_publish;
+      ++drawn;
+    }
+    void end_submission() override {}
+    bool make_guest_memory_cpu_visible(std::uint32_t, std::uint32_t) override { return true; }
+    bool make_edram_canonical() override { return true; }
+    bool invalidate_edram_native_state() override { return true; }
+    xenon::gpu::PresentStatus present(const xenon::gpu::PresentationFrame&) override {
+      return xenon::gpu::PresentStatus::NotConfigured;
+    }
+    bool resize_presentation(std::uint32_t, std::uint32_t) override { return false; }
+    bool presentation_ready() const noexcept override { return false; }
+    AddressSpace& memory;
+    std::uint32_t read_pointer;
+    std::atomic<int> drawn{0};
+    int drawn_after_publish{0};
+  };
+  constexpr std::uint32_t ring = 0x0100F000;
+  constexpr std::uint32_t read_pointer = 0x0121F000;
+  constexpr std::uint32_t extent = 0x0121F100;
+  store_le32(memory, read_pointer, 0u);
+  SlowDrawBackend backend(memory, read_pointer);
+  graphics.start_backend_thread();
+  assert(graphics.pipelined_drains());
+  const auto extent_address = extent | static_cast<std::uint32_t>(Endian::Swap8In16);
+  const auto initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  std::uint32_t at = 0;
+  const auto drain = [&](const std::vector<std::uint32_t>& words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i)
+      store_be32(memory, ring + (at + i) * 4u, words[i]);
+    const auto end = at + static_cast<std::uint32_t>(words.size());
+    assert(graphics.submit_ring(backend, ring, 1024, at, end) == end);
+    at = end;
+  };
+
+  // The extent as the stream writes it, with the backend idle.
+  drain({make_packet_type3(Type3Opcode::EventWriteExtent, 2), 0x09u, extent_address});
+  assert(load_physical_be16(memory, extent + 2u) == 1024u);
+
+  // A drain that streams: its draws, then a MEM_WRITE clearing the extent,
+  // both still executing when it returns.
+  constexpr std::uint32_t kDraws = 16;
+  std::vector<std::uint32_t> words;
+  for (std::uint32_t i = 0; i < kDraws; ++i)
+    words.insert(words.end(), {make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator});
+  words.insert(words.end(), {make_packet_type3(Type3Opcode::MemWrite, 2), extent, 0u});
+  const auto drain_holds = xenon::gpu::perf::peek(xenon::gpu::perf::Counter::HoldsDrain);
+  drain(words);
+  assert(xenon::gpu::perf::peek(xenon::gpu::perf::Counter::HoldsDrain) == drain_holds &&
+         "a pipelined drain does not wait for its last work");
+  // The read pointer goes back behind that work.
+  graphics.write_guest_after_work(read_pointer, {std::byte{1}, std::byte{0}, std::byte{0},
+                                                 std::byte{0}});
+  // The next drain writes the extent again while the MEM_WRITE is pending.
+  drain({make_packet_type3(Type3Opcode::EventWriteExtent, 2), 0x09u, extent_address});
+  graphics.stop_backend_thread();
+
+  assert(backend.drawn.load() == static_cast<int>(kDraws));
+  assert(backend.drawn_after_publish == 0 &&
+         "the guest's read pointer moved past draws still executing");
+  assert(load_le32_physical(memory, read_pointer) == 1u);
+  // MEM_WRITE, then the extent: the extent is what memory holds.
+  assert(load_physical_be16(memory, extent + 2u) == 1024u);
 }
 
 // Regression (Ace Combat 6 logged "truncated Xenos type-3 packet" on every
@@ -1672,9 +2120,16 @@ int main() {
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
-  test_ring_effects_follow_the_work_before_them();
-  test_front_buffer_swap_follows_the_work_before_it();
-  test_temporal_frames_end_at_the_front_buffer_swap();
+  for (const bool backend_thread : {false, true}) {
+    test_ring_effects_follow_the_work_before_them(backend_thread);
+    test_front_buffer_swap_follows_the_work_before_it(backend_thread);
+    test_temporal_frames_end_at_the_front_buffer_swap(backend_thread);
+    test_backend_thread_matches_inline_execution(backend_thread);
+    test_deferred_writes_reach_frontend_reads(backend_thread);
+  }
+  test_backend_thread_streams_draws_while_decoding();
+  test_short_drains_execute_without_a_hand_off();
+  test_pipelined_drains_publish_after_their_work();
   test_ring_waits_for_a_packet_past_the_write_pointer(memory, cp, regs);
   test_ring_wait_stall_resumes(memory, cp, regs);
   test_coher_status_host_wait_completes(memory, cp, regs);

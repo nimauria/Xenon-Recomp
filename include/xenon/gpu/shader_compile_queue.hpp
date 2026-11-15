@@ -20,6 +20,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +52,24 @@ class ShaderCompileQueue {
   [[nodiscard]] std::shared_ptr<const CompiledShader> wait(std::uint64_t key,
                                                            Clock::time_point deadline);
 
+  // GPU V3 prefetch: a shader the frontend has decoded, lowered and compiled
+  // on a worker before the backend reaches it. `lower` runs on the worker
+  // (lowering is a pure function of the decoded program); the first prefetch
+  // of a key queues it, later ones do nothing. Safe from any thread.
+  struct Prepared {
+    std::shared_ptr<const LoweredShader> lowered{};
+    // Null when the lowering is incomplete (nothing is compiled then).
+    std::shared_ptr<const CompiledShader> compiled{};
+    std::string error{};  // the lowering threw
+  };
+  using Lowering = std::function<LoweredShader()>;
+  void prefetch(std::uint64_t key, Lowering lower, const ShaderCompileOptions& options);
+  // The prepared shader for a prefetched key, waiting while it is lowered or
+  // compiled; nullopt when the key was never prefetched.
+  [[nodiscard]] std::optional<Prepared> prepared(std::uint64_t key);
+  // Whether `key` was prefetched (queued, running or done).
+  [[nodiscard]] bool prefetched(std::uint64_t key) const;
+
   // Compiles queued or running.
   [[nodiscard]] std::size_t pending() const;
   [[nodiscard]] unsigned worker_count() const noexcept {
@@ -64,7 +84,13 @@ class ShaderCompileQueue {
     std::uint64_t key;
     LoweredShader shader;
     ShaderCompileOptions options;
+    Lowering lower{};  // set: a prefetch job, lowered on the worker
   };
+  struct PreparedEntry {
+    bool done{};
+    Prepared prepared{};
+  };
+  std::unordered_map<std::uint64_t, PreparedEntry> prepared_;
   void run_worker();
 
   ShaderCache& cache_;

@@ -197,6 +197,14 @@ class Backend {
   // sync_guest_reads(). A backend that keeps no copies of guest memory reads
   // it nowhere else, so has nothing to capture.
   virtual void sync_guest_reads() {}
+  // GPU V3 shader prefetch: graphics IR the frontend is about to hand over.
+  // A backend may start lowering and compiling the shaders it loads, on
+  // worker threads, before it consumes them. Called on the frontend thread,
+  // concurrently with consumption: an implementation touches only
+  // thread-safe state.
+  virtual void prefetch_shaders(std::span<const ir::Command> commands) {
+    static_cast<void>(commands);
+  }
   virtual void end_guest_read_sync() {}
 
   // GPU writes to guest memory (resolves) reach guest memory without the

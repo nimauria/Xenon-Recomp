@@ -142,6 +142,14 @@ class Stream {
   }
 
   void clear() { commands_.clear(); }
+  // Moves the commands out (for a hand-off to the backend thread), leaving
+  // the stream empty with `recycled`'s storage, so steady-state hand-offs
+  // allocate nothing.
+  [[nodiscard]] std::vector<Command> take(std::vector<Command> recycled = {}) {
+    recycled.clear();
+    commands_.swap(recycled);
+    return recycled;
+  }
   [[nodiscard]] const std::vector<Command>& commands() const noexcept {
     return commands_;
   }

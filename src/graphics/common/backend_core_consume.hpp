@@ -718,7 +718,37 @@ void BackendCore<Derived, Api>::consume_shader_load(
   shader_texture_filters[load->program.hash()] = decoded.reflection.texture_filter_overrides;
 #ifdef XENON_HAS_DXC
   decoded_shaders[load->program.hash()] = decoded;
-  const auto lowered = HlslShaderLowerer::lower(decoded);
+  ShaderCompileOptions options{};
+  options = guest_shader_options();
+  // Usually lowered and compiled already, on a worker, since the frontend
+  // decoded the load (prefetch_shaders()); otherwise this waits for it -
+  // a draw never goes ahead without its shader.
+  std::shared_ptr<const LoweredShader> lowered_shader;
+  std::shared_ptr<const CompiledShader> prefetched;
+  if (shader_prefetch) {
+    shader_prefetch->prefetch(
+        load->program.hash(),
+        [decoded = load->decoded] { return HlslShaderLowerer::lower(*decoded); }, options);
+    const auto wait_start = std::chrono::steady_clock::now();
+    auto prepared = shader_prefetch->prepared(load->program.hash());
+    perf::add(perf::Counter::ShaderWaitNs,
+              static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             std::chrono::steady_clock::now() - wait_start)
+                                             .count()));
+    perf::add(perf::Counter::ShaderWaits, 1u);
+    if (!prepared || !prepared->lowered) {
+      ++shader_translation_failures;
+      error = prepared && !prepared->error.empty()
+                  ? named("shader lowering failed: " + prepared->error)
+                  : named("shader prefetch ended before the shader was prepared");
+      return;
+    }
+    lowered_shader = prepared->lowered;
+    prefetched = prepared->compiled;
+  } else {
+    lowered_shader = std::make_shared<const LoweredShader>(HlslShaderLowerer::lower(decoded));
+  }
+  const auto& lowered = *lowered_shader;
   dump_shader(load->program, lowered.hlsl);
   unsupported.unsupported_shader_instructions += lowered.unsupported_instructions;
   unsupported.unsupported_shader_features += lowered.unsupported_features;
@@ -736,9 +766,7 @@ void BackendCore<Derived, Api>::consume_shader_load(
                  "): " + error;
         });
   } else {
-    ShaderCompileOptions options{};
-    options.format = Api::kShaderBinaryFormat;
-    const auto compiled = shader_cache.get_or_compile(lowered, options);
+    const auto compiled = prefetched ? prefetched : shader_cache.get_or_compile(lowered, options);
     if (compiled->succeeded) {
       ++compiled_shader_count;
       shaders[load->program.hash()] = compiled;

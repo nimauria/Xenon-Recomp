@@ -17,10 +17,27 @@
 //   fence       time the CPU blocked on the host GPU, and how many waits
 //   shader      shader compiles on the draw path: count and time
 //   pso         pipeline creations: count and time
+//   shader wait time draws waited for a shader still being lowered or
+//               compiled in the background (and how often)
+//   gpu         GPU timestamps around every submitted batch: time the GPU
+//               spent executing batches ("busy"), the gaps between one
+//               batch ending and the next starting ("idle": the GPU waiting
+//               for work), and how many batches were measured
 //   draws/resolves  per second
 //   readback    MB of GPU-written bytes copied into guest memory; the time the
 //               GPU worker waited for them (and how often); the time guest
 //               CPU writes were held off while they were written ("window")
+//   backend     time the backend thread spent consuming IR, recording and
+//               presenting (BackendExecutor); the time the frontend blocked
+//               waiting for it (and how often) at guest-visible barriers
+//   submit      native queue submissions (ExecuteCommandLists / vkQueueSubmit2)
+//               and the time spent in them
+//   bindings    draws that reused an earlier draw's descriptor tables / set,
+//               and draws that copied or wrote their own
+//   holds       times the frontend had to wait for a busy backend, by cause:
+//               a guest-visible barrier (interrupt, flip, wait, IM_STORE), a
+//               sync point, a read of guest memory behind a deferred write,
+//               and the end of a drain
 
 #include <atomic>
 #include <chrono>
@@ -46,6 +63,22 @@ enum class Counter : std::uint32_t {
   ReadbackWaitNs,
   ReadbackWaits,
   ReadbackWindowNs,
+  BackendNs,
+  BackendWaitNs,
+  BackendWaits,
+  Submits,
+  SubmitNs,
+  HoldsBarrier,
+  HoldsSync,
+  HoldsRead,
+  HoldsDrain,
+  BindingsReused,
+  BindingsWritten,
+  ShaderWaitNs,
+  ShaderWaits,
+  GpuBusyNs,
+  GpuIdleNs,
+  GpuBatches,
   Count,
 };
 

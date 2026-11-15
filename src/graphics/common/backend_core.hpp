@@ -69,6 +69,7 @@
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/perf_stats.hpp"
+#include <thread>
 #include "xenon/gpu/guest_read_sync.hpp"
 #include "xenon/gpu/scanout.hpp"
 #include "xenon/gpu/texture.hpp"
@@ -80,6 +81,7 @@
 #include "xenon/memory/address_space.hpp"
 #ifdef XENON_HAS_DXC
 #include "xenon/gpu/dxc_shader_compiler.hpp"
+#include "xenon/gpu/shader_compile_queue.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 #endif
 
@@ -296,6 +298,204 @@ class BackendCore {
 #ifdef XENON_HAS_DXC
   std::shared_ptr<DxcShaderCompiler> compiler{std::make_shared<DxcShaderCompiler>()};
   ShaderCache shader_cache{compiler};
+  // GPU V3: shaders lowered and compiled on worker threads as soon as the
+  // frontend decodes their loads (prefetch_shaders()); null with
+  // XENON_GPU_ASYNC_SHADERS=0, when each is compiled where it is consumed.
+  // Declared after shader_cache, which its workers use: destroyed first.
+  std::unique_ptr<ShaderCompileQueue> shader_prefetch{make_shader_prefetch_queue(shader_cache)};
+  static std::unique_ptr<ShaderCompileQueue> make_shader_prefetch_queue(ShaderCache& cache) {
+    if (const char* value = std::getenv("XENON_GPU_ASYNC_SHADERS");
+        value && value[0] == '0' && value[1] == '\0')
+      return nullptr;
+    // A few workers: DXC is CPU-heavy, and the guest's own threads run
+    // beside them (a handheld gets one).
+    unsigned workers = std::clamp(std::thread::hardware_concurrency() / 4u, 1u, 6u);
+    if (const char* value = std::getenv("XENON_GPU_SHADER_THREADS"); value && *value) {
+      const auto parsed = std::strtoul(value, nullptr, 10);
+      if (parsed >= 1u && parsed <= 32u) workers = static_cast<unsigned>(parsed);
+    }
+    return std::make_unique<ShaderCompileQueue>(cache, workers);
+  }
+  // How guest shaders compile. SPIR-V is only legalized: the Vulkan driver
+  // optimizes it when it builds the pipeline anyway, and DXC's own SPIR-V
+  // optimizer cost about three quarters of a mission shader's compile (AC6:
+  // 46 ms on average with it off and registers as variables, 174 ms before).
+  // DXIL is optimized: the D3D12 driver expects DXC's optimized output, and
+  // it compiles faster that way.
+  static ShaderCompileOptions guest_shader_options() {
+    ShaderCompileOptions options{};
+    options.format = Api::kShaderBinaryFormat;
+    options.optimize = Api::kShaderBinaryFormat != ShaderBinaryFormat::Spirv;
+    return options;
+  }
+  // Shader variants a draw's state selects (consume_draw()): the key each
+  // is cached under and the lowering it takes. Shared by the draw, which
+  // uses them, and prefetch_shaders(), which predicts them.
+  static constexpr std::uint64_t writable_variant_key(std::uint64_t shader_hash) noexcept {
+    return shader_hash ^ 0x4D454D4558505257ull;
+  }
+  static ShaderLoweringOptions writable_variant_options() noexcept {
+    ShaderLoweringOptions options{};
+    options.force_guest_memory_rw = true;
+    return options;
+  }
+  struct PixelVariant {
+    std::uint64_t key{};
+    ShaderLoweringOptions options{};
+  };
+  // D24FS8 depth output (float20e4 rounding, per sample under MSAA) and
+  // PsParamGen (SQ_PROGRAM_CNTL.PARAM_GEN); nullopt when the draw needs
+  // neither and samples the pixel shader as loaded.
+  static std::optional<PixelVariant> pixel_variant(std::uint64_t pixel_hash, bool float20_depth,
+                                                   MsaaSamples samples, bool memexport_writable,
+                                                   std::uint8_t param_gen,
+                                                   bool point_primitive) noexcept {
+    if (!float20_depth && param_gen == ShaderProgramState::kNoParamGen) return std::nullopt;
+    const bool per_sample = float20_depth && samples != MsaaSamples::X1;
+    PixelVariant variant{};
+    variant.key =
+        pixel_hash ^ (float20_depth ? 0xD24F20E4D24F20E4ull : 0ull) ^
+        (per_sample ? 0x8000000000000000ull : 0ull) ^
+        (memexport_writable ? 0x0400000000000000ull : 0ull) ^
+        (param_gen != ShaderProgramState::kNoParamGen
+             ? 0x5041524D47454E00ull ^ (std::uint64_t(param_gen) << 40u) ^
+                   (point_primitive ? 0x0000100000000000ull : 0ull)
+             : 0ull);
+    if (float20_depth)
+      variant.options.pixel_depth_output = PixelDepthOutputMode::Float20e4NearestEven;
+    variant.options.force_sample_frequency = per_sample;
+    variant.options.force_guest_memory_rw = memexport_writable;
+    variant.options.param_gen_interpolator = param_gen;
+    variant.options.param_gen_point = point_primitive;
+    return variant;
+  }
+  // A shader variant for a draw: from a prefetch worker when the frontend
+  // predicted it (prefetch_variants(); waited for if still compiling),
+  // otherwise lowered and compiled here - queued behind other compiles it
+  // would wait longer.
+  struct VariantResult {
+    std::shared_ptr<const LoweredShader> lowered{};
+    std::shared_ptr<const CompiledShader> compiled{};
+    std::string error{};
+  };
+  VariantResult prepare_variant(std::uint64_t key, const DecodedShader& decoded,
+                                const ShaderLoweringOptions& lowering) {
+    ShaderCompileOptions options{};
+    options = guest_shader_options();
+    VariantResult result{};
+    if (shader_prefetch && shader_prefetch->prefetched(key)) {
+      ++prefetched_variant_hits;
+      const auto wait_start = std::chrono::steady_clock::now();
+      auto prepared = shader_prefetch->prepared(key);
+      perf::add(perf::Counter::ShaderWaitNs,
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - wait_start)
+                                               .count()));
+      perf::add(perf::Counter::ShaderWaits, 1u);
+      if (!prepared || !prepared->lowered) {
+        result.error = prepared && !prepared->error.empty()
+                           ? prepared->error
+                           : std::string("shader prefetch ended before the variant was prepared");
+        return result;
+      }
+      result.lowered = std::move(prepared->lowered);
+      result.compiled = std::move(prepared->compiled);
+    } else {
+      ++variants_compiled_at_draw;
+      result.lowered =
+          std::make_shared<const LoweredShader>(HlslShaderLowerer::lower(decoded, lowering));
+    }
+    if (result.lowered->complete && !result.compiled)
+      result.compiled = shader_cache.get_or_compile(*result.lowered, options);
+    return result;
+  }
+  // Frontend-thread state of prefetch_shaders(): registers and decoded
+  // shaders as of the IR handed over so far, and the variant combinations
+  // already predicted. Never touched by consumption.
+  ResourceStateTracker prefetch_registers{};
+  std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> prefetch_decoded{};
+  std::unordered_set<std::uint64_t> prefetch_variants_seen{};
+  std::uint64_t prefetched_variants{};       // frontend thread
+  std::uint64_t prefetched_variant_hits{};   // backend thread
+  std::uint64_t variants_compiled_at_draw{};  // backend thread
+  void prefetch_shaders(std::span<const ir::Command> commands) {
+    if (!shader_prefetch) return;
+    ShaderCompileOptions options{};
+    options = guest_shader_options();
+    for (const auto& command : commands) {
+      if (const auto* write = std::get_if<ir::RegisterWrite>(&command)) {
+        prefetch_registers.apply(*write);
+        continue;
+      }
+      if (const auto* load = std::get_if<ir::ShaderLoad>(&command)) {
+        if (!load->decoded) continue;
+        prefetch_decoded[load->program.hash()] = load->decoded;
+        shader_prefetch->prefetch(
+            load->program.hash(),
+            [decoded = load->decoded] { return HlslShaderLowerer::lower(*decoded); }, options);
+        continue;
+      }
+      if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) prefetch_variants(*draw);
+    }
+  }
+  // Starts the variants a draw will select (consume_draw()) as it is handed
+  // over. A prediction from the registers alone: a draw whose depth target
+  // turns out unbound compiles a variant it does not use, and one predicted
+  // wrongly waits for its variant where it is consumed, as without prefetch.
+  void prefetch_variants(const ir::DrawPacket& draw) {
+    if (!draw.vertex_shader.valid || !draw.pixel_shader.valid) return;
+    const auto vertex = prefetch_decoded.find(draw.vertex_shader.hash);
+    const auto pixel = prefetch_decoded.find(draw.pixel_shader.hash);
+    if (vertex == prefetch_decoded.end() || pixel == prefetch_decoded.end()) return;
+    // The registers variants depend on: RB_SURFACE_INFO (MSAA), RB_DEPTH_INFO
+    // (format), RB_DEPTHCONTROL, SQ_PROGRAM_CNTL and SQ_CONTEXT_MISC (param
+    // gen). A combination seen before is not predicted again.
+    auto mix = [](std::uint64_t hash, std::uint64_t value) {
+      hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6u) + (hash >> 2u);
+      return hash;
+    };
+    std::uint64_t combination = mix(draw.vertex_shader.hash, draw.pixel_shader.hash);
+    combination = mix(combination, (prefetch_registers.register_value(0x2000u) >> 16u) & 3u);
+    combination = mix(combination, (prefetch_registers.register_value(0x2002u) >> 16u) & 1u);
+    combination = mix(combination, prefetch_registers.register_value(0x2200u) & 0x7Fu);
+    combination = mix(combination, prefetch_registers.register_value(0x2180u));
+    combination = mix(combination, prefetch_registers.register_value(0x2181u));
+    combination = mix(combination, draw.primitive_type == PrimitiveType::PointList);
+    if (prefetch_variants_seen.size() >= 65536u) prefetch_variants_seen.clear();
+    if (!prefetch_variants_seen.insert(combination).second) return;
+
+    ShaderCompileOptions options{};
+    options = guest_shader_options();
+    auto start = [&](std::uint64_t key, const std::shared_ptr<const DecodedShader>& decoded,
+                     const ShaderLoweringOptions& lowering) {
+      ++prefetched_variants;
+      shader_prefetch->prefetch(
+          key, [decoded, lowering] { return HlslShaderLowerer::lower(*decoded, lowering); },
+          options);
+    };
+    const bool vertex_memexport = vertex->second->reflection.memory_exports != 0;
+    const bool pixel_memexport = pixel->second->reflection.memory_exports != 0;
+    const bool memexport_writable = vertex_memexport || pixel_memexport;
+    if (memexport_writable) {
+      if (!vertex_memexport)
+        start(writable_variant_key(draw.vertex_shader.hash), vertex->second,
+              writable_variant_options());
+      if (!pixel_memexport)
+        start(writable_variant_key(draw.pixel_shader.hash), pixel->second,
+              writable_variant_options());
+    }
+    const auto state = prefetch_registers.snapshot_targets();
+    const bool float20_depth =
+        !state.program.multipass() &&
+        state.depth_target.format == static_cast<std::uint8_t>(DepthRenderTargetFormat::D24FS8) &&
+        (state.depth_target.test_enabled || state.depth_target.write_enabled);
+    if (const auto variant = pixel_variant(
+            draw.pixel_shader.hash, float20_depth,
+            static_cast<MsaaSamples>(state.raster.msaa_samples_log2), memexport_writable,
+            state.program.param_gen_interpolator(),
+            draw.primitive_type == PrimitiveType::PointList))
+      start(variant->key, pixel->second, variant->options);
+  }
   std::unordered_map<std::uint64_t, std::shared_ptr<const CompiledShader>> shaders{};
   std::unordered_map<std::uint64_t, DecodedShader> decoded_shaders{};
   std::unordered_map<std::uint64_t, std::shared_ptr<const CompiledShader>>

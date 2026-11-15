@@ -487,9 +487,13 @@ class ResourceStateTracker {
       std::uint32_t fetch_constant) const noexcept;
   [[nodiscard]] std::optional<VertexBufferDescriptor> vertex_buffer(
       std::uint32_t fetch_constant, std::uint32_t select) const noexcept;
+  // The state every draw sees. Kept decoded between draws: only the parts
+  // whose registers were written since the last snapshot are decoded again
+  // (shader constant writes, most of a draw's, touch none of it).
   [[nodiscard]] DrawResourceState snapshot() const noexcept;
   // snapshot() without the texture and vertex fetch constants: the render
-  // target, depth, raster and copy state alone, for per-draw observers.
+  // target, depth, raster and copy state alone, for per-draw observers. It
+  // reads only registers 0x2000-0x3FFF and 0x4900 on (see apply()).
   [[nodiscard]] DrawResourceState snapshot_targets() const noexcept;
   [[nodiscard]] std::uint32_t register_value(std::uint32_t index) const noexcept {
     return index < registers_.size() ? registers_[index] : 0u;
@@ -504,6 +508,13 @@ class ResourceStateTracker {
  private:
   std::array<std::uint32_t, RegisterFile::kRegisterCount> registers_{};
   std::uint64_t generation_{};
+  // snapshot()'s decoded state and what was written since it was decoded:
+  // the target/raster/copy registers, and each texture slot (six fetch
+  // constant dwords) and vertex fetch (two) by bit.
+  mutable DrawResourceState decoded_{};
+  mutable bool targets_dirty_{true};
+  mutable std::uint32_t textures_dirty_{~0u};
+  mutable std::array<std::uint32_t, 3> vertex_buffers_dirty_{~0u, ~0u, ~0u};
 };
 
 }  // namespace xenon::gpu

@@ -285,7 +285,8 @@ bool ScanoutRenderer::capture(VkPhysicalDevice physical_device, VkDevice device,
                            VkDeviceSize(row_pitch) * constants.target_height,
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                           Buffer::kCpuReadback)) {
     error_ = readback.error();
     cleanup();
     return false;

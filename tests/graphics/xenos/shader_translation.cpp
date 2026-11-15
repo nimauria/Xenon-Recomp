@@ -2,6 +2,9 @@
 #include <array>
 #include <chrono>
 #include <cassert>
+#include <stdexcept>
+#include <thread>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -242,9 +245,10 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   }
   assert(lowered.complete);
   assert(lowered.hlsl.find(
-             "vfetch_base = xenon_vertex_fetch_base(5, 2, xenon_fetch_index(r[(0) & 63][0], "
+             "vfetch_base = xenon_vertex_fetch_base(5, 2, xenon_fetch_index(r_0[0], "
              "false), 3);") != std::string::npos);
   assert(lowered.hlsl.find("asuint(r[") == std::string::npos);
+  assert(lowered.hlsl.find("asuint(r_") == std::string::npos);
   assert(lowered.hlsl.find("xenon_vertex_decode(vfetch_base, 0, 16, true, true)") !=
          std::string::npos);
   assert(lowered.hlsl.find("select == 0u ? slot.x : (select == 1u ? slot.z : slot.w)") !=
@@ -265,7 +269,7 @@ void test_vertex_fetch_select_endian_and_packed_formats() {
   const auto rounded = HlslShaderLowerer::lower(shader);
   assert(rounded.complete);
   assert(rounded.hlsl.find(
-             "xenon_fetch_index(r[(0) & 63][0], true), 3);") !=
+             "xenon_fetch_index(r_0[0], true), 3);") !=
          std::string::npos);
   shader.instructions[0].vertex_fetch.data_format = 63;  // not a vertex format
   assert(!HlslShaderLowerer::lower(shader).complete);
@@ -302,7 +306,7 @@ void test_vertex_fetch_mini_reuses_the_full_fetch_address() {
   const auto lowered = HlslShaderLowerer::lower(shader);
   assert(lowered.complete);
   const auto first = lowered.hlsl.find(
-      "vfetch_base = xenon_vertex_fetch_base(31, 2, xenon_fetch_index(r[(0) & 63][0], false), 8);");
+      "vfetch_base = xenon_vertex_fetch_base(31, 2, xenon_fetch_index(r_0[0], false), 8);");
   assert(first != std::string::npos);
   // The base is latched once - the mini fetch does not read r0.x again.
   assert(lowered.hlsl.find("vfetch_base = xenon_vertex_fetch_base(", first + 1) ==
@@ -392,9 +396,9 @@ void test_vertex_index_applies_grouper_offset_and_clamp() {
   using namespace xenon::gpu;
   const auto lowered = HlslShaderLowerer::lower(make_shader(ShaderStage::Vertex));
   assert(lowered.complete);
-  assert(lowered.hlsl.find("r[0].x = (float)xenon_vertex_index(vertex_id);") !=
+  assert(lowered.hlsl.find("r_0.x = (float)xenon_vertex_index(vertex_id);") !=
          std::string::npos);
-  assert(lowered.hlsl.find("r[0].x = (float)vertex_id;") == std::string::npos);
+  assert(lowered.hlsl.find("r_0.x = (float)vertex_id;") == std::string::npos);
   assert(lowered.hlsl.find("uint4 vgt = XenonDrawState[1];") != std::string::npos);
   assert(lowered.hlsl.find(
              "clamp((index + vgt.y) & 0xFFFFFFu, vgt.z & 0xFFFFFFu, vgt.w & 0xFFFFFFu)") !=
@@ -973,11 +977,48 @@ void test_background_compile_queue() {
   std::filesystem::remove_all(directory, ec);
 }
 
+// GPU V3 shader prefetch: a decoded shader is lowered and compiled on a
+// worker; prepared() gives the lowering and the same binary the foreground
+// path makes, waiting while it is in flight; a key is prepared once; a
+// lowering that throws is reported, not lost; an unknown key has nothing.
+void test_shader_prefetch_lowers_and_compiles_on_workers() {
+  using namespace xenon::gpu;
+  auto compiler = std::make_shared<DxcShaderCompiler>();
+  ShaderCache cache(compiler);
+  ShaderCompileQueue queue(cache, 2);
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Dxil;
+  const auto decoded = std::make_shared<const DecodedShader>(make_shader(ShaderStage::Pixel));
+  std::atomic<int> lowerings{0};
+  std::atomic<std::thread::id> lowered_on{};
+  const auto lower = [&, decoded] {
+    ++lowerings;
+    lowered_on = std::this_thread::get_id();
+    return HlslShaderLowerer::lower(*decoded);
+  };
+  queue.prefetch(10u, lower, options);
+  queue.prefetch(10u, lower, options);  // already queued: nothing more
+  const auto prepared = queue.prepared(10u);
+  assert(prepared && prepared->lowered && prepared->lowered->complete);
+  assert(prepared->compiled && prepared->compiled->succeeded);
+  assert(lowerings.load() == 1);
+  assert(lowered_on.load() != std::this_thread::get_id());
+  ShaderCache foreground(compiler);
+  assert(foreground.get_or_compile(*prepared->lowered, options)->binary ==
+         prepared->compiled->binary);
+  queue.prefetch(11u, []() -> LoweredShader { throw std::runtime_error("bad microcode"); },
+                 options);
+  const auto failed = queue.prepared(11u);
+  assert(failed && !failed->lowered && failed->error == "bad microcode");
+  assert(!queue.prepared(12u));
+}
+
 int main() {
   test_lowering_is_deterministic();
   test_dxc_dual_target_and_cache();
   test_persistent_shader_cache();
   test_background_compile_queue();
+  test_shader_prefetch_lowers_and_compiles_on_workers();
   test_pixel_target_and_incomplete_rejection();
   test_control_flow_state_machine_and_explicit_rejection();
   test_texture_lod_and_gradient_lowering();
