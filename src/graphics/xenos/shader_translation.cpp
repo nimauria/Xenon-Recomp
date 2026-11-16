@@ -1,5 +1,7 @@
 #include "xenon/gpu/shader_translation.hpp"
 
+#include "xenon/memory/types.hpp"
+
 #include <algorithm>
 #include <array>
 #include <iomanip>
@@ -400,6 +402,87 @@ void emit_fetch(std::ostringstream& out, const DecodedInstruction& instruction) 
         << fetch.destination_swizzle << ");\n"
         << "        }\n";
   }
+}
+
+// The single guest-memory declaration emit_prelude() writes, which the
+// segmented binding replaces.
+constexpr std::string_view kGuestMemoryDeclaration =
+    "#ifdef XENON_MEMORY_RW\n"
+    "RWByteAddressBuffer XenonGuestMemory : register(u0);\n"
+    "#else\n"
+    "ByteAddressBuffer XenonGuestMemory : register(t0);\n"
+    "#endif\n";
+
+void replace_all(std::string& text, std::string_view from, std::string_view to) {
+  for (auto at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+    text.replace(at, from.size(), to);
+}
+
+// Rewrites a lowered guest shader for segmented guest memory: one buffer per
+// segment (read-only segment 0 at t0 and segment i at t(128 + i), past the
+// texture arrays; read-write segment i at u(i)) and accessors that pick the
+// segment from the address's high bits with a branch. False, with a
+// diagnostic, when an access remains that no accessor covers.
+bool segment_guest_memory(std::string& hlsl, std::uint8_t shift, std::uint8_t count, bool rw,
+                          std::vector<std::string>& diagnostics) {
+  const auto declaration = hlsl.find(kGuestMemoryDeclaration);
+  if (declaration == std::string::npos) {
+    diagnostics.push_back("segmented guest memory: the prelude's declaration was not found");
+    return false;
+  }
+  std::ostringstream block;
+  block << "#define XENON_GUEST_SEGMENT_SHIFT " << unsigned(shift) << "u\n"
+        << "#define XENON_GUEST_SEGMENT_MASK " << ((1ull << shift) - 1ull) << "u\n"
+        << "#define XENON_GUEST_MEMORY_BYTES " << memory::kPhysicalMemorySize << "u\n";
+  for (unsigned i = 0; i < count; ++i) {
+    if (rw) block << "RWByteAddressBuffer XenonGuestMemory" << i << " : register(u" << i << ");\n";
+    else block << "ByteAddressBuffer XenonGuestMemory" << i << " : register(t" << (i ? 128u + i : 0u)
+               << ");\n";
+  }
+  const auto each_segment = [&](const char* statement) {
+    std::ostringstream cases;
+    cases << "  const uint offset = address & XENON_GUEST_SEGMENT_MASK;\n"
+          << "  [branch] switch (address >> XENON_GUEST_SEGMENT_SHIFT) {\n";
+    for (unsigned i = 0; i < count; ++i) {
+      std::string line = statement;
+      replace_all(line, "SEGMENT", "XenonGuestMemory" + std::to_string(i));
+      cases << "    case " << i << "u: " << line << "\n";
+    }
+    cases << "    default: break;\n  }\n";
+    return cases.str();
+  };
+  block << "uint4 xenon_guest_load4(uint address) {\n"
+        << each_segment("return SEGMENT.Load4(offset);")
+        << "  return uint4(0u, 0u, 0u, 0u);\n}\n";
+  if (rw) {
+    block << "void xenon_guest_store(uint address, uint value) {\n"
+          << each_segment("SEGMENT.Store(offset, value); break;") << "}\n"
+          << "void xenon_guest_store2(uint address, uint2 value) {\n"
+          << each_segment("SEGMENT.Store2(offset, value); break;") << "}\n"
+          << "void xenon_guest_store4(uint address, uint4 value) {\n"
+          << each_segment("SEGMENT.Store4(offset, value); break;") << "}\n"
+          << "void xenon_guest_interlocked_and(uint address, uint value, out uint original) {\n"
+          << "  original = 0u;\n"
+          << each_segment("SEGMENT.InterlockedAnd(offset, value, original); break;") << "}\n"
+          << "void xenon_guest_interlocked_or(uint address, uint value, out uint original) {\n"
+          << "  original = 0u;\n"
+          << each_segment("SEGMENT.InterlockedOr(offset, value, original); break;") << "}\n";
+  }
+  hlsl.replace(declaration, kGuestMemoryDeclaration.size(), block.str());
+  replace_all(hlsl, "XenonGuestMemory.Load4(", "xenon_guest_load4(");
+  replace_all(hlsl, "XenonGuestMemory.Store4(", "xenon_guest_store4(");
+  replace_all(hlsl, "XenonGuestMemory.Store2(", "xenon_guest_store2(");
+  replace_all(hlsl, "XenonGuestMemory.Store(", "xenon_guest_store(");
+  replace_all(hlsl, "XenonGuestMemory.InterlockedAnd(", "xenon_guest_interlocked_and(");
+  replace_all(hlsl, "XenonGuestMemory.InterlockedOr(", "xenon_guest_interlocked_or(");
+  replace_all(hlsl, "XenonGuestMemory.GetDimensions(memory_size);",
+              "memory_size = XENON_GUEST_MEMORY_BYTES;");
+  if (hlsl.find("XenonGuestMemory.") != std::string::npos) {
+    diagnostics.push_back(
+        "segmented guest memory: a guest-memory access has no segmented accessor");
+    return false;
+  }
+  return true;
 }
 
 void emit_prelude(std::ostringstream& out, bool guest_memory_rw,
@@ -1366,6 +1449,11 @@ LoweredShader HlslShaderLowerer::lower(const DecodedShader& shader,
   }
   out << "  return output;\n}\n";
   result.hlsl = out.str();
+  if (options.guest_memory_segment_count > 1u &&
+      !segment_guest_memory(result.hlsl, options.guest_memory_segment_shift,
+                            options.guest_memory_segment_count, guest_memory_rw,
+                            result.diagnostics))
+    ++result.unsupported_features;
   result.translation_hash = hash_text(result.hlsl);
   result.complete = result.diagnostics.empty();
   return result;

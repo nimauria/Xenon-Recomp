@@ -148,8 +148,10 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   EdramDepthTransfer edram_depth_transfer{};
   GpuResolver gpu_resolver{};
 
-  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
-    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, plan.constants,
+                             plan.range_address, plan.range_size))
+      return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -158,8 +160,10 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     error = named(gpu_resolver.error());
     return false;
   }
-  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolveConstants& constants) {
-    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, constants)) return true;
+  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, plan.constants,
+                                   plan.range_address, plan.range_size))
+      return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -541,6 +545,14 @@ bool Backend::initialize(const ContextConfig& config) {
     impl_->error = impl_->resources.error();
     return false;
   }
+  // Guest shaders bind guest memory the way the device's descriptors allow.
+  impl_->guest_segments = impl_->resources.segmentation();
+  if (impl_->guest_segments.segmented())
+    logging::Logger::instance().log(
+        logging::Level::Info, "gpu",
+        "Vulkan storage buffers span less than guest memory: bound as " +
+            std::to_string(impl_->guest_segments.count) + " segments of " +
+            std::to_string(impl_->guest_segments.segment_bytes >> 20u) + " MiB");
   // Ordered work and submissions close the open draw run first.
   impl_->queue.set_before_ordered_work([impl = impl_.get()] { impl->close_draw_run(); });
   // GPU timestamps around every batch, where the queue supports them.

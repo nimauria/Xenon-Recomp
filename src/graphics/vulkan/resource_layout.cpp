@@ -1,6 +1,7 @@
 #include "xenon/gpu/vulkan/resource_layout.hpp"
 
 #include "xenon/gpu/perf_stats.hpp"
+#include "xenon/gpu/vulkan/guest_memory_limits.hpp"
 
 #include <algorithm>
 #include <array>
@@ -19,10 +20,28 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
     return false;
   }
   device_ = device;
+  {
+    const auto limits = query_guest_memory_limits(physical_device);
+    const auto plan =
+        plan_guest_memory_segments(limits.max_storage_range, memory::kPhysicalMemorySize);
+    if (!plan) {
+      error_ = "Vulkan device storage buffers span " + std::to_string(limits.max_storage_range) +
+               " bytes, too few to bind guest memory in " +
+               std::to_string(GuestMemorySegmentation::kMaxSegments) + " segments";
+      reset();
+      return false;
+    }
+    if (plan->segmented() && (plan->segment_bytes % limits.storage_offset_alignment) != 0u) {
+      error_ = "Vulkan guest-memory segments do not meet minStorageBufferOffsetAlignment";
+      reset();
+      return false;
+    }
+    segmentation_ = *plan;
+  }
   // The geometry stage reads the draw state (point sprite sizes).
   const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_GEOMETRY_BIT |
                                     VK_SHADER_STAGE_FRAGMENT_BIT;
-  const std::array bindings{
+  std::vector<VkDescriptorSetLayoutBinding> bindings{
       VkDescriptorSetLayoutBinding{kConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                                    1, stages, nullptr},
       VkDescriptorSetLayoutBinding{kGuestMemoryBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -39,6 +58,12 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
                                    32, stages, nullptr},
       VkDescriptorSetLayoutBinding{kMemoryExportBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                    1, stages, nullptr}};
+  for (std::uint32_t segment = 1; segment < segmentation_.count; ++segment) {
+    bindings.push_back({guest_memory_binding(segment), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                        stages, nullptr});
+    bindings.push_back({memory_export_binding(segment), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                        stages, nullptr});
+  }
   VkDescriptorSetLayoutCreateInfo layout_info{
       VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   layout_info.bindingCount = static_cast<std::uint32_t>(bindings.size());
@@ -69,7 +94,7 @@ bool ResourceLayout::initialize(VkPhysicalDevice physical_device, VkDevice devic
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                              CommandQueue::kBatchCommandCount},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                             2u * CommandQueue::kBatchCommandCount},
+                             2u * segmentation_.count * CommandQueue::kBatchCommandCount},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                              128u * CommandQueue::kBatchCommandCount},
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER,
@@ -175,7 +200,7 @@ void ResourceLayout::write_set(VkDescriptorSet descriptor_set, VkBuffer constant
   std::vector<VkWriteDescriptorSet> writes;
   writes.reserve(3 + texture_bindings_.size() * 2);
   std::vector<VkDescriptorBufferInfo> buffers;
-  buffers.reserve(3);
+  buffers.reserve(1u + 2u * segmentation_.count);
   buffers.push_back({constants, 0, kConstantBufferBytes});
   VkWriteDescriptorSet constants_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
   constants_write.dstSet = descriptor_set;
@@ -186,21 +211,28 @@ void ResourceLayout::write_set(VkDescriptorSet descriptor_set, VkBuffer constant
   writes.push_back(constants_write);
 
   if (guest_memory_buffer_ && guest_memory_size_) {
-    buffers.push_back({guest_memory_buffer_, 0, guest_memory_size_});
-    VkWriteDescriptorSet read_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    read_write.dstSet = descriptor_set;
-    read_write.dstBinding = kGuestMemoryBinding;
-    read_write.descriptorCount = 1;
-    read_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    read_write.pBufferInfo = &buffers.back();
-    writes.push_back(read_write);
-    // The vector may reallocate after push_back, so repair pointers below after
-    // all buffer infos are stable.
-    buffers.push_back({guest_memory_buffer_, 0, guest_memory_size_});
-    VkWriteDescriptorSet export_write = read_write;
-    export_write.dstBinding = kMemoryExportBinding;
-    export_write.pBufferInfo = &buffers.back();
-    writes.push_back(export_write);
+    // One read and one read-write descriptor per segment (a single pair over
+    // the whole buffer unless the device's range requires segments).
+    for (std::uint32_t segment = 0; segment < segmentation_.count; ++segment) {
+      const VkDeviceSize offset = segmentation_.segmented() ? segmentation_.offset(segment) : 0u;
+      const VkDeviceSize range =
+          segmentation_.segmented() ? segmentation_.range(segment) : guest_memory_size_;
+      buffers.push_back({guest_memory_buffer_, offset, range});
+      VkWriteDescriptorSet read_write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      read_write.dstSet = descriptor_set;
+      read_write.dstBinding = guest_memory_binding(segment);
+      read_write.descriptorCount = 1;
+      read_write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      read_write.pBufferInfo = &buffers.back();
+      writes.push_back(read_write);
+      // The vector may reallocate after push_back, so repair pointers below
+      // after all buffer infos are stable.
+      buffers.push_back({guest_memory_buffer_, offset, range});
+      VkWriteDescriptorSet export_write = read_write;
+      export_write.dstBinding = memory_export_binding(segment);
+      export_write.pBufferInfo = &buffers.back();
+      writes.push_back(export_write);
+    }
   }
 
   std::vector<VkDescriptorImageInfo> images;

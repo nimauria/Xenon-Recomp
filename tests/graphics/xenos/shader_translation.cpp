@@ -793,6 +793,73 @@ void test_memexport_translation_targets() {
   assert(compiler.compile(rw, spirv).succeeded);
 }
 
+// XEN-001: with guest memory in segments, every access goes through an
+// accessor that selects its segment, the declarations follow the Vulkan
+// binding plan (read-only t0 and t129+, read-write u0+), the result compiles
+// to SPIR-V, and the single-binding output is untouched.
+void test_segmented_guest_memory_lowering() {
+  using namespace xenon::gpu;
+  auto fetching = make_shader(ShaderStage::Vertex);
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::VertexFetch;
+  fetch.vertex_fetch.address = 1;
+  fetch.vertex_fetch.fetch_constant = 5;
+  fetch.vertex_fetch.destination_swizzle = 0x688;
+  fetch.vertex_fetch.stride_dwords = 3;
+  fetch.vertex_fetch.data_format = 38;
+  fetching.instructions.insert(fetching.instructions.begin(), fetch);
+  fetching.instructions[1].alu.address = 2;
+  fetching.control_flow[0].count = 2;
+
+  const auto single = HlslShaderLowerer::lower(fetching);
+  ShaderLoweringOptions segmented_options{};
+  segmented_options.guest_memory_segment_shift = 26;  // 64 MiB
+  segmented_options.guest_memory_segment_count = 8;
+  const auto segmented = HlslShaderLowerer::lower(fetching, segmented_options);
+  ShaderLoweringOptions one_segment{};
+  one_segment.guest_memory_segment_count = 1;
+  assert(HlslShaderLowerer::lower(fetching, one_segment).hlsl == single.hlsl);
+  assert(single.hlsl.find("XenonGuestMemory.Load4(") != std::string::npos);
+  if (!segmented.complete)
+    for (const auto& diagnostic : segmented.diagnostics) std::cerr << diagnostic << '\n';
+  assert(segmented.complete);
+  assert(segmented.hlsl.find("XenonGuestMemory.") == std::string::npos);
+  assert(segmented.hlsl.find("xenon_guest_load4(address)") != std::string::npos);
+  assert(segmented.hlsl.find("ByteAddressBuffer XenonGuestMemory0 : register(t0);") !=
+         std::string::npos);
+  assert(segmented.hlsl.find("ByteAddressBuffer XenonGuestMemory7 : register(t135);") !=
+         std::string::npos);
+  assert(segmented.hlsl.find("#define XENON_GUEST_SEGMENT_SHIFT 26u") != std::string::npos);
+  assert(segmented.translation_hash != single.translation_hash);
+
+  DxcShaderCompiler compiler;
+  ShaderCompileOptions spirv{};
+  spirv.format = ShaderBinaryFormat::Spirv;
+  const auto compiled = compiler.compile(segmented, spirv);
+  if (!compiled.succeeded)
+    for (const auto& diagnostic : compiled.diagnostics) std::cerr << diagnostic << '\n';
+  assert(compiled.succeeded);
+
+  // Memory export: read-write segments and every store/atomic accessor.
+  auto exporting = make_shader(ShaderStage::Vertex);
+  exporting.reflection.memory_exports = 1;
+  exporting.reflection.memory_export_mask = 1;
+  exporting.reflection.writes_export_address = true;
+  const auto written = HlslShaderLowerer::lower(exporting, segmented_options);
+  if (!written.complete)
+    for (const auto& diagnostic : written.diagnostics) std::cerr << diagnostic << '\n';
+  assert(written.complete);
+  assert(written.hlsl.find("XenonGuestMemory.") == std::string::npos);
+  assert(written.hlsl.find("RWByteAddressBuffer XenonGuestMemory7 : register(u7);") !=
+         std::string::npos);
+  assert(written.hlsl.find("xenon_guest_interlocked_and(") != std::string::npos);
+  assert(written.hlsl.find("memory_size = XENON_GUEST_MEMORY_BYTES;") != std::string::npos);
+  const auto compiled_rw = compiler.compile(written, spirv);
+  if (!compiled_rw.succeeded)
+    for (const auto& diagnostic : compiled_rw.diagnostics) std::cerr << diagnostic << '\n';
+  assert(compiled_rw.succeeded);
+}
+
 
 }  // namespace
 
@@ -1032,6 +1099,7 @@ int main() {
   test_sample_transfer_shaders();
   test_utility_shaders_compile_once();
   test_memexport_translation_targets();
+  test_segmented_guest_memory_lowering();
   test_scalar_source_and_export_constants_compile();
   std::cout << "xenon_shader_translation_tests: ok\n";
 }

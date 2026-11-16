@@ -325,7 +325,7 @@ void BackendCore<Derived, Api>::consume_resolve(
           error = mirror.error();
           return;
         }
-        if (!self().gpu_depth_resolve(*owner, gpu.constants)) return;
+        if (!self().gpu_depth_resolve(*owner, gpu)) return;
         mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
         note_gpu_guest_write(gpu.range_address, gpu.range_size);
         note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
@@ -470,7 +470,7 @@ void BackendCore<Derived, Api>::consume_resolve(
         error = mirror.error();
         return;
       }
-      if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
+      if (!self().gpu_color_resolve(*owner, gpu)) return;
       mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
       note_gpu_guest_write(gpu.range_address, gpu.range_size);
       note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
@@ -730,7 +730,10 @@ void BackendCore<Derived, Api>::consume_shader_load(
   if (shader_prefetch) {
     shader_prefetch->prefetch(
         load->program.hash(),
-        [decoded = load->decoded] { return HlslShaderLowerer::lower(*decoded); }, options);
+        [decoded = load->decoded, lowering = with_guest_segments({})] {
+          return HlslShaderLowerer::lower(*decoded, lowering);
+        },
+        options);
     const auto wait_start = std::chrono::steady_clock::now();
     auto prepared = shader_prefetch->prepared(load->program.hash());
     perf::add(perf::Counter::ShaderWaitNs,
@@ -748,7 +751,8 @@ void BackendCore<Derived, Api>::consume_shader_load(
     lowered_shader = prepared->lowered;
     prefetched = prepared->compiled;
   } else {
-    lowered_shader = std::make_shared<const LoweredShader>(HlslShaderLowerer::lower(decoded));
+    lowered_shader = std::make_shared<const LoweredShader>(
+        HlslShaderLowerer::lower(decoded, with_guest_segments({})));
   }
   const auto& lowered = *lowered_shader;
   dump_shader(load->program, lowered.hlsl);

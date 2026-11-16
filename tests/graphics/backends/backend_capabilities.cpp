@@ -540,6 +540,20 @@ int main() {
   assert(vulkan_resources.initialize(vulkan_context.physical_device(),
                                      vulkan_context.device()));
   assert(vulkan_resources.ready());
+  // XEN-001: under the Vulkan-minimum storage range (the _vulkan_128mib run)
+  // guest memory is bound as eight 64 MiB segments; otherwise as one.
+  {
+    const char* forced = std::getenv("XENON_VULKAN_MAX_STORAGE_BUFFER_RANGE");
+    const auto& segments = vulkan_resources.segmentation();
+    if (forced && std::strtoull(forced, nullptr, 0) == 134217728ull) {
+      assert(segments.segmented() && segments.count == 8u && segments.shift == 26u);
+    } else {
+      VkPhysicalDeviceProperties properties{};
+      vkGetPhysicalDeviceProperties(vulkan_context.physical_device(), &properties);
+      if (properties.limits.maxStorageBufferRange >= xenon::memory::kPhysicalMemorySize)
+        assert(!segments.segmented() && segments.count == 1u);
+    }
+  }
   assert(vulkan_resources.bind_guest_memory(
       vulkan_mirror.buffer(), xenon::memory::kPhysicalMemorySize));
   xenon::gpu::TextureDescriptor vulkan_texture_descriptor{};

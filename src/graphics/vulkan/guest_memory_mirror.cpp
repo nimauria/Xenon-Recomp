@@ -13,6 +13,7 @@ bool GuestMemoryMirror::initialize(VkPhysicalDevice physical_device,
                                    memory::AddressSpace& memory) {
   reset();
   error_.clear();
+  if (physical_device) limits_ = query_guest_memory_limits(physical_device);
   if (!mirror_.initialize(physical_device, device, memory::kPhysicalMemorySize,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT |

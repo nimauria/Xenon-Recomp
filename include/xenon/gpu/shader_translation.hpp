@@ -34,6 +34,12 @@ struct ShaderLoweringOptions {
   // whether the draw is of points (sprite coordinates in its ZW).
   std::uint8_t param_gen_interpolator{0xFF};
   bool param_gen_point{};
+  // Guest memory bound as `guest_memory_segment_count` segments of
+  // 1 << guest_memory_segment_shift bytes (guest_memory_segments.hpp), for
+  // backends whose descriptors cannot span the whole aperture. A count of 1
+  // is the single binding and leaves the generated HLSL unchanged.
+  std::uint8_t guest_memory_segment_shift{};
+  std::uint8_t guest_memory_segment_count{1};
 };
 
 struct LoweredShader {

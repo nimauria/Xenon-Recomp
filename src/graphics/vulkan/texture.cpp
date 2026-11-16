@@ -386,7 +386,7 @@ bool GpuTextureLoader::initialize(VkPhysicalDevice physical_device, VkDevice dev
   device_ = device;
   physical_device_ = physical_device;
   const std::array bindings{
-      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+      VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1,
                                    VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
       VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                    VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
@@ -400,13 +400,14 @@ bool GpuTextureLoader::initialize(VkPhysicalDevice physical_device, VkDevice dev
   layout_info.pSetLayouts = &set_layout_;
   layout_info.pushConstantRangeCount = 1;
   layout_info.pPushConstantRanges = &constants;
-  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                       2u * (2u + kTransientSets)};
+  const std::array pool_sizes{
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 2u + kTransientSets},
+      VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2u + kTransientSets}};
   VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
   pool_info.maxSets = 2u + kTransientSets;
-  pool_info.poolSizeCount = 1;
-  pool_info.pPoolSizes = &pool_size;
+  pool_info.poolSizeCount = static_cast<std::uint32_t>(pool_sizes.size());
+  pool_info.pPoolSizes = pool_sizes.data();
   if (vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout_) != VK_SUCCESS ||
       vkCreatePipelineLayout(device, &layout_info, nullptr, &pipeline_layout_) != VK_SUCCESS ||
       vkCreateDescriptorPool(device, &pool_info, nullptr, &pool_) != VK_SUCCESS) {
@@ -463,7 +464,7 @@ bool GpuTextureLoader::initialize(VkPhysicalDevice physical_device, VkDevice dev
 }
 
 VkDescriptorSet GpuTextureLoader::source_set(VkDescriptorSet& set, VkBuffer& bound,
-                                             VkBuffer source) {
+                                             VkBuffer source, VkDeviceSize source_range) {
   if (!set) {
     VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     allocate.descriptorPool = pool_;
@@ -477,7 +478,7 @@ VkDescriptorSet GpuTextureLoader::source_set(VkDescriptorSet& set, VkBuffer& bou
     bound = VK_NULL_HANDLE;
   }
   if (bound != source) {
-    const std::array infos{VkDescriptorBufferInfo{source, 0, VK_WHOLE_SIZE},
+    const std::array infos{VkDescriptorBufferInfo{source, 0, source_range},
                            VkDescriptorBufferInfo{staging_.buffer(), 0, VK_WHOLE_SIZE}};
     std::array<VkWriteDescriptorSet, 2> writes{};
     for (std::uint32_t i = 0; i < 2u; ++i) {
@@ -485,7 +486,8 @@ VkDescriptorSet GpuTextureLoader::source_set(VkDescriptorSet& set, VkBuffer& bou
       writes[i].dstSet = set;
       writes[i].dstBinding = i;
       writes[i].descriptorCount = 1;
-      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      writes[i].descriptorType =
+          i == 0u ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       writes[i].pBufferInfo = &infos[i];
     }
     vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
@@ -507,9 +509,27 @@ bool GpuTextureLoader::load_from_mirror(VkPhysicalDevice physical_device, VkDevi
                                         CommandQueue& queue, GuestMemoryMirror& mirror,
                                         TextureImage& image, const TextureLayout& layout) {
   if (!initialize(physical_device, device)) return false;
-  const auto set = source_set(mirror_set_, mirror_set_buffer_, mirror.buffer());
+  const auto& limits = mirror.storage_limits();
+  const auto set = source_set(mirror_set_, mirror_set_buffer_, mirror.buffer(),
+                              guest_memory_window_range(limits));
   if (!set) return false;
-  return run(queue, image, layout, set, 0u, 0u, memory::kPhysicalMemorySize, &mirror);
+  // A window over every subresource's bytes; the shader reads the texture
+  // relative to it (source_base) and nothing past it (source_limit).
+  std::uint64_t begin = memory::kPhysicalMemorySize, end = 0u;
+  for (const auto& sub : layout.subresources) {
+    begin = (std::min)(begin, std::uint64_t{sub.guest_address});
+    end = (std::max)(end, std::uint64_t{sub.guest_address} + sub.guest_size_bytes);
+  }
+  if (end <= begin) begin = end = 0u;
+  const auto window = guest_memory_window(limits, begin, end);
+  if (!window) {
+    error_ = "Xenos texture (" + std::to_string(end - begin) +
+             " bytes) exceeds the Vulkan device's storage-buffer range";
+    return false;
+  }
+  return run(queue, image, layout, set, 0u, static_cast<std::uint32_t>(window->offset),
+             static_cast<std::uint32_t>(window->range), &mirror,
+             static_cast<std::uint32_t>(window->offset));
 }
 
 bool GpuTextureLoader::load_from_bytes(VkPhysicalDevice physical_device, VkDevice device,
@@ -579,7 +599,7 @@ bool GpuTextureLoader::load_from_bytes(VkPhysicalDevice physical_device, VkDevic
 bool GpuTextureLoader::run(CommandQueue& queue, TextureImage& image, const TextureLayout& layout,
                            VkDescriptorSet set, std::uint32_t source_bias,
                            std::uint32_t source_base, std::uint32_t source_limit,
-                           GuestMemoryMirror* mirror) {
+                           GuestMemoryMirror* mirror, std::uint32_t source_dynamic_offset) {
   // Destination rows hold host blocks (a widened texel is 16 bytes).
   const auto bpb = layout.format.host_bytes_per_block();
   const auto block_width = std::uint32_t(layout.format.block_width);
@@ -659,7 +679,7 @@ bool GpuTextureLoader::run(CommandQueue& queue, TextureImage& image, const Textu
             vkCmdPipelineBarrier2(command, &dependency);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
             vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1,
-                                    &set, 0, nullptr);
+                                    &set, 1, &source_dynamic_offset);
             vkCmdPushConstants(command, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(constants), &constants);
             vkCmdDispatch(command, (constants.row_dwords + 7u) / 8u, (constants.rows + 7u) / 8u,

@@ -67,6 +67,7 @@
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/index_cache.hpp"
+#include "xenon/gpu/guest_memory_segments.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/perf_stats.hpp"
@@ -120,7 +121,7 @@ class BackendCore {
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
   //   bool record_draw(const DrawRecording&, bool& record_failed);
-  //   bool gpu_color_resolve(RenderTargetImage&, const GpuResolveConstants&);
+  //   bool gpu_color_resolve(RenderTargetImage&, const GpuResolvePlan&);
   //   bool gpu_color_clear(RenderTargetImage&, const GpuClearConstants&);
   //   With kSupportsDirectColorTransfer / kSupportsDirectDepthTransfer, the
   //   GPU EDRAM tile transfers between native images (same format, then
@@ -241,6 +242,14 @@ class BackendCore {
   // Converted DMA index buffers, reused while their guest bytes are unchanged
   // (index_cache.hpp); and the draw being consumed's host primitives, shared
   // by its render-target bounds and its recording (draw_primitives()).
+  // How guest shaders bind guest memory (one binding unless the backend's
+  // descriptors cannot span it; set once, before any shader is lowered).
+  GuestMemorySegmentation guest_segments{};
+  [[nodiscard]] ShaderLoweringOptions with_guest_segments(ShaderLoweringOptions options) const {
+    options.guest_memory_segment_shift = guest_segments.shift;
+    options.guest_memory_segment_count = static_cast<std::uint8_t>(guest_segments.count);
+    return options;
+  }
   ProcessedIndexCache index_cache{};
   std::shared_ptr<const ProcessedPrimitiveBatch> draw_batch{};
   ProcessedPrimitiveBatch draw_batch_storage{};
@@ -422,8 +431,8 @@ class BackendCore {
       result.compiled = std::move(prepared->compiled);
     } else {
       ++variants_compiled_at_draw;
-      result.lowered =
-          std::make_shared<const LoweredShader>(HlslShaderLowerer::lower(decoded, lowering));
+      result.lowered = std::make_shared<const LoweredShader>(
+          HlslShaderLowerer::lower(decoded, with_guest_segments(lowering)));
     }
     if (result.lowered->complete && !result.compiled)
       result.compiled = shader_cache.get_or_compile(*result.lowered, options);
@@ -452,7 +461,10 @@ class BackendCore {
         prefetch_decoded[load->program.hash()] = load->decoded;
         shader_prefetch->prefetch(
             load->program.hash(),
-            [decoded = load->decoded] { return HlslShaderLowerer::lower(*decoded); }, options);
+            [decoded = load->decoded, lowering = with_guest_segments({})] {
+              return HlslShaderLowerer::lower(*decoded, lowering);
+            },
+            options);
         continue;
       }
       if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) prefetch_variants(*draw);
@@ -490,7 +502,10 @@ class BackendCore {
                      const ShaderLoweringOptions& lowering) {
       ++prefetched_variants;
       shader_prefetch->prefetch(
-          key, [decoded, lowering] { return HlslShaderLowerer::lower(*decoded, lowering); },
+          key,
+          [decoded, lowering = with_guest_segments(lowering)] {
+            return HlslShaderLowerer::lower(*decoded, lowering);
+          },
           options);
     };
     const bool vertex_memexport = vertex->second->reflection.memory_exports != 0;

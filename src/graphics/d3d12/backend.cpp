@@ -108,8 +108,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   EdramDepthTransfer edram_depth_transfer{};
   GpuResolver gpu_resolver{};
 
-  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolveConstants& constants) {
-    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, constants)) return true;
+  bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve(context.device(), queue, mirror, owner, plan.constants)) return true;
     error = named(gpu_resolver.error());
     return false;
   }
@@ -118,8 +118,9 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     error = named(gpu_resolver.error());
     return false;
   }
-  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolveConstants& constants) {
-    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, constants)) return true;
+  bool gpu_depth_resolve(DepthTargetImage& owner, const GpuResolvePlan& plan) {
+    if (gpu_resolver.resolve_depth(context.device(), queue, mirror, owner, plan.constants))
+      return true;
     error = named(gpu_resolver.error());
     return false;
   }

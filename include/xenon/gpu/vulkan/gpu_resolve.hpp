@@ -26,10 +26,12 @@ class GpuResolver {
   GpuResolver& operator=(const GpuResolver&) = delete;
 
   [[nodiscard]] bool resolve(VkDevice device, CommandQueue& queue, GuestMemoryMirror& mirror,
-                             RenderTargetImage& owner, const GpuResolveConstants& constants);
+                             RenderTargetImage& owner, const GpuResolveConstants& constants,
+                             std::uint32_t range_address, std::uint32_t range_size);
   [[nodiscard]] bool resolve_depth(VkDevice device, CommandQueue& queue,
                                    GuestMemoryMirror& mirror, DepthTargetImage& owner,
-                                   const GpuResolveConstants& constants);
+                                   const GpuResolveConstants& constants,
+                                   std::uint32_t range_address, std::uint32_t range_size);
   [[nodiscard]] bool clear(VkDevice device, CommandQueue& queue, RenderTargetImage& owner,
                            const GpuClearConstants& constants);
   [[nodiscard]] bool clear_depth(VkDevice device, CommandQueue& queue, DepthTargetImage& owner,
@@ -45,9 +47,15 @@ class GpuResolver {
   [[nodiscard]] VkPipeline clear_pipeline(VkDevice device, VkFormat format, MsaaSamples samples,
                                           bool depth);
   void bind_guest(VkDevice device, GuestMemoryMirror& mirror);
+  // The guest descriptor is dynamic: a window of at most the device's
+  // storage-buffer range over the resolve's destination bytes (XEN-001),
+  // with the destination base rebased to it.
+  [[nodiscard]] bool window_for(GuestMemoryMirror& mirror, std::uint32_t range_address,
+                                std::uint32_t range_size, GpuResolveConstants& constants,
+                                std::uint32_t& dynamic_offset);
   void dispatch(VkCommandBuffer command, VkPipeline pipeline, VkPipelineLayout layout,
                 VkDescriptorSet source_set, GuestMemoryMirror& mirror,
-                const GpuResolveConstants& constants);
+                const GpuResolveConstants& constants, std::uint32_t dynamic_offset);
 
   VkDevice device_{VK_NULL_HANDLE};
   VkDescriptorSetLayout source_layout_{VK_NULL_HANDLE};
