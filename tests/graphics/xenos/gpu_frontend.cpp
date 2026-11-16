@@ -840,6 +840,97 @@ void test_front_buffer_swap_follows_the_work_before_it(bool backend_thread) {
   graphics.set_swap_callback({});
 }
 
+// Live frame capture (deterministic replay of a running title's frames):
+// armed, the recording starts with the next drain - the registers, shaders
+// and canonical EDRAM as they stand then - takes every command played across
+// drains, and ends with the drain that decodes the requested swap. The file
+// it writes loads and replays the same work.
+void test_live_frame_capture_records_whole_frames(bool backend_thread) {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  if (backend_thread) graphics.start_backend_thread();
+  constexpr std::uint32_t ring = 0x0100B000;
+  constexpr std::uint32_t fence = 0x0121B000;
+  store_be32(memory, fence, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const std::vector<std::uint32_t> draw{make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator};
+  std::uint32_t at = 0;
+  const auto drain = [&](std::vector<std::uint32_t> words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + (at + i) * 4u, words[i]);
+    const auto end = at + static_cast<std::uint32_t>(words.size());
+    assert(graphics.submit_ring(backend, ring, 1024, at, end) == end);
+    at = end;
+  };
+  const auto with = [](std::vector<std::uint32_t> a, const std::vector<std::uint32_t>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+  };
+
+  // State from before the recording: a register and EDRAM contents.
+  drain(with({make_packet_type0(0x321, 1), 0x1234u}, draw));
+  std::array<std::byte, 64> pattern{};
+  for (std::size_t i = 0; i < pattern.size(); ++i) pattern[i] = static_cast<std::byte>(i * 7u + 1u);
+  graphics.edram().write(4096u, pattern);
+
+  const auto path = std::filesystem::temp_directory_path() /
+                    (std::string("xenon_live_capture_test_") + (backend_thread ? "1" : "0") + ".xgc");
+  std::filesystem::remove(path);
+  graphics.arm_frame_capture(path, 1);
+  assert(graphics.frame_capture_armed());
+  // The frame: two drains, the swap in the second.
+  drain(with(with({make_packet_type0(0x321, 1), 0x5678u}, draw), draw));
+  assert(graphics.frame_capture_armed() && "no swap decoded yet");
+  xenon::gpu::FrontBufferSwap flip{};
+  flip.base_address = 0x1F000000u;
+  flip.width = 1280u;
+  flip.height = 720u;
+  flip.pitch = 1280u * 4u;
+  flip.format = 6u;
+  flip.has_fetch_constant = true;
+  flip.fetch_constant = {0x8A000002u, 0x1F000086u, 0x059E04FFu, 0u, 0u, 0x200u};
+  auto second = with(draw, draw);
+  for (const auto word : xenon::gpu::encode_front_buffer_swap(flip)) second.push_back(word);
+  drain(second);
+  // Recorded and written: a drain after the swap is not part of it.
+  assert(!graphics.frame_capture_armed());
+  drain(draw);
+  graphics.stop_backend_thread();
+
+  const auto result = graphics.take_frame_capture_result();
+  assert(result && result->ok && result->path == path);
+  assert(result->drains == 2u && result->draws == 4u);
+  assert(!graphics.take_frame_capture_result() && "reported once");
+
+  std::string error;
+  const auto capture = xenon::gpu::load_portable_capture(path, &error);
+  assert(capture && error.empty());
+  assert(capture->frontend.initial_registers.values[0x321] == 0x1234u &&
+         "registers as the recording started");
+  assert(capture->frontend.final_registers.values[0x321] == 0x5678u);
+  const auto draws = std::count_if(
+      capture->frontend.commands.begin(), capture->frontend.commands.end(),
+      [](const xenon::gpu::ir::Command& c) { return std::holds_alternative<xenon::gpu::ir::DrawPacket>(c); });
+  assert(draws == 4);
+  assert(std::equal(pattern.begin(), pattern.end(), capture->edram.begin() + 4096) &&
+         "EDRAM as the recording started");
+  assert(!capture->complete && !capture->diagnostics.empty() &&
+         "a live recording says its memory is from the end");
+
+  // It replays the same four draws, elsewhere.
+  AddressSpace replay_memory;
+  assert(replay_memory.initialize());
+  xenon::gpu::GraphicsSystem replay(replay_memory);
+  OrderRecordingBackend replayed(replay_memory, fence);
+  xenon::gpu::GraphicsSystem::ReplayTiming timing{};
+  assert(replay.replay_portable_capture(replayed, *capture, &error, &timing));
+  assert(replayed.draws_executed == 4);
+  assert(timing.consume_ns > 0u);
+  std::filesystem::remove(path);
+}
+
 // The temporal analyzer sees the work execute_ir() runs and closes a frame at
 // the swap that shows it: the draw before the swap belongs to that frame, the
 // draw after it to the next, and the session's swap callback still runs.
@@ -2206,6 +2297,7 @@ int main() {
   for (const bool backend_thread : {false, true}) {
     test_ring_effects_follow_the_work_before_them(backend_thread);
     test_front_buffer_swap_follows_the_work_before_it(backend_thread);
+    test_live_frame_capture_records_whole_frames(backend_thread);
     test_temporal_frames_end_at_the_front_buffer_swap(backend_thread);
     test_backend_thread_matches_inline_execution(backend_thread);
     test_deferred_writes_reach_frontend_reads(backend_thread);

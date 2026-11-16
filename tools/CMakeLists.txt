@@ -85,3 +85,22 @@ if(TARGET xenon_graphics_dxc AND (TARGET xenon_graphics_d3d12 OR TARGET xenon_gr
   xenon_stage_runtime_dependencies(draw-bench)
   xenon_enable_warnings(draw-bench)
 endif()
+
+# gpu-replay: replays a portable GPU capture (XENON_GPU_CAPTURE=1 records one
+# from a running title) through a real native backend and times it - a
+# deterministic renderer benchmark of a real workload; --verify checks the
+# replay produces the same bytes every time.
+if(TARGET xenon_graphics_dxc AND (TARGET xenon_graphics_d3d12 OR TARGET xenon_graphics_vulkan))
+  add_executable(gpu-replay gpu_replay.cpp)
+  target_link_libraries(gpu-replay PRIVATE xenon_graphics xenon_logging)
+  if(WIN32 AND TARGET xenon_graphics_d3d12)
+    target_link_libraries(gpu-replay PRIVATE xenon_graphics_d3d12)
+    target_compile_definitions(gpu-replay PRIVATE XENON_GPU_REPLAY_D3D12=1)
+  endif()
+  if(TARGET xenon_graphics_vulkan)
+    target_link_libraries(gpu-replay PRIVATE xenon_graphics_vulkan)
+    target_compile_definitions(gpu-replay PRIVATE XENON_GPU_REPLAY_VULKAN=1)
+  endif()
+  xenon_stage_runtime_dependencies(gpu-replay)
+  xenon_enable_warnings(gpu-replay)
+endif()
