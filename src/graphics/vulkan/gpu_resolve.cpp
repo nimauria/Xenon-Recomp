@@ -91,7 +91,7 @@ bool GpuResolver::create_layouts(VkDevice device) {
       VkDescriptorSetLayoutBinding{17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
                                    DepthTargetImage::kSampledSourceStages, nullptr}};
   // Set 1: the guest-memory mirror, written by physical address.
-  const VkDescriptorSetLayoutBinding guest{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+  const VkDescriptorSetLayoutBinding guest{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1,
                                            VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   set_info.bindingCount = 1;
@@ -138,7 +138,7 @@ bool GpuResolver::create_layouts(VkDevice device) {
     error_ = "Vulkan GPU resolve clear pipeline layout creation failed";
     return false;
   }
-  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1};
   VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   pool_info.maxSets = 1;
   pool_info.poolSizeCount = 1;
@@ -303,33 +303,56 @@ VkPipeline GpuResolver::clear_pipeline(VkDevice device, VkFormat format, MsaaSam
 
 void GpuResolver::bind_guest(VkDevice device, GuestMemoryMirror& mirror) {
   if (guest_set_buffer_ == mirror.buffer()) return;
-  const VkDescriptorBufferInfo buffer{mirror.buffer(), 0, VK_WHOLE_SIZE};
+  // At most the device's storage-buffer range; each dispatch places it with
+  // a dynamic offset (window_for()).
+  const VkDescriptorBufferInfo buffer{mirror.buffer(), 0,
+                                      guest_memory_window_range(mirror.storage_limits())};
   VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
   write.dstSet = guest_set_;
   write.dstBinding = 0;
   write.descriptorCount = 1;
-  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
   write.pBufferInfo = &buffer;
   vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
   guest_set_buffer_ = mirror.buffer();
 }
 
+bool GpuResolver::window_for(GuestMemoryMirror& mirror, std::uint32_t range_address,
+                             std::uint32_t range_size, GpuResolveConstants& constants,
+                             std::uint32_t& dynamic_offset) {
+  const auto window = guest_memory_window(mirror.storage_limits(), range_address,
+                                          std::uint64_t{range_address} + range_size);
+  if (!window) {
+    error_ = "Vulkan GPU resolve destination (" + std::to_string(range_size) +
+             " bytes) exceeds the device's storage-buffer range";
+    return false;
+  }
+  dynamic_offset = static_cast<std::uint32_t>(window->offset);
+  constants.destination_base = window->rebase(constants.destination_base);
+  return true;
+}
+
 void GpuResolver::dispatch(VkCommandBuffer command, VkPipeline pipeline, VkPipelineLayout layout,
                            VkDescriptorSet source_set, GuestMemoryMirror& mirror,
-                           const GpuResolveConstants& constants) {
+                           const GpuResolveConstants& constants, std::uint32_t dynamic_offset) {
   mirror.prepare_shader_access(command, true);
   vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
   const std::array sets{source_set, guest_set_};
   vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0,
-                          static_cast<std::uint32_t>(sets.size()), sets.data(), 0, nullptr);
+                          static_cast<std::uint32_t>(sets.size()), sets.data(), 1,
+                          &dynamic_offset);
   vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants),
                      &constants);
   vkCmdDispatch(command, (constants.width + 7u) / 8u, (constants.height + 7u) / 8u, 1u);
 }
 
 bool GpuResolver::resolve(VkDevice device, CommandQueue& queue, GuestMemoryMirror& mirror,
-                          RenderTargetImage& owner, const GpuResolveConstants& constants) {
-  if (!constants.width || !constants.height) return true;
+                          RenderTargetImage& owner, const GpuResolveConstants& guest_constants,
+                          std::uint32_t range_address, std::uint32_t range_size) {
+  if (!guest_constants.width || !guest_constants.height) return true;
+  auto constants = guest_constants;
+  std::uint32_t dynamic_offset = 0;
+  if (!window_for(mirror, range_address, range_size, constants, dynamic_offset)) return false;
   // A 16-bit float owner is read through its integer view, so a raw resolve
   // keeps its bits.
   const auto pipeline =
@@ -359,7 +382,8 @@ bool GpuResolver::resolve(VkDevice device, CommandQueue& queue, GuestMemoryMirro
         dependency.imageMemoryBarrierCount = 1;
         dependency.pImageMemoryBarriers = &barrier;
         vkCmdPipelineBarrier2(command, &dependency);
-        dispatch(command, pipeline, resolve_layout_, source_set, mirror, constants);
+        dispatch(command, pipeline, resolve_layout_, source_set, mirror, constants,
+                 dynamic_offset);
         barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -376,8 +400,12 @@ bool GpuResolver::resolve(VkDevice device, CommandQueue& queue, GuestMemoryMirro
 }
 
 bool GpuResolver::resolve_depth(VkDevice device, CommandQueue& queue, GuestMemoryMirror& mirror,
-                                DepthTargetImage& owner, const GpuResolveConstants& constants) {
-  if (!constants.width || !constants.height) return true;
+                                DepthTargetImage& owner, const GpuResolveConstants& guest_constants,
+                                std::uint32_t range_address, std::uint32_t range_size) {
+  if (!guest_constants.width || !guest_constants.height) return true;
+  auto constants = guest_constants;
+  std::uint32_t dynamic_offset = 0;
+  if (!window_for(mirror, range_address, range_size, constants, dynamic_offset)) return false;
   const auto pipeline = resolve_pipeline(device, owner.host_msaa(), true, owner.guest_format());
   if (!pipeline) return false;
   const auto source_set = owner.sampled_descriptor_set(depth_source_layout_);
@@ -388,7 +416,8 @@ bool GpuResolver::resolve_depth(VkDevice device, CommandQueue& queue, GuestMemor
   bind_guest(device, mirror);
   if (!queue.execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
         owner.transition_to_sampled(command);
-        dispatch(command, pipeline, depth_resolve_layout_, source_set, mirror, constants);
+        dispatch(command, pipeline, depth_resolve_layout_, source_set, mirror, constants,
+                 dynamic_offset);
         owner.transition_to_depth_attachment(command);
       })) {
     error_ = queue.error();

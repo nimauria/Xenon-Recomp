@@ -66,6 +66,8 @@
 #include "xenon/gpu/ir.hpp"
 #include "xenon/gpu/presentation.hpp"
 #include "xenon/gpu/primitive_processor.hpp"
+#include "xenon/gpu/index_cache.hpp"
+#include "xenon/gpu/guest_memory_segments.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/perf_stats.hpp"
@@ -119,7 +121,7 @@ class BackendCore {
   //   std::uint32_t color_render_width(const DrawResourceState&, const RenderTargetImage*);
   //   std::uint32_t color_render_height(const DrawResourceState&, const RenderTargetImage*);
   //   bool record_draw(const DrawRecording&, bool& record_failed);
-  //   bool gpu_color_resolve(RenderTargetImage&, const GpuResolveConstants&);
+  //   bool gpu_color_resolve(RenderTargetImage&, const GpuResolvePlan&);
   //   bool gpu_color_clear(RenderTargetImage&, const GpuClearConstants&);
   //   With kSupportsDirectColorTransfer / kSupportsDirectDepthTransfer, the
   //   GPU EDRAM tile transfers between native images (same format, then
@@ -237,6 +239,33 @@ class BackendCore {
   // or found unlowerable); a repeated load of one is a no-op.
   std::unordered_set<std::uint64_t> handled_shader_loads{};
   TextureDirtyTracker texture_dirty{};
+  // Converted DMA index buffers, reused while their guest bytes are unchanged
+  // (index_cache.hpp); and the draw being consumed's host primitives, shared
+  // by its render-target bounds and its recording (draw_primitives()).
+  // How guest shaders bind guest memory (one binding unless the backend's
+  // descriptors cannot span it; set once, before any shader is lowered).
+  GuestMemorySegmentation guest_segments{};
+  [[nodiscard]] ShaderLoweringOptions with_guest_segments(ShaderLoweringOptions options) const {
+    options.guest_memory_segment_shift = guest_segments.shift;
+    options.guest_memory_segment_count = static_cast<std::uint8_t>(guest_segments.count);
+    return options;
+  }
+  ProcessedIndexCache index_cache{};
+  std::shared_ptr<const ProcessedPrimitiveBatch> draw_batch{};
+  ProcessedPrimitiveBatch draw_batch_storage{};
+  std::vector<std::uint32_t> primitive_scratch{};
+  std::vector<std::byte> index_snapshot_scratch{};
+  bool draw_batch_ready{};
+  std::string draw_batch_error{};
+  // CPU vertex evaluation plans by vertex shader hash (decoded shaders are
+  // content-addressed and immutable, so a plan never goes stale).
+  std::unordered_map<std::uint64_t, std::shared_ptr<const VertexEvaluatorPlan>> evaluator_plans{};
+  // A write the GPU made to guest memory (resolve, memory export): converted
+  // indices read from it are no longer current.
+  void note_gpu_guest_write(std::uint32_t address, std::uint32_t size) {
+    if (address == 0u && size >= memory::kPhysicalMemorySize) index_cache.clear();
+    else index_cache.invalidate(address, size);
+  }
   // Texture mods (texture_replacement.hpp): dumping guest-authored textures
   // and sampling replacements in their place.
   TextureReplacements texture_mods{TextureReplacements::from_environment()};
@@ -402,8 +431,8 @@ class BackendCore {
       result.compiled = std::move(prepared->compiled);
     } else {
       ++variants_compiled_at_draw;
-      result.lowered =
-          std::make_shared<const LoweredShader>(HlslShaderLowerer::lower(decoded, lowering));
+      result.lowered = std::make_shared<const LoweredShader>(
+          HlslShaderLowerer::lower(decoded, with_guest_segments(lowering)));
     }
     if (result.lowered->complete && !result.compiled)
       result.compiled = shader_cache.get_or_compile(*result.lowered, options);
@@ -432,7 +461,10 @@ class BackendCore {
         prefetch_decoded[load->program.hash()] = load->decoded;
         shader_prefetch->prefetch(
             load->program.hash(),
-            [decoded = load->decoded] { return HlslShaderLowerer::lower(*decoded); }, options);
+            [decoded = load->decoded, lowering = with_guest_segments({})] {
+              return HlslShaderLowerer::lower(*decoded, lowering);
+            },
+            options);
         continue;
       }
       if (const auto* draw = std::get_if<ir::DrawPacket>(&command)) prefetch_variants(*draw);
@@ -470,7 +502,10 @@ class BackendCore {
                      const ShaderLoweringOptions& lowering) {
       ++prefetched_variants;
       shader_prefetch->prefetch(
-          key, [decoded, lowering] { return HlslShaderLowerer::lower(*decoded, lowering); },
+          key,
+          [decoded, lowering = with_guest_segments(lowering)] {
+            return HlslShaderLowerer::lower(*decoded, lowering);
+          },
           options);
     };
     const bool vertex_memexport = vertex->second->reflection.memory_exports != 0;
@@ -571,6 +606,8 @@ class BackendCore {
     std::uint64_t start_ns{xenon::logging::activity_trace_enabled()
                                ? xenon::logging::activity_now_ns()
                                : 0u};
+    std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
+    std::uint64_t bytes{};
     template <typename Step>
     bool step(std::size_t index, Step&& run) {
       const auto start = std::chrono::steady_clock::now();
@@ -581,6 +618,13 @@ class BackendCore {
       return ok;
     }
     ~TransferTiming() {
+      // perf_frame.log: every move through canonical storage on the CPU.
+      perf::add(perf::Counter::EdramCpuTransfers, 1u);
+      perf::add(perf::Counter::EdramCpuBytes, bytes);
+      perf::add(perf::Counter::EdramCpuNs,
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count()));
       // Activity trace: every move through canonical storage on the CPU.
       if (xenon::logging::activity_trace_enabled()) {
         const auto key = xenon::logging::intern_activity(
@@ -615,6 +659,7 @@ class BackendCore {
       const auto height = std::uint32_t(region.bottom - region.top);
       const auto canonical_pitch = width * (surface.is_64bpp ? 8u : 4u);
       std::vector<std::byte> canonical(std::size_t(canonical_pitch) * height);
+      timing.bytes += std::uint64_t{canonical_pitch} * height * sample_count;
       for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
         std::vector<std::byte> pixels;
         std::uint32_t pitch{};
@@ -650,6 +695,7 @@ class BackendCore {
       const auto left = std::uint32_t(region.left), top = std::uint32_t(region.top);
       const auto width = std::uint32_t(region.right - region.left);
       const auto height = std::uint32_t(region.bottom - region.top);
+      timing.bytes += std::uint64_t{width} * height * 4u * sample_count;
       for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
         std::vector<std::uint32_t> pixels;
         std::uint32_t pitch{};
@@ -685,6 +731,7 @@ class BackendCore {
       const auto host_pitch = width * color_host_bytes_per_pixel(image.guest_format());
       std::vector<std::byte> canonical(std::size_t(canonical_pitch) * height);
       std::vector<std::byte> pixels(std::size_t(host_pitch) * height);
+      timing.bytes += std::uint64_t{canonical_pitch} * height * sample_count;
       for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
         if (!timing.step(0, [&] {
               return resolve_edram_raw(*edram, surface, left, top, width, height, sample,
@@ -719,6 +766,7 @@ class BackendCore {
       const auto width = std::uint32_t(region.right - region.left);
       const auto height = std::uint32_t(region.bottom - region.top);
       std::vector<std::uint32_t> pixels(std::size_t(width) * height);
+      timing.bytes += std::uint64_t{width} * height * 4u * sample_count;
       for (std::uint32_t sample = 0; sample < sample_count; ++sample) {
         if (!timing.step(0, [&] {
               return resolve_edram_raw(*edram, surface, left, top, width, height, sample,
@@ -1305,45 +1353,40 @@ class BackendCore {
       return scissor_bound;
     const auto decoded = decoded_shaders.find(draw.vertex_shader.hash);
     if (decoded == decoded_shaders.end()) return scissor_bound;
-    if (!VertexPositionEvaluator::unsupported_reason(decoded->second).empty()) {
+    auto& plan = evaluator_plans[draw.vertex_shader.hash];
+    if (!plan) plan = std::make_shared<const VertexEvaluatorPlan>(decoded->second);
+    if (!plan->supported()) {
       ++unsupported.unsupported_shader_features;
       return scissor_bound;
     }
     // The vertices the host would run: the processed batch's indices, or
-    // 0..n-1 for a non-indexed one.
-    std::vector<std::byte> index_snapshot;
-    std::uint32_t index_snapshot_base = 0u;
-    if (draw.source == DrawSource::Dma) {
-      const auto bytes_per_index = draw.index_buffer.format == IndexFormat::UInt32 ? 4u : 2u;
-      const auto index_bytes =
-          std::uint64_t{(std::min)(draw.index_count, draw.index_buffer.length_bytes / bytes_per_index)} *
-          bytes_per_index;
-      if (!draw.index_buffer.valid || !index_bytes ||
-          std::uint64_t{draw.index_buffer.physical_address} + index_bytes > memory::kPhysicalMemorySize ||
-          !mirror.make_cpu_visible(draw.index_buffer.physical_address,
-                                   static_cast<std::uint32_t>(index_bytes),
-                                   memory::GpuRangeUsage::IndexBuffer))
-        return scissor_bound;
-      index_snapshot.resize(static_cast<std::size_t>(index_bytes));
-      index_snapshot_base = draw.index_buffer.physical_address;
-      if (!memory->copy_physical_range(index_snapshot_base, index_snapshot)) return scissor_bound;
+    // 0..n-1 for a non-indexed one - the same batch the draw records.
+    const auto* batch_pointer = draw_primitives(draw, state);
+    if (!batch_pointer) return scissor_bound;
+    const auto& batch = *batch_pointer;
+    if (batch.topology == HostPrimitiveTopology::PointList) return scissor_bound;
+    const std::span<const std::uint32_t> indexed_order(batch.indices);
+    const auto order_at = [&](std::size_t i) {
+      return batch.indexed ? indexed_order[i] : static_cast<std::uint32_t>(i);
+    };
+    const std::size_t order_size = batch.indexed ? indexed_order.size() : batch.vertex_count;
+    // At most kMaxEvaluatedVertices distinct vertices: fixed storage.
+    std::array<std::uint32_t, kMaxEvaluatedVertices> vertex_storage{};
+    std::size_t vertex_count = 0;
+    for (std::size_t i = 0; i < order_size; ++i) {
+      const auto vertex = order_at(i);
+      const auto end = vertex_storage.begin() + vertex_count;
+      const auto at = std::lower_bound(vertex_storage.begin(), end, vertex);
+      if (at != end && *at == vertex) continue;
+      if (vertex_count == kMaxEvaluatedVertices) return scissor_bound;
+      std::move_backward(at, end, end + 1);
+      *at = vertex;
+      ++vertex_count;
     }
-    const auto batch = process_primitives(
-        draw, index_snapshot,
-        {state.primitive_assembly.reset_enabled, state.primitive_assembly.reset_index},
-        index_snapshot_base);
-    if (!batch.valid || batch.topology == HostPrimitiveTopology::PointList) return scissor_bound;
-    std::vector<std::uint32_t> order;
-    if (batch.indexed) {
-      order = batch.indices;
-    } else {
-      order.resize(batch.vertex_count);
-      for (std::uint32_t i = 0; i < batch.vertex_count; ++i) order[i] = i;
-    }
-    auto vertices = order;
-    std::sort(vertices.begin(), vertices.end());
-    vertices.erase(std::unique(vertices.begin(), vertices.end()), vertices.end());
-    if (vertices.empty() || vertices.size() > kMaxEvaluatedVertices) return scissor_bound;
+    const std::span<const std::uint32_t> vertices(vertex_storage.data(), vertex_count);
+    if (vertices.empty()) return scissor_bound;
+    perf::add(perf::Counter::BoundsEvaluations, 1u);
+    const perf::ScopedTime bounds_time(perf::Counter::BoundsNs);
 
     std::array<std::byte, kShaderConstantBufferBytes> constants{};
     if (!resource_state.write_constant_buffer(constants)) return scissor_bound;
@@ -1357,24 +1400,30 @@ class BackendCore {
       return memory->copy_physical_range(address, out);
     };
     float lowest = -INFINITY;
-    std::unordered_map<std::uint32_t, std::array<float, 2>> pixels;
-    for (const auto vertex : vertices) {
+    // Each vertex's pixel, in `vertices` order (sorted, for lookup below).
+    std::array<std::array<float, 2>, kMaxEvaluatedVertices> pixel_storage{};
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
       const auto evaluated =
-          VertexPositionEvaluator::evaluate(decoded->second, constants, vertex, reader);
+          VertexPositionEvaluator::evaluate(*plan, constants, vertices[i], reader);
       if (!evaluated.valid) {
         ++unsupported.unsupported_shader_features;
         return scissor_bound;
       }
-      pixels.emplace(vertex, evaluated.pixel);
+      pixel_storage[i] = evaluated.pixel;
       lowest = (std::max)(lowest, evaluated.pixel[1]);
     }
+    const auto pixel_of = [&](std::uint32_t vertex) -> const std::array<float, 2>& {
+      return pixel_storage[static_cast<std::size_t>(
+          std::lower_bound(vertices.begin(), vertices.end(), vertex) - vertices.begin())];
+    };
     // A rectangle list's fourth corner, as the expansion geometry shader
     // makes it (make_rectangle_list_geometry_shader): A + B - C, with A-B the
     // longest side. Off an axis-aligned rectangle it can reach lower.
     if (batch.requires_rectangle_expansion) {
-      for (std::size_t i = 0; i + 2u < order.size(); i += 3u) {
-        const std::array<std::array<float, 2>, 3> p{pixels.at(order[i]), pixels.at(order[i + 1u]),
-                                                     pixels.at(order[i + 2u])};
+      for (std::size_t i = 0; i + 2u < order_size; i += 3u) {
+        const std::array<std::array<float, 2>, 3> p{pixel_of(order_at(i)),
+                                                     pixel_of(order_at(i + 1u)),
+                                                     pixel_of(order_at(i + 2u))};
         const auto distance = [&](std::size_t u, std::size_t v) {
           const float dx = p[u][0] - p[v][0], dy = p[u][1] - p[v][1];
           return dx * dx + dy * dy;
@@ -1391,6 +1440,92 @@ class BackendCore {
     if (!(lowest > 0.0f)) return (std::min)(scissor_bound, 1);
     const auto rows = static_cast<std::int32_t>(std::ceil((std::min)(lowest, 16384.0f)));
     return (std::min)(scissor_bound, (std::max)(1, rows));
+  }
+
+  // The host primitives of the draw being consumed: computed once per draw
+  // (draw_batch_ready is cleared when consume_draw() starts) and shared by
+  // its render-target bounds and its recording. A DMA index buffer comes
+  // from the processed-index cache while its guest bytes are unchanged;
+  // otherwise its bytes are copied out once - after any GPU-written part is
+  // made CPU-visible - converted, and cached. Null, with draw_batch_error,
+  // when the draw's primitives cannot be produced.
+  const ProcessedPrimitiveBatch* draw_primitives(const ir::DrawPacket& draw,
+                                                 const DrawResourceState& state) {
+    if (draw_batch_ready) return draw_batch ? draw_batch.get() : nullptr;
+    draw_batch_ready = true;
+    draw_batch.reset();
+    draw_batch_error.clear();
+    const PrimitiveProcessingOptions options{state.primitive_assembly.reset_enabled,
+                                             state.primitive_assembly.reset_index};
+    if (draw.source != DrawSource::Dma) {
+      if (!process_primitives_into(draw, {}, options, 0u, draw_batch_storage, primitive_scratch)) {
+        draw_batch_error = draw_batch_storage.error;
+        return nullptr;
+      }
+      // Non-owning: the storage lives as long as the backend.
+      draw_batch = std::shared_ptr<const ProcessedPrimitiveBatch>(
+          std::shared_ptr<const ProcessedPrimitiveBatch>{}, &draw_batch_storage);
+      return draw_batch.get();
+    }
+    if (!memory) {
+      draw_batch_error = named("indexed draw has no guest memory");
+      return nullptr;
+    }
+    const auto& buffer = draw.index_buffer;
+    const auto bytes_per_index = buffer.format == IndexFormat::UInt32 ? 4u : 2u;
+    const auto count = (std::min)(draw.index_count, buffer.length_bytes / bytes_per_index);
+    const auto index_bytes = std::uint64_t{count} * bytes_per_index;
+    if (!buffer.valid || index_bytes > UINT32_MAX ||
+        std::uint64_t{buffer.physical_address} + index_bytes > memory::kPhysicalMemorySize) {
+      draw_batch_error = named("index snapshot range is invalid");
+      return nullptr;
+    }
+    const auto source_bytes = static_cast<std::uint32_t>(index_bytes);
+    // Bytes the GPU wrote come back first; such a buffer is converted afresh
+    // and not cached (it changed outside the page epochs the cache checks).
+    bool cacheable = true;
+    if (source_bytes && mirror.has_gpu_dirty(buffer.physical_address, source_bytes)) {
+      cacheable = false;
+      index_cache.invalidate(buffer.physical_address, source_bytes);
+      if (!mirror.make_cpu_visible(buffer.physical_address, source_bytes,
+                                   memory::GpuRangeUsage::IndexBuffer)) {
+        draw_batch_error = mirror.error();
+        return nullptr;
+      }
+    }
+    const IndexCacheKey key{buffer.physical_address,
+                            count,
+                            buffer.format,
+                            buffer.endian,
+                            draw.primitive_type,
+                            options.reset_enabled,
+                            options.reset_index};
+    // Taken before the bytes are read: a write racing the copy has a newer
+    // epoch, so the entry is found stale next time.
+    const auto epoch = memory->coherency().current_epoch();
+    if (cacheable) {
+      if (auto hit = index_cache.find(key, source_bytes, memory->coherency(), epoch)) {
+        perf::add(perf::Counter::IndexCacheHits, 1u);
+        draw_batch = std::move(hit);
+        return draw_batch.get();
+      }
+    }
+    perf::add(perf::Counter::IndexCacheMisses, 1u);
+    index_snapshot_scratch.resize(source_bytes);
+    if (!memory->copy_physical_range(buffer.physical_address, index_snapshot_scratch)) {
+      draw_batch_error = named("index snapshot failed");
+      return nullptr;
+    }
+    auto batch = std::make_shared<ProcessedPrimitiveBatch>();
+    if (!process_primitives_into(draw, index_snapshot_scratch, options, buffer.physical_address,
+                                 *batch, primitive_scratch)) {
+      draw_batch_error = batch->error;
+      return nullptr;
+    }
+    perf::add(perf::Counter::IndexBytesConverted, batch->indices.size() * sizeof(std::uint32_t));
+    if (cacheable) index_cache.insert(key, source_bytes, epoch, batch);
+    draw_batch = std::move(batch);
+    return draw_batch.get();
   }
 
   void note_draw(const ir::DrawPacket& draw, const DrawResourceState& state) {

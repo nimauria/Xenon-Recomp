@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "xenon/gpu/vulkan/command_queue.hpp"
+#include "xenon/gpu/vulkan/guest_memory_limits.hpp"
 #include "xenon/gpu/readback_publisher.hpp"
 #include "xenon/gpu/staging_ring.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
@@ -68,8 +69,11 @@ class GuestMemoryMirror {
   }
   [[nodiscard]] VkBuffer buffer() const noexcept { return mirror_.buffer(); }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // The storage-buffer limits passes binding a window of the mirror use.
+  [[nodiscard]] const GuestMemoryLimits& storage_limits() const noexcept { return limits_; }
 
  private:
+  GuestMemoryLimits limits_{};
   static constexpr std::uint32_t kTransferSize = 16u * 1024u * 1024u;
   // Room for a frame's resolves in flight (AC6 resolves ~20 MiB a frame).
   static constexpr std::uint32_t kReadbackSize = 64u * 1024u * 1024u;

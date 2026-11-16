@@ -72,8 +72,8 @@ int main() {
   batch = process_primitives(draw, memory);
   assert(batch.valid && !batch.indexed && batch.requires_rectangle_expansion);
   assert(batch.topology == HostPrimitiveTopology::TriangleList);
-  assert((batch.indices == std::vector<std::uint32_t>{0, 1, 2}));
-  const std::vector<std::uint32_t> rectangle_indices{0, 1, 2};
+  // The host draws vertices 0..2 non-indexed: no index list is produced.
+  assert(batch.vertex_count == 3 && batch.indices.empty());
   for (const auto primitive : {PrimitiveType::CopyRectList0,
                                PrimitiveType::CopyRectList1,
                                PrimitiveType::CopyRectList2,
@@ -82,7 +82,7 @@ int main() {
     draw.primitive_type = primitive;
     batch = process_primitives(draw, memory);
     assert(batch.valid && batch.requires_rectangle_expansion);
-    assert(batch.indices == rectangle_indices);
+    assert(!batch.indexed && batch.vertex_count == 3);
   }
 
   // 32-bit DMA indices, byte-swapped and masked to 24 bits, as a strip.
@@ -125,6 +125,76 @@ int main() {
     batch = process_primitives(draw, memory, {true, 0xFFFFu});
     assert(batch.valid && batch.indexed);
     assert(batch.indices == expected);
+  }
+  // An auto-indexed list is a non-indexed draw of its whole primitives: no
+  // index is produced, the count is trimmed.
+  {
+    ProcessedPrimitiveBatch reused{};
+    std::vector<std::uint32_t> scratch;
+    ir::DrawPacket list{};
+    list.source = DrawSource::AutoIndex;
+    list.primitive_type = PrimitiveType::TriangleList;
+    list.index_count = 8;
+    assert(process_primitives_into(list, {}, {}, 0u, reused, scratch));
+    assert(reused.valid && !reused.indexed && reused.indices.empty() && reused.vertex_count == 6);
+    list.primitive_type = PrimitiveType::RectangleList;
+    assert(process_primitives_into(list, {}, {}, 0u, reused, scratch));
+    assert(reused.valid && !reused.indexed && reused.requires_rectangle_expansion &&
+           reused.vertex_count == 6);
+    list.primitive_type = PrimitiveType::LineList;
+    list.index_count = 5;
+    assert(process_primitives_into(list, {}, {}, 0u, reused, scratch));
+    assert(!reused.indexed && reused.vertex_count == 4 &&
+           reused.topology == HostPrimitiveTopology::LineList && !reused.requires_rectangle_expansion);
+
+    // A DMA list is read in one pass: endian swap, 24-bit mask, trimming.
+    std::array<std::byte, 64> dma{};
+    const std::array<std::uint32_t, 4> words32{0x01000000u, 0x020000FFu, 0x03000000u, 0x04000000u};
+    std::memcpy(dma.data(), words32.data(), sizeof(words32));
+    ir::DrawPacket indexed{};
+    indexed.source = DrawSource::Dma;
+    indexed.primitive_type = PrimitiveType::TriangleList;
+    indexed.index_count = 4;
+    indexed.index_buffer = {true, 0, 16, 4, IndexFormat::UInt32, Endian::Swap8In32};
+    assert(process_primitives_into(indexed, dma, {}, 0u, reused, scratch));
+    assert(reused.valid && reused.indexed &&
+           (reused.indices == std::vector<std::uint32_t>{1u, 0xFF000002u & 0x00FFFFFFu, 3u}));
+    assert(reused.vertex_count == 3);
+    // The same storage, reused for a strip (which needs the scratch pass) and
+    // a different source: nothing from the previous draw leaks in.
+    const std::array<std::uint16_t, 4> words16{0x0100, 0x0200, 0x0300, 0x0400};
+    std::memcpy(dma.data() + 32, words16.data(), sizeof(words16));
+    ir::DrawPacket strip{};
+    strip.source = DrawSource::Dma;
+    strip.primitive_type = PrimitiveType::TriangleStrip;
+    strip.index_count = 4;
+    strip.index_buffer = {true, 32, 8, 4, IndexFormat::UInt16, Endian::Swap8In16};
+    assert(process_primitives_into(strip, dma, {}, 0u, reused, scratch));
+    assert((reused.indices == std::vector<std::uint32_t>{1, 2, 3, 3, 2, 4}));
+    // Out-of-range DMA fails with an error and leaves no valid batch behind.
+    strip.index_buffer.physical_address = 60;
+    assert(!process_primitives_into(strip, dma, {}, 0u, reused, scratch));
+    assert(!reused.valid && !reused.error.empty());
+    // Every path agrees with the allocating wrapper.
+    for (const auto type : {PrimitiveType::PointList, PrimitiveType::LineList,
+                            PrimitiveType::LineStrip, PrimitiveType::LineLoop,
+                            PrimitiveType::TriangleList, PrimitiveType::TriangleFan,
+                            PrimitiveType::TriangleStrip, PrimitiveType::QuadList,
+                            PrimitiveType::QuadStrip, PrimitiveType::RectangleList}) {
+      for (const auto source : {DrawSource::AutoIndex, DrawSource::Dma}) {
+        ir::DrawPacket any{};
+        any.source = source;
+        any.primitive_type = type;
+        any.index_count = 4;
+        any.index_buffer = {true, 32, 8, 4, IndexFormat::UInt16, Endian::Swap8In16};
+        const auto expected = process_primitives(any, dma);
+        assert(process_primitives_into(any, dma, {}, 0u, reused, scratch) == expected.valid);
+        assert(reused.indices == expected.indices && reused.indexed == expected.indexed &&
+               reused.vertex_count == expected.vertex_count &&
+               reused.topology == expected.topology &&
+               reused.requires_rectangle_expansion == expected.requires_rectangle_expansion);
+      }
+    }
   }
   std::cout << "xenon_primitive_processor_tests: ok\n";
 }

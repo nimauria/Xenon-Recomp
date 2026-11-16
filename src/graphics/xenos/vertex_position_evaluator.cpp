@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <unordered_map>
 
 #include "xenon/gpu/resource_ir.hpp"
 
@@ -70,7 +69,7 @@ std::uint32_t endian_swap(std::uint32_t value, std::uint32_t endian) noexcept {
 }
 
 struct Machine {
-  const DecodedShader& shader;
+  const VertexEvaluatorPlan& plan;
   std::span<const std::byte> constants;
   const GuestPhysicalReader& memory;
 
@@ -430,25 +429,14 @@ struct Machine {
                maximum = draw_state(7) & 0xFFFFFFu;
     // HLSL clamp(x, lo, hi) is min(max(x, lo), hi), also when lo > hi.
     r[0][0] = static_cast<float>(std::min(std::max((vertex_id + offset) & 0xFFFFFFu, minimum), maximum));
-    std::unordered_map<std::uint32_t, const DecodedInstruction*> instructions;
-    for (const auto& instruction : shader.instructions) {
-      const auto address = instruction.kind == ShaderInstructionKind::Alu ? instruction.alu.address
-                           : instruction.kind == ShaderInstructionKind::VertexFetch
-                               ? instruction.vertex_fetch.address
-                               : instruction.texture_fetch.address;
-      instructions.emplace(address, &instruction);
-    }
-    std::unordered_map<std::uint32_t, const DecodedControlFlow*> control_flow;
-    for (const auto& cf : shader.control_flow) control_flow.emplace(cf.index, &cf);
-
     std::uint32_t pc = 0, guard = 0, call_depth = 0, loop_depth = 0;
     std::array<std::uint32_t, 4> call_stack{}, loop_remaining{};
     std::array<std::int32_t, 4> loop_value{}, loop_step{};
     bool running = true;
     while (running && guard++ < 65536u) {
-      const auto found = control_flow.find(pc);
-      if (found == control_flow.end()) break;  // default: running=false
-      const auto& cf = *found->second;
+      const auto* found = plan.control_flow(pc);
+      if (!found) break;  // default: running=false
+      const auto& cf = *found;
       const auto next = cf.index + 1u;
       const auto opcode = cf.opcode;
       const auto value = static_cast<unsigned>(opcode);
@@ -469,12 +457,12 @@ struct Machine {
                           opcode == ControlFlowOpcode::CondExecPredCleanEnd;
         if (execute) {
           for (std::uint32_t address = cf.target; address < cf.target + cf.count; ++address) {
-            const auto instruction = instructions.find(address);
-            if (instruction == instructions.end()) {
+            const auto* instruction = plan.instruction(address);
+            if (!instruction) {
               error = "control flow references an instruction absent from the decoded IR";
               return false;
             }
-            const auto& decoded = *instruction->second;
+            const auto& decoded = *instruction;
             if (decoded.kind == ShaderInstructionKind::Alu) {
               alu(decoded.alu);
             } else if (decoded.kind == ShaderInstructionKind::VertexFetch) {
@@ -571,7 +559,63 @@ std::string VertexPositionEvaluator::unsupported_reason(const DecodedShader& sha
   return {};
 }
 
+VertexEvaluatorPlan::VertexEvaluatorPlan(const DecodedShader& shader)
+    : reason_(VertexPositionEvaluator::unsupported_reason(shader)) {
+  if (!reason_.empty()) return;
+  const auto address_of = [](const DecodedInstruction& instruction) {
+    return instruction.kind == ShaderInstructionKind::Alu ? instruction.alu.address
+           : instruction.kind == ShaderInstructionKind::VertexFetch
+               ? instruction.vertex_fetch.address
+               : instruction.texture_fetch.address;
+  };
+  if (!shader.instructions.empty()) {
+    std::uint32_t lowest = UINT32_MAX, highest = 0u;
+    for (const auto& instruction : shader.instructions) {
+      lowest = (std::min)(lowest, address_of(instruction));
+      highest = (std::max)(highest, address_of(instruction));
+    }
+    // Xenos microcode holds at most 4096 instruction slots; anything wider
+    // is not a decoded shader this evaluator can trust.
+    if (highest - lowest >= 65536u) {
+      reason_ = "instruction addresses span more than a shader's microcode";
+      return;
+    }
+    instruction_base_ = lowest;
+    instruction_slots_.assign(static_cast<std::size_t>(highest - lowest) + 1u, -1);
+    instructions_.reserve(shader.instructions.size());
+    for (const auto& instruction : shader.instructions) {
+      auto& slot = instruction_slots_[address_of(instruction) - lowest];
+      if (slot >= 0) continue;  // the first instruction at an address wins
+      slot = static_cast<std::int32_t>(instructions_.size());
+      instructions_.push_back(instruction);
+    }
+  }
+  std::uint32_t highest_cf = 0u;
+  for (const auto& cf : shader.control_flow) highest_cf = (std::max)(highest_cf, cf.index);
+  if (!shader.control_flow.empty()) {
+    if (highest_cf >= 65536u) {
+      reason_ = "control-flow indices exceed a shader's microcode";
+      return;
+    }
+    control_flow_slots_.assign(static_cast<std::size_t>(highest_cf) + 1u, -1);
+    control_flow_.reserve(shader.control_flow.size());
+    for (const auto& cf : shader.control_flow) {
+      auto& slot = control_flow_slots_[cf.index];
+      if (slot >= 0) continue;
+      slot = static_cast<std::int32_t>(control_flow_.size());
+      control_flow_.push_back(cf);
+    }
+  }
+}
+
 VertexEvaluation VertexPositionEvaluator::evaluate(const DecodedShader& shader,
+                                                   std::span<const std::byte> constants,
+                                                   std::uint32_t vertex_id,
+                                                   const GuestPhysicalReader& memory) {
+  return evaluate(VertexEvaluatorPlan(shader), constants, vertex_id, memory);
+}
+
+VertexEvaluation VertexPositionEvaluator::evaluate(const VertexEvaluatorPlan& plan,
                                                    std::span<const std::byte> constants,
                                                    std::uint32_t vertex_id,
                                                    const GuestPhysicalReader& memory) {
@@ -580,11 +624,11 @@ VertexEvaluation VertexPositionEvaluator::evaluate(const DecodedShader& shader,
     result.error = "constant buffer is smaller than the shader constant ABI";
     return result;
   }
-  if (auto reason = unsupported_reason(shader); !reason.empty()) {
-    result.error = std::move(reason);
+  if (!plan.supported()) {
+    result.error = plan.unsupported_reason();
     return result;
   }
-  Machine machine{shader, constants, memory};
+  Machine machine{plan, constants, memory};
   if (!machine.run(vertex_id)) {
     result.error = machine.error;
     return result;

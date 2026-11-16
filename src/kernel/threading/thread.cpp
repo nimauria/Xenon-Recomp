@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "xenon/kernel/mutant.hpp"
+#include "xenon/logging/host_sampler.hpp"
 #include "xenon/logging/probe_log.hpp"
 
 #if defined(_WIN32)
@@ -387,6 +388,13 @@ KernelThread* KernelThread::current() noexcept { return t_current_thread; }
 
 void KernelThread::thread_main() {
   t_current_thread = this;
+  // Host tools (host_profile.log, debuggers) name the thread after its
+  // kernel thread.
+  {
+    const auto label = name();
+    logging::set_current_thread_name("Xenon " + (label.empty() ? std::string("thread") : label) +
+                                     " #" + std::to_string(thread_id()));
+  }
   // Honors CREATE_SUSPENDED: park here until resume() drops suspend_count_
   // to zero, or terminate() is called while still parked - either way, this
   // never runs entry_() before the thread has actually been resumed at

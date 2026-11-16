@@ -8,6 +8,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include "xenon/gpu/guest_memory_segments.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/vulkan/command_queue.hpp"
 #include "xenon/gpu/vulkan/memory.hpp"
@@ -24,6 +25,15 @@ class ResourceLayout {
   static constexpr std::uint32_t kTextureCubeBinding = 113;
   static constexpr std::uint32_t kSamplerBinding = 160;
   static constexpr std::uint32_t kMemoryExportBinding = 192;
+  // Segmented guest memory (XEN-001): read-only segment i >= 1 at
+  // t(128 + i), past the texture arrays; read-write segment i at u(i).
+  static constexpr std::uint32_t kGuestMemorySegmentBinding = 144;  // + segment
+  [[nodiscard]] static constexpr std::uint32_t guest_memory_binding(std::uint32_t segment) noexcept {
+    return segment ? kGuestMemorySegmentBinding + segment : kGuestMemoryBinding;
+  }
+  [[nodiscard]] static constexpr std::uint32_t memory_export_binding(std::uint32_t segment) noexcept {
+    return kMemoryExportBinding + segment;
+  }
   static constexpr VkDeviceSize kConstantBufferBytes = kShaderConstantBufferBytes;
   static constexpr std::uint32_t kFrameCount = CommandQueue::kFrameCount;
 
@@ -64,8 +74,14 @@ class ResourceLayout {
     return constants_staging_;
   }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // How guest memory is bound, from the device's storage-buffer range
+  // (guest_memory_limits.hpp).
+  [[nodiscard]] const GuestMemorySegmentation& segmentation() const noexcept {
+    return segmentation_;
+  }
 
  private:
+  GuestMemorySegmentation segmentation_{};
   struct FrameBindings {
     VkDescriptorPool descriptor_pool{VK_NULL_HANDLE};
     std::array<VkDescriptorSet, CommandQueue::kBatchCommandCount> descriptor_sets{};

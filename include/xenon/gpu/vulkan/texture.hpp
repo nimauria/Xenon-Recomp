@@ -107,12 +107,16 @@ class GpuTextureLoader {
   static constexpr std::uint32_t kTransientSets = 64u;
 
   [[nodiscard]] bool initialize(VkPhysicalDevice physical_device, VkDevice device);
+  // The source binding is a dynamic storage buffer of `source_range` bytes
+  // (the guest-memory mirror binds at most the device's storage range and
+  // is placed over each texture with a dynamic offset, XEN-001).
   [[nodiscard]] VkDescriptorSet source_set(VkDescriptorSet& set, VkBuffer& bound,
-                                           VkBuffer source);
+                                           VkBuffer source,
+                                           VkDeviceSize source_range = VK_WHOLE_SIZE);
   [[nodiscard]] bool run(CommandQueue& queue, TextureImage& image, const TextureLayout& layout,
                          VkDescriptorSet set, std::uint32_t source_bias,
                          std::uint32_t source_base, std::uint32_t source_limit,
-                         GuestMemoryMirror* mirror);
+                         GuestMemoryMirror* mirror, std::uint32_t source_dynamic_offset = 0u);
   void retire(std::uint64_t completed);
 
   VkPhysicalDevice physical_device_{VK_NULL_HANDLE};

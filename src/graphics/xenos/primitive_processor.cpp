@@ -6,16 +6,6 @@
 namespace xenon::gpu {
 namespace {
 
-std::uint16_t swap16(std::uint16_t value, Endian endian) {
-  switch (endian) {
-    case Endian::None: return value;
-    case Endian::Swap8In16:
-    case Endian::Swap8In32: return std::uint16_t((value << 8) | (value >> 8));
-    case Endian::Swap16In32: return value;
-  }
-  return value;
-}
-
 void append_triangle(std::vector<std::uint32_t>& out, std::uint32_t a,
                      std::uint32_t b, std::uint32_t c) {
   if (a == b || b == c || a == c) return;
@@ -154,61 +144,136 @@ bool convert_with_primitive_reset(
   return true;
 }
 
+// The topologies the host draws as they are: each index is used once, in
+// order, so the converted list is the source trimmed to whole primitives.
+bool direct_list_topology(PrimitiveType type, std::size_t count, HostPrimitiveTopology& topology,
+                          bool& rectangle_expansion, std::size_t& kept) noexcept {
+  rectangle_expansion = false;
+  switch (type) {
+    case PrimitiveType::PointList:
+      topology = HostPrimitiveTopology::PointList;
+      kept = count;
+      return true;
+    case PrimitiveType::LineList:
+      topology = HostPrimitiveTopology::LineList;
+      kept = count & ~std::size_t{1};
+      return true;
+    case PrimitiveType::TriangleList:
+      topology = HostPrimitiveTopology::TriangleList;
+      kept = count / 3u * 3u;
+      return true;
+    case PrimitiveType::RectangleList:
+    case PrimitiveType::CopyRectList0:
+    case PrimitiveType::CopyRectList1:
+    case PrimitiveType::CopyRectList2:
+    case PrimitiveType::CopyRectList3:
+    case PrimitiveType::FillRectList:
+      topology = HostPrimitiveTopology::TriangleList;
+      rectangle_expansion = true;
+      kept = count / 3u * 3u;
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Reads `count` guest indices from `data` into `out`, endian-swapped and (for
+// 32-bit indices) masked to the 24 bits Xenos uses.
+void read_guest_indices(const std::byte* data, std::size_t count, IndexFormat format,
+                        Endian endian, std::uint32_t* out) noexcept {
+  if (format == IndexFormat::UInt32) {
+    for (std::size_t i = 0; i < count; ++i) {
+      std::uint32_t value{};
+      std::memcpy(&value, data + i * 4u, 4);
+      out[i] = gpu_swap(value, endian) & 0x00FFFFFFu;
+    }
+  } else if (endian == Endian::Swap8In16 || endian == Endian::Swap8In32) {
+    for (std::size_t i = 0; i < count; ++i) {
+      std::uint16_t value{};
+      std::memcpy(&value, data + i * 2u, 2);
+      out[i] = std::uint16_t((value << 8) | (value >> 8));
+    }
+  } else {
+    for (std::size_t i = 0; i < count; ++i) {
+      std::uint16_t value{};
+      std::memcpy(&value, data + i * 2u, 2);
+      out[i] = value;
+    }
+  }
+}
+
 }  // namespace
 
-ProcessedPrimitiveBatch process_primitives(
-    const ir::DrawPacket& draw, std::span<const std::byte> physical_memory,
-    const PrimitiveProcessingOptions& options, std::uint32_t physical_base) {
-  ProcessedPrimitiveBatch result{};
-  std::vector<std::uint32_t> source;
+bool process_primitives_into(const ir::DrawPacket& draw,
+                             std::span<const std::byte> physical_memory,
+                             const PrimitiveProcessingOptions& options,
+                             std::uint32_t physical_base, ProcessedPrimitiveBatch& result,
+                             std::vector<std::uint32_t>& scratch) {
+  result.topology = HostPrimitiveTopology::TriangleList;
+  result.indices.clear();
+  result.vertex_count = 0;
+  result.error.clear();
+  result.indexed = false;
+  result.requires_rectangle_expansion = false;
+  result.valid = false;
+  scratch.clear();
+
+  HostPrimitiveTopology list_topology{};
+  bool rectangle_expansion = false;
+  std::size_t kept = 0;
   if (draw.source == DrawSource::AutoIndex) {
-    source.resize(draw.index_count);
-    for (std::uint32_t i = 0; i < draw.index_count; ++i) source[i] = i;
+    if (direct_list_topology(draw.primitive_type, draw.index_count, list_topology,
+                             rectangle_expansion, kept)) {
+      // 0, 1, 2... in order: a non-indexed draw of the whole primitives.
+      result.topology = list_topology;
+      result.requires_rectangle_expansion = rectangle_expansion;
+      result.vertex_count = static_cast<std::uint32_t>(kept);
+      result.valid = true;
+      return true;
+    }
+    scratch.resize(draw.index_count);
+    for (std::uint32_t i = 0; i < draw.index_count; ++i) scratch[i] = i;
   } else if (draw.source == DrawSource::Dma) {
     const auto& buffer = draw.index_buffer;
     const auto bytes_per_index = buffer.format == IndexFormat::UInt32 ? 4u : 2u;
-    const auto count = std::min(draw.index_count,
-                                buffer.length_bytes / bytes_per_index);
+    const auto count = std::min(draw.index_count, buffer.length_bytes / bytes_per_index);
     if (!buffer.valid || buffer.physical_address < physical_base ||
-        std::uint64_t(buffer.physical_address) +
-                std::uint64_t(count) * bytes_per_index >
+        std::uint64_t(buffer.physical_address) + std::uint64_t(count) * bytes_per_index >
             std::uint64_t{physical_base} + physical_memory.size()) {
       result.error = "Xenos DMA index buffer is outside physical memory";
-      return result;
+      return false;
     }
-    const auto* data =
-        physical_memory.data() + (buffer.physical_address - physical_base);
-    source.resize(count);
-    auto* out = source.data();
-    if (buffer.format == IndexFormat::UInt32) {
-      for (std::uint32_t i = 0; i < count; ++i) {
-        std::uint32_t value{};
-        std::memcpy(&value, data + i * 4u, 4);
-        out[i] = gpu_swap(value, buffer.endian) & 0x00FFFFFFu;
-      }
-    } else {
-      for (std::uint32_t i = 0; i < count; ++i) {
-        std::uint16_t value{};
-        std::memcpy(&value, data + i * 2u, 2);
-        out[i] = swap16(value, buffer.endian);
-      }
+    const auto* data = physical_memory.data() + (buffer.physical_address - physical_base);
+    // List topologies take no primitive reset: one pass straight into the
+    // result, with no intermediate copy.
+    if (direct_list_topology(draw.primitive_type, count, list_topology, rectangle_expansion,
+                             kept)) {
+      result.topology = list_topology;
+      result.requires_rectangle_expansion = rectangle_expansion;
+      result.indices.resize(kept);
+      read_guest_indices(data, kept, buffer.format, buffer.endian, result.indices.data());
+      result.vertex_count = static_cast<std::uint32_t>(kept);
+      result.indexed = true;
+      result.valid = true;
+      return true;
     }
+    scratch.resize(count);
+    read_guest_indices(data, count, buffer.format, buffer.endian, scratch.data());
   } else if (draw.source == DrawSource::Immediate) {
-    source.reserve(draw.immediate_index_dwords.size() * 2u);
+    scratch.reserve(draw.immediate_index_dwords.size() * 2u);
     for (const auto dword : draw.immediate_index_dwords) {
-      if (draw.index_format == IndexFormat::UInt32) source.push_back(dword & 0x00FFFFFFu);
+      if (draw.index_format == IndexFormat::UInt32) scratch.push_back(dword & 0x00FFFFFFu);
       else {
-        source.push_back(dword & 0xFFFFu);
-        source.push_back(dword >> 16u);
+        scratch.push_back(dword & 0xFFFFu);
+        scratch.push_back(dword >> 16u);
       }
     }
-    if (source.size() > draw.index_count) source.resize(draw.index_count);
+    if (scratch.size() > draw.index_count) scratch.resize(draw.index_count);
   } else {
     result.error = "reserved Xenos draw source";
-    return result;
+    return false;
   }
-  bool reset_enabled = options.reset_enabled &&
-                       draw.source != DrawSource::AutoIndex &&
+  bool reset_enabled = options.reset_enabled && draw.source != DrawSource::AutoIndex &&
                        supports_primitive_reset(draw.primitive_type);
   std::uint32_t reset_index = options.reset_index & 0x00FFFFFFu;
   if (reset_enabled && draw.index_format == IndexFormat::UInt16) {
@@ -217,16 +282,24 @@ ProcessedPrimitiveBatch process_primitives(
     if (reset_index > 0xFFFFu) reset_enabled = false;
   }
   if (reset_enabled) {
-    if (!convert_with_primitive_reset(draw.primitive_type, source, reset_index,
-                                      result))
-      return result;
-  } else if (!convert_topology(draw.primitive_type, source, result)) {
-    return result;
+    if (!convert_with_primitive_reset(draw.primitive_type, scratch, reset_index, result))
+      return false;
+  } else if (!convert_topology(draw.primitive_type, scratch, result)) {
+    return false;
   }
   result.vertex_count = static_cast<std::uint32_t>(result.indices.size());
   result.indexed = draw.source != DrawSource::AutoIndex ||
                    result.indices.size() != draw.index_count;
   result.valid = true;
+  return true;
+}
+
+ProcessedPrimitiveBatch process_primitives(
+    const ir::DrawPacket& draw, std::span<const std::byte> physical_memory,
+    const PrimitiveProcessingOptions& options, std::uint32_t physical_base) {
+  ProcessedPrimitiveBatch result{};
+  std::vector<std::uint32_t> scratch;
+  (void)process_primitives_into(draw, physical_memory, options, physical_base, result, scratch);
   return result;
 }
 

@@ -51,7 +51,8 @@ void ScanoutRenderer::reset() noexcept {
 bool ScanoutRenderer::create_layouts(VkDevice device) {
   if (pipeline_layout_) return true;
   device_ = device;
-  const VkDescriptorSetLayoutBinding binding{kGuestBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+  const VkDescriptorSetLayoutBinding binding{kGuestBinding,
+                                             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1,
                                              VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
   VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   set_info.bindingCount = 1;
@@ -71,7 +72,7 @@ bool ScanoutRenderer::create_layouts(VkDevice device) {
     error_ = "Vulkan scan-out pipeline layout creation failed";
     return false;
   }
-  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1};
   VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
   pool_info.maxSets = 1;
   pool_info.poolSizeCount = 1;
@@ -98,13 +99,15 @@ bool ScanoutRenderer::prepare(VkDevice device, VkFormat format, GuestMemoryMirro
 #else
   if (!create_layouts(device)) return false;
   if (set_buffer_ != mirror.buffer()) {
-    // The whole mirror: the shader addresses it by physical address.
-    const VkDescriptorBufferInfo buffer{mirror.buffer(), 0, VK_WHOLE_SIZE};
+    // At most the device's storage-buffer range, placed over the front
+    // buffer with a dynamic offset when it is drawn (XEN-001).
+    const VkDescriptorBufferInfo buffer{mirror.buffer(), 0,
+                                        guest_memory_window_range(mirror.storage_limits())};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = set_;
     write.dstBinding = kGuestBinding;
     write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
     write.pBufferInfo = &buffer;
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     set_buffer_ = mirror.buffer();
@@ -197,9 +200,24 @@ bool ScanoutRenderer::prepare(VkDevice device, VkFormat format, GuestMemoryMirro
 
 void ScanoutRenderer::record(VkCommandBuffer command, GuestMemoryMirror& mirror,
                              VkImageView target, VkFormat format,
-                             const ScanoutConstants& constants) {
+                             const ScanoutConstants& guest_constants) {
   const auto found = pipelines_.find(static_cast<std::uint32_t>(format));
   if (found == pipelines_.end()) return;
+  // The front buffer's bytes: whole 32x32 tiles of its pitch, which every
+  // tiled or linear texel offset stays within.
+  auto constants = guest_constants;
+  const std::uint64_t rows = (std::uint64_t{constants.source_height} + 31u) & ~std::uint64_t{31};
+  const std::uint64_t pitch = (std::uint64_t{constants.pitch_blocks} + 31u) & ~std::uint64_t{31};
+  const std::uint64_t begin = constants.guest_base;
+  const std::uint64_t end = (std::min)(begin + rows * pitch * constants.bytes_per_block,
+                                       std::uint64_t{memory::kPhysicalMemorySize});
+  const auto window = guest_memory_window(mirror.storage_limits(), begin, (std::max)(begin, end));
+  if (!window) {
+    error_ = "Vulkan scan-out front buffer exceeds the device's storage-buffer range";
+    return;
+  }
+  constants.guest_base = window->rebase(constants.guest_base);
+  const auto dynamic_offset = static_cast<std::uint32_t>(window->offset);
   mirror.prepare_shader_access(command, false);
   VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   color.imageView = target;
@@ -214,7 +232,7 @@ void ScanoutRenderer::record(VkCommandBuffer command, GuestMemoryMirror& mirror,
   vkCmdBeginRendering(command, &rendering);
   vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, found->second);
   vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout_, 0, 1,
-                          &set_, 0, nullptr);
+                          &set_, 1, &dynamic_offset);
   vkCmdPushConstants(command, pipeline_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                      sizeof(constants), &constants);
   const VkViewport viewport{0.0f, 0.0f, float(constants.target_width),
