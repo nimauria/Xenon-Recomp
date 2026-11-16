@@ -633,6 +633,88 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// The command processor reports a drain whose draws read, by address, guest
+// memory commands were fetched from - the ring (all of it: the guest refills
+// whatever the read pointer passed) or an indirect buffer: the pump then holds
+// that drain's read pointer behind its work, since the draws read the data
+// only when they execute (Direct3D's DrawPrimitiveUP / BeginVertices data).
+void test_drains_reading_command_memory(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t ring = 0x01030000;
+  constexpr std::uint32_t capacity = 512;
+  constexpr std::uint32_t indirect = 0x01040000;
+  constexpr std::uint32_t heap = 0x01050000;
+  const auto auto_draw = make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto dma_draw = make_draw_initiator(PrimitiveType::TriangleList, DrawSource::Dma, 3);
+  std::uint32_t at = 0;
+  const auto drain = [&](const std::vector<std::uint32_t>& words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i)
+      store_be32(memory, ring + (at + i) * 4u, words[i]);
+    const auto end = at + static_cast<std::uint32_t>(words.size());
+    assert(cp.execute_ring(ring, capacity, at, end) == end);
+    at = end;
+    return cp.drain_reads_command_memory();
+  };
+  const auto dma = [&](std::uint32_t indices) {
+    return std::vector<std::uint32_t>{make_packet_type3(Type3Opcode::DrawIndx, 4), 0u, dma_draw,
+                                      indices, 3u};
+  };
+  const auto with = [](std::vector<std::uint32_t> a, const std::vector<std::uint32_t>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+  };
+  const std::vector<std::uint32_t> plain{make_packet_type3(Type3Opcode::DrawIndx2, 1), auto_draw};
+
+  // An auto-indexed draw reads nothing by address.
+  assert(!drain(plain));
+  // Indices in the heap: no; in the ring's free space, past this drain: yes.
+  assert(!drain(dma(heap)));
+  assert(drain(with(plain, dma(ring + 400u * 4u))));
+  // Each drain is judged afresh.
+  assert(!drain(plain));
+
+  // An indirect buffer is command memory from then on.
+  write_words(memory, indirect, {make_packet_type3(Type3Opcode::DrawIndx2, 1), auto_draw});
+  assert(!drain({make_packet_type3(Type3Opcode::IndirectBuffer, 2), indirect, 2u}));
+  assert(drain(dma(indirect + 4u)));
+  assert(!drain(dma(indirect + 8u)));  // just past it
+
+  // A resolve (RB_MODECONTROL copy) reads its rectangle from fetch constant
+  // 0, whatever the shaders fetch: in the ring, flagged; in the heap, not.
+  const auto fetch0 = [](std::uint32_t address) {
+    return std::vector<std::uint32_t>{make_packet_type0(0x4800, 2), address | 3u, 6u << 2};
+  };
+  const std::vector<std::uint32_t> copy_mode{make_packet_type0(0x2208, 1), 6u};
+  const std::vector<std::uint32_t> color_mode{make_packet_type0(0x2208, 1), 4u};
+  assert(drain(with(with(copy_mode, fetch0(ring + 450u * 4u)), plain)));
+  assert(!drain(with(with(copy_mode, fetch0(heap)), plain)));
+  // Not a resolve, and no shader fetches it: not read.
+  assert(!drain(with(with(color_mode, fetch0(ring + 450u * 4u)), plain)));
+
+  // Bounded: many scattered indirect buffers merge into at most
+  // kCommandMemoryRanges ranges, every one of them still covered.
+  constexpr std::uint32_t kBuffers = 100;
+  constexpr std::uint32_t scattered = 0x01100000;
+  std::vector<std::uint32_t> calls;
+  for (std::uint32_t i = 0; i < kBuffers; ++i) {
+    store_be32(memory, scattered + i * 0x1000u, make_packet_type2());
+    calls.insert(calls.end(),
+                 {make_packet_type3(Type3Opcode::IndirectBuffer, 2), scattered + i * 0x1000u, 1u});
+  }
+  const std::uint32_t calls_at = 0x01200000;
+  for (std::uint32_t i = 0; i < calls.size(); ++i) store_be32(memory, calls_at + i * 4u, calls[i]);
+  cp.execute_buffer(calls_at, static_cast<std::uint32_t>(calls.size()));
+  const auto& ranges = cp.command_memory();
+  assert(ranges.size() <= CommandProcessor::kCommandMemoryRanges);
+  for (std::size_t i = 1; i < ranges.size(); ++i)
+    assert(ranges[i - 1].second < ranges[i].first && "sorted, disjoint, not touching");
+  for (std::uint32_t i = 0; i < kBuffers; ++i) {
+    const std::uint64_t address = scattered + i * 0x1000u;
+    assert(std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+      return range.first <= address && address + 4u <= range.second;
+    }));
+  }
+}
+
 // Executes graphics IR and records, for each draw, the guest-visible state at
 // the moment the draw executes.
 class OrderRecordingBackend final : public xenon::gpu::Backend {
@@ -756,6 +838,97 @@ void test_front_buffer_swap_follows_the_work_before_it(bool backend_thread) {
   assert(graphics.command_processor().statistics().front_buffer_swaps == 1u);
   assert(backend.draws_executed == 2);
   graphics.set_swap_callback({});
+}
+
+// Live frame capture (deterministic replay of a running title's frames):
+// armed, the recording starts with the next drain - the registers, shaders
+// and canonical EDRAM as they stand then - takes every command played across
+// drains, and ends with the drain that decodes the requested swap. The file
+// it writes loads and replays the same work.
+void test_live_frame_capture_records_whole_frames(bool backend_thread) {
+  AddressSpace memory;
+  assert(memory.initialize());
+  xenon::gpu::GraphicsSystem graphics(memory);
+  if (backend_thread) graphics.start_backend_thread();
+  constexpr std::uint32_t ring = 0x0100B000;
+  constexpr std::uint32_t fence = 0x0121B000;
+  store_be32(memory, fence, 0u);
+  OrderRecordingBackend backend(memory, fence);
+  constexpr std::uint32_t initiator =
+      make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const std::vector<std::uint32_t> draw{make_packet_type3(Type3Opcode::DrawIndx2, 1), initiator};
+  std::uint32_t at = 0;
+  const auto drain = [&](std::vector<std::uint32_t> words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i) store_be32(memory, ring + (at + i) * 4u, words[i]);
+    const auto end = at + static_cast<std::uint32_t>(words.size());
+    assert(graphics.submit_ring(backend, ring, 1024, at, end) == end);
+    at = end;
+  };
+  const auto with = [](std::vector<std::uint32_t> a, const std::vector<std::uint32_t>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+  };
+
+  // State from before the recording: a register and EDRAM contents.
+  drain(with({make_packet_type0(0x321, 1), 0x1234u}, draw));
+  std::array<std::byte, 64> pattern{};
+  for (std::size_t i = 0; i < pattern.size(); ++i) pattern[i] = static_cast<std::byte>(i * 7u + 1u);
+  graphics.edram().write(4096u, pattern);
+
+  const auto path = std::filesystem::temp_directory_path() /
+                    (std::string("xenon_live_capture_test_") + (backend_thread ? "1" : "0") + ".xgc");
+  std::filesystem::remove(path);
+  graphics.arm_frame_capture(path, 1);
+  assert(graphics.frame_capture_armed());
+  // The frame: two drains, the swap in the second.
+  drain(with(with({make_packet_type0(0x321, 1), 0x5678u}, draw), draw));
+  assert(graphics.frame_capture_armed() && "no swap decoded yet");
+  xenon::gpu::FrontBufferSwap flip{};
+  flip.base_address = 0x1F000000u;
+  flip.width = 1280u;
+  flip.height = 720u;
+  flip.pitch = 1280u * 4u;
+  flip.format = 6u;
+  flip.has_fetch_constant = true;
+  flip.fetch_constant = {0x8A000002u, 0x1F000086u, 0x059E04FFu, 0u, 0u, 0x200u};
+  auto second = with(draw, draw);
+  for (const auto word : xenon::gpu::encode_front_buffer_swap(flip)) second.push_back(word);
+  drain(second);
+  // Recorded and written: a drain after the swap is not part of it.
+  assert(!graphics.frame_capture_armed());
+  drain(draw);
+  graphics.stop_backend_thread();
+
+  const auto result = graphics.take_frame_capture_result();
+  assert(result && result->ok && result->path == path);
+  assert(result->drains == 2u && result->draws == 4u);
+  assert(!graphics.take_frame_capture_result() && "reported once");
+
+  std::string error;
+  const auto capture = xenon::gpu::load_portable_capture(path, &error);
+  assert(capture && error.empty());
+  assert(capture->frontend.initial_registers.values[0x321] == 0x1234u &&
+         "registers as the recording started");
+  assert(capture->frontend.final_registers.values[0x321] == 0x5678u);
+  const auto draws = std::count_if(
+      capture->frontend.commands.begin(), capture->frontend.commands.end(),
+      [](const xenon::gpu::ir::Command& c) { return std::holds_alternative<xenon::gpu::ir::DrawPacket>(c); });
+  assert(draws == 4);
+  assert(std::equal(pattern.begin(), pattern.end(), capture->edram.begin() + 4096) &&
+         "EDRAM as the recording started");
+  assert(!capture->complete && !capture->diagnostics.empty() &&
+         "a live recording says its memory is from the end");
+
+  // It replays the same four draws, elsewhere.
+  AddressSpace replay_memory;
+  assert(replay_memory.initialize());
+  xenon::gpu::GraphicsSystem replay(replay_memory);
+  OrderRecordingBackend replayed(replay_memory, fence);
+  xenon::gpu::GraphicsSystem::ReplayTiming timing{};
+  assert(replay.replay_portable_capture(replayed, *capture, &error, &timing));
+  assert(replayed.draws_executed == 4);
+  assert(timing.consume_ns > 0u);
+  std::filesystem::remove(path);
 }
 
 // The temporal analyzer sees the work execute_ir() runs and closes a frame at
@@ -2120,9 +2293,11 @@ int main() {
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_drains_reading_command_memory(memory, cp);
   for (const bool backend_thread : {false, true}) {
     test_ring_effects_follow_the_work_before_them(backend_thread);
     test_front_buffer_swap_follows_the_work_before_it(backend_thread);
+    test_live_frame_capture_records_whole_frames(backend_thread);
     test_temporal_frames_end_at_the_front_buffer_swap(backend_thread);
     test_backend_thread_matches_inline_execution(backend_thread);
     test_deferred_writes_reach_frontend_reads(backend_thread);

@@ -10,7 +10,7 @@
 // counters.
 //
 // Columns:
-//   frames      presented frames in the second; ms p50/p99/max between them
+//   frames      presented frames in the second; ms p50/p95/p99/max between them
 //   swaps       guest VdSwap calls (the frames the title finished)
 //   ring/ir     time the worker spent decoding the ring / playing IR
 //   present     time in the host present (DXGI/Vulkan, including its wait)
@@ -46,6 +46,12 @@
 //               a guest-visible barrier (interrupt, flip, wait, IM_STORE), a
 //               sync point, a read of guest memory behind a deferred write,
 //               and the end of a drain
+//   rptr        ring drains whose read pointer went back to the guest as
+//               soon as they were decoded ("early"), and those held behind
+//               their work (a draw reading command memory, or an earlier
+//               held write-back still pending)
+//   runs        draw runs - the draws between two resolves - by size: how
+//               much work each render pass gives a native batch
 
 #include <atomic>
 #include <chrono>
@@ -97,6 +103,17 @@ enum class Counter : std::uint32_t {
   EdramCpuTransfers,
   EdramCpuBytes,
   EdramCpuNs,
+  ReadPointerEarly,
+  ReadPointerHeld,
+  // Draw-run histogram buckets (note_draw_run()): 0, 1, 2-3, 4-15, 16-63,
+  // 64-255, 256+ draws.
+  DrawRuns0,
+  DrawRuns1,
+  DrawRuns2to3,
+  DrawRuns4to15,
+  DrawRuns16to63,
+  DrawRuns64to255,
+  DrawRuns256Plus,
   Count,
 };
 
@@ -124,6 +141,9 @@ class ScopedTime {
   Counter count_;
   std::chrono::steady_clock::time_point start_;
 };
+
+// A run of `draws` draws ended at a resolve: counted in its size bucket.
+void note_draw_run(std::uint64_t draws) noexcept;
 
 // A frame reached the screen (called by the presenting thread only).
 void note_presented_frame(std::chrono::steady_clock::time_point when);

@@ -2,8 +2,12 @@
 
 #include <cstdint>
 #include <deque>
-#include <span>
+#include <filesystem>
 #include <functional>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -37,9 +41,11 @@ class GraphicsSystem {
   // fence pass the draws and resolves before it have executed, and the guest
   // memory they used may be reused. The rest executes before this returns,
   // or - pipelined drains (start_backend_thread()) - is left running on the
-  // backend thread: the returned index is where decoding goes on, and the
-  // guest learns the drain's ring words are free only from a read pointer
-  // written back with write_guest_after_work(), behind that work.
+  // backend thread: the returned index is where decoding goes on. The read
+  // pointer goes back to the guest as soon as the drain is decoded
+  // (write_guest_ahead_of_work()), unless a draw of it reads command memory
+  // (CommandProcessor::drain_reads_command_memory()): then behind its work
+  // (write_guest_after_work()).
   [[nodiscard]] std::uint32_t submit_ring(Backend& backend, std::uint32_t physical_address,
                                           std::uint32_t capacity_dwords,
                                           std::uint32_t read_index,
@@ -62,9 +68,18 @@ class GraphicsSystem {
       std::string* error = nullptr);
   // Restores captured guest RAM/EDRAM through Memory V2 and replays normalized
   // work into the backend without depending on any prior backend cache state.
+  // `timing`, when given, receives the time spent restoring and consuming.
+  // `restore_edram` false keeps the EDRAM and native render targets the
+  // previous replay left (guest memory is still restored): a benchmark's
+  // steady state, as a running title never reloads EDRAM between frames.
+  struct ReplayTiming {
+    std::uint64_t restore_ns{};
+    std::uint64_t consume_ns{};
+  };
   [[nodiscard]] bool replay_portable_capture(
       Backend& backend, const PortableSubmissionCapture& capture,
-      std::string* error = nullptr);
+      std::string* error = nullptr, ReplayTiming* timing = nullptr,
+      bool restore_edram = true);
   // Replays captured normalized frontend work against the current guest RAM
   // and EDRAM. A complete register preamble is emitted first so replay is
   // deterministic even when the backend retained state from prior work.
@@ -98,8 +113,15 @@ class GraphicsSystem {
   // Writes `bytes` to guest physical memory once everything handed over has
   // executed - at once when it has (or no backend thread runs). Ordered with
   // the stream's own deferred writes, and waited for by the frontend's reads
-  // of those bytes. The ring read pointer goes back to the guest this way.
+  // of those bytes.
   void write_guest_after_work(std::uint32_t address, std::vector<std::byte> bytes);
+  // Writes `bytes` to guest physical memory now, ahead of work still
+  // executing: for state that describes the command processor's own fetch
+  // position (the ring read pointer), not the results of the work. A write
+  // to the same bytes still deferred behind work (write_guest_after_work())
+  // keeps this one behind it, so the guest never sees the value go back.
+  // Returns whether it was written now.
+  bool write_guest_ahead_of_work(std::uint32_t address, std::span<const std::byte> bytes);
   // GPU V3 pipelined drains (default on with the backend thread;
   // XENON_GPU_PIPELINED_DRAINS=0 turns them off): a drain returns without
   // waiting for its last work, and the next one starts decoding beside it.
@@ -137,6 +159,32 @@ class GraphicsSystem {
   [[nodiscard]] Edram& edram() noexcept { return edram_; }
   [[nodiscard]] const Edram& edram() const noexcept { return edram_; }
   [[nodiscard]] CommandProcessor& command_processor() noexcept { return command_processor_; }
+
+  // Live frame capture: the GPU work of a running title recorded as one
+  // portable capture, for deterministic renderer benchmarks of real
+  // workloads (tools/gpu_replay). From the next ring drain on, every command
+  // played is recorded until the drain that decodes the `frames`th front
+  // buffer swap, then `path` is written: the canonical EDRAM, registers and
+  // active shaders as the recording started, the commands, and the guest
+  // memory they reach. That memory is snapshotted when the recording ends,
+  // so bytes the CPU rewrote during it hold their final values (the capture
+  // is marked incomplete and says so). Called on the thread that drains the
+  // ring; the backend is held while the EDRAM and memory are copied.
+  void arm_frame_capture(std::filesystem::path path, std::uint32_t frames);
+  [[nodiscard]] bool frame_capture_armed() const noexcept { return frame_capture_ != nullptr; }
+  struct FrameCaptureResult {
+    bool ok{};
+    std::filesystem::path path{};
+    std::string error{};
+    std::uint32_t drains{};
+    std::uint64_t commands{};
+    std::uint64_t draws{};
+    std::uint64_t physical_bytes{};
+  };
+  // The outcome of the last recording that ended, once.
+  [[nodiscard]] std::optional<FrameCaptureResult> take_frame_capture_result() {
+    return std::exchange(frame_capture_result_, std::nullopt);
+  }
 
  private:
   memory::AddressSpace& memory_;
@@ -186,7 +234,32 @@ class GraphicsSystem {
   void note_hold(perf::Counter cause);
   [[nodiscard]] bool replay_portable_capture_now(Backend& backend,
                                                  const PortableSubmissionCapture& capture,
-                                                 std::string* error);
+                                                 std::string* error, ReplayTiming* timing,
+                                                 bool restore_edram);
+
+  struct FrameCaptureRecording {
+    std::filesystem::path path{};
+    std::uint32_t frames{};
+    bool started{};
+    std::uint64_t swaps_at_start{};
+    std::uint32_t drains{};
+    FrontendSubmissionCapture frontend{};
+    std::vector<std::byte> edram{};
+  };
+  std::unique_ptr<FrameCaptureRecording> frame_capture_{};
+  std::optional<FrameCaptureResult> frame_capture_result_{};
+  // At a drain's start (nothing decoded and not handed over): the recording
+  // begins here.
+  void begin_frame_capture(Backend& backend, std::uint32_t physical_address,
+                           std::uint32_t capacity_dwords, std::uint32_t read_index);
+  // At a drain's end: the recording ends once it holds `frames` swaps.
+  void end_frame_capture_if_done(Backend& backend, std::uint32_t next_read_index);
+  // Every hand-off of commands to the backend passes them here.
+  void record_for_capture(const std::vector<ir::Command>& commands) {
+    if (frame_capture_ && frame_capture_->started)
+      frame_capture_->frontend.commands.insert(frame_capture_->frontend.commands.end(),
+                                               commands.begin(), commands.end());
+  }
 
   // Last member: destroyed (and drained) before the state its tasks use.
   BackendExecutor executor_{};

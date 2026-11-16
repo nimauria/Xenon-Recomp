@@ -232,6 +232,25 @@ class CommandProcessor {
   [[nodiscard]] const std::optional<ShaderProgram>& active_pixel_program() const noexcept {
     return active_pixel_program_;
   }
+  // Whether a draw the last execute_ring() decoded reads, by address, guest
+  // memory commands have been fetched from - the ring itself or an indirect
+  // buffer: Direct3D's BeginVertices/DrawPrimitiveUP data, and its resolve
+  // rectangles, can live in its command buffers. The guest recycles command
+  // memory as the read pointer passes it, so the read pointer of such a
+  // drain must not reach the guest before its draws have read their data.
+  // Checked: index buffers, the vertex fetches of both active shaders, and a
+  // resolve's rectangle vertices (fetch constant 0).
+  [[nodiscard]] bool drain_reads_command_memory() const noexcept {
+    return drain_reads_command_memory_;
+  }
+  // The guest physical ranges commands have been fetched from, [begin, end),
+  // sorted and disjoint (bounded: past kCommandMemoryRanges the closest
+  // neighbours merge, which only widens the check).
+  [[nodiscard]] const std::vector<std::pair<std::uint64_t, std::uint64_t>>& command_memory()
+      const noexcept {
+    return command_memory_;
+  }
+  static constexpr std::size_t kCommandMemoryRanges = 64;
 
  private:
   static constexpr std::uint32_t kMaximumIndirectDepth = 32;
@@ -308,6 +327,16 @@ class CommandProcessor {
   ir::ShaderReference active_pixel_shader_{};
   std::optional<ShaderProgram> active_vertex_program_{};
   std::optional<ShaderProgram> active_pixel_program_{};
+  // Their decodes (the vertex fetches a draw makes).
+  std::shared_ptr<const DecodedShader> active_vertex_decoded_{};
+  std::shared_ptr<const DecodedShader> active_pixel_decoded_{};
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> command_memory_{};
+  bool drain_reads_command_memory_{};
+  void note_command_memory(std::uint64_t begin, std::uint64_t end);
+  [[nodiscard]] bool overlaps_command_memory(std::uint64_t begin,
+                                             std::uint64_t end) const noexcept;
+  // Sets drain_reads_command_memory_ when `draw` reads command memory.
+  void note_draw_memory_reads(const ir::DrawPacket& draw);
   // One decode per distinct program (ShaderProgram::hash() covers stage,
   // start slot and microcode); repeated loads share it.
   std::unordered_map<std::uint64_t, std::shared_ptr<const DecodedShader>> decoded_programs_{};

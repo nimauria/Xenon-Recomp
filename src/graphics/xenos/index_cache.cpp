@@ -1,5 +1,6 @@
 #include "xenon/gpu/index_cache.hpp"
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -54,7 +55,9 @@ void ProcessedIndexCache::insert(const IndexCacheKey& key, std::uint32_t source_
     ++stats_.evictions;
     erase(std::prev(lru_.end()));
   }
-  lru_.push_front(Entry{key, source_bytes, read_epoch, bytes, std::move(batch)});
+  lru_.push_front(Entry{key, source_bytes, read_epoch, bytes, std::move(batch), {}});
+  lru_.front().by_address = by_address_.emplace(key.address, lru_.begin());
+  max_source_bytes_ = (std::max)(max_source_bytes_, source_bytes);
   entries_.emplace(key, lru_.begin());
   resident_bytes_ += bytes;
 }
@@ -63,14 +66,18 @@ void ProcessedIndexCache::invalidate(std::uint32_t address, std::uint32_t size) 
   if (!size || lru_.empty()) return;
   const auto begin = std::uint64_t{address};
   const auto end = begin + size;
-  for (auto entry = lru_.begin(); entry != lru_.end();) {
-    const auto next = std::next(entry);
-    const auto first = std::uint64_t{entry->key.address};
-    if (first < end && first + entry->source_bytes > begin) {
+  // Only entries starting within max_source_bytes_ before the range can
+  // reach into it.
+  const auto earliest =
+      begin > max_source_bytes_ ? static_cast<std::uint32_t>(begin - max_source_bytes_) : 0u;
+  for (auto it = by_address_.lower_bound(earliest);
+       it != by_address_.end() && std::uint64_t{it->first} < end;) {
+    const auto entry = it->second;
+    ++it;  // erase() removes this element from the index
+    if (std::uint64_t{entry->key.address} + entry->source_bytes > begin) {
       ++stats_.gpu_invalidations;
       erase(entry);
     }
-    entry = next;
   }
 }
 
@@ -80,6 +87,7 @@ void ProcessedIndexCache::clear() {
     for (const auto& entry : lru_)
       if (entry.batch) erase_listener_(*entry.batch);
   entries_.clear();
+  by_address_.clear();
   lru_.clear();
   resident_bytes_ = 0;
 }
@@ -87,6 +95,7 @@ void ProcessedIndexCache::clear() {
 void ProcessedIndexCache::erase(Lru::iterator entry) {
   if (erase_listener_ && entry->batch) erase_listener_(*entry->batch);
   resident_bytes_ -= entry->bytes;
+  by_address_.erase(entry->by_address);
   entries_.erase(entry->key);
   lru_.erase(entry);
 }

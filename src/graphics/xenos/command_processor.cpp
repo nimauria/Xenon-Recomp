@@ -271,6 +271,10 @@ void CommandProcessor::reset() {
   active_pixel_shader_ = {};
   active_vertex_program_.reset();
   active_pixel_program_.reset();
+  active_vertex_decoded_.reset();
+  active_pixel_decoded_.reset();
+  command_memory_.clear();
+  drain_reads_command_memory_ = false;
   shader_partition_ = {};
   bin_base_offset_ = 0;
   bin_mask_ = 0;
@@ -306,6 +310,10 @@ std::uint32_t CommandProcessor::execute_ring(std::uint32_t physical_address,
   ++stats_.ring_drains;
   submission_dwords_ = 0;
   max_indirect_depth_ = 0;
+  // The whole ring is command memory: the guest refills any of it the read
+  // pointer has passed, not only this drain's words.
+  drain_reads_command_memory_ = false;
+  note_command_memory(physical_address, std::uint64_t{physical_address} + capacity_dwords * 4ull);
 
   // Resuming a suspended wait: only valid when the drain restarts at exactly the
   // packet that was suspended; anything else (the ring was reset, the guest
@@ -495,6 +503,86 @@ std::shared_ptr<const DecodedShader> CommandProcessor::decode_program(
   auto& slot = decoded_programs_[program.hash()];
   if (!slot) slot = std::make_shared<const DecodedShader>(ShaderDecoder::decode(program));
   return slot;
+}
+
+void CommandProcessor::note_command_memory(std::uint64_t begin, std::uint64_t end) {
+  if (end <= begin) return;
+  // Already known (the ring every drain; Direct3D's command buffer region
+  // once its segments have merged): nothing changes.
+  auto at = std::lower_bound(command_memory_.begin(), command_memory_.end(), begin,
+                             [](const auto& range, std::uint64_t value) {
+                               return range.second < value;
+                             });
+  if (at != command_memory_.end() && at->first <= begin && at->second >= end) return;
+  // Merge every range it overlaps or touches.
+  auto last = at;
+  while (last != command_memory_.end() && last->first <= end) {
+    begin = (std::min)(begin, last->first);
+    end = (std::max)(end, last->second);
+    ++last;
+  }
+  at = command_memory_.erase(at, last);
+  command_memory_.insert(at, {begin, end});
+  if (command_memory_.size() <= kCommandMemoryRanges) return;
+  // Bounded: the two neighbours with the smallest gap merge. The set only
+  // grows, so the check stays conservative - a read it flags at worst holds
+  // a read pointer behind its drain's work, as before the early write-back.
+  std::size_t closest = 0;
+  for (std::size_t i = 1; i + 1 < command_memory_.size(); ++i) {
+    if (command_memory_[i + 1].first - command_memory_[i].second <
+        command_memory_[closest + 1].first - command_memory_[closest].second)
+      closest = i;
+  }
+  command_memory_[closest].second = command_memory_[closest + 1].second;
+  command_memory_.erase(command_memory_.begin() + static_cast<std::ptrdiff_t>(closest + 1));
+}
+
+bool CommandProcessor::overlaps_command_memory(std::uint64_t begin,
+                                               std::uint64_t end) const noexcept {
+  if (end <= begin) return false;
+  const auto at = std::lower_bound(command_memory_.begin(), command_memory_.end(), begin,
+                                   [](const auto& range, std::uint64_t value) {
+                                     return range.second <= value;
+                                   });
+  return at != command_memory_.end() && at->first < end;
+}
+
+void CommandProcessor::note_draw_memory_reads(const ir::DrawPacket& draw) {
+  if (drain_reads_command_memory_) return;  // decided for this drain
+  if (draw.index_buffer.valid &&
+      overlaps_command_memory(draw.index_buffer.physical_address,
+                              std::uint64_t{draw.index_buffer.physical_address} +
+                                  draw.index_buffer.length_bytes)) {
+    drain_reads_command_memory_ = true;
+    return;
+  }
+  // A vertex fetch constant (two dwords of a six-dword slot): type 3 is a
+  // vertex buffer, dword 0 its dword-aligned address, dword 1 bits 2..25 its
+  // size in dwords (ResourceStateTracker::vertex_buffer()).
+  constexpr std::uint32_t kFetchConstantBase = 0x4800u;
+  const auto reads_vertices = [&](std::uint32_t fetch_constant, std::uint32_t select) {
+    if (fetch_constant >= 32u || select >= 3u) return false;
+    const auto offset = kFetchConstantBase + fetch_constant * 6u + select * 2u;
+    const auto w0 = registers_.read(offset);
+    if ((w0 & 3u) != 3u) return false;
+    const std::uint64_t address = w0 & ~3u;
+    const std::uint64_t bytes = std::uint64_t{(registers_.read(offset + 1u) >> 2) & 0xFFFFFFu} * 4u;
+    return overlaps_command_memory(address, address + bytes);
+  };
+  for (const auto* decoded : {active_vertex_decoded_.get(), active_pixel_decoded_.get()}) {
+    if (!decoded) continue;
+    for (const auto fetch : decoded->reflection.vertex_fetches) {
+      if (reads_vertices(fetch / 3u, fetch % 3u)) {
+        drain_reads_command_memory_ = true;
+        return;
+      }
+    }
+  }
+  // A resolve (RB_MODECONTROL EDRAM mode 6, copy) reads its rectangle from
+  // fetch constant 0 whatever the shaders fetch.
+  constexpr std::uint32_t kRbModeControl = 0x2208u;
+  if ((registers_.read(kRbModeControl) & 7u) == 6u && reads_vertices(0u, 0u))
+    drain_reads_command_memory_ = true;
 }
 
 void CommandProcessor::write_guest_effect(std::uint32_t address,
@@ -925,11 +1013,13 @@ void CommandProcessor::execute_invalidate_state(
   if ((mask & 0x100u) != 0u) {
     active_vertex_shader_ = {};
     active_vertex_program_.reset();
+    active_vertex_decoded_.reset();
     ++stats_.shader_invalidations;
   }
   if ((mask & 0x200u) != 0u) {
     active_pixel_shader_ = {};
     active_pixel_program_.reset();
+    active_pixel_decoded_.reset();
     ++stats_.shader_invalidations;
   }
   ++stats_.invalidate_state_packets;
@@ -1242,6 +1332,7 @@ void CommandProcessor::execute_draw(Type3Opcode opcode, bool predicate,
 
   draw.register_generation = registers_.generation();
   draw.raw_payload = std::move(payload);
+  note_draw_memory_reads(draw);
   stream_.emit(std::move(draw));
   ++stats_.draws;
   if (draw_emitted_callback_) draw_emitted_callback_();
@@ -1330,6 +1421,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       stream_.emit(ir::IndirectBuffer{address, length, prefetch});
       ++stats_.indirect_buffers;
     }
+    note_command_memory(address, std::uint64_t{address} + std::uint64_t{length} * 4u);
     if (length) execute_buffer_internal(address, length, depth + 1u, start_offset);
     return;
   }
@@ -1458,6 +1550,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_program_ = program;
     }
     auto decoded = decode_program(program);
+    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, false, address,
                                 std::move(program), std::move(decoded), payload});
     return;
@@ -1486,6 +1579,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
       active_pixel_program_ = program;
     }
     auto decoded = decode_program(program);
+    (stage == ShaderStage::Vertex ? active_vertex_decoded_ : active_pixel_decoded_) = decoded;
     stream_.emit(ir::ShaderLoad{header.opcode, true, 0,
                                 std::move(program), std::move(decoded), payload});
     return;

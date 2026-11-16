@@ -230,6 +230,81 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
   // The VdSwap count last added to the frame statistics.
   std::uint64_t counted_swap_generation = 0;
 
+  // Live GPU capture (XENON_GPU_CAPTURE=1): whole frames of the running
+  // title recorded as a portable capture in the probe directory
+  // (gpu_capture_<n>.xgc; tools/gpu-replay replays and times it), when
+  //   - a file named capture.signal appears in the probe directory (it is
+  //     removed once seen), or
+  //   - a second decodes at least XENON_GPU_CAPTURE_DRAWS draws (default
+  //     30000, a heavy mission scene; 0 turns this off), at most
+  //     XENON_GPU_CAPTURE_COUNT times (default 1).
+  // Each covers XENON_GPU_CAPTURE_FRAMES frames (default 2). Checked once a
+  // second; the outcome goes to the console and gpu_capture.log.
+  struct LiveCapture {
+    bool enabled{};
+    std::uint32_t frames{2};
+    std::uint64_t draw_threshold{30000};
+    std::uint64_t automatic_left{1};
+    std::uint32_t written{};
+    Clock::time_point next_check{};
+    std::uint64_t draws_at_check{};
+  } capture;
+  {
+    const auto number = [](const char* name, std::uint64_t fallback) {
+      const char* value = std::getenv(name);
+      if (!value || !*value) return fallback;
+      char* end = nullptr;
+      const auto parsed = std::strtoull(value, &end, 10);
+      return end && *end == '\0' ? static_cast<std::uint64_t>(parsed) : fallback;
+    };
+    const char* enabled = std::getenv("XENON_GPU_CAPTURE");
+    capture.enabled = enabled && enabled[0] == '1' && enabled[1] == '\0';
+    capture.frames = static_cast<std::uint32_t>(
+        (std::min<std::uint64_t>)((std::max<std::uint64_t>)(number("XENON_GPU_CAPTURE_FRAMES", 2), 1), 600));
+    capture.draw_threshold = number("XENON_GPU_CAPTURE_DRAWS", 30000);
+    capture.automatic_left = number("XENON_GPU_CAPTURE_COUNT", 1);
+  }
+  const auto poll_live_capture = [&](Clock::time_point now) {
+    if (auto result = graphics_system_->take_frame_capture_result()) {
+      const auto line =
+          result->ok
+              ? "GPU capture written: " + result->path.string() + " (" +
+                    std::to_string(result->drains) + " drains, " +
+                    std::to_string(result->commands) + " commands, " +
+                    std::to_string(result->draws) + " draws, " +
+                    std::to_string(result->physical_bytes / (1024u * 1024u)) + " MiB of guest memory)"
+              : "GPU capture failed: " + result->path.string() + ": " + result->error;
+      logging::append_run_log("gpu_capture.log", "%s\n", line.c_str());
+      if (config_.enable_logging) {
+        std::scoped_lock console_log_lock(console_log_mutex());
+        std::cout << "[XenonSession] " << line << std::endl;
+      }
+    }
+    if (now < capture.next_check) return;
+    const bool first = capture.next_check == Clock::time_point{};
+    capture.next_check = now + std::chrono::seconds(1);
+    const auto draws = graphics_system_->command_processor().draw_count();
+    const auto draws_this_second = draws - capture.draws_at_check;
+    capture.draws_at_check = draws;
+    if (first || graphics_system_->frame_capture_armed()) return;
+    const std::filesystem::path directory = logging::probe_log_directory();
+    if (directory.empty()) return;
+    std::error_code ignored;
+    bool arm = false;
+    if (std::filesystem::exists(directory / "capture.signal", ignored)) {
+      std::filesystem::remove(directory / "capture.signal", ignored);
+      arm = true;
+    } else if (capture.draw_threshold && capture.automatic_left &&
+               draws_this_second >= capture.draw_threshold) {
+      --capture.automatic_left;
+      arm = true;
+    }
+    if (arm)
+      graphics_system_->arm_frame_capture(
+          directory / ("gpu_capture_" + std::to_string(capture.written++) + ".xgc"),
+          capture.frames);
+  };
+
   while (gpu_pump_running_.load(std::memory_order_relaxed)) {
     const bool parked =
         graphics_system_ && graphics_system_->command_processor().parked_on_wait();
@@ -281,8 +356,26 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         // does VdInitializeRingBuffer), so write it as physical memory: treating
         // it as a guest virtual address faulted on the free page every drain and
         // the title never saw the read pointer advance.
-        // Behind the drain's work, which a pipelined drain leaves executing
-        // (GraphicsSystem::write_guest_after_work()).
+        //
+        // The read pointer is the command processor's FETCH position, as on
+        // the Xenos, whose read pointer advances as it fetches commands
+        // ahead of the shader pipes finishing them: it is written as soon as
+        // the drain is decoded, not behind its work. Decoding copies what
+        // it needs out of the command words (register values, immediate
+        // indices, shader microcode; indirect buffers are decoded inline),
+        // so the guest may reuse them at once; the work's own guest-visible
+        // effects (fences, interrupts, flips) stay ordered behind it. Data a
+        // draw reads by address from command memory (Direct3D's
+        // BeginVertices/DrawPrimitiveUP vertices, inline index buffers) is
+        // read only when the draw executes, so a drain with such a draw
+        // (CommandProcessor::drain_reads_command_memory()) writes its read
+        // pointer behind its work, as all drains used to. Held behind the
+        // work, the read pointer kept ring space from the guest until the
+        // backend finished each drain: AC6's Direct3D spins for ring space
+        // (0x821E6240), and in missions that spin was half of its main
+        // thread's time.
+        // XENON_GPU_RPTR_AFTER_WORK=1 (development A/B only) holds every
+        // drain's read pointer behind its work.
         if (ring.rptr_writeback_address != 0 && memory_) {
           if (!memory_->physical_data(ring.rptr_writeback_address)) {
             if (config_.enable_logging) {
@@ -292,12 +385,35 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
                         << " has no RAM backing" << std::endl;
             }
           } else {
-            graphics_system_->write_guest_after_work(
-                ring.rptr_writeback_address,
-                {static_cast<std::byte>(new_read_index >> 24),
-                 static_cast<std::byte>(new_read_index >> 16),
-                 static_cast<std::byte>(new_read_index >> 8),
-                 static_cast<std::byte>(new_read_index)});
+            static const bool after_work = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+              const char* value = std::getenv("XENON_GPU_RPTR_AFTER_WORK");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+              return value && *value == '1';
+            }();
+            const std::array<std::byte, 4> big_endian{
+                static_cast<std::byte>(new_read_index >> 24),
+                static_cast<std::byte>(new_read_index >> 16),
+                static_cast<std::byte>(new_read_index >> 8),
+                static_cast<std::byte>(new_read_index)};
+            const bool reads_command_memory =
+                graphics_system_->command_processor().drain_reads_command_memory();
+            if (after_work || reads_command_memory) {
+              graphics_system_->write_guest_after_work(
+                  ring.rptr_writeback_address,
+                  std::vector<std::byte>(big_endian.begin(), big_endian.end()));
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            } else if (graphics_system_->write_guest_ahead_of_work(
+                           ring.rptr_writeback_address, big_endian)) {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerEarly, 1u);
+            } else {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            }
           }
         }
       } catch (const std::exception& ex) {
@@ -344,6 +460,7 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         counted_swap_generation = swap_generation;
       }
       gpu::perf::flush_if_due(_after_execute_ir);
+      if (capture.enabled) poll_live_capture(_after_execute_ir);
       const auto _submit_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    _after_submit_ring - _tick_phase_start)
                                    .count();

@@ -2467,7 +2467,7 @@ class BackendCore {
       auto found = resident_ranges.find(draw.batch.resident_key);
       if (found == resident_ranges.end()) {
         resident_allocator.reclaim(queue.completed_value());
-        if (const auto placed = resident_allocator.allocate(draw.index_byte_size, 256u)) {
+        if (const auto placed = resident_allocator.allocate(draw.index_byte_size)) {
           std::memcpy(resident_index_mapping.data() + *placed, draw.batch.indices.data(),
                       draw.index_byte_size);
           perf::add(perf::Counter::ResidentIndexBytes, draw.index_byte_size);
