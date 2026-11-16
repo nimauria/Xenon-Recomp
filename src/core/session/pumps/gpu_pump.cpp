@@ -281,8 +281,26 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
         // does VdInitializeRingBuffer), so write it as physical memory: treating
         // it as a guest virtual address faulted on the free page every drain and
         // the title never saw the read pointer advance.
-        // Behind the drain's work, which a pipelined drain leaves executing
-        // (GraphicsSystem::write_guest_after_work()).
+        //
+        // The read pointer is the command processor's FETCH position, as on
+        // the Xenos, whose read pointer advances as it fetches commands
+        // ahead of the shader pipes finishing them: it is written as soon as
+        // the drain is decoded, not behind its work. Decoding copies what
+        // it needs out of the command words (register values, immediate
+        // indices, shader microcode; indirect buffers are decoded inline),
+        // so the guest may reuse them at once; the work's own guest-visible
+        // effects (fences, interrupts, flips) stay ordered behind it. Data a
+        // draw reads by address from command memory (Direct3D's
+        // BeginVertices/DrawPrimitiveUP vertices, inline index buffers) is
+        // read only when the draw executes, so a drain with such a draw
+        // (CommandProcessor::drain_reads_command_memory()) writes its read
+        // pointer behind its work, as all drains used to. Held behind the
+        // work, the read pointer kept ring space from the guest until the
+        // backend finished each drain: AC6's Direct3D spins for ring space
+        // (0x821E6240), and in missions that spin was half of its main
+        // thread's time.
+        // XENON_GPU_RPTR_AFTER_WORK=1 (development A/B only) holds every
+        // drain's read pointer behind its work.
         if (ring.rptr_writeback_address != 0 && memory_) {
           if (!memory_->physical_data(ring.rptr_writeback_address)) {
             if (config_.enable_logging) {
@@ -292,12 +310,35 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
                         << " has no RAM backing" << std::endl;
             }
           } else {
-            graphics_system_->write_guest_after_work(
-                ring.rptr_writeback_address,
-                {static_cast<std::byte>(new_read_index >> 24),
-                 static_cast<std::byte>(new_read_index >> 16),
-                 static_cast<std::byte>(new_read_index >> 8),
-                 static_cast<std::byte>(new_read_index)});
+            static const bool after_work = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+              const char* value = std::getenv("XENON_GPU_RPTR_AFTER_WORK");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+              return value && *value == '1';
+            }();
+            const std::array<std::byte, 4> big_endian{
+                static_cast<std::byte>(new_read_index >> 24),
+                static_cast<std::byte>(new_read_index >> 16),
+                static_cast<std::byte>(new_read_index >> 8),
+                static_cast<std::byte>(new_read_index)};
+            const bool reads_command_memory =
+                graphics_system_->command_processor().drain_reads_command_memory();
+            if (after_work || reads_command_memory) {
+              graphics_system_->write_guest_after_work(
+                  ring.rptr_writeback_address,
+                  std::vector<std::byte>(big_endian.begin(), big_endian.end()));
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            } else if (graphics_system_->write_guest_ahead_of_work(
+                           ring.rptr_writeback_address, big_endian)) {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerEarly, 1u);
+            } else {
+              gpu::perf::add(gpu::perf::Counter::ReadPointerHeld, 1u);
+            }
           }
         }
       } catch (const std::exception& ex) {

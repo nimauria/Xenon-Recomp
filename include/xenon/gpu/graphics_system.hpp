@@ -37,9 +37,11 @@ class GraphicsSystem {
   // fence pass the draws and resolves before it have executed, and the guest
   // memory they used may be reused. The rest executes before this returns,
   // or - pipelined drains (start_backend_thread()) - is left running on the
-  // backend thread: the returned index is where decoding goes on, and the
-  // guest learns the drain's ring words are free only from a read pointer
-  // written back with write_guest_after_work(), behind that work.
+  // backend thread: the returned index is where decoding goes on. The read
+  // pointer goes back to the guest as soon as the drain is decoded
+  // (write_guest_ahead_of_work()), unless a draw of it reads command memory
+  // (CommandProcessor::drain_reads_command_memory()): then behind its work
+  // (write_guest_after_work()).
   [[nodiscard]] std::uint32_t submit_ring(Backend& backend, std::uint32_t physical_address,
                                           std::uint32_t capacity_dwords,
                                           std::uint32_t read_index,
@@ -98,8 +100,15 @@ class GraphicsSystem {
   // Writes `bytes` to guest physical memory once everything handed over has
   // executed - at once when it has (or no backend thread runs). Ordered with
   // the stream's own deferred writes, and waited for by the frontend's reads
-  // of those bytes. The ring read pointer goes back to the guest this way.
+  // of those bytes.
   void write_guest_after_work(std::uint32_t address, std::vector<std::byte> bytes);
+  // Writes `bytes` to guest physical memory now, ahead of work still
+  // executing: for state that describes the command processor's own fetch
+  // position (the ring read pointer), not the results of the work. A write
+  // to the same bytes still deferred behind work (write_guest_after_work())
+  // keeps this one behind it, so the guest never sees the value go back.
+  // Returns whether it was written now.
+  bool write_guest_ahead_of_work(std::uint32_t address, std::span<const std::byte> bytes);
   // GPU V3 pipelined drains (default on with the backend thread;
   // XENON_GPU_PIPELINED_DRAINS=0 turns them off): a drain returns without
   // waiting for its last work, and the next one starts decoding beside it.

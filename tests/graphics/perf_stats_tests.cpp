@@ -99,7 +99,25 @@ void test_p99_and_max_show_a_hitch() {
   perf::note_presented_frame(t += 250ms);
   const auto line = perf::take_line(1.0);
   assert(contains(line, "p50 33.3"));
+  // One hitch in a hundred intervals: past p95, reached by p99.
+  assert(contains(line, "p95 33.3"));
   assert(contains(line, "max 250.0"));
+}
+
+// Draw runs land in their size buckets, and the read pointer's early and
+// held write-backs are reported apart.
+void test_draw_runs_and_read_pointer_counts() {
+  (void)perf::take_line(1.0);
+  for (const std::uint64_t run : {0u, 1u, 2u, 3u, 4u, 15u, 16u, 63u, 64u, 255u, 256u, 5000u})
+    perf::note_draw_run(run);
+  perf::add(perf::Counter::ReadPointerEarly, 41u);
+  perf::add(perf::Counter::ReadPointerHeld, 2u);
+  const auto line = perf::take_line(1.0);
+  assert(contains(line, "rptr early 41 held 2"));
+  assert(contains(line, "runs 0:1 1:1 2-3:2 4-15:2 16-63:2 64-255:2 256+:2"));
+  const auto empty = perf::take_line(1.0);
+  assert(contains(empty, "rptr early 0 held 0"));
+  assert(contains(empty, "runs 0:0 1:0 2-3:0 4-15:0 16-63:0 64-255:0 256+:0"));
 }
 
 void test_scoped_time_counts_one_and_adds_its_duration() {
@@ -152,6 +170,8 @@ int main() {
   test_rates_are_per_second_of_the_window();
   std::cerr << "p99_and_max_show_a_hitch\n";
   test_p99_and_max_show_a_hitch();
+  std::cerr << "draw_runs_and_read_pointer_counts\n";
+  test_draw_runs_and_read_pointer_counts();
   std::cerr << "scoped_time_counts_one_and_adds_its_duration\n";
   test_scoped_time_counts_one_and_adds_its_duration();
   std::cerr << "flush_writes_once_a_second_without_probe_logs\n";

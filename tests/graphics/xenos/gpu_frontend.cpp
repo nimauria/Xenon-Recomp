@@ -633,6 +633,88 @@ void test_ring_wrap(AddressSpace& memory, CommandProcessor& cp,
   assert(regs.read(0x331) == 0x22220000);
 }
 
+// The command processor reports a drain whose draws read, by address, guest
+// memory commands were fetched from - the ring (all of it: the guest refills
+// whatever the read pointer passed) or an indirect buffer: the pump then holds
+// that drain's read pointer behind its work, since the draws read the data
+// only when they execute (Direct3D's DrawPrimitiveUP / BeginVertices data).
+void test_drains_reading_command_memory(AddressSpace& memory, CommandProcessor& cp) {
+  constexpr std::uint32_t ring = 0x01030000;
+  constexpr std::uint32_t capacity = 512;
+  constexpr std::uint32_t indirect = 0x01040000;
+  constexpr std::uint32_t heap = 0x01050000;
+  const auto auto_draw = make_draw_initiator(PrimitiveType::TriangleList, DrawSource::AutoIndex, 3);
+  const auto dma_draw = make_draw_initiator(PrimitiveType::TriangleList, DrawSource::Dma, 3);
+  std::uint32_t at = 0;
+  const auto drain = [&](const std::vector<std::uint32_t>& words) {
+    for (std::uint32_t i = 0; i < words.size(); ++i)
+      store_be32(memory, ring + (at + i) * 4u, words[i]);
+    const auto end = at + static_cast<std::uint32_t>(words.size());
+    assert(cp.execute_ring(ring, capacity, at, end) == end);
+    at = end;
+    return cp.drain_reads_command_memory();
+  };
+  const auto dma = [&](std::uint32_t indices) {
+    return std::vector<std::uint32_t>{make_packet_type3(Type3Opcode::DrawIndx, 4), 0u, dma_draw,
+                                      indices, 3u};
+  };
+  const auto with = [](std::vector<std::uint32_t> a, const std::vector<std::uint32_t>& b) {
+    a.insert(a.end(), b.begin(), b.end());
+    return a;
+  };
+  const std::vector<std::uint32_t> plain{make_packet_type3(Type3Opcode::DrawIndx2, 1), auto_draw};
+
+  // An auto-indexed draw reads nothing by address.
+  assert(!drain(plain));
+  // Indices in the heap: no; in the ring's free space, past this drain: yes.
+  assert(!drain(dma(heap)));
+  assert(drain(with(plain, dma(ring + 400u * 4u))));
+  // Each drain is judged afresh.
+  assert(!drain(plain));
+
+  // An indirect buffer is command memory from then on.
+  write_words(memory, indirect, {make_packet_type3(Type3Opcode::DrawIndx2, 1), auto_draw});
+  assert(!drain({make_packet_type3(Type3Opcode::IndirectBuffer, 2), indirect, 2u}));
+  assert(drain(dma(indirect + 4u)));
+  assert(!drain(dma(indirect + 8u)));  // just past it
+
+  // A resolve (RB_MODECONTROL copy) reads its rectangle from fetch constant
+  // 0, whatever the shaders fetch: in the ring, flagged; in the heap, not.
+  const auto fetch0 = [](std::uint32_t address) {
+    return std::vector<std::uint32_t>{make_packet_type0(0x4800, 2), address | 3u, 6u << 2};
+  };
+  const std::vector<std::uint32_t> copy_mode{make_packet_type0(0x2208, 1), 6u};
+  const std::vector<std::uint32_t> color_mode{make_packet_type0(0x2208, 1), 4u};
+  assert(drain(with(with(copy_mode, fetch0(ring + 450u * 4u)), plain)));
+  assert(!drain(with(with(copy_mode, fetch0(heap)), plain)));
+  // Not a resolve, and no shader fetches it: not read.
+  assert(!drain(with(with(color_mode, fetch0(ring + 450u * 4u)), plain)));
+
+  // Bounded: many scattered indirect buffers merge into at most
+  // kCommandMemoryRanges ranges, every one of them still covered.
+  constexpr std::uint32_t kBuffers = 100;
+  constexpr std::uint32_t scattered = 0x01100000;
+  std::vector<std::uint32_t> calls;
+  for (std::uint32_t i = 0; i < kBuffers; ++i) {
+    store_be32(memory, scattered + i * 0x1000u, make_packet_type2());
+    calls.insert(calls.end(),
+                 {make_packet_type3(Type3Opcode::IndirectBuffer, 2), scattered + i * 0x1000u, 1u});
+  }
+  const std::uint32_t calls_at = 0x01200000;
+  for (std::uint32_t i = 0; i < calls.size(); ++i) store_be32(memory, calls_at + i * 4u, calls[i]);
+  cp.execute_buffer(calls_at, static_cast<std::uint32_t>(calls.size()));
+  const auto& ranges = cp.command_memory();
+  assert(ranges.size() <= CommandProcessor::kCommandMemoryRanges);
+  for (std::size_t i = 1; i < ranges.size(); ++i)
+    assert(ranges[i - 1].second < ranges[i].first && "sorted, disjoint, not touching");
+  for (std::uint32_t i = 0; i < kBuffers; ++i) {
+    const std::uint64_t address = scattered + i * 0x1000u;
+    assert(std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) {
+      return range.first <= address && address + 4u <= range.second;
+    }));
+  }
+}
+
 // Executes graphics IR and records, for each draw, the guest-visible state at
 // the moment the draw executes.
 class OrderRecordingBackend final : public xenon::gpu::Backend {
@@ -2120,6 +2202,7 @@ int main() {
   test_unexecuted_packets_are_unlowered(memory, cp, stream);
   test_indirect_buffer(memory, cp, regs);
   test_ring_wrap(memory, cp, regs);
+  test_drains_reading_command_memory(memory, cp);
   for (const bool backend_thread : {false, true}) {
     test_ring_effects_follow_the_work_before_them(backend_thread);
     test_front_buffer_swap_follows_the_work_before_it(backend_thread);

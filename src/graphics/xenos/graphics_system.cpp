@@ -704,6 +704,24 @@ void GraphicsSystem::write_guest_after_work(std::uint32_t address, std::vector<s
       size);
 }
 
+bool GraphicsSystem::write_guest_ahead_of_work(std::uint32_t address,
+                                               std::span<const std::byte> bytes) {
+  while (!deferred_writes_.empty() && executor_.done(deferred_writes_.front().sequence))
+    deferred_writes_.pop_front();
+  const std::uint64_t end = std::uint64_t{address} + bytes.size();
+  const bool behind_deferred =
+      std::any_of(deferred_writes_.begin(), deferred_writes_.end(),
+                  [&](const DeferredWrite& write) {
+                    return write.begin < end && address < write.end;
+                  });
+  if (behind_deferred) {
+    write_guest_after_work(address, std::vector<std::byte>(bytes.begin(), bytes.end()));
+    return false;
+  }
+  make_guest_write(address, bytes, /*skip_if_unchanged=*/false);
+  return true;
+}
+
 void GraphicsSystem::make_guest_write(std::uint32_t address, std::span<const std::byte> bytes,
                                       bool skip_if_unchanged) {
   if (skip_if_unchanged) {

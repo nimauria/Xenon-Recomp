@@ -776,12 +776,9 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
   const auto during = xenon::core::SessionExecutionTestAccess::gpu_interrupts_delivered(harness.session);
   // About 15 at 60 Hz; the old single thread delivered none.
   assert(during - before >= 5 && "vsync interrupts continue while a draw blocks the worker");
-  // The guest may reuse ring words only once the commands in them are done:
-  // the read pointer it sees does not move past a draw still executing
-  // (the command processor may decode ahead of it - pipelined drains).
-  assert(guest_read_pointer() == 0u &&
-         "the guest's read pointer does not move past a draw still executing");
-
+  // A short drain with the backend idle executes on the pump thread itself:
+  // its read pointer goes back once the pump is past it.
+  assert(guest_read_pointer() == 0u);
   blocking->release.store(true);
   for (int i = 0; i < 400 && guest_read_pointer() != 2u; ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -791,6 +788,104 @@ void test_vsync_keeps_arriving_while_the_gpu_worker_is_busy() {
   const bool shutdown_completed = run_with_timeout(
       [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
   assert(shutdown_completed);
+}
+
+// The ring read pointer is the command processor's fetch position, as on the
+// Xenos: once a drain is decoded the guest may reuse its ring words while its
+// draws still execute on the backend thread (AC6's Direct3D spun for ring
+// space while the read pointer waited for the backend). A drain with a draw
+// that reads its data out of command memory - here a DMA index buffer in the
+// ring's free space, as Direct3D's DrawIndexedPrimitiveUP can place it -
+// holds the read pointer behind the draw, which has not read it yet.
+void run_read_pointer_case(bool index_buffer_in_ring) {
+  GpuPumpHarness harness;
+  auto backend = std::make_unique<BlockingDrawBackend>();
+  auto* blocking = backend.get();
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session, std::move(backend));
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* memory = harness.session.memory();
+  auto* kernel_process = harness.session.kernel_process();
+
+  constexpr std::uint32_t kRingBase = 0x2000u;
+  constexpr std::uint32_t kRingDwords = 64u;
+  constexpr std::uint32_t kIndicesAt = kRingBase + 48u * 4u;  // free ring space
+  std::vector<std::uint32_t> words;
+  // Nine auto-indexed DRAW_INDX_2 draws: past GraphicsSystem::kStreamAfterDraws
+  // the drain streams to the backend thread and decoding goes on.
+  for (int i = 0; i < 9; ++i) {
+    words.push_back(0xC0003600u);
+    words.push_back(0x00030084u);
+  }
+  if (index_buffer_in_ring) {
+    // DRAW_INDX: viz token, initiator (3 16-bit DMA indices, triangle list),
+    // VGT_DMA_BASE, VGT_DMA_SIZE (3 words, no swap).
+    words.insert(words.end(), {0xC0032200u, 0u, 0x00030004u, kIndicesAt, 3u});
+  }
+  const auto write_word = [&](std::uint32_t address, std::uint32_t word) {
+    const std::array<std::byte, 4> bytes{
+        static_cast<std::byte>(word >> 24), static_cast<std::byte>(word >> 16),
+        static_cast<std::byte>(word >> 8), static_cast<std::byte>(word)};
+    assert(memory->write_physical(address, bytes));
+  };
+  for (std::uint32_t i = 0; i < words.size(); ++i) write_word(kRingBase + i * 4u, words[i]);
+  write_word(kIndicesAt, 0x00000001u);
+  write_word(kIndicesAt + 4u, 0x00020000u);
+  kernel_process->configure_gpu_ring_buffer(kRingBase, kRingDwords);
+  constexpr std::uint32_t kWritebackPhysical = 0x2400u;
+  assert(memory->fill_physical(kWritebackPhysical, 4u, std::byte{0}));
+  kernel_process->set_gpu_ring_buffer_rptr_writeback(kWritebackPhysical);
+  const auto guest_read_pointer = [&] {
+    std::array<std::byte, 4> bytes{};
+    assert(memory->copy_physical_range(kWritebackPhysical, bytes));
+    return std::to_integer<std::uint32_t>(bytes[0]) << 24 |
+           std::to_integer<std::uint32_t>(bytes[1]) << 16 |
+           std::to_integer<std::uint32_t>(bytes[2]) << 8 | std::to_integer<std::uint32_t>(bytes[3]);
+  };
+  const auto end = static_cast<std::uint32_t>(words.size());
+  kernel_process->set_gpu_ring_buffer_write_index(end);
+
+  for (int i = 0; i < 400 && blocking->draws_entered.load() == 0; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(blocking->draws_entered.load() == 1 && "the backend thread reached the first draw");
+  // Decoding finishes while the backend is stuck in the first draw.
+  for (int i = 0; i < 400 && kernel_process->gpu_ring_buffer().read_index != end; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(kernel_process->gpu_ring_buffer().read_index == end && "the drain was decoded");
+
+  if (!index_buffer_in_ring) {
+    for (int i = 0; i < 400 && guest_read_pointer() != end; ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    assert(guest_read_pointer() == end &&
+           "the guest's read pointer reaches the decoded commands while their draws execute");
+    assert(blocking->draws_entered.load() == 1 && "the first draw is still executing");
+    // The guest reuses the ring words; the decoded draws do not change.
+    assert(memory->fill_physical(kRingBase, end * 4u, std::byte{0xEE}));
+  } else {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    assert(guest_read_pointer() == 0u &&
+           "a drain whose draw reads command memory keeps its read pointer behind the draw");
+  }
+
+  blocking->release.store(true);
+  for (int i = 0; i < 400 && guest_read_pointer() != end; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(guest_read_pointer() == end);
+  // Every decoded draw executes (the early read pointer does not wait for them).
+  const int draws = index_buffer_in_ring ? 10 : 9;
+  for (int i = 0; i < 400 && blocking->draws_entered.load() != draws; ++i)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  assert(blocking->draws_entered.load() == draws);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+}
+
+void test_read_pointer_returns_once_a_streamed_drain_is_decoded() {
+  run_read_pointer_case(/*index_buffer_in_ring=*/false);
+}
+
+void test_read_pointer_waits_for_a_draw_reading_command_memory() {
+  run_read_pointer_case(/*index_buffer_in_ring=*/true);
 }
 
 // The worker drains ring work when it is published, not on a polling tick:
@@ -912,6 +1007,8 @@ int main() {
   test_shutdown_ends_blocked_waits_in_callbacks_and_guest_threads();
   test_vsync_callback_wakes_a_waiting_guest_thread_each_frame();
   test_vsync_keeps_arriving_while_the_gpu_worker_is_busy();
+  test_read_pointer_returns_once_a_streamed_drain_is_decoded();
+  test_read_pointer_waits_for_a_draw_reading_command_memory();
   test_published_ring_work_wakes_the_worker();
   test_present_outcomes_are_counted_by_status();
   test_a_front_buffer_without_a_fetch_constant_is_not_presented();

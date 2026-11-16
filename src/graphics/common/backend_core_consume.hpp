@@ -176,6 +176,7 @@ void BackendCore<Derived, Api>::consume(const ir::Command& command) {
       if (tracing() && !error.empty()) trace("  resolve failed: " + error);
       report_slow("resolve");
       // The next resolve's trail starts here.
+      perf::note_draw_run(draw_trail_count);
       draw_trail_count = 0;
     } else {
       note_draw(*draw, state);
