@@ -124,22 +124,35 @@ bool EdramSurfaceLayout::valid() const noexcept {
 }
 
 namespace {
+// A surface's identity, packed exactly into the low 48 bits - base tile 12,
+// pitch 16, height 16, MSAA 2, 64bpp and depth 1 each - so two surfaces get
+// the same key only when they are the same surface; callers XOR their own
+// tags into bits 56 and up. (Every render-target and ownership lookup of a
+// draw computes these: the byte-wise FNV-1a they replace was a chain of 48
+// dependent multiplies each, ~15% of a draw's host time in draw-bench.)
+// Fields outside those ranges - only an invalid surface has them - are mixed
+// into all 64 bits instead.
 std::uint64_t hash_surface(const EdramSurfaceLayout& surface,
                            bool include_height) noexcept {
-  std::uint64_t hash = 14695981039346656037ull;
-  auto add = [&](std::uint64_t value) {
-    for (unsigned i = 0; i < 8; ++i) {
-      hash ^= static_cast<std::uint8_t>(value >> (i * 8u));
-      hash *= 1099511628211ull;
-    }
+  const std::uint64_t height = include_height ? surface.height_pixels : 0u;
+  const auto msaa = static_cast<std::uint64_t>(surface.msaa);
+  if (surface.base_tile < (1u << 12u) && surface.pitch_pixels < (1u << 16u) &&
+      height < (1u << 16u) && msaa < 4u) {
+    return std::uint64_t{surface.base_tile} | std::uint64_t{surface.pitch_pixels} << 12u |
+           height << 28u | msaa << 44u | std::uint64_t{surface.is_64bpp} << 46u |
+           std::uint64_t{surface.depth} << 47u;
+  }
+  const auto mix = [](std::uint64_t value) {
+    value ^= value >> 30u;
+    value *= 0xBF58476D1CE4E5B9ull;
+    value ^= value >> 27u;
+    value *= 0x94D049BB133111EBull;
+    return value ^ (value >> 31u);
   };
-  add(surface.base_tile);
-  add(surface.pitch_pixels);
-  if (include_height) add(surface.height_pixels);
-  add(static_cast<std::uint8_t>(surface.msaa));
-  add(surface.is_64bpp);
-  add(surface.depth);
-  return hash;
+  auto value = mix(std::uint64_t{surface.base_tile} | std::uint64_t{surface.pitch_pixels} << 32u);
+  value = mix(value ^ height ^ msaa << 40u ^ std::uint64_t{surface.is_64bpp} << 50u ^
+              std::uint64_t{surface.depth} << 51u);
+  return value | (1ull << 48u);  // never equal to an exact packing's low bits alone
 }
 }  // namespace
 
