@@ -7,11 +7,15 @@
 #include <unordered_map>
 
 #include "xenon/core/session.hpp"
+#include "xenon/logging/host_sampler.hpp"
 
 namespace xenon::core {
 
 void XenonSession::start_guest_profile() {
   stop_guest_profile();
+  // XENON_HOST_PROFILE: the host threads' own sampling profile, beside the
+  // guest one (host_profile.log in the probe directory at stop).
+  logging::start_host_profile_from_environment();
   const char* setting = std::getenv("XENON_GUEST_PROFILE");
   if (!setting || !*setting || std::string_view(setting) == "0") return;
   guest_profile_path_ = std::string_view(setting) == "1" ? "guest_profile.log" : setting;
@@ -51,6 +55,7 @@ void XenonSession::start_guest_profile() {
 }
 
 void XenonSession::stop_guest_profile() noexcept {
+  logging::stop_host_profile_and_report();
   guest_profile_running_.store(false);
   if (!guest_profile_thread_.joinable()) return;
   guest_profile_thread_.join();

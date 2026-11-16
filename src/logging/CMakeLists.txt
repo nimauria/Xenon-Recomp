@@ -8,10 +8,15 @@
 add_library(xenon_logging STATIC
   activity_trace.cpp
   diagnostic_events.cpp
+  host_sampler.cpp
   logger.cpp
   probe_log.cpp
 )
 target_include_directories(xenon_logging PUBLIC "${XENON_SOURCE_DIR}/include")
 target_compile_features(xenon_logging PUBLIC cxx_std_20)
 xenon_enable_warnings(xenon_logging)
+if(UNIX AND NOT APPLE)
+  # dladdr (glibc < 2.34 keeps it in libdl).
+  target_link_libraries(xenon_logging PUBLIC ${CMAKE_DL_LIBS})
+endif()
 add_library(Xenon::Logging ALIAS xenon_logging)

@@ -50,3 +50,19 @@ endif()
 if(XENON_ENABLE_AUDIO AND NOT XENON_ENABLE_MEMORY)
   message(FATAL_ERROR "XENON_ENABLE_AUDIO requires XENON_ENABLE_MEMORY")
 endif()
+
+# Symbols for optimized builds: host profiles (XENON_HOST_PROFILE) and crash
+# reports resolve function names instead of module offsets. Code generation
+# is unchanged: MSVC keeps /OPT:REF and /OPT:ICF, which /DEBUG would
+# otherwise turn off, and /Z7 keeps debug info in the objects so parallel
+# compiles never contend for one PDB.
+option(XENON_RELEASE_DEBUG_INFO "Emit debug symbols for Release builds (code generation unchanged)" ON)
+if(XENON_RELEASE_DEBUG_INFO)
+  if(MSVC)
+    add_compile_options($<$<CONFIG:Release>:/Z7>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF>
+                     $<$<CONFIG:Release>:/OPT:ICF>)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options($<$<CONFIG:Release>:-g1>)
+  endif()
+endif()
