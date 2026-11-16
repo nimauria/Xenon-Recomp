@@ -156,7 +156,8 @@ std::string take_line(double seconds) {
                 "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | edram "
                 "gpu %llu (%.1f MB, %.1f ms) | rptr "
                 "early %llu held %llu | runs 0:%llu 1:%llu 2-3:%llu 4-15:%llu 16-63:%llu "
-                "64-255:%llu 256+:%llu | queue max %llu mean %.1f\n",
+                "64-255:%llu 256+:%llu | queue max %llu mean %.1f | barriers interrupt %llu (%.0f "
+                "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.95), percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -214,7 +215,15 @@ std::string take_line(double seconds) {
                   const auto posts = take(Counter::BackendPosts);
                   const auto depth = take(Counter::BackendQueueDepthSum);
                   return posts ? static_cast<double>(depth) / static_cast<double>(posts) : 0.0;
-                }());
+                }(),
+                static_cast<unsigned long long>(take(Counter::BarrierInterrupts)),
+                ms(take(Counter::BarrierInterruptNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierSwaps)),
+                ms(take(Counter::BarrierSwapNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierWaits)),
+                ms(take(Counter::BarrierWaitNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierWrites)),
+                ms(take(Counter::BarrierWriteNs)));
   return line;
 }
 

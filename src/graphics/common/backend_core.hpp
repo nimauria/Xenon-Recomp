@@ -336,7 +336,10 @@ class BackendCore {
   std::chrono::steady_clock::time_point submission_started{};
   std::deque<std::pair<std::uint64_t, std::shared_ptr<void>>> retired_resources{};
 
+  // Frees what the GPU has finished with. The completion query is a driver
+  // call (a fence/timeline read); with nothing retired it is not made.
   void collect_retired_resources() {
+    if (retired_resources.empty()) return;
     const auto completed = queue.completed_value();
     while (!retired_resources.empty() &&
            retired_resources.front().first <= completed) {

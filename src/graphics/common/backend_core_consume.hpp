@@ -53,7 +53,11 @@ inline void note_cpu_resolve(std::string_view reason, bool depth, unsigned sourc
 
 template <typename Derived, typename Api>
 void BackendCore<Derived, Api>::consume(const ir::Command& command) {
-  collect_retired_resources();
+  // Register writes - most of the stream - neither create nor retire native
+  // resources; the rest collect what the GPU has finished with. Collecting at
+  // every command queried the GPU fence ~3000 times a frame (a quarter of
+  // the backend's consume time replaying AC6's title screen).
+  if (!std::holds_alternative<ir::RegisterWrite>(command)) collect_retired_resources();
   ++command_count;
   ++performance.commands;
   // RegisterWrite/DrawPacket/ShaderLoad carry state the host renderer needs.

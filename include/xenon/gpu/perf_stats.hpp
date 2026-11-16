@@ -57,6 +57,10 @@
 //               much work each render pass gives a native batch
 //   queue       backend work queue: the deepest it got (tasks waiting) and
 //               its mean depth when work was posted
+//   barriers    the guest-visible barriers that held the frontend for a busy
+//               backend, by kind - CP interrupt, front-buffer flip, wait on
+//               memory or a register, guest write or instruction store -
+//               with the time each kind held it
 //
 // Frame timeline (XENON_FRAME_TIMELINE=1, or with XENON_HOST_PROFILE):
 // frame_timeline.log gets one line per presented frame - when it was
@@ -132,6 +136,14 @@ enum class Counter : std::uint32_t {
   BackendQueueMax,       // maximum (note_max())
   BackendQueueDepthSum,  // depth summed at each post
   BackendPosts,
+  BarrierInterrupts,
+  BarrierInterruptNs,
+  BarrierSwaps,
+  BarrierSwapNs,
+  BarrierWaits,
+  BarrierWaitNs,
+  BarrierWrites,
+  BarrierWriteNs,
   Count,
 };
 

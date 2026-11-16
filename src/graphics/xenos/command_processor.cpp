@@ -790,7 +790,8 @@ void CommandProcessor::execute_wait_reg_mem(
   // completes the coherency request it reports (below), and nothing the GPU
   // wrote is observed through it. AC6 polls it after every resolve, so
   // treating it as a barrier waited for each resolve's readback.
-  if (memory_source || payload[1] != kCoherStatusHostRegister) before_guest_visible_effect();
+  if (memory_source || payload[1] != kCoherStatusHostRegister)
+    before_guest_visible_effect(BarrierKind::Wait);
   // Polling COHER_STATUS_HOST is how a title waits for a host-memory coherency
   // request it queued (texture/vertex cache invalidation over a range). The
   // command processor completes the request itself as part of the poll and the
@@ -879,7 +880,7 @@ void CommandProcessor::execute_wait_register(
         "PM4_WAIT_REG_EQ/GTE requires exactly 4 dwords");
   }
   const std::uint32_t register_index = payload[0];
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::Wait);
   if (!registers_.valid(register_index)) {
     throw std::out_of_range("PM4 compact wait register outside register file");
   }
@@ -968,7 +969,7 @@ bool CommandProcessor::execute_im_store(
     throw std::out_of_range("PM4_IM_STORE destination outside physical RAM");
   }
 
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::ShaderStore);
   if (byte_count64) {
     auto write = memory_.physical_write_span(
         destination, static_cast<std::uint32_t>(byte_count64));
@@ -1156,7 +1157,7 @@ void CommandProcessor::execute_interrupt(
   }
   ++stats_.interrupt_packets;
   if (!interrupt_callback_) return;
-  before_guest_visible_effect();
+  before_guest_visible_effect(BarrierKind::Interrupt);
   // Code the handler wakes may rewrite what the commands after the interrupt
   // read; the hardware reads it before that code can run.
   sync_point();
@@ -1382,7 +1383,7 @@ void CommandProcessor::execute_type3(Reader& reader, const PacketHeader& header,
     if (const auto swap = decode_front_buffer_swap(payload)) {
       // The flip shows what the work before it rendered and resolved, so that
       // work executes first.
-      before_guest_visible_effect();
+      before_guest_visible_effect(BarrierKind::Swap);
       advance_progress_counter();
       ++stats_.front_buffer_swaps;
       if (swap_callback_) swap_callback_(*swap);
