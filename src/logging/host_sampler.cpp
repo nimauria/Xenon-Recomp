@@ -30,6 +30,7 @@
 #include <cxxabi.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
@@ -570,6 +571,23 @@ std::string HostSampler::report() const {
     out += line;
   }
   return out;
+}
+
+void set_current_thread_name(std::string_view name) {
+#if defined(XENON_HOST_SAMPLER_WINDOWS)
+  const int length = MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()),
+                                         nullptr, 0);
+  if (length <= 0) return;
+  std::wstring wide(static_cast<std::size_t>(length), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide.data(), length);
+  (void)SetThreadDescription(GetCurrentThread(), wide.c_str());
+#elif defined(__linux__)
+  char truncated[16] = {};
+  std::memcpy(truncated, name.data(), (std::min)(name.size(), sizeof(truncated) - 1u));
+  (void)pthread_setname_np(pthread_self(), truncated);
+#else
+  (void)name;
+#endif
 }
 
 std::optional<HostSamplerOptions> host_sampler_options_from_environment() {

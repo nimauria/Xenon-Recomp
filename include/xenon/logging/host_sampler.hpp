@@ -36,6 +36,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace xenon::logging {
@@ -111,5 +112,10 @@ class HostSampler {
 // probe directory) when the session stops. Both are no-ops otherwise.
 void start_host_profile_from_environment();
 void stop_host_profile_and_report();
+
+// Names the calling thread for host tools: profiles (host_profile.log),
+// debuggers and crash dumps (SetThreadDescription; pthread_setname_np, which
+// keeps the first 15 bytes, on Linux).
+void set_current_thread_name(std::string_view name);
 
 }  // namespace xenon::logging

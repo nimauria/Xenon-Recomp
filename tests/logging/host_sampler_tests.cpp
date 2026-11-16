@@ -24,16 +24,6 @@
 
 namespace {
 
-void name_this_thread(const char* name) {
-#if defined(_WIN32)
-  wchar_t wide[64] = {};
-  for (std::size_t i = 0; name[i] && i + 1 < std::size(wide); ++i) wide[i] = wchar_t(name[i]);
-  (void)SetThreadDescription(GetCurrentThread(), wide);
-#elif defined(__linux__)
-  pthread_setname_np(pthread_self(), name);
-#endif
-}
-
 std::atomic<bool> g_stop{false};
 std::atomic<std::uint64_t> g_sink{0};
 
@@ -74,11 +64,11 @@ int main() {
   std::condition_variable wake;
   bool released = false;
   std::thread busy([] {
-    name_this_thread("sampler-busy");
+    xenon::logging::set_current_thread_name("sampler-busy");
     sampler_test_busy_loop();
   });
   std::thread blocked([&] {
-    name_this_thread("sampler-blocked");
+    xenon::logging::set_current_thread_name("sampler-blocked");
     std::unique_lock lock(mutex);
     wake.wait(lock, [&] { return released; });
   });
