@@ -6,6 +6,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "xenon/gpu/shader_ir.hpp"
 
@@ -43,6 +44,45 @@ struct VertexEvaluation {
 using GuestPhysicalReader =
     std::function<bool(std::uint32_t physical_address, std::span<std::byte> out)>;
 
+// A decoded vertex shader prepared for repeated CPU evaluation: whether it can
+// be evaluated at all, and its instructions and control flow laid out by
+// address so each step of a run is an array index. Immutable and
+// self-contained (it copies what it needs from the decoded shader), so the
+// renderer builds one per shader and reuses it for every vertex of every draw
+// - before it, each vertex rebuilt two hash maps over the whole shader and
+// rescanned it for support.
+class VertexEvaluatorPlan {
+ public:
+  explicit VertexEvaluatorPlan(const DecodedShader& shader);
+
+  [[nodiscard]] bool supported() const noexcept { return reason_.empty(); }
+  // Why the shader cannot be evaluated on the CPU, or empty when it can.
+  [[nodiscard]] const std::string& unsupported_reason() const noexcept { return reason_; }
+
+  // The instruction at microcode `address`, or null when the decoded IR has
+  // none there.
+  [[nodiscard]] const DecodedInstruction* instruction(std::uint32_t address) const noexcept {
+    const auto slot = static_cast<std::uint64_t>(address) - instruction_base_;
+    if (address < instruction_base_ || slot >= instruction_slots_.size()) return nullptr;
+    const auto index = instruction_slots_[static_cast<std::size_t>(slot)];
+    return index < 0 ? nullptr : &instructions_[static_cast<std::size_t>(index)];
+  }
+  // The control-flow instruction with index `index`, or null.
+  [[nodiscard]] const DecodedControlFlow* control_flow(std::uint32_t index) const noexcept {
+    if (index >= control_flow_slots_.size()) return nullptr;
+    const auto slot = control_flow_slots_[index];
+    return slot < 0 ? nullptr : &control_flow_[static_cast<std::size_t>(slot)];
+  }
+
+ private:
+  std::string reason_;
+  std::vector<DecodedInstruction> instructions_;
+  std::vector<std::int32_t> instruction_slots_;  // address - base -> instructions_
+  std::uint32_t instruction_base_{};
+  std::vector<DecodedControlFlow> control_flow_;
+  std::vector<std::int32_t> control_flow_slots_;  // cf index -> control_flow_
+};
+
 class VertexPositionEvaluator {
  public:
   // Why `shader` cannot be evaluated on the CPU, or empty when it can.
@@ -52,7 +92,12 @@ class VertexPositionEvaluator {
   // `vertex_id` (an auto-generated index or the index buffer's value; the
   // shader applies VGT_INDX_OFFSET and the min/max clamp itself, from
   // XenonDrawState). `constants` is the draw's whole shader constant buffer.
+  // Builds a plan for the one call; repeated evaluation passes a plan.
   [[nodiscard]] static VertexEvaluation evaluate(const DecodedShader& shader,
+                                                 std::span<const std::byte> constants,
+                                                 std::uint32_t vertex_id,
+                                                 const GuestPhysicalReader& memory);
+  [[nodiscard]] static VertexEvaluation evaluate(const VertexEvaluatorPlan& plan,
                                                  std::span<const std::byte> constants,
                                                  std::uint32_t vertex_id,
                                                  const GuestPhysicalReader& memory);

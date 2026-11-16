@@ -327,6 +327,7 @@ void BackendCore<Derived, Api>::consume_resolve(
         }
         if (!self().gpu_depth_resolve(*owner, gpu.constants)) return;
         mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+        note_gpu_guest_write(gpu.range_address, gpu.range_size);
         note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
         // Guest code may read what it resolved; the copy lands with the work
         // (unless the title's module says its CPU never does).
@@ -471,6 +472,7 @@ void BackendCore<Derived, Api>::consume_resolve(
       }
       if (!self().gpu_color_resolve(*owner, gpu.constants)) return;
       mirror.mark_gpu_write(gpu.range_address, gpu.range_size);
+      note_gpu_guest_write(gpu.range_address, gpu.range_size);
       note_backend_write(texture_dirty, guest_reads, gpu.range_address, gpu.range_size);
       if (state.copy.color_clear_enabled && !self().gpu_color_clear(*owner, clear)) return;
       // Guest code may read what it resolved, and it reads CPU memory. The

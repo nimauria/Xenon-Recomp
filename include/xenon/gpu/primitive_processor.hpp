@@ -40,4 +40,16 @@ struct ProcessedPrimitiveBatch {
     const PrimitiveProcessingOptions& options = {},
     std::uint32_t physical_base = 0u);
 
+// The same conversion into `result`, reusing its index storage and `scratch`
+// (the intermediate the strip, fan, quad and reset expansions need) across
+// calls, so a steady stream of draws allocates nothing. List topologies are
+// converted in one pass; an auto-indexed list is a non-indexed draw and
+// produces no indices at all. False (with result.error) when the draw cannot
+// be converted.
+bool process_primitives_into(const ir::DrawPacket& draw,
+                             std::span<const std::byte> physical_memory,
+                             const PrimitiveProcessingOptions& options,
+                             std::uint32_t physical_base, ProcessedPrimitiveBatch& result,
+                             std::vector<std::uint32_t>& scratch);
+
 }  // namespace xenon::gpu

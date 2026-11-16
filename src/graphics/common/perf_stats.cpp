@@ -60,7 +60,7 @@ std::string take_line(double seconds) {
   }
   std::sort(frames.begin(), frames.end());
   const double per = seconds > 0.0 ? 1.0 / seconds : 0.0;
-  char line[1152];
+  char line[1536];
   std::snprintf(line, sizeof(line),
                 "frames %.1f/s ms p50 %.1f p99 %.1f max %.1f | swaps %.1f/s | ring %.0f ms "
                 "ir %.0f ms present %.0f ms | fence %.0f ms (%llu waits) | shader %llu (%.0f ms) "
@@ -68,7 +68,8 @@ std::string take_line(double seconds) {
                 "(%llu) window %.0f ms | backend %.0f ms wait %.0f ms (%llu) | submit %llu "
                 "(%.0f ms) | holds barrier %llu sync %llu read %llu drain %llu | bindings reused "
                 "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
-                "(%llu batches)\n",
+                "(%llu batches) | indices reused %llu converted %llu (%.1f MB) | bounds %llu "
+                "(%.1f ms) | edram cpu %llu (%.1f MB, %.0f ms)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -98,7 +99,15 @@ std::string take_line(double seconds) {
                 ms(take(Counter::ShaderWaitNs)),
                 static_cast<unsigned long long>(take(Counter::ShaderWaits)),
                 ms(take(Counter::GpuBusyNs)), ms(take(Counter::GpuIdleNs)),
-                static_cast<unsigned long long>(take(Counter::GpuBatches)));
+                static_cast<unsigned long long>(take(Counter::GpuBatches)),
+                static_cast<unsigned long long>(take(Counter::IndexCacheHits)),
+                static_cast<unsigned long long>(take(Counter::IndexCacheMisses)),
+                static_cast<double>(take(Counter::IndexBytesConverted)) / (1024.0 * 1024.0),
+                static_cast<unsigned long long>(take(Counter::BoundsEvaluations)),
+                ms(take(Counter::BoundsNs)),
+                static_cast<unsigned long long>(take(Counter::EdramCpuTransfers)),
+                static_cast<double>(take(Counter::EdramCpuBytes)) / (1024.0 * 1024.0),
+                ms(take(Counter::EdramCpuNs)));
   return line;
 }
 

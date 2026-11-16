@@ -72,6 +72,9 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
                                        static_cast<long long>(total), text.c_str());
     }
   } phases;
+  // This draw's primitives are prepared once, on first use (draw_primitives).
+  draw_batch_ready = false;
+  draw_batch.reset();
   static const auto activity_key = xenon::logging::intern_activity(
       {"gpu", "draw", {"prim", "indices", "vs", "ps"}, false});
   xenon::logging::ActivityScope activity(
@@ -351,7 +354,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
     const auto dirty_epoch = guest_reads.read_epoch(*memory);
     // Textures this draw has already loaded: another slot sampling the same
     // one binds that image.
-    std::vector<std::uint64_t> loaded_keys;
+    std::array<std::uint64_t, 32> loaded_key_storage{};
+    std::size_t loaded_key_count = 0;
     for (std::uint32_t slot = 0; slot < used.size(); ++slot) {
       if (!used[slot] || !state.textures[slot]) continue;
       const auto& descriptor = *state.textures[slot];
@@ -383,7 +387,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       auto existing = textures.find(key);
       const bool already_cached = existing != textures.end();
       const bool loaded_here =
-          std::find(loaded_keys.begin(), loaded_keys.end(), key) != loaded_keys.end();
+          std::find(loaded_key_storage.begin(), loaded_key_storage.begin() + loaded_key_count,
+                    key) != loaded_key_storage.begin() + loaded_key_count;
       const bool dirty = already_cached && !loaded_here &&
                          cached_texture_stale(texture_dirty, guest_reads, key,
                                               memory->coherency(), dirty_epoch);
@@ -474,7 +479,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
             textures.emplace(key, std::move(created));
           }
         }
-        loaded_keys.push_back(key);
+        if (loaded_key_count < loaded_key_storage.size())
+          loaded_key_storage[loaded_key_count++] = key;
       } else {
         guest_reads.reused(key);
       }
@@ -674,46 +680,15 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
       float20_depth_variant = float20_depth;
     }
 
-    if (draw->index_buffer.valid && draw->index_buffer.length_bytes &&
-        !mirror.make_cpu_visible(
-            draw->index_buffer.physical_address,
-            draw->index_buffer.length_bytes,
-            memory::GpuRangeUsage::IndexBuffer)) {
-      error = mirror.error();
+    // Shared with drawable_bottom_for(); cached while the guest index buffer
+    // is unchanged (draw_primitives).
+    const auto* batch_pointer = draw_primitives(*draw, state);
+    if (!batch_pointer) {
+      error = draw_batch_error.empty() ? named("draw primitives could not be prepared")
+                                       : draw_batch_error;
       return;
     }
-    const PrimitiveProcessingOptions primitive_options{
-        state.primitive_assembly.reset_enabled,
-        state.primitive_assembly.reset_index};
-    std::vector<std::byte> index_snapshot;
-    std::uint32_t index_snapshot_base = 0u;
-    if (draw->source == DrawSource::Dma) {
-      const auto bytes_per_index =
-          draw->index_buffer.format == IndexFormat::UInt32 ? 4u : 2u;
-      const auto index_bytes = std::uint64_t{(std::min)(
-          draw->index_count,
-          draw->index_buffer.length_bytes / bytes_per_index)} *
-                               bytes_per_index;
-      if (index_bytes > UINT32_MAX ||
-          std::uint64_t{draw->index_buffer.physical_address} + index_bytes >
-              memory::kPhysicalMemorySize) {
-        error = named("index snapshot range is invalid");
-        return;
-      }
-      index_snapshot.resize(static_cast<std::size_t>(index_bytes));
-      index_snapshot_base = draw->index_buffer.physical_address;
-      if (!memory->copy_physical_range(index_snapshot_base,
-                                       index_snapshot)) {
-        error = named("index snapshot failed");
-        return;
-      }
-    }
-    const auto batch = process_primitives(
-        *draw, index_snapshot, primitive_options, index_snapshot_base);
-    if (!batch.valid) {
-      error = batch.error;
-      return;
-    }
+    const auto& batch = *batch_pointer;
     // Xenos draws points as sprites (PA_SU_POINT_SIZE, or the size the
     // vertex shader exports), expanded by a geometry shader.
     const bool point_sprites = batch.topology == HostPrimitiveTopology::PointList;
@@ -917,11 +892,13 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         // the complete physical aperture as GPU-owned rather than risking a
         // stale CPU upload over an unknown export.
         mirror.mark_gpu_write(0, memory::kPhysicalMemorySize);
+        note_gpu_guest_write(0, memory::kPhysicalMemorySize);
         note_backend_write(texture_dirty, guest_reads, 0, memory::kPhysicalMemorySize);
       } else {
         for (const auto& range : memexport_ranges) {
           const auto address = range.base_address_dwords << 2u;
           mirror.mark_gpu_write(address, range.size_bytes);
+          note_gpu_guest_write(address, range.size_bytes);
           note_backend_write(texture_dirty, guest_reads, address, range.size_bytes);
         }
       }

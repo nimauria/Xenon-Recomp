@@ -398,9 +398,42 @@ void test_decoded_microcode() {
   assert(v.position[0] == 7.0f && !v.valid);
 }
 
+// A plan built once and reused - the renderer's path - evaluates every vertex
+// exactly as a one-shot evaluation does, and carries the support verdict.
+void test_plan_reuse_matches_one_shot() {
+  Memory memory;
+  write_vertices(memory, {{0, 0, 0, 1}, {208, 0, 0, 1}, {0, 144, 0, 1}, {64, 32, 0, 1}}, false);
+  Constants constants;
+  constants.vertex_fetch(0, 0, kVertexData, 0);
+  const auto vs = passthrough();
+  const VertexEvaluatorPlan plan(vs);
+  assert(plan.supported() && plan.unsupported_reason().empty());
+  for (int pass = 0; pass < 3; ++pass) {
+    for (std::uint32_t vertex = 0; vertex < 4; ++vertex) {
+      const auto once = VertexPositionEvaluator::evaluate(vs, constants.bytes, vertex, memory.reader());
+      const auto planned =
+          VertexPositionEvaluator::evaluate(plan, constants.bytes, vertex, memory.reader());
+      assert(once.valid == planned.valid);
+      assert(once.position == planned.position && once.pixel == planned.pixel);
+    }
+    constants.draw_state_float(11, 2.0f * float(pass + 1));  // the constants change between draws
+  }
+  // An unsupported shader's plan says why, and evaluation reports it.
+  auto sampled = passthrough();
+  DecodedInstruction fetch{};
+  fetch.kind = ShaderInstructionKind::TextureFetch;
+  fetch.texture_fetch.opcode = 1u;  // tfetch: no CPU evaluation
+  sampled.instructions.push_back(fetch);
+  const VertexEvaluatorPlan unsupported(sampled);
+  assert(!unsupported.supported() && !unsupported.unsupported_reason().empty());
+  const auto refused = VertexPositionEvaluator::evaluate(unsupported, constants.bytes, 0, memory.reader());
+  assert(!refused.valid && refused.error == unsupported.unsupported_reason());
+}
+
 }  // namespace
 
 int main() {
+  test_plan_reuse_matches_one_shot();
   test_passthrough_reaches_its_pixels();
   test_endian_and_float2();
   test_constant_transform();

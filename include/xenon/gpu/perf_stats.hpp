@@ -34,6 +34,12 @@
 //               and the time spent in them
 //   bindings    draws that reused an earlier draw's descriptor tables / set,
 //               and draws that copied or wrote their own
+//   indices     processed-index cache: draws whose converted indices were
+//               reused, draws that converted them, and the MiB converted
+//   bounds      draws whose vertices ran on the CPU to bound their render
+//               target (VertexPositionEvaluator), and the time spent
+//   edram cpu   ownership changes that went through canonical EDRAM on the
+//               CPU (readback, repack, upload): count, MiB and time
 //   holds       times the frontend had to wait for a busy backend, by cause:
 //               a guest-visible barrier (interrupt, flip, wait, IM_STORE), a
 //               sync point, a read of guest memory behind a deferred write,
@@ -79,6 +85,14 @@ enum class Counter : std::uint32_t {
   GpuBusyNs,
   GpuIdleNs,
   GpuBatches,
+  IndexCacheHits,
+  IndexCacheMisses,
+  IndexBytesConverted,
+  BoundsEvaluations,
+  BoundsNs,
+  EdramCpuTransfers,
+  EdramCpuBytes,
+  EdramCpuNs,
   Count,
 };
 
