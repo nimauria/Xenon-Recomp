@@ -395,7 +395,17 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     std::uint32_t draw_slot = 0;
     if (!queue.reserve_slot(frame_index, draw_slot)) return false;
     PreparedDraw prepared{};
-    prepared.tables = resources.prepare_draw(frame_index, draw_slot);
+    prepared.tables = resources.prepare_draw(frame_index, draw_slot, queue.batch_serial());
+    if (prepared.tables.exhausted) {
+      // The batch's descriptor heaps are full: submit it and prepare the draw
+      // in the next one (whose heaps start empty).
+      if (!queue.flush() || !queue.reserve_slot(frame_index, draw_slot)) return false;
+      prepared.tables = resources.prepare_draw(frame_index, draw_slot, queue.batch_serial());
+    }
+    if (!prepared.tables.valid) {
+      error = named("D3D12 draw descriptor tables could not be prepared");
+      return false;
+    }
     std::size_t index_offset = 0;
     bool resident_index = false;
     if (!upload_draw_indices(draw, frame_index, index_offset, resident_index)) {

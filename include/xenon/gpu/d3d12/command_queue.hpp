@@ -29,7 +29,12 @@ namespace xenon::gpu::d3d12 {
 class CommandQueue {
  public:
   static constexpr std::uint32_t kFrameCount = 3;
-  static constexpr std::uint32_t kBatchCommandCount = 64;
+  // Draws and ordered work a batch holds before it is submitted. A draw's
+  // descriptor tables are allocated only when they change
+  // (ResourceLayout::prepare_draw), so this is no longer tied to the 2048-entry
+  // shader-visible sampler heap: 64 draws a batch meant 16 submissions for a
+  // 1000-draw frame, about a quarter of a draw's host time in draw-bench.
+  static constexpr std::uint32_t kBatchCommandCount = 1024;
 
   CommandQueue() = default;
   ~CommandQueue();
@@ -53,6 +58,9 @@ class CommandQueue {
 
   // Reserves the next draw slot of the open batch (flushing a full batch
   // first) for a draw prepared now and recorded later through record_run().
+  // Identifies the open batch: every begin_batch() that opens one makes a new
+  // value. Descriptor tables written in one batch are reused only within it.
+  [[nodiscard]] std::uint64_t batch_serial() const noexcept { return batch_serial_; }
   [[nodiscard]] bool reserve_slot(std::uint32_t& frame_index, std::uint32_t& slot);
   // Records a run of prepared draws in order with everything before it: on
   // the calling thread into the primary segment, or (`parallel`, with
@@ -141,6 +149,7 @@ class CommandQueue {
   // Owned by the one concurrent waiter (wait_completed_concurrent()).
   void* concurrent_event_{};
   std::uint32_t next_frame_{};
+  std::uint64_t batch_serial_{};
   std::uint32_t current_frame_{UINT32_MAX};
   std::uint64_t next_fence_value_{1};
   std::uint64_t last_submitted_value_{};

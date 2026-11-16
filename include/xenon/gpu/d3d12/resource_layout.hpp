@@ -52,10 +52,21 @@ class ResourceLayout {
     D3D12_GPU_DESCRIPTOR_HANDLE samplers{};
     D3D12_GPU_DESCRIPTOR_HANDLE memory_export{};
     D3D12_GPU_VIRTUAL_ADDRESS constants{};
+    // The batch's descriptor heaps have no room for this draw's new tables:
+    // submit the batch and prepare the draw in the next one.
+    bool exhausted{};
+    bool valid{};
   };
   // Snapshots the staged descriptors and constants for the draw recorded in
-  // `draw_slot` of the batch on `frame_index`. Slots increase within a batch.
-  [[nodiscard]] DrawTables prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot);
+  // `draw_slot` of batch `batch` (CommandQueue::batch_serial()) on
+  // `frame_index`. Slots increase within a batch. Tables are copied into the
+  // frame's heaps only when they differ from the batch's previous draw's.
+  [[nodiscard]] DrawTables prepare_draw(std::uint32_t frame_index, std::uint32_t draw_slot,
+                                        std::uint64_t batch);
+  // Table regions a frame's shader-visible heaps hold: the sampler heap is
+  // capped at 2048 descriptors.
+  static constexpr std::uint32_t kResourceRegions = 2048;
+  static constexpr std::uint32_t kSamplerRegions = 2048u / kSamplerCount;
   [[nodiscard]] std::span<std::byte> constants() noexcept {
     return constants_staging_;
   }
@@ -85,14 +96,16 @@ class ResourceLayout {
   }
 
  private:
-  struct DrawBindings {
-    Buffer constants{};
-    std::span<std::byte> constants_mapping{};
-  };
   struct FrameBindings {
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> resource_heap{};
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> sampler_heap{};
-    std::array<DrawBindings, CommandQueue::kBatchCommandCount> draws{};
+    // Every draw slot's constants, kConstantBufferBytes apart.
+    Buffer constants{};
+    std::span<std::byte> constants_mapping{};
+    // Table regions written in `batch` so far.
+    std::uint64_t batch{UINT64_MAX};
+    std::uint32_t resource_regions{};
+    std::uint32_t sampler_regions{};
   };
   [[nodiscard]] D3D12_GPU_DESCRIPTOR_HANDLE resource_table(std::uint32_t frame_index,
                                                            std::uint32_t region) const noexcept;
@@ -129,6 +142,7 @@ class ResourceLayout {
     std::uint32_t slot{};
     std::uint32_t region{};
     std::uint64_t generation{};
+    std::uint64_t batch{UINT64_MAX};
   };
   LastTables last_resources_{};
   LastTables last_samplers_{};
