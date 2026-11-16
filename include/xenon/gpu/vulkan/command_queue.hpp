@@ -23,7 +23,10 @@ namespace xenon::gpu::vulkan {
 class CommandQueue {
  public:
   static constexpr std::uint32_t kFrameCount = 3;
-  static constexpr std::uint32_t kBatchCommandCount = 64;
+  // Draws and ordered work a batch holds before it is submitted: each slot has
+  // its own descriptor set and constants (ResourceLayout), and 64 a batch
+  // meant 16 submissions for a 1000-draw frame (draw-bench).
+  static constexpr std::uint32_t kBatchCommandCount = 1024;
 
   CommandQueue() = default;
   ~CommandQueue();

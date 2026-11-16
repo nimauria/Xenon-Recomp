@@ -68,6 +68,7 @@
 #include "xenon/gpu/primitive_processor.hpp"
 #include "xenon/gpu/index_cache.hpp"
 #include "xenon/gpu/guest_memory_segments.hpp"
+#include "xenon/gpu/resident_range_allocator.hpp"
 #include "xenon/gpu/resource_ir.hpp"
 #include "xenon/gpu/gpu_resolve.hpp"
 #include "xenon/gpu/perf_stats.hpp"
@@ -216,6 +217,30 @@ class BackendCore {
   std::array<Buffer, CommandQueue::kFrameCount> transient_uploads{};
   std::array<std::span<std::byte>, CommandQueue::kFrameCount>
       transient_upload_mappings{};
+  // GPU-resident processed indices: a cached conversion is copied here once
+  // and drawn from until the index cache drops it (attach_resident_indices).
+  static constexpr std::size_t kResidentIndexBytes = ProcessedIndexCache::kDefaultCapacityBytes;
+  Buffer resident_indices{};
+  std::span<std::byte> resident_index_mapping{};
+  ResidentRangeAllocator resident_allocator{};
+  struct ResidentRange {
+    std::uint64_t offset{};
+    std::uint64_t size{};
+  };
+  std::unordered_map<std::uint64_t, ResidentRange> resident_ranges{};
+  std::uint64_t next_resident_key{1};
+  // Called by the backend once `resident_indices` is created and mapped: the
+  // cache's dropped batches release their ranges once the GPU is past them.
+  void attach_resident_indices() {
+    resident_allocator.reset(resident_index_mapping.size());
+    index_cache.set_erase_listener([this](const ProcessedPrimitiveBatch& batch) {
+      const auto found = resident_ranges.find(batch.resident_key);
+      if (found == resident_ranges.end()) return;
+      resident_allocator.release(found->second.offset, found->second.size,
+                                 queue.retirement_value());
+      resident_ranges.erase(found);
+    });
+  }
   std::array<TransientArena, CommandQueue::kFrameCount> transient_arenas = [] {
     std::array<TransientArena, CommandQueue::kFrameCount> arenas;
     for (auto& arena : arenas) arena.reset_capacity(kTransientUploadBytes);
@@ -1523,7 +1548,10 @@ class BackendCore {
       return nullptr;
     }
     perf::add(perf::Counter::IndexBytesConverted, batch->indices.size() * sizeof(std::uint32_t));
-    if (cacheable) index_cache.insert(key, source_bytes, epoch, batch);
+    if (cacheable) {
+      batch->resident_key = next_resident_key++;
+      index_cache.insert(key, source_bytes, epoch, batch);
+    }
     draw_batch = std::move(batch);
     return draw_batch.get();
   }
@@ -2425,12 +2453,37 @@ class BackendCore {
     return true;
   }
 
-  // Copies an indexed batch into its command batch's transient upload arena
-  // and returns the 4-byte aligned offset it was written at. Called from
-  // inside record_draw(), while the batch is open.
+  // Places an indexed batch's indices where the draw reads them: a cached
+  // batch in the GPU-resident buffer (`resident` set; copied there on its
+  // first draw only), anything else - or a cached batch the resident buffer
+  // has no room for - in its command batch's transient upload arena. Returns
+  // the offset in the chosen buffer. Called from inside record_draw(), while
+  // the batch is open.
   bool upload_draw_indices(const DrawRecording& draw, std::uint32_t frame_index,
-                           std::size_t& offset) {
+                           std::size_t& offset, bool& resident) {
+    resident = false;
     if (!draw.batch.indexed) return true;
+    if (draw.batch.resident_key && !resident_index_mapping.empty()) {
+      auto found = resident_ranges.find(draw.batch.resident_key);
+      if (found == resident_ranges.end()) {
+        resident_allocator.reclaim(queue.completed_value());
+        if (const auto placed = resident_allocator.allocate(draw.index_byte_size, 256u)) {
+          std::memcpy(resident_index_mapping.data() + *placed, draw.batch.indices.data(),
+                      draw.index_byte_size);
+          perf::add(perf::Counter::ResidentIndexBytes, draw.index_byte_size);
+          found = resident_ranges.emplace(draw.batch.resident_key,
+                                          ResidentRange{*placed, draw.index_byte_size})
+                      .first;
+        }
+      }
+      if (found != resident_ranges.end()) {
+        perf::add(perf::Counter::ResidentIndexDraws, 1u);
+        offset = static_cast<std::size_t>(found->second.offset);
+        resident = true;
+        return true;
+      }
+      // No room: this draw uploads them as an uncached one would.
+    }
     const auto allocation = transient_arenas[frame_index].allocate(
         queue.retirement_value(), draw.index_byte_size);
     if (!allocation) {

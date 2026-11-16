@@ -395,9 +395,20 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     std::uint32_t draw_slot = 0;
     if (!queue.reserve_slot(frame_index, draw_slot)) return false;
     PreparedDraw prepared{};
-    prepared.tables = resources.prepare_draw(frame_index, draw_slot);
+    prepared.tables = resources.prepare_draw(frame_index, draw_slot, queue.batch_serial());
+    if (prepared.tables.exhausted) {
+      // The batch's descriptor heaps are full: submit it and prepare the draw
+      // in the next one (whose heaps start empty).
+      if (!queue.flush() || !queue.reserve_slot(frame_index, draw_slot)) return false;
+      prepared.tables = resources.prepare_draw(frame_index, draw_slot, queue.batch_serial());
+    }
+    if (!prepared.tables.valid) {
+      error = named("D3D12 draw descriptor tables could not be prepared");
+      return false;
+    }
     std::size_t index_offset = 0;
-    if (!upload_draw_indices(draw, frame_index, index_offset)) {
+    bool resident_index = false;
+    if (!upload_draw_indices(draw, frame_index, index_offset, resident_index)) {
       record_failed = true;
       return true;
     }
@@ -409,7 +420,10 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     prepared.indexed = draw.batch.indexed;
     if (draw.batch.indexed) {
       prepared.index_view.BufferLocation =
-          transient_uploads[frame_index].resource()->GetGPUVirtualAddress() + index_offset;
+          (resident_index ? resident_indices.resource()
+                          : transient_uploads[frame_index].resource())
+              ->GetGPUVirtualAddress() +
+          index_offset;
       prepared.index_view.SizeInBytes = static_cast<UINT>(draw.index_byte_size);
       prepared.index_view.Format = DXGI_FORMAT_R32_UINT;
       prepared.element_count = static_cast<UINT>(draw.batch.indices.size());
@@ -557,6 +571,14 @@ bool Backend::initialize(const ContextConfig& config) {
       return false;
     }
   }
+  if (!impl_->resident_indices.initialize(impl_->context.device(), Impl::kResidentIndexBytes,
+                                          D3D12_HEAP_TYPE_UPLOAD,
+                                          D3D12_RESOURCE_STATE_GENERIC_READ) ||
+      !impl_->resident_indices.map(impl_->resident_index_mapping)) {
+    impl_->error = impl_->resident_indices.error();
+    return false;
+  }
+  impl_->attach_resident_indices();
   // Before any guest depth is written: every D24 write path then stores the
   // guest's exact codes on this device.
   if (!impl_->calibrate_depth_writes()) return false;

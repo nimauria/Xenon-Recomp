@@ -2,7 +2,7 @@
   "content_digest": "sha256:adec1682515be9d095d43e4bda6d60e52987f1807af46a6344bc029a1161387e",
   "description": "Audit candidates and validation problems. Candidates are suggestions for review; they are never applied to tools/coverage/coverage.json automatically.",
   "metadata": {
-    "assessed_commit": "c25533ec6ffffcfdb8856c957ac2fa78d937d971",
+    "assessed_commit": "c88f1f7262be2f68242c336e90ef0ba9ed009714",
     "worktree": "clean"
   },
   "problems": [
@@ -13,7 +13,7 @@
       "severity": "warning"
     },
     {
-      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision c25533ec6fff",
+      "detail": "linux results come from cfb0e8a5b3c7, not the assessed revision c88f1f7262be",
       "id": null,
       "kind": "ci_stale",
       "severity": "warning"

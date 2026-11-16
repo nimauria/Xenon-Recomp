@@ -76,12 +76,16 @@ void ProcessedIndexCache::invalidate(std::uint32_t address, std::uint32_t size) 
 
 void ProcessedIndexCache::clear() {
   stats_.gpu_invalidations += lru_.size();
+  if (erase_listener_)
+    for (const auto& entry : lru_)
+      if (entry.batch) erase_listener_(*entry.batch);
   entries_.clear();
   lru_.clear();
   resident_bytes_ = 0;
 }
 
 void ProcessedIndexCache::erase(Lru::iterator entry) {
+  if (erase_listener_ && entry->batch) erase_listener_(*entry->batch);
   resident_bytes_ -= entry->bytes;
   entries_.erase(entry->key);
   lru_.erase(entry);

@@ -1106,13 +1106,15 @@ int main() {
     // GPU V3: a frame's descriptor tables live in one heap pair, bound once
     // per command list. A draw with nothing rebound since an earlier draw of
     // the same batch reuses that draw's tables; a rebinding gets a fresh copy
-    // in its own slot; a new batch on the frame (slots restart at 0) never
+    // in the next free region of the batch; a new batch on the frame never
     // reuses the previous batch's tables; another frame uses its own heaps.
     {
+      constexpr std::uint64_t kBatch = 100, kNextBatch = 101, kOtherFrameBatch = 102;
       const auto copied_before = resources.tables_copied();
       const auto reused_before = resources.tables_reused();
-      const auto first = resources.prepare_draw(1, 0);
-      const auto second = resources.prepare_draw(1, 1);
+      const auto first = resources.prepare_draw(1, 0, kBatch);
+      const auto second = resources.prepare_draw(1, 1, kBatch);
+      assert(first.valid && second.valid && !first.exhausted);
       assert(first.resources.ptr && first.samplers.ptr && first.constants);
       assert(second.resources.ptr == first.resources.ptr);
       assert(second.samplers.ptr == first.samplers.ptr);
@@ -1121,31 +1123,63 @@ int main() {
       assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
                                     texture.resource(), texture.format(), 1,
                                     texture_descriptor));
-      const auto third = resources.prepare_draw(1, 2);
+      const auto third = resources.prepare_draw(1, 2, kBatch);
       assert(third.resources.ptr == first.resources.ptr);
-      // A new binding (slot 1's view and sampler) is copied at the draw's slot.
+      // A new binding (slot 1's view and sampler) is copied into the batch's
+      // next region.
       assert(resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
                                     texture.resource(), texture.format(), 1,
                                     texture_descriptor));
-      const auto fourth = resources.prepare_draw(1, 3);
+      const auto fourth = resources.prepare_draw(1, 3, kBatch);
       const auto resource_stride = std::uint64_t(xenon::gpu::d3d12::ResourceLayout::kResourceCount) *
                                    context.device()->GetDescriptorHandleIncrementSize(
                                        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      assert(fourth.resources.ptr == first.resources.ptr + 3u * resource_stride);
+      assert(fourth.resources.ptr == first.resources.ptr + resource_stride);
       assert(fourth.samplers.ptr != first.samplers.ptr);
       assert(fourth.memory_export.ptr > fourth.resources.ptr);
-      const auto fifth = resources.prepare_draw(1, 4);
+      // Each draw slot keeps its own constants.
+      assert(fourth.constants == first.constants + 3u * xenon::gpu::kShaderConstantBufferBytes);
+      const auto fifth = resources.prepare_draw(1, 4, kBatch);
       assert(fifth.resources.ptr == fourth.resources.ptr);
-      // A new batch on frame 1: slot 0 is copied again, in its own region.
-      const auto restarted = resources.prepare_draw(1, 0);
+      // A new batch on frame 1 copies its tables again, from the first region.
+      const auto restarted = resources.prepare_draw(1, 0, kNextBatch);
       assert(restarted.resources.ptr == first.resources.ptr);
-      const auto other = resources.prepare_draw(2, 5);
+      // Even at a later slot, a new batch never reuses the last batch's
+      // tables: the regions they lived in are being rewritten.
+      const auto copied_at_restart = resources.tables_copied();
+      const auto late = resources.prepare_draw(1, 9, kNextBatch + 10u);
+      assert(late.valid && resources.tables_copied() == copied_at_restart + 1u);
+      const auto other = resources.prepare_draw(2, 5, kOtherFrameBatch);
       assert(other.resources.ptr ==
-             resources.resource_heap(2)->GetGPUDescriptorHandleForHeapStart().ptr +
-                 5u * resource_stride);
+             resources.resource_heap(2)->GetGPUDescriptorHandleForHeapStart().ptr);
       assert(resources.resource_heap(1) != resources.resource_heap(2));
-      assert(resources.tables_copied() == copied_before + 4u);
+      assert(resources.tables_copied() == copied_before + 5u);
       assert(resources.tables_reused() == reused_before + 3u);
+
+      // A batch holds at most kSamplerRegions distinct sampler tables (the
+      // shader-visible sampler heap's 2048 descriptors): the next draw that
+      // needs one is refused as exhausted - its batch must be submitted - and
+      // the next batch has room again.
+      constexpr std::uint64_t kFullBatch = 200;
+      auto varied = texture_descriptor;
+      std::uint32_t slot = 0;
+      bool exhausted = false;
+      for (std::uint32_t draw = 0;
+           draw <= xenon::gpu::d3d12::ResourceLayout::kSamplerRegions; ++draw) {
+        varied.lod_bias = static_cast<std::int16_t>(draw + 1);  // a new sampler state
+        assert(resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
+                                      texture.resource(), texture.format(), 1, varied));
+        const auto tables = resources.prepare_draw(0, slot++, kFullBatch);
+        if (draw < xenon::gpu::d3d12::ResourceLayout::kSamplerRegions) {
+          assert(tables.valid && !tables.exhausted);
+        } else {
+          assert(!tables.valid && tables.exhausted);
+          exhausted = true;
+        }
+      }
+      assert(exhausted);
+      const auto next = resources.prepare_draw(0, 0, kFullBatch + 1u);
+      assert(next.valid && !next.exhausted);
     }
     xenon::gpu::EdramSurfaceLayout d3d_surface{
         0, 64, 64, xenon::gpu::MsaaSamples::X1, false, false};
@@ -1328,7 +1362,7 @@ int main() {
       std::cerr << "D3D12 pipeline: " << d3d_pipeline.error() << '\n';
     assert(d3d_pipeline_ready);
     std::cout << "D3D12 pipeline ready\n";
-    const auto d3d_tables = resources.prepare_draw(0, 0);
+    const auto d3d_tables = resources.prepare_draw(0, 0, 1);
     assert(d3d_tables.resources.ptr && d3d_tables.samplers.ptr && d3d_tables.constants);
     assert(queue.execute([&](ID3D12GraphicsCommandList* list) {
       list->SetPipelineState(d3d_pipeline.pipeline());

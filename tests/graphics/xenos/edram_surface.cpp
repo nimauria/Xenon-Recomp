@@ -310,6 +310,27 @@ int main() {
   assert(single.hash() != shorter.hash());
   shorter.base_tile++;
   assert(single.identity_hash() != shorter.identity_hash());
+  // Keys are exact: surfaces that differ in any identity field never share
+  // one, and the height only enters hash().
+  {
+    std::vector<std::uint64_t> keys;
+    for (std::uint32_t base : {0u, 1u, 720u, 2047u})
+      for (std::uint32_t pitch : {80u, 640u, 1280u, 8192u})
+        for (auto msaa : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4})
+          for (bool wide : {false, true})
+            for (bool depth : {false, true}) {
+              const EdramSurfaceLayout surface{base, pitch, 368u, msaa, wide, depth};
+              keys.push_back(surface.identity_hash());
+              auto taller = surface;
+              taller.height_pixels = 720u;
+              assert(taller.identity_hash() == surface.identity_hash());
+              assert(taller.hash() != surface.hash());
+              // Callers tag bits 56 and up; the identity never reaches them.
+              assert((surface.identity_hash() >> 56u) == 0u);
+            }
+    std::sort(keys.begin(), keys.end());
+    assert(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+  }
 
   EdramSurfaceLayout msaa2{1008, 1120, 720, MsaaSamples::X2, false, true};
   assert(msaa2.sample_width() == 1120 && msaa2.sample_height() == 1440);

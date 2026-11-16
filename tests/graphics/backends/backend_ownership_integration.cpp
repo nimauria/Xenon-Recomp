@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "xenon/gpu/perf_stats.hpp"
 #include "xenon/gpu/backend_capabilities.hpp"
 #include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_surface.hpp"
@@ -1228,6 +1229,132 @@ void run_dot_products_follow_xenos_zero_rule(Backend& backend, std::string_view 
   std::cout << name << " dot products follow the Xenos 0 * anything = 0 rule: ok\n";
 }
 
+// Indexed draws through a real backend: a DMA index buffer converted once is
+// reused - from the processed-index cache and the GPU-resident index buffer -
+// while its guest bytes are unchanged, and a CPU write to it is seen by the
+// very next draw (the cache must never serve stale indices).
+template <typename Backend>
+void run_indexed_draws_track_index_buffer_writes(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kPitch = 80, kWidth = 32, kHeight = 16;
+  constexpr std::uint32_t kVertices = 0x90000, kIndices = 0x98000;
+  constexpr std::uint32_t kFirst = 0x00600000u, kSecond = 0x00680000u;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  // Pixel-space corners: the left half (0, 1, 2, 3) and the right half's far
+  // edge (4, 5).
+  const std::array<float, 24> vertices{
+      -0.5f, -0.5f, 0.0f, 1.0f,  15.5f, -0.5f, 0.0f, 1.0f,  -0.5f, 15.5f, 0.0f, 1.0f,
+      15.5f, 15.5f, 0.0f, 1.0f,  31.5f, -0.5f, 0.0f, 1.0f,  31.5f, 15.5f, 0.0f, 1.0f};
+  write_guest_bytes(memory, kVertices, vertices.data(), sizeof(vertices));
+  const std::array<float, 6> resolve_rectangle{-0.5f, -0.5f, float(kWidth) - 0.5f,
+                                               -0.5f, -0.5f, float(kHeight) - 0.5f};
+  write_guest_bytes(memory, kResolveVertices, resolve_rectangle.data(), sizeof(resolve_rectangle));
+  // Big-endian 16-bit indices (Swap8In16), as a title stores them.
+  const auto write_indices = [&](std::array<std::uint16_t, 6> indices) {
+    for (auto& index : indices) index = std::uint16_t((index << 8u) | (index >> 8u));
+    write_guest_bytes(memory, kIndices, indices.data(), sizeof(indices));
+  };
+  write_indices({0, 1, 2, 1, 3, 2});
+  Edram edram;
+  edram.reset();
+  const auto vertex_load = decoded_shader_load(ShaderStage::Vertex, 51, fetch_position_vertex_shader());
+  const auto pixel_load = decoded_shader_load(ShaderStage::Pixel, 52, constant_color_pixel_shader());
+
+  backend.begin_submission(memory, edram);
+  assert_backend_ok(backend, "begin_submission");
+  backend.consume(ir::Command{vertex_load});
+  backend.consume(ir::Command{pixel_load});
+  const auto set_draw_state = [&] {
+    write_register(backend, 0x2000, kPitch);
+    write_register(backend, 0x200E, 0u);
+    write_register(backend, 0x200F, kPitch | (8192u << 16u));
+    write_register(backend, 0x2081, 1u << 31u);
+    write_register(backend, 0x2082, kPitch | (8192u << 16u));
+    write_register(backend, 0x2001,
+                   0u | (static_cast<std::uint32_t>(ColorRenderTargetFormat::R8G8B8A8) << 16u));
+    write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::ColorDepth));
+    write_register(backend, 0x2104, 0xFu);
+    write_register(backend, 0x2200, 0u);
+    write_register(backend, 0x2201, 0x00010001u);
+    write_register(backend, 0x2204, 1u << 16u);
+    write_register(backend, 0x2206, 1u << 10u);
+    write_register(backend, 0x2100, 0xFFFFFFu);
+    const auto fetch_constant = ResourceStateTracker::kFetchConstantBase;
+    write_register(backend, fetch_constant, 3u | kVertices);
+    write_register(backend, fetch_constant + 1u,
+                   static_cast<std::uint32_t>(Endian::None) | (24u << 2u));
+  };
+  const auto set_color = [&](std::array<float, 4> color) {
+    for (std::uint32_t i = 0; i < 4; ++i)
+      write_register(backend, 0x4400u + i, std::bit_cast<std::uint32_t>(color[i]));
+  };
+  const auto draw_indexed = [&] {
+    ir::DrawPacket draw{};
+    draw.opcode = Type3Opcode::DrawIndx2;
+    draw.primitive_type = PrimitiveType::TriangleList;
+    draw.source = DrawSource::Dma;
+    draw.index_format = IndexFormat::UInt16;
+    draw.index_count = 6;
+    draw.index_buffer.valid = true;
+    draw.index_buffer.physical_address = kIndices;
+    draw.index_buffer.length_bytes = 12;
+    draw.index_buffer.format = IndexFormat::UInt16;
+    draw.index_buffer.endian = Endian::Swap8In16;
+    draw.vertex_shader = {true, vertex_load.program.hash(), 0};
+    draw.pixel_shader = {true, pixel_load.program.hash(), 0};
+    backend.consume(ir::Command{std::move(draw)});
+    assert_backend_ok(backend, "indexed draw");
+  };
+  const auto resolve_to = [&](std::uint32_t destination) {
+    set_resolve_fetch(backend);
+    write_register(backend, 0x2208, static_cast<std::uint32_t>(EdramMode::Copy));
+    write_register(backend, 0x2318, static_cast<std::uint32_t>(CopyCommand::Raw) << 20u);
+    write_register(backend, 0x2319, destination);
+    write_register(backend, 0x231A, kWidth | (kHeight << 16u));
+    write_register(backend, 0x231B, static_cast<std::uint32_t>(Endian128::None) | (6u << 7u));
+    issue_dummy_draw(backend);
+    guest_observes_resolve(backend);
+    assert_backend_ok(backend, "indexed draw resolve");
+  };
+  const auto pixel = [&](std::uint32_t destination, std::uint32_t x, std::uint32_t y) {
+    return read_guest_word(
+        memory, destination + static_cast<std::uint32_t>(tiled_offset_2d(x, y, kWidth, 4)));
+  };
+  const auto expect = [&](const char* what, std::uint32_t got, std::uint32_t want) {
+    if (got == want) return;
+    std::cerr << name << ": " << what << " is 0x" << std::hex << got << ", not 0x" << want
+              << std::dec << '\n';
+    assert(false);
+  };
+
+  // The left half, twice: the second draw reuses the converted indices.
+  set_draw_state();
+  set_color({1.0f, 0.0f, 0.0f, 1.0f});
+  const auto hits_before = xenon::gpu::perf::peek(xenon::gpu::perf::Counter::IndexCacheHits);
+  const auto resident_before =
+      xenon::gpu::perf::peek(xenon::gpu::perf::Counter::ResidentIndexDraws);
+  draw_indexed();
+  draw_indexed();
+  assert(xenon::gpu::perf::peek(xenon::gpu::perf::Counter::IndexCacheHits) > hits_before);
+  assert(xenon::gpu::perf::peek(xenon::gpu::perf::Counter::ResidentIndexDraws) >=
+         resident_before + 2u);
+  resolve_to(kFirst);
+  expect("left pixel after the first draws", pixel(kFirst, 5, 7), 0xFF0000FFu);
+  expect("right pixel after the first draws", pixel(kFirst, 25, 7), 0u);
+
+  // The title rewrites its index buffer in place: the next draw covers the
+  // right half, in green; the left half keeps its red.
+  write_indices({1, 4, 3, 4, 5, 3});
+  set_draw_state();
+  set_color({0.0f, 1.0f, 0.0f, 1.0f});
+  draw_indexed();
+  resolve_to(kSecond);
+  expect("right pixel after the rewrite", pixel(kSecond, 25, 7), 0xFF00FF00u);
+  expect("left pixel after the rewrite", pixel(kSecond, 5, 7), 0xFF0000FFu);
+  backend.end_submission();
+  std::cout << name << " indexed draws track their index buffer: ok\n";
+}
+
 // Two native color images of one format over the same EDRAM tile: the second
 // takes the tile from the first on the GPU (EdramColorTransfer) rather than
 // through canonical EDRAM, and resolving it yields exactly the EDRAM words the
@@ -1587,6 +1714,11 @@ int main() {
       assert(dots.initialize({.enable_validation = false}));
       run_dot_products_follow_xenos_zero_rule(dots, "Vulkan");
     }
+    {
+      xenon::gpu::vulkan::Backend indexed;
+      assert(indexed.initialize({.enable_validation = false}));
+      run_indexed_draws_track_index_buffer_writes(indexed, "Vulkan");
+    }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command buffer of its own and submitted in order, give
     // the same pixels.
@@ -1677,6 +1809,11 @@ int main() {
       xenon::gpu::d3d12::Backend dots;
       assert(dots.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
       run_dot_products_follow_xenos_zero_rule(dots, "D3D12");
+    }
+    {
+      xenon::gpu::d3d12::Backend indexed;
+      assert(indexed.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+      run_indexed_draws_track_index_buffer_writes(indexed, "D3D12");
     }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command list of its own and submitted in order, give the

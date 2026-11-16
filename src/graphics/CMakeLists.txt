@@ -22,6 +22,7 @@ if(XENON_ENABLE_GRAPHICS)
     xenos/primitive_processor.cpp
     xenos/index_cache.cpp
     xenos/guest_memory_segments.cpp
+    xenos/resident_range_allocator.cpp
     xenos/command_processor.cpp
     xenos/capture.cpp
     xenos/graphics_system.cpp

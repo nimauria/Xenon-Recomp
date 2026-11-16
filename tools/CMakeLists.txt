@@ -67,3 +67,21 @@ if(TARGET xenon_graphics_dxc)
   target_link_libraries(shader-bench PRIVATE xenon_graphics_dxc)
   xenon_enable_warnings(shader-bench)
 endif()
+
+# draw-bench: a deterministic, mission-shaped draw stream through a real
+# native backend - host cost per draw, and a host profile with --profile
+# (development: renderer performance without running a game).
+if(TARGET xenon_graphics_dxc AND (TARGET xenon_graphics_d3d12 OR TARGET xenon_graphics_vulkan))
+  add_executable(draw-bench draw_bench.cpp)
+  target_link_libraries(draw-bench PRIVATE xenon_graphics xenon_logging)
+  if(WIN32 AND TARGET xenon_graphics_d3d12)
+    target_link_libraries(draw-bench PRIVATE xenon_graphics_d3d12)
+    target_compile_definitions(draw-bench PRIVATE XENON_DRAW_BENCH_D3D12=1)
+  endif()
+  if(TARGET xenon_graphics_vulkan)
+    target_link_libraries(draw-bench PRIVATE xenon_graphics_vulkan)
+    target_compile_definitions(draw-bench PRIVATE XENON_DRAW_BENCH_VULKAN=1)
+  endif()
+  xenon_stage_runtime_dependencies(draw-bench)
+  xenon_enable_warnings(draw-bench)
+endif()

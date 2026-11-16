@@ -231,6 +231,7 @@ bool CommandQueue::begin_batch() {
   frame.command_count = 0;
   frame.recording = true;
   current_frame_ = next_frame_;
+  ++batch_serial_;
   // The frame's previous batch has completed (waited for above): read its
   // timestamps before this batch overwrites them, then start timing this one.
   read_timestamps(frame);
