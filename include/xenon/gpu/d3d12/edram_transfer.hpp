@@ -12,6 +12,7 @@
 #include "xenon/gpu/d3d12/command_queue.hpp"
 #include "xenon/gpu/d3d12/depth_target.hpp"
 #include "xenon/gpu/d3d12/render_target.hpp"
+#include "xenon/gpu/edram.hpp"
 #include "xenon/gpu/edram_surface.hpp"
 #include "xenon/gpu/shader_translation.hpp"
 
@@ -26,6 +27,32 @@ struct EdramTransferSourceImage {
   D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_RENDER_TARGET};
   MsaaSamples host_msaa{MsaaSamples::X1};
   EdramTransferEndpoint endpoint{};
+  // Canonical EDRAM (EdramCanonicalStore::source()): the EDRAM image as a raw
+  // buffer at t0 instead of an image; `endpoint` is unused.
+  bool canonical{};
+};
+
+// GPU-resident canonical EDRAM: the 10 MiB EDRAM image in a default-heap
+// buffer the canonical loads read (one raw SRV at t0), filled from the CPU
+// canonical store tile by tile through a persistently mapped upload buffer
+// laid out as EDRAM. upload() records the copies into the queue's open batch;
+// a tile's upload bytes are rewritten only once the GPU has copied the
+// previous ones (each tile remembers the batch that reads it).
+class EdramCanonicalStore {
+ public:
+  [[nodiscard]] bool upload(ID3D12Device* device, CommandQueue& queue, const Edram& edram,
+                            std::span<const std::uint16_t> tiles);
+  [[nodiscard]] EdramTransferSourceImage source() const noexcept;
+  [[nodiscard]] const std::string& error() const noexcept { return error_; }
+
+ private:
+  [[nodiscard]] bool create(ID3D12Device* device);
+  Microsoft::WRL::ComPtr<ID3D12Resource> buffer_{};
+  Microsoft::WRL::ComPtr<ID3D12Resource> upload_{};
+  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_{};
+  std::byte* mapped_{};
+  std::array<std::uint64_t, Edram::kTileCount> tile_busy_until_{};
+  std::string error_{};
 };
 // Null `heap` (with `error` set) when the image has no shader-resource view.
 [[nodiscard]] EdramTransferSourceImage edram_transfer_source(RenderTargetImage& image,
@@ -54,6 +81,14 @@ class EdramColorTransfer {
                              RenderTargetImage& destination,
                              const EdramTransferConstants& constants,
                              std::span<const EdramSurfaceRegion> regions);
+  // Loads canonical EDRAM words (`canonical`, EdramCanonicalStore::source(),
+  // already holding the regions' tiles) into `destination`, for the formats
+  // edram_canonical_load_supported() accepts.
+  [[nodiscard]] bool load_canonical(ID3D12Device* device, CommandQueue& queue,
+                                    const EdramTransferSourceImage& canonical,
+                                    RenderTargetImage& destination,
+                                    const EdramTransferConstants& constants,
+                                    std::span<const EdramSurfaceRegion> regions);
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
@@ -94,12 +129,19 @@ class EdramDepthTransfer {
                              DepthTargetImage& destination,
                              const EdramTransferConstants& constants,
                              std::span<const EdramSurfaceRegion> regions);
+  // As EdramColorTransfer::load_canonical(), into a depth image.
+  [[nodiscard]] bool load_canonical(ID3D12Device* device, CommandQueue& queue,
+                                    const EdramTransferSourceImage& canonical,
+                                    DepthTargetImage& destination,
+                                    const EdramTransferConstants& constants,
+                                    std::span<const EdramSurfaceRegion> regions);
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
   // The pipeline of one pass. `converting` selects the converting shader for
-  // `source` (else the same-format one); `stencil_bit` selects a StencilBit
-  // pass's write mask (ignored otherwise).
+  // `source` (else the same-format one; a canonical source always takes the
+  // canonical load); `stencil_bit` selects a StencilBit pass's write mask
+  // (ignored otherwise).
   [[nodiscard]] ID3D12PipelineState* pipeline(ID3D12Device* device,
                                               const EdramTransferSourceImage& source,
                                               const DepthTargetImage& destination,

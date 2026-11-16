@@ -1,6 +1,10 @@
 #include "xenon/gpu/d3d12/edram_transfer.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 #ifdef XENON_HAS_DXC
 #include "xenon/gpu/dxc_shader_compiler.hpp"
@@ -31,10 +35,120 @@ EdramTransferSourceImage edram_transfer_source(DepthTargetImage& image, std::str
   return source;
 }
 
+bool EdramCanonicalStore::create(ID3D12Device* device) {
+  if (buffer_) return true;
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC desc{};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = Edram::kSize;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  // It rests in COPY_DEST; a load moves it to PIXEL_SHADER_RESOURCE and back.
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&buffer_)))) {
+    error_ = "D3D12 canonical EDRAM buffer creation failed";
+    return false;
+  }
+  heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+  void* mapped = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                             IID_PPV_ARGS(&upload_))) ||
+      FAILED(upload_->Map(0, nullptr, &mapped))) {
+    buffer_.Reset();
+    upload_.Reset();
+    error_ = "D3D12 canonical EDRAM upload buffer creation failed";
+    return false;
+  }
+  mapped_ = static_cast<std::byte*>(mapped);
+  D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+  heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  heap_desc.NumDescriptors = 1;
+  heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  if (FAILED(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap_)))) {
+    buffer_.Reset();
+    upload_.Reset();
+    mapped_ = nullptr;
+    error_ = "D3D12 canonical EDRAM descriptor heap creation failed";
+    return false;
+  }
+  D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+  view.Format = DXGI_FORMAT_R32_TYPELESS;
+  view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  view.Buffer.NumElements = Edram::kSize / 4u;
+  view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+  device->CreateShaderResourceView(buffer_.Get(), &view,
+                                   heap_->GetCPUDescriptorHandleForHeapStart());
+  return true;
+}
+
+bool EdramCanonicalStore::upload(ID3D12Device* device, CommandQueue& queue, const Edram& edram,
+                                 std::span<const std::uint16_t> tiles) {
+  if (tiles.empty()) return true;
+  if (!device || !create(device)) {
+    if (error_.empty()) error_ = "D3D12 canonical EDRAM upload has no device";
+    return false;
+  }
+  // A tile's upload bytes are reused only once the copy reading them is done.
+  std::uint64_t busy = 0;
+  for (const auto tile : tiles) busy = (std::max)(busy, tile_busy_until_[tile % Edram::kTileCount]);
+  if (busy > queue.completed_value()) {
+    if (busy > queue.last_submitted_value() && !queue.flush()) {
+      error_ = queue.error();
+      return false;
+    }
+    if (!queue.wait_for_completion(busy)) {
+      error_ = queue.error();
+      return false;
+    }
+  }
+  // Runs of consecutive tiles, one copy each.
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;  // first tile, count
+  std::vector<std::uint16_t> sorted(tiles.begin(), tiles.end());
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  const auto bytes = edram.bytes();
+  for (const auto tile : sorted) {
+    const auto offset = std::size_t(tile % Edram::kTileCount) * Edram::kTileBytes;
+    std::memcpy(mapped_ + offset, bytes.data() + offset, Edram::kTileBytes);
+    if (!runs.empty() && runs.back().first + runs.back().second == tile)
+      ++runs.back().second;
+    else
+      runs.emplace_back(tile, 1u);
+  }
+  if (!queue.execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t, std::uint32_t) {
+        for (const auto& [first, count] : runs)
+          list->CopyBufferRegion(buffer_.Get(), std::uint64_t(first) * Edram::kTileBytes,
+                                 upload_.Get(), std::uint64_t(first) * Edram::kTileBytes,
+                                 std::uint64_t(count) * Edram::kTileBytes);
+      })) {
+    error_ = queue.error();
+    return false;
+  }
+  const auto retirement = queue.retirement_value();
+  for (const auto tile : sorted) tile_busy_until_[tile] = retirement;
+  return true;
+}
+
+EdramTransferSourceImage EdramCanonicalStore::source() const noexcept {
+  EdramTransferSourceImage source{};
+  source.resource = buffer_.Get();
+  source.heap = heap_.Get();
+  source.state = D3D12_RESOURCE_STATE_COPY_DEST;
+  source.canonical = true;
+  return source;
+}
+
 namespace {
 
 std::uint32_t source_srv_count(const EdramTransferSourceImage& source) noexcept {
-  return source.endpoint.depth ? 2u : 1u;
+  return !source.canonical && source.endpoint.depth ? 2u : 1u;
 }
 
 // Root constants at b0 for the pixel shader, then a table of the source's
@@ -203,7 +317,8 @@ ID3D12PipelineState* EdramColorTransfer::converting_pipeline(
                    (std::uint64_t(source.endpoint.depth) << 16u) |
                    (std::uint64_t(source.endpoint.format) << 24u) |
                    (std::uint64_t(source.host_msaa) << 32u) |
-                   (std::uint64_t(destination.host_msaa()) << 40u);
+                   (std::uint64_t(destination.host_msaa()) << 40u) |
+                   (std::uint64_t(source.canonical) << 48u);
   if (const auto found = converting_pipelines_.find(key); found != converting_pipelines_.end())
     return found->second.Get();
   const auto srv_count = source_srv_count(source);
@@ -213,8 +328,10 @@ ID3D12PipelineState* EdramColorTransfer::converting_pipeline(
   if (!root_signature) return nullptr;
   auto state = create_color_transfer_pipeline(
       device, root_signature,
-      make_edram_converting_color_transfer_shader(source.host_msaa, source.endpoint,
-                                                  destination.guest_format()),
+      source.canonical
+          ? make_edram_canonical_color_load_shader(destination.guest_format())
+          : make_edram_converting_color_transfer_shader(source.host_msaa, source.endpoint,
+                                                        destination.guest_format()),
       destination.transfer_format(), destination.host_msaa(), error_);
   if (!state) return nullptr;
   return converting_pipelines_.emplace(key, std::move(state)).first->second.Get();
@@ -299,6 +416,24 @@ bool EdramColorTransfer::convert(ID3D12Device* device, CommandQueue& queue,
               source.resource, source.heap, source.state, destination, constants, regions);
 }
 
+bool EdramColorTransfer::load_canonical(ID3D12Device* device, CommandQueue& queue,
+                                        const EdramTransferSourceImage& canonical,
+                                        RenderTargetImage& destination,
+                                        const EdramTransferConstants& constants,
+                                        std::span<const EdramSurfaceRegion> regions) {
+  const EdramTransferEndpoint target{false, static_cast<std::uint8_t>(destination.guest_format())};
+  if (!device || !canonical.canonical || !canonical.resource || !canonical.heap ||
+      !destination.resource() || !edram_canonical_load_supported(target)) {
+    error_ = "D3D12 canonical EDRAM load needs the canonical store and a supported color image";
+    return false;
+  }
+  if (regions.empty()) return true;
+  auto* state = converting_pipeline(device, canonical, destination);
+  if (!state) return false;
+  return draw(queue, state, root_signatures_[0].Get(), canonical.resource, canonical.heap,
+              canonical.state, destination, constants, regions);
+}
+
 ID3D12PipelineState* EdramDepthTransfer::pipeline(ID3D12Device* device,
                                                   const EdramTransferSourceImage& source,
                                                   const DepthTargetImage& destination,
@@ -316,7 +451,8 @@ ID3D12PipelineState* EdramDepthTransfer::pipeline(ID3D12Device* device,
                    (std::uint64_t(source.endpoint.format) << 16u) |
                    (std::uint64_t(source_host) << 32u) | (std::uint64_t(destination_host) << 40u) |
                    (std::uint64_t(pass) << 48u) | (std::uint64_t(stencil_bit & 7u) << 56u) |
-                   (std::uint64_t(destination.unorm24_depth_write()) << 60u);
+                   (std::uint64_t(destination.unorm24_depth_write()) << 60u) |
+                   (std::uint64_t(source.canonical) << 63u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end())
     return found->second.Get();
   const auto srv_count = source_srv_count(source);
@@ -326,10 +462,12 @@ ID3D12PipelineState* EdramDepthTransfer::pipeline(ID3D12Device* device,
   if (!root_signature) return nullptr;
   const auto write = destination.unorm24_depth_write();
   const auto pixel =
-      converting ? make_edram_converting_depth_transfer_shader(
-                       source_host, source.endpoint, destination.guest_format(), pass, write)
-                 : make_edram_depth_transfer_shader(source_host, pass,
-                                                    destination.guest_format(), write);
+      source.canonical
+          ? make_edram_canonical_depth_load_shader(destination.guest_format(), pass, write)
+      : converting ? make_edram_converting_depth_transfer_shader(
+                         source_host, source.endpoint, destination.guest_format(), pass, write)
+                   : make_edram_depth_transfer_shader(source_host, pass,
+                                                      destination.guest_format(), write);
   auto state = create_depth_transfer_pipeline(device, root_signature, pixel, format,
                                               destination_host, pass, stencil_bit, error_);
   if (!state) return nullptr;
@@ -438,6 +576,20 @@ bool EdramDepthTransfer::convert(ID3D12Device* device, CommandQueue& queue,
     return false;
   }
   return run(device, queue, source, destination, true, constants, regions);
+}
+
+bool EdramDepthTransfer::load_canonical(ID3D12Device* device, CommandQueue& queue,
+                                        const EdramTransferSourceImage& canonical,
+                                        DepthTargetImage& destination,
+                                        const EdramTransferConstants& constants,
+                                        std::span<const EdramSurfaceRegion> regions) {
+  const EdramTransferEndpoint target{true, static_cast<std::uint8_t>(destination.guest_format())};
+  if (!device || !canonical.canonical || !canonical.resource || !canonical.heap ||
+      !destination.resource() || !edram_canonical_load_supported(target)) {
+    error_ = "D3D12 canonical EDRAM load needs the canonical store and a supported depth image";
+    return false;
+  }
+  return run(device, queue, canonical, destination, true, constants, regions);
 }
 
 }  // namespace xenon::gpu::d3d12

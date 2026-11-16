@@ -1663,6 +1663,86 @@ void run_converting_transfers(Make make, std::string_view name) {
   }
 }
 
+// Canonical EDRAM loads on the GPU (GPU-resident canonical storage): a
+// native image taking tiles that canonical EDRAM holds - first use, or after
+// native state was discarded - gets every guest sample's word from the
+// uploaded EDRAM image, unpacked in a shader, for each format the converting
+// transfer covers and each MSAA mode. Returned to canonical storage (a
+// readback and the CPU's exact pack), every word comes back unchanged.
+template <typename Backend>
+void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kPitch = 80;
+  constexpr std::uint32_t kRows = 16;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  Edram edram;
+  edram.reset();
+  const std::array views{kD24S8View, kD24FS8View, kRgba8View, kR32FloatView, kR16G16FloatView};
+  const std::array<MsaaSamples, 3> modes{MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4};
+  for (const auto& view : views) {
+    for (const auto msaa : modes) {
+      const EdramSurfaceLayout layout{kSurfaceBaseTile, kPitch, kRows, msaa, false, view.depth};
+      const auto samples = 1u << static_cast<unsigned>(msaa);
+      // Words every view holds exactly (finite 16-bit halves), distinct per
+      // sample.
+      const auto seeded = [](std::uint32_t x, std::uint32_t y, std::uint32_t s) -> std::uint32_t {
+        return 0x40000000u | (((x * 7u + y * 37u + s * 91u) & 0xFFu) << 16u) | (y << 8u) | x;
+      };
+      for (std::uint32_t s = 0; s < samples; ++s)
+        for (std::uint32_t y = 0; y < kRows; ++y)
+          for (std::uint32_t x = 0; x < kPitch; ++x)
+            assert(write_edram_sample(edram, layout, x, y, {seeded(x, y, s), 0u}, s));
+      backend.begin_submission(memory, edram);
+      assert_backend_ok(backend, "begin_submission");
+      // Everything canonical: the draw below loads the tiles.
+      assert(backend.invalidate_edram_native_state());
+      const auto loads_before = backend.performance_counters().gpu_canonical_edram_loads;
+      write_register(backend, 0x2000, kPitch | (static_cast<std::uint32_t>(msaa) << 16u));
+      write_register(backend, 0x200E, 0u);
+      write_register(backend, 0x200F, kPitch | (kRows << 16u));
+      write_register(backend, 0x2081, 1u << 31u);
+      write_register(backend, 0x2082, kPitch | (kRows << 16u));
+      write_register(backend, view.depth ? 0x2002 : 0x2001,
+                     kSurfaceBaseTile | (std::uint32_t(view.format) << 16u));
+      write_register(backend, 0x2208,
+                     static_cast<std::uint32_t>(view.depth ? EdramMode::DepthOnly
+                                                           : EdramMode::ColorDepth));
+      write_register(backend, 0x2104, view.depth ? 0u : 0xFu);
+      write_register(backend, 0x2200, view.depth ? (1u << 1u) | (1u << 2u) : 0u);
+      issue_dummy_draw(backend);
+      assert_backend_ok(backend, "draw loading canonical tiles");
+      if (backend.performance_counters().gpu_canonical_edram_loads <= loads_before) {
+        std::cerr << name << ' ' << view.label << " x" << samples
+                  << ": the canonical tiles were not loaded on the GPU\n";
+        assert(false);
+      }
+      // The CPU copy is overwritten; only the native image holds the words.
+      for (std::uint32_t s = 0; s < samples; ++s)
+        for (std::uint32_t y = 0; y < kRows; ++y)
+          for (std::uint32_t x = 0; x < kPitch; ++x)
+            assert(write_edram_sample(edram, layout, x, y, {0xDEADBEEFu, 0u}, s));
+      assert(backend.make_edram_canonical());
+      assert_backend_ok(backend, "returning the tiles to canonical storage");
+      std::uint32_t mismatches = 0;
+      for (std::uint32_t s = 0; s < samples; ++s) {
+        for (std::uint32_t y = 0; y < kRows; ++y) {
+          for (std::uint32_t x = 0; x < kPitch; ++x) {
+            const auto word = read_edram_sample(edram, layout, x, y, s)[0];
+            if (word == seeded(x, y, s)) continue;
+            if (++mismatches <= 6u)
+              std::cerr << name << ' ' << view.label << " x" << samples << " sample " << s
+                        << " at (" << x << ',' << y << "): 0x" << std::hex << word
+                        << ", loaded 0x" << seeded(x, y, s) << std::dec << '\n';
+          }
+        }
+      }
+      assert(mismatches == 0);
+      backend.end_submission();
+    }
+  }
+  std::cout << name << " canonical EDRAM loads on the GPU: ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -1718,6 +1798,11 @@ int main() {
       xenon::gpu::vulkan::Backend indexed;
       assert(indexed.initialize({.enable_validation = false}));
       run_indexed_draws_track_index_buffer_writes(indexed, "Vulkan");
+    }
+    {
+      xenon::gpu::vulkan::Backend canonical;
+      assert(canonical.initialize({.enable_validation = false}));
+      run_canonical_gpu_loads(canonical, "Vulkan");
     }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command buffer of its own and submitted in order, give
@@ -1814,6 +1899,11 @@ int main() {
       xenon::gpu::d3d12::Backend indexed;
       assert(indexed.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
       run_indexed_draws_track_index_buffer_writes(indexed, "D3D12");
+    }
+    {
+      xenon::gpu::d3d12::Backend canonical;
+      assert(canonical.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+      run_canonical_gpu_loads(canonical, "D3D12");
     }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command list of its own and submitted in order, give the

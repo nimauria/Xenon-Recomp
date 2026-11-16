@@ -80,7 +80,8 @@ std::string take_line(double seconds) {
                 "(%.0f ms) | holds barrier %llu sync %llu read %llu drain %llu | bindings reused "
                 "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
                 "(%llu batches) | indices reused %llu converted %llu (%.1f MB) | bounds %llu "
-                "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | rptr "
+                "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | edram "
+                "gpu %llu (%.1f MB, %.1f ms) | rptr "
                 "early %llu held %llu | runs 0:%llu 1:%llu 2-3:%llu 4-15:%llu 16-63:%llu "
                 "64-255:%llu 256+:%llu\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
@@ -123,6 +124,9 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::EdramCpuTransfers)),
                 static_cast<double>(take(Counter::EdramCpuBytes)) / (1024.0 * 1024.0),
                 ms(take(Counter::EdramCpuNs)),
+                static_cast<unsigned long long>(take(Counter::EdramGpuLoads)),
+                static_cast<double>(take(Counter::EdramGpuLoadBytes)) / (1024.0 * 1024.0),
+                ms(take(Counter::EdramGpuLoadNs)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerEarly)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerHeld)),
                 static_cast<unsigned long long>(take(Counter::DrawRuns0)),

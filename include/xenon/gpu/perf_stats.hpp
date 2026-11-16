@@ -42,6 +42,9 @@
 //               and MiB of indices copied into the resident buffer
 //   edram cpu   ownership changes that went through canonical EDRAM on the
 //               CPU (readback, repack, upload): count, MiB and time
+//   edram gpu   canonical EDRAM loaded into native images on the GPU (tiles
+//               copied as they are, unpacked in a shader): count, MiB of
+//               tiles and the host time to record them
 //   holds       times the frontend had to wait for a busy backend, by cause:
 //               a guest-visible barrier (interrupt, flip, wait, IM_STORE), a
 //               sync point, a read of guest memory behind a deferred write,
@@ -103,6 +106,9 @@ enum class Counter : std::uint32_t {
   EdramCpuTransfers,
   EdramCpuBytes,
   EdramCpuNs,
+  EdramGpuLoads,
+  EdramGpuLoadBytes,
+  EdramGpuLoadNs,
   ReadPointerEarly,
   ReadPointerHeld,
   // Draw-run histogram buckets (note_draw_run()): 0, 1, 2-3, 4-15, 16-63,

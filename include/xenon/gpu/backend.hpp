@@ -45,6 +45,10 @@ struct GpuPerformanceCounters {
   // Tile sets handed from one native image to another on the GPU, without
   // a round trip through canonical EDRAM.
   std::uint64_t direct_edram_transfers{};
+  // Canonical EDRAM loaded into a native image on the GPU (tiles copied as
+  // they are, unpacked in a shader) instead of converted sample by sample on
+  // the CPU and uploaded.
+  std::uint64_t gpu_canonical_edram_loads{};
   // Color resolves done on the GPU out of the image owning their tiles,
   // without flushing it to canonical EDRAM.
   std::uint64_t gpu_resolves{};

@@ -237,7 +237,9 @@ int run(Backend& backend, const Options& options, const PortableSubmissionCaptur
             << " MiB per iteration\n";
   for (const auto& diagnostic : capture.diagnostics) std::cout << "  note: " << diagnostic << "\n";
   if (options.verify)
-    std::cout << "  deterministic: " << (deterministic ? "yes" : "NO - iterations differ") << "\n";
+    std::cout << "  deterministic: " << (deterministic ? "yes" : "NO - iterations differ")
+              << " (EDRAM and resolve destinations hash " << std::hex << first_hash.value_or(0)
+              << std::dec << ")\n";
   if (options.profile) std::cout << "\n" << sampler.report();
   return options.verify && !deterministic ? 3 : 0;
 }

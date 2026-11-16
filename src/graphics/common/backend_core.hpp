@@ -18,6 +18,10 @@
 //     static constexpr bool kEmulatesFrontAndBackCull = ...;
 //     static constexpr bool kSharedBlendFactorConstant = ...;  // one RGBA blend-factor constant
 //     static constexpr bool kSupportsDirectColorTransfer = ...;
+//     static constexpr bool kSupportsDirectDepthTransfer = ...;
+//     // Impl::load_canonical_color/depth() exist (canonical EDRAM loads on
+//     // the GPU, edram_canonical_load_supported() formats):
+//     static constexpr bool kSupportsCanonicalGpuLoad = ...;
 //     // With XENON_HAS_DXC:
 //     static constexpr ShaderBinaryFormat kShaderBinaryFormat = ...;
 //     static constexpr std::string_view kShaderBinaryName = "SPIR-V";
@@ -741,8 +745,76 @@ class BackendCore {
     return true;
   }
 
+  // Canonical EDRAM loaded into a native image on the GPU: the regions'
+  // tiles are copied out of the CPU store as they are (no per-sample work on
+  // the CPU) and each destination sample unpacks its EDRAM word in a shader
+  // (make_edram_canonical_color_load_shader). For the formats
+  // edram_canonical_load_supported() accepts; others take the CPU
+  // conversion below. XENON_EDRAM_GPU_CANONICAL=0 (development A/B) sends
+  // every load through the CPU.
+  static bool canonical_gpu_loads_enabled() {
+    static const bool enabled = [] {
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+      const char* value = std::getenv("XENON_EDRAM_GPU_CANONICAL");
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+      return !(value && value[0] == '0' && value[1] == '\0');
+    }();
+    return enabled;
+  }
+  template <typename Image>
+  [[nodiscard]] bool canonical_gpu_load_applies(const Image& image) const {
+    if constexpr (!Api::kSupportsCanonicalGpuLoad) {
+      return false;
+    } else {
+      constexpr bool depth = std::is_same_v<Image, DepthTargetImage>;
+      return edram && canonical_gpu_loads_enabled() &&
+             edram_canonical_load_supported(
+                 {depth, static_cast<std::uint8_t>(image.guest_format())});
+    }
+  }
+  template <typename Image>
+  bool canonical_to_native_on_gpu(Image& image, std::span<const EdramSurfaceRegion> regions) {
+    if constexpr (!Api::kSupportsCanonicalGpuLoad) {
+      error = named("canonical EDRAM loads on the GPU are unavailable on this backend");
+      return false;
+    } else {
+      const auto started = std::chrono::steady_clock::now();
+      std::vector<std::uint16_t> tiles;
+      for (const auto& region : regions) {
+        const auto covered = covered_edram_tiles(image.surface(), region);
+        tiles.insert(tiles.end(), covered.begin(), covered.end());
+      }
+      std::sort(tiles.begin(), tiles.end());
+      tiles.erase(std::unique(tiles.begin(), tiles.end()), tiles.end());
+      // The mapping's destination half is the image's own surface; the
+      // source half is unused by the canonical shader.
+      const auto constants = make_edram_transfer_constants(image.surface(), image.host_msaa(),
+                                                           image.surface(), image.host_msaa());
+      bool loaded = false;
+      if constexpr (std::is_same_v<Image, DepthTargetImage>)
+        loaded = self().load_canonical_depth(image, *edram, tiles, constants, regions);
+      else
+        loaded = self().load_canonical_color(image, *edram, tiles, constants, regions);
+      if (!loaded) return false;
+      perf::add(perf::Counter::EdramGpuLoads, 1u);
+      perf::add(perf::Counter::EdramGpuLoadBytes, std::uint64_t{tiles.size()} * Edram::kTileBytes);
+      perf::add(perf::Counter::EdramGpuLoadNs,
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count()));
+      ++performance.gpu_canonical_edram_loads;
+      return true;
+    }
+  }
+
   bool canonical_to_color(RenderTargetImage& image,
                           std::span<const EdramSurfaceRegion> regions) {
+    if (canonical_gpu_load_applies(image)) return canonical_to_native_on_gpu(image, regions);
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"color acquire", {"load", "convert", "upload"},
@@ -781,6 +853,7 @@ class BackendCore {
 
   bool canonical_to_depth(DepthTargetImage& image,
                           std::span<const EdramSurfaceRegion> regions) {
+    if (canonical_gpu_load_applies(image)) return canonical_to_native_on_gpu(image, regions);
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"depth acquire", {"load", "-", "upload"},

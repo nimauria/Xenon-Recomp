@@ -68,6 +68,7 @@ struct BackendApi {
   static constexpr bool kSharedBlendFactorConstant = false;
   static constexpr bool kSupportsDirectColorTransfer = true;
   static constexpr bool kSupportsDirectDepthTransfer = true;
+  static constexpr bool kSupportsCanonicalGpuLoad = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;
@@ -146,6 +147,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   EdramColorTransfer edram_color_transfer{};
   EdramDepthTransfer edram_depth_transfer{};
+  EdramCanonicalStore edram_canonical_store{};
   GpuResolver gpu_resolver{};
 
   bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolvePlan& plan) {
@@ -229,6 +231,41 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                            std::span<const EdramSurfaceRegion> regions) {
     if (edram_depth_transfer.convert(context.device(), context.physical_device(), queue, source,
                                      destination, constants, regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+
+  // Canonical EDRAM loads on the GPU: `tiles` uploaded from the CPU store,
+  // then unpacked into the image (BackendCore::canonical_to_color()).
+  bool load_canonical_color(RenderTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_color_transfer.load_canonical(context.device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  bool load_canonical_depth(DepthTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_depth_transfer.load_canonical(context.device(), context.physical_device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
       return true;
     error = named(edram_depth_transfer.error());
     return false;

@@ -846,6 +846,10 @@ bool edram_converting_transfer_supported(EdramTransferEndpoint source,
   return converting_transfer_format(source) && converting_transfer_format(destination);
 }
 
+bool edram_canonical_load_supported(EdramTransferEndpoint destination) noexcept {
+  return converting_transfer_format(destination);
+}
+
 std::optional<EdramTransferSample> edram_transfer_source(
     const EdramTransferConstants& constants, std::uint32_t x, std::uint32_t y,
     std::uint32_t destination_host_sample) noexcept {

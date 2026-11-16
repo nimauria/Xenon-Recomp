@@ -29,6 +29,17 @@ EdramTransferEndpoint endpoint_of(const RenderTargetImage& image) noexcept {
 EdramTransferEndpoint endpoint_of(const DepthTargetImage& image) noexcept {
   return {true, static_cast<std::uint8_t>(image.guest_format())};
 }
+EdramTransferEndpoint endpoint_of(const CanonicalEdramSource&) noexcept { return {}; }
+
+std::uint32_t layout_kind(const RenderTargetImage&) noexcept {
+  return EdramTransferLayouts::kColorSource;
+}
+std::uint32_t layout_kind(const DepthTargetImage&) noexcept {
+  return EdramTransferLayouts::kDepthSource;
+}
+std::uint32_t layout_kind(const CanonicalEdramSource&) noexcept {
+  return EdramTransferLayouts::kCanonicalSource;
+}
 
 // The descriptor set a transfer reads its source through: a color image's
 // transfer view (integer for 16-bit float storage), a depth image's planes.
@@ -37,6 +48,9 @@ VkDescriptorSet transfer_set(RenderTargetImage& source, VkDescriptorSetLayout la
 }
 VkDescriptorSet transfer_set(DepthTargetImage& source, VkDescriptorSetLayout layout) {
   return source.sampled_descriptor_set(layout);
+}
+VkDescriptorSet transfer_set(CanonicalEdramSource& source, VkDescriptorSetLayout) {
+  return source.set;
 }
 
 // Makes a source image readable by the transfer's fragment shader, and
@@ -79,6 +93,10 @@ void begin_sampling(VkCommandBuffer command, DepthTargetImage& source) {
 void end_sampling(VkCommandBuffer command, DepthTargetImage& source) {
   source.transition_to_depth_attachment(command);
 }
+// The store's upload makes its copies visible to the fragment shader, and
+// the next upload waits for those reads (EdramCanonicalStore::upload()).
+void begin_sampling(VkCommandBuffer, CanonicalEdramSource&) {}
+void end_sampling(VkCommandBuffer, CanonicalEdramSource&) {}
 
 void draw_transfer_regions(VkCommandBuffer command, std::span<const EdramSurfaceRegion> regions) {
   for (const auto& region : regions) {
@@ -213,7 +231,7 @@ EdramTransferLayouts::~EdramTransferLayouts() {
 }
 
 bool EdramTransferLayouts::create(VkDevice device, std::string& error) {
-  if (pipeline_layouts_[0] && pipeline_layouts_[1]) return true;
+  if (pipeline_layouts_[0] && pipeline_layouts_[1] && pipeline_layouts_[2]) return true;
   device_ = device;
   const VkDescriptorSetLayoutBinding color_binding{16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
                                                    RenderTargetImage::kSampledSourceStages,
@@ -224,11 +242,14 @@ bool EdramTransferLayouts::create(VkDevice device, std::string& error) {
       VkDescriptorSetLayoutBinding{17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
                                    DepthTargetImage::kSampledSourceStages, nullptr}};
   const VkPushConstantRange constants{VK_SHADER_STAGE_FRAGMENT_BIT, 0, constant_bytes_};
-  for (std::size_t kind = 0; kind < 2; ++kind) {
+  for (std::size_t kind = 0; kind < 3; ++kind) {
     if (pipeline_layouts_[kind]) continue;
     VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    set_info.bindingCount = kind ? static_cast<std::uint32_t>(depth_bindings.size()) : 1u;
-    set_info.pBindings = kind ? depth_bindings.data() : &color_binding;
+    set_info.bindingCount =
+        kind == kDepthSource ? static_cast<std::uint32_t>(depth_bindings.size()) : 1u;
+    set_info.pBindings = kind == kDepthSource    ? depth_bindings.data()
+                         : kind == kColorSource ? &color_binding
+                                                : &kCanonicalBinding;
     if (!set_layouts_[kind] &&
         vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layouts_[kind]) !=
             VK_SUCCESS) {
@@ -258,7 +279,8 @@ EdramColorTransfer::~EdramColorTransfer() {
 
 VkPipeline EdramColorTransfer::pipeline(VkDevice device, EdramTransferEndpoint source,
                                         MsaaSamples source_host,
-                                        const RenderTargetImage& destination, bool converting) {
+                                        const RenderTargetImage& destination, bool converting,
+                                        bool canonical) {
 #ifndef XENON_HAS_DXC
   error_ = "Vulkan EDRAM transfer requires DXC";
   return VK_NULL_HANDLE;
@@ -272,17 +294,22 @@ VkPipeline EdramColorTransfer::pipeline(VkDevice device, EdramTransferEndpoint s
                                      (std::uint64_t(source.depth) << 41u) |
                                      (std::uint64_t(source.format) << 44u) |
                                      (std::uint64_t(destination.guest_format()) << 52u)
-                               : 0u);
+                               : 0u) |
+                   (std::uint64_t(canonical) << 60u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end()) return found->second;
   device_ = device;
   if (!layouts_.create(device, error_)) return VK_NULL_HANDLE;
-  const auto pixel = converting ? make_edram_converting_color_transfer_shader(
-                                      source_host, source, destination.guest_format())
-                                : make_edram_color_transfer_shader(
-                                      source_host, destination.transfer_format() !=
-                                                       destination.format());
+  const auto pixel = canonical ? make_edram_canonical_color_load_shader(destination.guest_format())
+                     : converting ? make_edram_converting_color_transfer_shader(
+                                        source_host, source, destination.guest_format())
+                                  : make_edram_color_transfer_shader(
+                                        source_host, destination.transfer_format() !=
+                                                         destination.format());
+  const auto kind = canonical      ? EdramTransferLayouts::kCanonicalSource
+                    : source.depth ? EdramTransferLayouts::kDepthSource
+                                   : EdramTransferLayouts::kColorSource;
   const auto pipeline =
-      create_transfer_pipeline(device, layouts_.pipeline_layout(source.depth), pixel, false,
+      create_transfer_pipeline(device, layouts_.pipeline_layout(kind), pixel, false,
                                format, false, destination_host,
                                EdramDepthTransferPass::Depth, error_);
   if (!pipeline) return VK_NULL_HANDLE;
@@ -297,11 +324,13 @@ bool EdramColorTransfer::run(VkDevice device, CommandQueue& queue, Source& sourc
                              const EdramTransferConstants& constants,
                              std::span<const EdramSurfaceRegion> regions) {
   if (regions.empty()) return true;
+  constexpr bool canonical = std::is_same_v<Source, CanonicalEdramSource>;
   const auto endpoint = endpoint_of(source);
-  const auto state = pipeline(device, endpoint, source.host_msaa(), destination, converting);
+  const auto state =
+      pipeline(device, endpoint, source.host_msaa(), destination, converting, canonical);
   if (!state) return false;
-  const auto layout = layouts_.pipeline_layout(endpoint.depth);
-  const auto source_set = transfer_set(source, layouts_.set_layout(endpoint.depth));
+  const auto layout = layouts_.pipeline_layout(layout_kind(source));
+  const auto source_set = transfer_set(source, layouts_.set_layout(layout_kind(source)));
   if (!source_set) {
     error_ = source.error();
     return false;
@@ -375,6 +404,19 @@ bool EdramColorTransfer::convert(VkDevice device, CommandQueue& queue, DepthTarg
   return run(device, queue, source, destination, true, constants, regions);
 }
 
+bool EdramColorTransfer::load_canonical(VkDevice device, CommandQueue& queue,
+                                        CanonicalEdramSource source,
+                                        RenderTargetImage& destination,
+                                        const EdramTransferConstants& constants,
+                                        std::span<const EdramSurfaceRegion> regions) {
+  if (!device || !source.set || !destination.image() ||
+      !edram_canonical_load_supported(endpoint_of(destination))) {
+    error_ = "Vulkan canonical EDRAM load needs the canonical store and a supported color image";
+    return false;
+  }
+  return run(device, queue, source, destination, true, constants, regions);
+}
+
 EdramDepthTransfer::~EdramDepthTransfer() {
   if (!device_) return;
   for (const auto& [key, pipeline] : pipelines_) vkDestroyPipeline(device_, pipeline, nullptr);
@@ -383,7 +425,7 @@ EdramDepthTransfer::~EdramDepthTransfer() {
 VkPipeline EdramDepthTransfer::pipeline(VkDevice device, EdramTransferEndpoint source,
                                         MsaaSamples source_host,
                                         const DepthTargetImage& destination, bool converting,
-                                        EdramDepthTransferPass pass) {
+                                        EdramDepthTransferPass pass, bool canonical) {
 #ifndef XENON_HAS_DXC
   error_ = "Vulkan EDRAM depth transfer requires DXC";
   return VK_NULL_HANDLE;
@@ -397,18 +439,23 @@ VkPipeline EdramDepthTransfer::pipeline(VkDevice device, EdramTransferEndpoint s
                                      (std::uint64_t(source.format) << 46u) |
                                      (std::uint64_t(destination.guest_format()) << 54u)
                                : 0u) |
-                   (std::uint64_t(destination.unorm24_depth_write()) << 63u);
+                   (std::uint64_t(destination.unorm24_depth_write()) << 63u) |
+                   (std::uint64_t(canonical) << 62u);
   if (const auto found = pipelines_.find(key); found != pipelines_.end()) return found->second;
   device_ = device;
   if (!layouts_.create(device, error_)) return VK_NULL_HANDLE;
   const auto write = destination.unorm24_depth_write();
   const auto pixel =
-      converting ? make_edram_converting_depth_transfer_shader(
-                       source_host, source, destination.guest_format(), pass, write)
-                 : make_edram_depth_transfer_shader(source_host, pass,
-                                                    destination.guest_format(), write);
+      canonical ? make_edram_canonical_depth_load_shader(destination.guest_format(), pass, write)
+      : converting ? make_edram_converting_depth_transfer_shader(
+                         source_host, source, destination.guest_format(), pass, write)
+                   : make_edram_depth_transfer_shader(source_host, pass,
+                                                      destination.guest_format(), write);
+  const auto kind = canonical      ? EdramTransferLayouts::kCanonicalSource
+                    : source.depth ? EdramTransferLayouts::kDepthSource
+                                   : EdramTransferLayouts::kColorSource;
   const auto pipeline = create_transfer_pipeline(
-      device, layouts_.pipeline_layout(source.depth), pixel,
+      device, layouts_.pipeline_layout(kind), pixel,
       pass == EdramDepthTransferPass::DepthAndStencil, format, true, destination_host, pass,
       error_);
   if (!pipeline) return VK_NULL_HANDLE;
@@ -440,19 +487,21 @@ bool EdramDepthTransfer::run(VkDevice device, VkPhysicalDevice physical_device,
     });
   }
   const bool combined = stencil_export_ == 1;
+  constexpr bool canonical = std::is_same_v<Source, CanonicalEdramSource>;
   const auto endpoint = endpoint_of(source);
   const auto first = pipeline(device, endpoint, source.host_msaa(), destination, converting,
                               combined ? EdramDepthTransferPass::DepthAndStencil
-                                       : EdramDepthTransferPass::Depth);
+                                       : EdramDepthTransferPass::Depth,
+                              canonical);
   if (!first) return false;
   VkPipeline stencil_bits = VK_NULL_HANDLE;
   if (!combined) {
     stencil_bits = pipeline(device, endpoint, source.host_msaa(), destination, converting,
-                            EdramDepthTransferPass::StencilBit);
+                            EdramDepthTransferPass::StencilBit, canonical);
     if (!stencil_bits) return false;
   }
-  const auto layout = layouts_.pipeline_layout(endpoint.depth);
-  const auto source_set = transfer_set(source, layouts_.set_layout(endpoint.depth));
+  const auto layout = layouts_.pipeline_layout(layout_kind(source));
+  const auto source_set = transfer_set(source, layouts_.set_layout(layout_kind(source)));
   if (!source_set) {
     error_ = source.error();
     return false;
@@ -544,6 +593,140 @@ bool EdramDepthTransfer::convert(VkDevice device, VkPhysicalDevice physical_devi
     return false;
   }
   return run(device, physical_device, queue, source, destination, true, constants, regions);
+}
+
+bool EdramDepthTransfer::load_canonical(VkDevice device, VkPhysicalDevice physical_device,
+                                        CommandQueue& queue, CanonicalEdramSource source,
+                                        DepthTargetImage& destination,
+                                        const EdramTransferConstants& constants,
+                                        std::span<const EdramSurfaceRegion> regions) {
+  if (!device || !source.set || !destination.image() ||
+      !edram_canonical_load_supported(endpoint_of(destination))) {
+    error_ = "Vulkan canonical EDRAM load needs the canonical store and a supported depth image";
+    return false;
+  }
+  return run(device, physical_device, queue, source, destination, true, constants, regions);
+}
+
+EdramCanonicalStore::~EdramCanonicalStore() {
+  if (!device_) return;
+  if (pool_) vkDestroyDescriptorPool(device_, pool_, nullptr);
+  if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
+}
+
+bool EdramCanonicalStore::create(VkPhysicalDevice physical_device, VkDevice device) {
+  if (set_) return true;
+  device_ = device;
+  if (!buffer_.initialize(physical_device, device, Edram::kSize,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+    error_ = "Vulkan canonical EDRAM buffer: " + buffer_.error();
+    return false;
+  }
+  if (!staging_.initialize(physical_device, device, Edram::kSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+      !staging_.map(mapped_)) {
+    error_ = "Vulkan canonical EDRAM staging buffer: " + staging_.error();
+    return false;
+  }
+  VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  set_info.bindingCount = 1;
+  set_info.pBindings = &EdramTransferLayouts::kCanonicalBinding;
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  pool_info.maxSets = 1;
+  pool_info.poolSizeCount = 1;
+  pool_info.pPoolSizes = &pool_size;
+  if (vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout_) != VK_SUCCESS ||
+      vkCreateDescriptorPool(device, &pool_info, nullptr, &pool_) != VK_SUCCESS) {
+    error_ = "Vulkan canonical EDRAM descriptor creation failed";
+    return false;
+  }
+  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  allocate.descriptorPool = pool_;
+  allocate.descriptorSetCount = 1;
+  allocate.pSetLayouts = &set_layout_;
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  if (vkAllocateDescriptorSets(device, &allocate, &set) != VK_SUCCESS) {
+    error_ = "Vulkan canonical EDRAM descriptor set allocation failed";
+    return false;
+  }
+  const VkDescriptorBufferInfo info{buffer_.buffer(), 0, Edram::kSize};
+  VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+  write.dstSet = set;
+  write.dstBinding = 16;
+  write.descriptorCount = 1;
+  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  write.pBufferInfo = &info;
+  vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+  set_ = set;
+  return true;
+}
+
+bool EdramCanonicalStore::upload(VkPhysicalDevice physical_device, VkDevice device,
+                                 CommandQueue& queue, const Edram& edram,
+                                 std::span<const std::uint16_t> tiles) {
+  if (tiles.empty()) return true;
+  if (!device || !create(physical_device, device)) {
+    if (error_.empty()) error_ = "Vulkan canonical EDRAM upload has no device";
+    return false;
+  }
+  // A tile's staging bytes are reused only once the copy reading them is done.
+  std::uint64_t busy = 0;
+  for (const auto tile : tiles) busy = (std::max)(busy, tile_busy_until_[tile % Edram::kTileCount]);
+  if (busy > queue.completed_value()) {
+    if (busy > queue.last_submitted_value() && !queue.flush()) {
+      error_ = queue.error();
+      return false;
+    }
+    if (!queue.wait_for_completion(busy)) {
+      error_ = queue.error();
+      return false;
+    }
+  }
+  std::vector<std::uint16_t> sorted(tiles.begin(), tiles.end());
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::vector<VkBufferCopy> copies;
+  const auto bytes = edram.bytes();
+  for (const auto tile : sorted) {
+    const auto offset = VkDeviceSize(tile % Edram::kTileCount) * Edram::kTileBytes;
+    std::memcpy(mapped_.data() + offset, bytes.data() + offset, Edram::kTileBytes);
+    if (!copies.empty() && copies.back().srcOffset + copies.back().size == offset)
+      copies.back().size += Edram::kTileBytes;
+    else
+      copies.push_back({offset, offset, Edram::kTileBytes});
+  }
+  if (!queue.execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
+        // Earlier loads' reads finish before the copy, which finishes before
+        // the loads that follow read it.
+        VkBufferMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buffer_.buffer();
+        barrier.size = VK_WHOLE_SIZE;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.bufferMemoryBarrierCount = 1;
+        dependency.pBufferMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(command, &dependency);
+        vkCmdCopyBuffer(command, staging_.buffer(), buffer_.buffer(),
+                        static_cast<std::uint32_t>(copies.size()), copies.data());
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        vkCmdPipelineBarrier2(command, &dependency);
+      })) {
+    error_ = queue.error();
+    return false;
+  }
+  const auto retirement = queue.retirement_value();
+  for (const auto tile : sorted) tile_busy_until_[tile] = retirement;
+  return true;
 }
 
 }  // namespace xenon::gpu::vulkan
