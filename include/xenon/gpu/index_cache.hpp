@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <list>
+#include <map>
 #include <memory>
 #include <unordered_map>
 
@@ -79,6 +80,8 @@ class ProcessedIndexCache {
               std::shared_ptr<const ProcessedPrimitiveBatch> batch);
 
   // The GPU wrote [address, address + size): every entry reading it is gone.
+  // Visits only entries that can overlap it (an address-ordered index), not
+  // every entry: missions resolve thousands of times a second.
   void invalidate(std::uint32_t address, std::uint32_t size);
   void clear();
 
@@ -94,19 +97,26 @@ class ProcessedIndexCache {
   [[nodiscard]] const IndexCacheStats& stats() const noexcept { return stats_; }
 
  private:
+  struct Entry;
+  using Lru = std::list<Entry>;
+  using ByAddress = std::multimap<std::uint32_t, Lru::iterator>;
   struct Entry {
     IndexCacheKey key{};
     std::uint32_t source_bytes{};
     std::uint64_t epoch{};
     std::size_t bytes{};
     std::shared_ptr<const ProcessedPrimitiveBatch> batch;
+    ByAddress::iterator by_address{};
   };
-  using Lru = std::list<Entry>;
   void erase(Lru::iterator entry);
 
   std::size_t capacity_bytes_;
   std::size_t resident_bytes_{};
   Lru lru_;  // most recently used first
+  ByAddress by_address_;  // entries by source address
+  // The largest source range ever cached: an entry overlapping [a, b) starts
+  // after a - this.
+  std::uint32_t max_source_bytes_{};
   std::unordered_map<IndexCacheKey, Lru::iterator, IndexCacheKeyHash> entries_;
   IndexCacheStats stats_{};
   std::function<void(const ProcessedPrimitiveBatch&)> erase_listener_;

@@ -141,6 +141,32 @@ int main() {
     assert((dropped == std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7}));
   }
 
+  // Invalidation through the address index: among thousands of entries only
+  // those overlapping the written range go, including one that starts well
+  // before it, and the cost does not scale with the entries' count.
+  {
+    ProcessedIndexCache many(256u << 20);
+    for (std::uint32_t i = 0; i < 4000; ++i)
+      many.insert(key_at(0x01000000u + i * 0x1000u), 600, coherency.current_epoch(), batch_of(300));
+    // A large buffer, starting long before the write, that reaches into it.
+    many.insert(key_at(0x00800000u, 30000), 60000, coherency.current_epoch(), batch_of(30000));
+    const auto entries_before = many.entries();
+    // Write the bytes of entries 10 and 11 only.
+    many.invalidate(0x01000000u + 10u * 0x1000u + 100u, 0x1000u);
+    assert(many.entries() == entries_before - 2u);
+    assert(!many.find(key_at(0x01000000u + 10u * 0x1000u), 600, coherency, coherency.current_epoch()));
+    assert(!many.find(key_at(0x01000000u + 11u * 0x1000u), 600, coherency, coherency.current_epoch()));
+    assert(many.find(key_at(0x01000000u + 12u * 0x1000u), 600, coherency, coherency.current_epoch()));
+    assert(many.find(key_at(0x00800000u, 30000), 60000, coherency, coherency.current_epoch()));
+    // The long buffer is reached through max_source_bytes_.
+    many.invalidate(0x00800000u + 59999u, 1u);
+    assert(!many.find(key_at(0x00800000u, 30000), 60000, coherency, coherency.current_epoch()));
+    // A write nowhere near any entry visits none of them.
+    const auto before = many.stats().gpu_invalidations;
+    for (int i = 0; i < 10000; ++i) many.invalidate(0x10000000u, 0x10000u);
+    assert(many.stats().gpu_invalidations == before);
+  }
+
   std::cout << "xenon_index_cache_tests: ok\n";
   return 0;
 }
