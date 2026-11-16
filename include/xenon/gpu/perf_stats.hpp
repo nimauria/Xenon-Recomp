@@ -38,6 +38,8 @@
 //               reused, draws that converted them, and the MiB converted
 //   bounds      draws whose vertices ran on the CPU to bound their render
 //               target (VertexPositionEvaluator), and the time spent
+//   resident    indexed draws drawn from GPU-resident indices (no upload),
+//               and MiB of indices copied into the resident buffer
 //   edram cpu   ownership changes that went through canonical EDRAM on the
 //               CPU (readback, repack, upload): count, MiB and time
 //   holds       times the frontend had to wait for a busy backend, by cause:
@@ -90,6 +92,8 @@ enum class Counter : std::uint32_t {
   IndexBytesConverted,
   BoundsEvaluations,
   BoundsNs,
+  ResidentIndexDraws,
+  ResidentIndexBytes,
   EdramCpuTransfers,
   EdramCpuBytes,
   EdramCpuNs,

@@ -30,6 +30,10 @@ struct ProcessedPrimitiveBatch {
   // selects the diagonal and generates the fourth post-transform corner.
   bool requires_rectangle_expansion{};
   bool valid{};
+  // Nonzero for a batch the processed-index cache keeps: the backend may then
+  // hold its indices in a GPU-resident buffer under this key until the cache
+  // drops it (ProcessedIndexCache::set_erase_listener).
+  std::uint64_t resident_key{};
 };
 
 // Converts Xenos draw sources and primitive types once in the common layer.

@@ -20,6 +20,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -81,6 +82,13 @@ class ProcessedIndexCache {
   void invalidate(std::uint32_t address, std::uint32_t size);
   void clear();
 
+  // Called with every batch the cache drops (stale, invalidated, evicted,
+  // replaced or cleared), so state kept for it - its GPU-resident copy - can
+  // be released.
+  void set_erase_listener(std::function<void(const ProcessedPrimitiveBatch&)> listener) {
+    erase_listener_ = std::move(listener);
+  }
+
   [[nodiscard]] std::size_t entries() const noexcept { return entries_.size(); }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return resident_bytes_; }
   [[nodiscard]] const IndexCacheStats& stats() const noexcept { return stats_; }
@@ -101,6 +109,7 @@ class ProcessedIndexCache {
   Lru lru_;  // most recently used first
   std::unordered_map<IndexCacheKey, Lru::iterator, IndexCacheKeyHash> entries_;
   IndexCacheStats stats_{};
+  std::function<void(const ProcessedPrimitiveBatch&)> erase_listener_;
 };
 
 }  // namespace xenon::gpu

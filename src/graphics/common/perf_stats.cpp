@@ -69,7 +69,7 @@ std::string take_line(double seconds) {
                 "(%.0f ms) | holds barrier %llu sync %llu read %llu drain %llu | bindings reused "
                 "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
                 "(%llu batches) | indices reused %llu converted %llu (%.1f MB) | bounds %llu "
-                "(%.1f ms) | edram cpu %llu (%.1f MB, %.0f ms)\n",
+                "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -105,6 +105,8 @@ std::string take_line(double seconds) {
                 static_cast<double>(take(Counter::IndexBytesConverted)) / (1024.0 * 1024.0),
                 static_cast<unsigned long long>(take(Counter::BoundsEvaluations)),
                 ms(take(Counter::BoundsNs)),
+                static_cast<unsigned long long>(take(Counter::ResidentIndexDraws)),
+                static_cast<double>(take(Counter::ResidentIndexBytes)) / (1024.0 * 1024.0),
                 static_cast<unsigned long long>(take(Counter::EdramCpuTransfers)),
                 static_cast<double>(take(Counter::EdramCpuBytes)) / (1024.0 * 1024.0),
                 ms(take(Counter::EdramCpuNs)));

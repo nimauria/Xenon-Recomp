@@ -383,7 +383,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     if (!queue.reserve_slot(frame_index, draw_slot)) return false;
     const auto binding = resources.prepare_draw(frame_index, draw_slot);
     std::size_t index_offset = 0;
-    if (!upload_draw_indices(draw, frame_index, index_offset)) {
+    bool resident_index = false;
+    if (!upload_draw_indices(draw, frame_index, index_offset, resident_index)) {
       record_failed = true;
       return true;
     }
@@ -393,7 +394,8 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     prepared.constants_offset = binding.constants_offset;
     prepared.indexed = draw.batch.indexed;
     if (draw.batch.indexed) {
-      prepared.index_buffer = transient_uploads[frame_index].buffer();
+      prepared.index_buffer = resident_index ? resident_indices.buffer()
+                                             : transient_uploads[frame_index].buffer();
       prepared.index_offset = static_cast<VkDeviceSize>(index_offset);
       prepared.element_count = static_cast<std::uint32_t>(draw.batch.indices.size());
     } else {
@@ -569,6 +571,15 @@ bool Backend::initialize(const ContextConfig& config) {
       return false;
     }
   }
+  if (!impl_->resident_indices.initialize(
+          impl_->context.physical_device(), impl_->context.device(), Impl::kResidentIndexBytes,
+          VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ||
+      !impl_->resident_indices.map(impl_->resident_index_mapping)) {
+    impl_->error = impl_->resident_indices.error();
+    return false;
+  }
+  impl_->attach_resident_indices();
   // Before any guest depth is written: every D24 write path then stores the
   // guest's exact codes on this device.
   if (!impl_->calibrate_depth_writes()) return false;

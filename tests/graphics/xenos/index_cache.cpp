@@ -5,9 +5,11 @@
 
 #include "xenon/gpu/index_cache.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <vector>
 
 using namespace xenon::gpu;
 
@@ -108,6 +110,36 @@ int main() {
   ProcessedIndexCache tiny(1024);
   tiny.insert(key, bytes, coherency.current_epoch(), batch_of(4096));
   assert(tiny.entries() == 0);
+
+  // The erase listener hears every batch the cache drops - stale, GPU
+  // invalidated, evicted, replaced and cleared - so its resident copy can go.
+  {
+    ProcessedIndexCache listened(3 * (1024 * 4 + 512));
+    std::vector<std::uint64_t> dropped;
+    listened.set_erase_listener(
+        [&](const ProcessedPrimitiveBatch& batch) { dropped.push_back(batch.resident_key); });
+    const auto keyed = [](std::uint64_t key) {
+      auto batch = std::make_shared<ProcessedPrimitiveBatch>();
+      batch->indices.resize(1024, 1u);
+      batch->valid = true;
+      batch->resident_key = key;
+      return std::shared_ptr<const ProcessedPrimitiveBatch>(batch);
+    };
+    listened.insert(key_at(0x10000), 2048, coherency.current_epoch(), keyed(1));
+    coherency.mark_write(0x10000, 4);
+    assert(!listened.find(key_at(0x10000), 2048, coherency, coherency.current_epoch()));
+    assert(dropped == std::vector<std::uint64_t>{1});
+    listened.insert(key_at(0x20000), 2048, coherency.current_epoch(), keyed(2));
+    listened.invalidate(0x20000, 4);
+    listened.insert(key_at(0x30000), 2048, coherency.current_epoch(), keyed(3));
+    listened.insert(key_at(0x30000), 2048, coherency.current_epoch(), keyed(4));  // replaces 3
+    listened.insert(key_at(0x40000), 2048, coherency.current_epoch(), keyed(5));
+    listened.insert(key_at(0x50000), 2048, coherency.current_epoch(), keyed(6));
+    listened.insert(key_at(0x60000), 2048, coherency.current_epoch(), keyed(7));  // evicts 4
+    listened.clear();
+    std::sort(dropped.begin(), dropped.end());
+    assert((dropped == std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7}));
+  }
 
   std::cout << "xenon_index_cache_tests: ok\n";
   return 0;
