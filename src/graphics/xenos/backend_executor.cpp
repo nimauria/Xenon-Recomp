@@ -155,6 +155,10 @@ std::uint64_t BackendExecutor::post_sequenced(Task task) {
     queue_.push_back(Item{std::move(task), sequence});
     pending_.fetch_add(1u, std::memory_order_acq_rel);
     ++stats_.posted;
+    // perf_frame.log "queue": how far the backend runs behind.
+    perf::note_max(perf::Counter::BackendQueueMax, queue_.size());
+    perf::add(perf::Counter::BackendQueueDepthSum, queue_.size());
+    perf::add(perf::Counter::BackendPosts, 1u);
   }
   work_.notify_one();
   return sequence;

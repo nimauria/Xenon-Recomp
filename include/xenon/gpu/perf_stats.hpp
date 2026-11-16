@@ -55,6 +55,15 @@
 //               held write-back still pending)
 //   runs        draw runs - the draws between two resolves - by size: how
 //               much work each render pass gives a native batch
+//   queue       backend work queue: the deepest it got (tasks waiting) and
+//               its mean depth when work was posted
+//
+// Frame timeline (XENON_FRAME_TIMELINE=1, or with XENON_HOST_PROFILE):
+// frame_timeline.log gets one line per presented frame - when it was
+// presented, the interval since the last, and for the work between the two
+// the draws, resolves, GPU busy and idle time, backend time, frontend waits
+// for the backend (holds) and fence waits - so a slow frame shows whether
+// the GPU, the backend thread or a wait held it.
 
 #include <atomic>
 #include <chrono>
@@ -120,11 +129,27 @@ enum class Counter : std::uint32_t {
   DrawRuns16to63,
   DrawRuns64to255,
   DrawRuns256Plus,
+  BackendQueueMax,       // maximum (note_max())
+  BackendQueueDepthSum,  // depth summed at each post
+  BackendPosts,
   Count,
 };
 
 void add(Counter counter, std::uint64_t value) noexcept;
+// Raises `counter` to `value` if it is lower (a per-window maximum).
+void note_max(Counter counter, std::uint64_t value) noexcept;
 [[nodiscard]] std::uint64_t peek(Counter counter) noexcept;
+// Everything ever added to `counter`, never reset (the frame timeline's
+// per-frame deltas).
+[[nodiscard]] std::uint64_t lifetime(Counter counter) noexcept;
+
+// The frame timeline (see above): on when `enabled`; set_frame_timeline()
+// from the environment at session start.
+void set_frame_timeline(bool enabled) noexcept;
+[[nodiscard]] bool frame_timeline_enabled() noexcept;
+// The timeline line for a frame presented at `when` (exposed for tests);
+// note_presented_frame() writes it to frame_timeline.log when enabled.
+[[nodiscard]] std::string take_frame_timeline_line(std::chrono::steady_clock::time_point when);
 
 // Adds the scope's duration in nanoseconds to `counter` (and one to `count`,
 // when given) on destruction.

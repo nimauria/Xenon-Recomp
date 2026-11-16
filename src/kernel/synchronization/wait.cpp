@@ -5,10 +5,12 @@
 #include "xenon/kernel/semaphore.hpp"
 #include "xenon/kernel/thread.hpp"
 #include "xenon/kernel/timer.hpp"
+#include "xenon/kernel/wait_profile.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -355,6 +357,9 @@ WaitResult wait_for_objects_after(const std::function<bool()>* signal,
     }
   }
 
+  // Registered: the wait blocks from here (wait attribution, wait_profile.hpp).
+  const auto blocked_since = wait_profile_enabled() ? std::chrono::steady_clock::now()
+                                                    : std::chrono::steady_clock::time_point{};
   std::optional<WaitResult> outcome;
   while (true) {
     std::uint64_t observed = 0;
@@ -404,8 +409,17 @@ WaitResult wait_for_objects_after(const std::function<bool()>* signal,
   std::scoped_lock dispatch(detail::dispatcher_mutex());
   for (auto* object : distinct) detail::WaitAccess::wait_list(*object).remove(&block);
   if (own_thread) detail::WaitAccess::wait_list(*own_thread).remove(&block);
-  if (block.granted) return succeeded(block.index, block.abandoned);
-  return *outcome;
+  const auto result = block.granted ? succeeded(block.index, block.abandoned) : *outcome;
+  if (blocked_since != std::chrono::steady_clock::time_point{}) {
+    // The object that ended the wait: the one granted, else the first.
+    const auto index = block.granted && block.index < objects.size() ? block.index : 0u;
+    note_blocking_wait(waiting_thread_id, *objects[index], result,
+                       static_cast<std::uint64_t>(
+                           std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - blocked_since)
+                               .count()));
+  }
+  return result;
 }
 
 }  // namespace
