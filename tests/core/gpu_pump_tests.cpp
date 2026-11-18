@@ -917,6 +917,7 @@ std::atomic<bool> g_presenting{false};
 std::atomic<int> g_scanout_presents{0};
 std::atomic<int> g_vblank_callbacks{0};
 std::atomic<int> g_vblank_callbacks_during_present{0};
+std::atomic<int> g_present_ms{4};
 
 // A vblank interrupt delivered while the frame it ends is still being presented.
 ExecutionResult scanout_latch_probe_entry(ExecutionContext& context) {
@@ -941,7 +942,7 @@ class SlowPresentBackend final : public gpu::Backend {
   bool invalidate_edram_native_state() override { return true; }
   gpu::PresentStatus present(const gpu::PresentationFrame&) override {
     g_presenting.store(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_present_ms.load()));
     g_presenting.store(false);
     g_scanout_presents.fetch_add(1);
     return gpu::PresentStatus::Success;
@@ -993,6 +994,47 @@ void test_vblank_interrupt_follows_the_scanout_it_ends() {
   assert(latch_timeouts == 0u);
 }
 
+// Regression (failed once in a loaded full test run): the vsync thread waits
+// 8 ms for the scan-out, then delivered the interrupt regardless - while the
+// worker was still presenting, so the title could render into the buffer
+// being scanned out. Presents here take 20 ms, past that wait every time:
+// the interrupt still never lands mid-present. A present already under way
+// is waited for; a vblank the worker had not started is given up on (after
+// any earlier present still running ends) and not presented late.
+void test_vblank_interrupt_waits_for_a_long_present() {
+  const xenon::kernel::HostTimerResolution timer_resolution{};
+  g_present_ms.store(20);
+  g_presenting.store(false);
+  g_scanout_presents.store(0);
+  g_vblank_callbacks.store(0);
+  g_vblank_callbacks_during_present.store(0);
+  constexpr GuestAddress kCallbackAddr = 0x5000u;
+  GpuPumpHarness harness(kCallbackAddr, &scanout_latch_probe_entry);
+  xenon::core::SessionExecutionTestAccess::set_backend(harness.session,
+                                                       std::make_unique<SlowPresentBackend>());
+  assert(xenon::core::SessionExecutionTestAccess::create_guest_process(harness.session));
+  auto* kernel_process = harness.session.kernel_process();
+  kernel_process->set_gpu_interrupt_callback(kCallbackAddr, 0u);
+  const std::array<std::uint32_t, 6> fetch{0x80000002u | 2u << 22, 0x3000u | 2u << 6 | 6u,
+                                           63u | 63u << 13, 0u, 0u, 0x200u};
+  for (int frame = 0; frame < 40; ++frame) {
+    kernel_process->set_gpu_front_buffer(0x3000u, 64u, 64u, 256u, 6u, fetch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  }
+  const auto given_up =
+      xenon::core::SessionExecutionTestAccess::scanout_latch_timeouts(harness.session);
+  const bool shutdown_completed = run_with_timeout(
+      [&] { harness.session.shutdown(); }, std::chrono::milliseconds(5000));
+  assert(shutdown_completed);
+  g_present_ms.store(4);
+  std::cout << "  20 ms presents: " << g_scanout_presents.load() << " presented, "
+            << g_vblank_callbacks.load() << " vblank interrupts, " << given_up
+            << " vblanks given up on" << std::endl;
+  assert(g_scanout_presents.load() >= 10 && g_vblank_callbacks.load() >= 15);
+  assert(g_vblank_callbacks_during_present.load() == 0 &&
+         "no vblank interrupt is delivered while a present is still under way");
+}
+
 }  // namespace
 
 int main() {
@@ -1013,6 +1055,7 @@ int main() {
   test_present_outcomes_are_counted_by_status();
   test_a_front_buffer_without_a_fetch_constant_is_not_presented();
   test_vblank_interrupt_follows_the_scanout_it_ends();
+  test_vblank_interrupt_waits_for_a_long_present();
 
   std::cout << "All GPU pump thread tests passed!\n";
   return 0;

@@ -903,6 +903,13 @@ class XenonSession final : public cpu::RuntimeServices {
   // overwrite the buffer before it was read, tearing its top rows.
   std::atomic<std::uint64_t> scanout_requested_{0};
   SequenceLatch scanout_latched_{};
+  // Who settled the latest vblank's scan-out, as (vblank << 1) | abandoned:
+  // the worker claims a vblank as it starts presenting it; the vsync thread,
+  // its wait over, either finds the present under way (and waits for it to
+  // finish) or claims the vblank abandoned, and the worker then skips that
+  // present - the screen keeps the previous frame for one vblank rather than
+  // being scanned out while the title already renders into it.
+  std::atomic<std::uint64_t> scanout_claim_{0};
   // Vblanks whose interrupt went out without the scan-out latched in time.
   std::atomic<std::uint64_t> scanout_latch_timeouts_{0};
   std::atomic<std::uint64_t> gpu_presents_{0};
