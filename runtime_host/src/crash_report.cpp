@@ -15,6 +15,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dbghelp.h>
 #else
 #include <csignal>
 #include <fcntl.h>
@@ -34,6 +35,19 @@ char g_module_path[MAX_PATH]{};
 // C++ exception into std::terminate.
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
 constexpr DWORD kCppExceptionCode = 0xE06D7363u;
+// The minidump next to crash.log: DbgHelp's writer, resolved at installation
+// (no loader work in the handler), and what it is asked to include.
+using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                         PMINIDUMP_EXCEPTION_INFORMATION,
+                                         PMINIDUMP_USER_STREAM_INFORMATION,
+                                         PMINIDUMP_CALLBACK_INFORMATION);
+MiniDumpWriteDumpFn g_write_dump = nullptr;
+wchar_t g_dump_path[1024]{};
+MINIDUMP_TYPE g_dump_type = MiniDumpNormal;
+struct DumpRequest {
+  EXCEPTION_POINTERS* pointers;
+  DWORD thread_id;
+};
 #else
 char g_path[4096]{};
 alignas(16) char g_alt_stack[64 * 1024]{};
@@ -152,6 +166,35 @@ void now_utc(std::int64_t& seconds, std::uint32_t& millis) noexcept {
 }
 
 #if defined(_WIN32)
+DWORD WINAPI write_minidump_thread(void* parameter) {
+  const auto& request = *static_cast<const DumpRequest*>(parameter);
+  const HANDLE file = CreateFileW(g_dump_path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return 1;
+  MINIDUMP_EXCEPTION_INFORMATION exception{};
+  exception.ThreadId = request.thread_id;
+  exception.ExceptionPointers = request.pointers;
+  exception.ClientPointers = FALSE;
+  const BOOL written = g_write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, g_dump_type,
+                                    request.pointers ? &exception : nullptr, nullptr, nullptr);
+  CloseHandle(file);
+  if (!written) DeleteFileW(g_dump_path);
+  return written ? 0 : 1;
+}
+
+// Writes crash.dmp for the failing thread. From a thread of its own: the
+// failing one may have no stack left (a stack overflow), and DbgHelp walks
+// the failing thread best while it is suspended in the handler.
+void write_minidump(EXCEPTION_POINTERS* pointers) noexcept {
+  if (!g_write_dump || !g_dump_path[0]) return;
+  DumpRequest request{pointers, GetCurrentThreadId()};
+  const HANDLE thread =
+      CreateThread(nullptr, 256u * 1024u, &write_minidump_thread, &request, 0, nullptr);
+  if (!thread) return;
+  WaitForSingleObject(thread, 120000u);
+  CloseHandle(thread);
+}
+
 LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* pointers) {
   // An uncaught C++ exception goes on to std::terminate, whose handler
   // records it with its message.
@@ -182,6 +225,7 @@ LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS* pointers) {
       info.access_address = record.ExceptionInformation[1];
     }
     write_crash_report(info);
+    write_minidump(pointers);
   }
   // Let the process end with the exception's own code, as it would have.
   return EXCEPTION_CONTINUE_SEARCH;
@@ -236,6 +280,11 @@ void fatal_signal_handler(int signal_number, siginfo_t* signal_info, void*) {
     append_line(line, length);
     g_writing.clear();
   }
+#if defined(_WIN32)
+  // No exception record to point at: the dump shows this thread in the
+  // handler, called from where the exception escaped.
+  write_minidump(nullptr);
+#endif
   std::abort();
 }
 
@@ -329,6 +378,23 @@ bool install_crash_report(const std::filesystem::path& run_dir) {
   const auto& wide = path.native();
   if (wide.size() + 1u > std::size(g_path)) return false;
   std::memcpy(g_path, wide.c_str(), (wide.size() + 1u) * sizeof(wchar_t));
+  // The minidump: small by default (threads, stacks and the memory they
+  // point at, modules); XENON_CRASH_DUMP=full adds all committed memory
+  // (guest memory included: large), =off writes none.
+  const auto dump = (run_dir / "crash.dmp").native();
+  wchar_t mode[16]{};
+  const DWORD mode_length = GetEnvironmentVariableW(L"XENON_CRASH_DUMP", mode, 16u);
+  const std::wstring_view dump_mode(mode, mode_length < 16u ? mode_length : 0u);
+  if (dump_mode != L"off" && dump_mode != L"0" && dump.size() + 1u <= std::size(g_dump_path)) {
+    std::memcpy(g_dump_path, dump.c_str(), (dump.size() + 1u) * sizeof(wchar_t));
+    g_dump_type = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+        MiniDumpWithIndirectlyReferencedMemory |
+        (dump_mode == L"full" ? MiniDumpWithFullMemory | MiniDumpWithHandleData : 0));
+    if (const HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll"))
+      g_write_dump = reinterpret_cast<MiniDumpWriteDumpFn>(
+          reinterpret_cast<void*>(GetProcAddress(dbghelp, "MiniDumpWriteDump")));
+  }
   g_installed.store(true, std::memory_order_release);
   const auto previous = SetUnhandledExceptionFilter(&unhandled_exception_filter);
   if (previous != &unhandled_exception_filter) g_previous_filter = previous;

@@ -5,7 +5,11 @@
 // ends the process without reaching any of the session's own reporting, so
 // the runtime host writes one line about it to crash.log in the run's error
 // folder before the process goes. The writer allocates nothing and formats
-// into static storage, since it may run on an exhausted stack.
+// into static storage, since it may run on an exhausted stack. On Windows a
+// minidump of the failing thread's state goes beside it (crash.dmp, for a
+// debugger with the build's PDBs): threads, stacks, the memory they point at
+// and the module list by default; XENON_CRASH_DUMP=full adds all committed
+// memory, XENON_CRASH_DUMP=off writes none.
 
 #include <cstddef>
 #include <cstdint>
