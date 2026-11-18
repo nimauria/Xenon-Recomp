@@ -87,6 +87,15 @@
       }
     },
     {
+      "name": "windows-x64-asan",
+      "inherits": "windows-x64-release",
+      "displayName": "Windows x64 Release with AddressSanitizer",
+      "cacheVariables": {
+        "XENON_ENABLE_ASAN": "ON",
+        "XENON_BUILD_RUNTIME_HOST": "OFF"
+      }
+    },
+    {
       "name": "windows-x64-release",
       "inherits": "base",
       "displayName": "Windows x64 Release",
