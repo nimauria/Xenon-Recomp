@@ -332,7 +332,9 @@ namespace {
 // suspending a waiting thread runs a kernel APC on it, so a blocked thread's
 // counter moves a little at every sample; Linux counts nanoseconds.
 std::uint64_t calibrate_running_threshold(std::chrono::microseconds interval) {
-  const auto tenth_us = static_cast<std::uint64_t>((std::max)(interval.count() / 10, 1ll));
+  // The count's type is long on Linux, long long on Windows.
+  using Count = std::chrono::microseconds::rep;
+  const auto tenth_us = static_cast<std::uint64_t>((std::max)(interval.count() / 10, Count{1}));
 #if defined(XENON_HOST_SAMPLER_WINDOWS)
   // Cycles per microsecond of this thread's counter, measured while it spins.
   ULONG64 cycles_start = 0, cycles_end = 0;
