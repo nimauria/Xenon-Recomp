@@ -428,11 +428,24 @@ int main() {
                            " -DXENON_RECOMP_ROOT=" + quote(xenon::test::snapshot_source_tree("registry_numeric_format")) +
                          xenon::test::nested_cmake_toolchain_args();
     assert(std::system(configure.c_str()) == 0);
-    // Parallel like recomp_driver_tests' identical nested build: a serial
-    // build of the snapshot's ~170 sources (MSBuild without /m under the
-    // Visual Studio generator) ran past CTest's 900 s timeout on Windows CI.
-    const auto compile = "cmake --build " + quote(build) + " --target xenon_game --parallel 4";
+    // Only registry.cpp itself, with the include paths and flags xenon_game
+    // gives it: building all of xenon_game also compiled the Xenon runtime it
+    // links (~150 sources, 730-810 s locally) and ran past CTest's 900 s
+    // timeout on the Windows CI runner. Ninja builds one object of a target
+    // without its dependencies' objects; another generator builds the
+    // library, in parallel (a serial MSBuild build timed out the same way).
+    // That the whole generated project compiles and links is
+    // recomp_driver_tests' nested build.
+    const bool ninja = std::filesystem::exists(build / "build.ninja");
+#if defined(_WIN32)
+    const std::string registry_object = "CMakeFiles\\xenon_game.dir\\registry.cpp.obj";
+#else
+    const std::string registry_object = "CMakeFiles/xenon_game.dir/registry.cpp.o";
+#endif
+    const auto compile = "cmake --build " + quote(build) + " --target " +
+                         (ninja ? registry_object : std::string("xenon_game")) + " --parallel 4";
     assert(std::system(compile.c_str()) == 0);
+    if (ninja) assert(std::filesystem::exists(build / registry_object));
     std::filesystem::remove_all(project.fixture.root);
   }
   std::cout << "  [PASS] Generated registry.cpp for kCompiledFunctionCount = 15 actually compiles\n";
