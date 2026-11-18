@@ -126,6 +126,15 @@ int main() {
     assert(cmake.find("check_cxx_source_runs") != std::string::npos);
     assert(cmake.find("/arch:AVX2") != std::string::npos);
     assert(cmake.find("-march=x86-64-v3 -ffp-contract=off") != std::string::npos);
+    // XEN-003: the shared runtime's objects go through the verified object
+    // cache too - the launcher is set before the runtime is added - so a
+    // second module's workspace reuses them instead of compiling the runtime
+    // again.
+    const auto launcher = cmake.find("set(CMAKE_CXX_COMPILER_LAUNCHER");
+    const auto runtime = cmake.find("add_subdirectory(${XENON_RECOMP_ROOT}");
+    assert(launcher != std::string::npos && runtime != std::string::npos && launcher < runtime);
+    assert(cmake.find("tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}", launcher) ==
+           cmake.find("tools/compilation_cache.py"));
   }
   const auto first = std::filesystem::file_size(output / "functions" / "shard_000.cpp");
   assert(xenon::recomp::generate_project(options, report, error));
