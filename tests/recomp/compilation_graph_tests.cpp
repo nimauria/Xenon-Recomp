@@ -566,6 +566,34 @@ int main() {
     assert(long_store.lookup(deep)->bytes=="deep bytes");
     std::filesystem::remove_all(fixture.root / "long");
   }
+  // publish() creates staging/ and nodes/ when it finds them missing (a new
+  // cache root, or either one removed by hand) instead of checking both on
+  // every call.
+  {
+    const g::Store fresh(fixture.root / "fresh");
+    const auto check = [&](const char* name) {
+      g::Node node{"source","test",{{"fresh",name}}, {}};
+      assert(fresh.publish(node,name).bytes==name);
+      assert(fresh.lookup(node) && fresh.lookup(node)->bytes==name);
+    };
+    check("new root");
+    std::filesystem::remove_all(fresh.root() / "nodes");
+    check("nodes removed");
+    std::filesystem::remove_all(fresh.root() / "staging");
+    check("staging removed");
+  }
+  // Only the IR of a compiled region is stored: its decoded and analysis
+  // nodes are identities the IR key depends on, never looked up.
+  {
+    const g::Store regions(fixture.root / "regions");
+    const std::array<std::uint32_t,2> words{0x38600001u, kBlr};
+    const std::array<xenon::cpu::FunctionCodeRange,1> range{{{0x82000000u, words}}};
+    const auto compiled = g::compile_region(regions, {}, 0x82000000u, range);
+    assert(compiled.compiled.ok && compiled.nodes.size()==3);
+    assert(!regions.lookup(compiled.nodes[0]) && !regions.lookup(compiled.nodes[1]));
+    assert(regions.lookup(compiled.nodes[2]));
+    assert(g::compile_region(regions, {}, 0x82000000u, range).ir_hit);
+  }
 
   DriverOptions options;options.input=fixture.input;options.output=fixture.output;
   options.graph_cache=store.root();options.shard_function_count=1;options.analysis_jobs=1;options.codegen_jobs=1;
