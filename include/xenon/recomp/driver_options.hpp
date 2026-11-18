@@ -65,6 +65,10 @@ struct DriverOptions {
   // existing shard_function_count behavior exactly (no default: a byte
   // budget changes on-disk shard layout, so callers opt in deliberately
   // rather than being silently repartitioned by an upstream default change).
+  // Boundaries are content-defined (plan_shard_starts(): cuts at address
+  // anchors once a shard is half full), so a regeneration after a
+  // change rewrites only the shards around it and the rest stay
+  // byte-identical - incremental rebuilds compile those few.
   std::optional<std::size_t> shard_max_bytes;
   // The byte budget to use for a whole game (xenon-prepare, game modules'
   // own generators): about 300 shards for Ace Combat 6. One function per

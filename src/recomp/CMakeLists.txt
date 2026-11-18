@@ -71,6 +71,7 @@ add_library(xenon_recomp STATIC
   compilation/project/generated_registry.cpp
   compilation/project/generation_staging.cpp
   compilation/shards/shard_assembly.cpp
+  compilation/shards/shard_plan.cpp
   # Caching, reporting and title intake.
   caching/artifact_cache.cpp
   caching/workspace_lock.cpp
