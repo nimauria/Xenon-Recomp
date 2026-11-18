@@ -731,6 +731,65 @@ int main() {
     assert(mem.read64_be(kHeader) == kConditionalThreads * kIncrements);
   }
 
+  // XEN-005: a plain store is never lost to a conditional store whose
+  // reservation was taken before it. Conditional threads increment the low
+  // half of one word; a plain writer stores successive markers in the high
+  // half and checks, before each store, that its previous marker is still
+  // there. A conditional store that succeeded over the marker (its lwarx
+  // value predates the plain store) would bring back the older marker. The
+  // reserve once read the global write epoch before the in-flight writer
+  // count, so a plain store that scanned the reservation slots just before
+  // the claim and completed between those two loads went unseen. Run through
+  // AddressSpace and through MemoryAccessContext (the generated code's path).
+  for (const bool through_context : {false, true}) {
+    constexpr GuestAddress kWord = 0x00100E00u;
+    constexpr unsigned kConditionalThreads = 3;
+    constexpr std::uint32_t kMarkers = 60000;
+    mem.write32_be(kWord, 0u);
+    std::atomic<bool> stop{false};
+    std::atomic<std::uint32_t> lost_at{0};
+    std::vector<std::thread> threads;
+    for (unsigned t = 0; t < kConditionalThreads; ++t) {
+      threads.emplace_back([&] {
+        auto context = mem.access_context();
+        while (!stop.load(std::memory_order_acquire)) {
+          std::uint32_t observed{};
+          const auto token = through_context ? context.reserve32(kWord, observed) : mem.reserve32(kWord, observed);
+          if (!token) continue;
+          const auto next = (observed & 0xFFFF0000u) | ((observed + 1u) & 0xFFFFu);
+          if (through_context) {
+            (void)context.store_conditional32(kWord, token, next);
+          } else {
+            (void)mem.store_conditional32(kWord, token, next);
+          }
+        }
+      });
+    }
+    threads.emplace_back([&] {
+      auto context = mem.access_context();
+      for (std::uint32_t marker = 1; marker <= kMarkers; ++marker) {
+        const auto value = through_context ? context.read32_be(kWord) : mem.read32_be(kWord);
+        if ((value >> 16u) != ((marker - 1u) & 0xFFFFu)) {
+          lost_at.store(marker, std::memory_order_release);
+          break;
+        }
+        const auto next = ((marker & 0xFFFFu) << 16u) | (value & 0xFFFFu);
+        if (through_context) {
+          context.write32_be(kWord, next);
+        } else {
+          mem.write32_be(kWord, next);
+        }
+      }
+      stop.store(true, std::memory_order_release);
+    });
+    for (auto& thread : threads) thread.join();
+    if (lost_at.load() != 0u) {
+      std::cerr << "plain store lost to a stale conditional store before marker " << lost_at.load()
+                << (through_context ? " (MemoryAccessContext)\n" : " (AddressSpace)\n");
+    }
+    assert(lost_at.load() == 0u);
+  }
+
   // Explicit physical allocation can be mapped into a virtual range for GPU/APU sharing.
   std::uint32_t shared_phys{};
   assert(mem.allocate_physical(0x2000u, 0x1000u, false, shared_phys));
