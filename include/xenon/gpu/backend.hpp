@@ -21,6 +21,11 @@ struct GpuPerformanceCounters {
   std::uint64_t draws{};
   std::uint64_t shader_cache_misses{};
   std::uint64_t pipeline_cache_misses{};
+  // Of the pipelines created, those the persistent cache supplied instead of
+  // a compile: D3D12 pipeline-library loads, Vulkan pipeline-cache hits as
+  // the driver reports them (pipeline creation feedback). Same meaning on
+  // both backends (XEN-004).
+  std::uint64_t pipeline_cache_hits{};
   std::uint64_t resolve_operations{};
   std::uint64_t edram_transfers{};
   std::uint64_t staging_transfers{};
@@ -45,6 +50,14 @@ struct GpuPerformanceCounters {
   // Tile sets handed from one native image to another on the GPU, without
   // a round trip through canonical EDRAM.
   std::uint64_t direct_edram_transfers{};
+  // Canonical EDRAM loaded into a native image on the GPU (tiles copied as
+  // they are, unpacked in a shader) instead of converted sample by sample on
+  // the CPU and uploaded.
+  std::uint64_t gpu_canonical_edram_loads{};
+  // Native images flushed to canonical EDRAM on the GPU (packed in a compute
+  // shader, the tiles read back once) instead of read back sample by sample
+  // and converted on the CPU.
+  std::uint64_t gpu_canonical_edram_stores{};
   // Color resolves done on the GPU out of the image owning their tiles,
   // without flushing it to canonical EDRAM.
   std::uint64_t gpu_resolves{};

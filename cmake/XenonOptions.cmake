@@ -66,3 +66,19 @@ if(XENON_RELEASE_DEBUG_INFO)
     add_compile_options($<$<CONFIG:Release>:-g1>)
   endif()
 endif()
+
+# AddressSanitizer for every Xenon target (the windows-x64-asan preset; the
+# Linux sanitizers preset sets its flags directly). With MSVC the standard
+# library's container annotations stay off: prebuilt dependencies are not
+# instrumented, and mixing annotated and unannotated code reports false
+# container overflows.
+option(XENON_ENABLE_ASAN "Build with AddressSanitizer" OFF)
+if(XENON_ENABLE_ASAN)
+  if(MSVC)
+    add_compile_options(/fsanitize=address)
+    add_compile_definitions(_DISABLE_VECTOR_ANNOTATION _DISABLE_STRING_ANNOTATION)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+  endif()
+endif()

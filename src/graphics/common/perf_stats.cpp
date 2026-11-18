@@ -14,6 +14,16 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Counter::Count)> g_counters{};
+std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Counter::Count)> g_lifetime{};
+
+std::atomic<bool> g_frame_timeline{false};
+// The frame timeline's previous frame: its time and the lifetime counters
+// then (presenting thread only).
+std::mutex g_timeline_mutex;
+Clock::time_point g_timeline_start{};
+Clock::time_point g_timeline_last{};
+std::uint64_t g_timeline_frames{};
+std::array<std::uint64_t, static_cast<std::size_t>(Counter::Count)> g_timeline_previous{};
 
 // Frame intervals of the current window, kept by the presenting thread and
 // taken by the flushing one.
@@ -39,6 +49,64 @@ double percentile(const std::vector<double>& sorted, double p) {
 
 void add(Counter counter, std::uint64_t value) noexcept {
   g_counters[static_cast<std::size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
+  g_lifetime[static_cast<std::size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
+}
+
+void note_max(Counter counter, std::uint64_t value) noexcept {
+  auto& slot = g_counters[static_cast<std::size_t>(counter)];
+  auto current = slot.load(std::memory_order_relaxed);
+  while (current < value &&
+         !slot.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+  }
+}
+
+std::uint64_t lifetime(Counter counter) noexcept {
+  return g_lifetime[static_cast<std::size_t>(counter)].load(std::memory_order_relaxed);
+}
+
+void set_frame_timeline(bool enabled) noexcept {
+  g_frame_timeline.store(enabled, std::memory_order_relaxed);
+}
+
+bool frame_timeline_enabled() noexcept { return g_frame_timeline.load(std::memory_order_relaxed); }
+
+std::string take_frame_timeline_line(Clock::time_point when) {
+  std::scoped_lock lock(g_timeline_mutex);
+  std::array<std::uint64_t, static_cast<std::size_t>(Counter::Count)> now{};
+  for (std::size_t i = 0; i < now.size(); ++i) now[i] = g_lifetime[i].load(std::memory_order_relaxed);
+  const auto delta = [&](Counter counter) {
+    const auto i = static_cast<std::size_t>(counter);
+    return now[i] - g_timeline_previous[i];
+  };
+  if (g_timeline_start == Clock::time_point{}) g_timeline_start = g_timeline_last = when;
+  const double at_ms = std::chrono::duration<double, std::milli>(when - g_timeline_start).count();
+  const double interval_ms =
+      std::chrono::duration<double, std::milli>(when - g_timeline_last).count();
+  char line[512];
+  std::snprintf(
+      line, sizeof(line),
+      "frame %llu at %.1f ms: interval %.1f ms | draws %llu resolves %llu | gpu busy %.2f ms idle "
+      "%.2f ms (%llu batches) | backend %.2f ms, frontend waited %.2f ms (%llu holds: barrier "
+      "%llu sync %llu read %llu drain %llu) | fence %.2f ms | shader wait %.2f ms | edram cpu "
+      "%llu gpu %llu gpu store %llu\n",
+      static_cast<unsigned long long>(g_timeline_frames), at_ms, interval_ms,
+      static_cast<unsigned long long>(delta(Counter::Draws)),
+      static_cast<unsigned long long>(delta(Counter::Resolves)), ms(delta(Counter::GpuBusyNs)),
+      ms(delta(Counter::GpuIdleNs)), static_cast<unsigned long long>(delta(Counter::GpuBatches)),
+      ms(delta(Counter::BackendNs)), ms(delta(Counter::BackendWaitNs)),
+      static_cast<unsigned long long>(delta(Counter::BackendWaits)),
+      static_cast<unsigned long long>(delta(Counter::HoldsBarrier)),
+      static_cast<unsigned long long>(delta(Counter::HoldsSync)),
+      static_cast<unsigned long long>(delta(Counter::HoldsRead)),
+      static_cast<unsigned long long>(delta(Counter::HoldsDrain)), ms(delta(Counter::FenceWaitNs)),
+      ms(delta(Counter::ShaderWaitNs)),
+      static_cast<unsigned long long>(delta(Counter::EdramCpuTransfers)),
+      static_cast<unsigned long long>(delta(Counter::EdramGpuLoads)),
+      static_cast<unsigned long long>(delta(Counter::EdramGpuStores)));
+  g_timeline_previous = now;
+  g_timeline_last = when;
+  ++g_timeline_frames;
+  return line;
 }
 
 std::uint64_t peek(Counter counter) noexcept {
@@ -57,10 +125,16 @@ void note_draw_run(std::uint64_t draws) noexcept {
 }
 
 void note_presented_frame(Clock::time_point when) {
-  std::scoped_lock lock(g_frames_mutex);
-  if (g_last_frame != Clock::time_point{})
-    g_frame_ms.push_back(std::chrono::duration<double, std::milli>(when - g_last_frame).count());
-  g_last_frame = when;
+  {
+    std::scoped_lock lock(g_frames_mutex);
+    if (g_last_frame != Clock::time_point{})
+      g_frame_ms.push_back(std::chrono::duration<double, std::milli>(when - g_last_frame).count());
+    g_last_frame = when;
+  }
+  if (frame_timeline_enabled()) {
+    const auto line = take_frame_timeline_line(when);
+    logging::append_run_log("frame_timeline.log", "%s", line.c_str());
+  }
 }
 
 std::string take_line(double seconds) {
@@ -80,9 +154,11 @@ std::string take_line(double seconds) {
                 "(%.0f ms) | holds barrier %llu sync %llu read %llu drain %llu | bindings reused "
                 "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
                 "(%llu batches) | indices reused %llu converted %llu (%.1f MB) | bounds %llu "
-                "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | rptr "
+                "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | edram "
+                "gpu %llu (%.1f MB, %.1f ms) | edram gpu store %llu (%.1f MB, %.1f ms) | rptr "
                 "early %llu held %llu | runs 0:%llu 1:%llu 2-3:%llu 4-15:%llu 16-63:%llu "
-                "64-255:%llu 256+:%llu\n",
+                "64-255:%llu 256+:%llu | queue max %llu mean %.1f | barriers interrupt %llu (%.0f "
+                "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms)\n",
                 static_cast<double>(frames.size()) * per, percentile(frames, 0.5),
                 percentile(frames, 0.95), percentile(frames, 0.99), frames.empty() ? 0.0 : frames.back(),
                 static_cast<double>(take(Counter::Swaps)) * per, ms(take(Counter::RingNs)),
@@ -123,6 +199,12 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::EdramCpuTransfers)),
                 static_cast<double>(take(Counter::EdramCpuBytes)) / (1024.0 * 1024.0),
                 ms(take(Counter::EdramCpuNs)),
+                static_cast<unsigned long long>(take(Counter::EdramGpuLoads)),
+                static_cast<double>(take(Counter::EdramGpuLoadBytes)) / (1024.0 * 1024.0),
+                ms(take(Counter::EdramGpuLoadNs)),
+                static_cast<unsigned long long>(take(Counter::EdramGpuStores)),
+                static_cast<double>(take(Counter::EdramGpuStoreBytes)) / (1024.0 * 1024.0),
+                ms(take(Counter::EdramGpuStoreNs)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerEarly)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerHeld)),
                 static_cast<unsigned long long>(take(Counter::DrawRuns0)),
@@ -131,7 +213,21 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::DrawRuns4to15)),
                 static_cast<unsigned long long>(take(Counter::DrawRuns16to63)),
                 static_cast<unsigned long long>(take(Counter::DrawRuns64to255)),
-                static_cast<unsigned long long>(take(Counter::DrawRuns256Plus)));
+                static_cast<unsigned long long>(take(Counter::DrawRuns256Plus)),
+                static_cast<unsigned long long>(take(Counter::BackendQueueMax)),
+                [&] {
+                  const auto posts = take(Counter::BackendPosts);
+                  const auto depth = take(Counter::BackendQueueDepthSum);
+                  return posts ? static_cast<double>(depth) / static_cast<double>(posts) : 0.0;
+                }(),
+                static_cast<unsigned long long>(take(Counter::BarrierInterrupts)),
+                ms(take(Counter::BarrierInterruptNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierSwaps)),
+                ms(take(Counter::BarrierSwapNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierWaits)),
+                ms(take(Counter::BarrierWaitNs)),
+                static_cast<unsigned long long>(take(Counter::BarrierWrites)),
+                ms(take(Counter::BarrierWriteNs)));
   return line;
 }
 

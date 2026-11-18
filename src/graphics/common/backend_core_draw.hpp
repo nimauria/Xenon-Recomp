@@ -506,7 +506,7 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         }
       }
       if (!self().bind_texture(slot, bound_state, *bound)) {
-        error = resources.error();
+        if (!resources.error().empty()) error = resources.error();
         return;
       }
     }
@@ -787,6 +787,8 @@ void BackendCore<Derived, Api>::consume_draw(const ir::DrawPacket* draw,
         error = pipeline->error();
         return;
       }
+      if (pipeline->loaded_from_library())
+        pipeline_cache_hits.fetch_add(1u, std::memory_order_relaxed);
       pipelines.emplace(pipeline_key, std::move(pipeline));
     }
     const auto index_byte_size =

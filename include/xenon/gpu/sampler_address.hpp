@@ -42,4 +42,21 @@ enum class SamplerAddress : std::uint8_t {
   return border_color == 1u;
 }
 
+// The mip levels a fetch samples and how it blends between them. The mip
+// filter is point (0), linear (1) or base map (2): a base-map fetch samples
+// only its base level, the fetch constant's minimum mip (xenia: the maximum
+// LOD clamped to the minimum). Shared so both backends agree (XEN-004).
+struct SamplerLodRange {
+  float min_lod{};
+  float max_lod{};
+  bool linear_mips{};
+};
+[[nodiscard]] constexpr SamplerLodRange xenos_sampler_lod_range(std::uint8_t mip_filter,
+                                                               std::uint8_t mip_min_level,
+                                                               std::uint8_t mip_max_level) noexcept {
+  const bool base_map = mip_filter == 2u;
+  return {static_cast<float>(mip_min_level),
+          static_cast<float>(base_map ? mip_min_level : mip_max_level), mip_filter == 1u};
+}
+
 }  // namespace xenon::gpu

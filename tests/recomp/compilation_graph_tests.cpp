@@ -33,6 +33,9 @@
 #include "xenon/recomp/driver.hpp"
 #include "xenon/recomp/compilation_graph.hpp"
 #include "xenon/recomp/worker_pool.hpp"
+#include "xenon/recomp/shard_plan.hpp"
+#include <cmath>
+#include <set>
 #include <array>
 #include <chrono>
 
@@ -327,6 +330,143 @@ void test_shard_byte_budget() {
   std::cout << "Shard byte-budget bundling/oversized-function tests passed\n";
 }
 
+// Phase 9 (incremental recompilation): byte-budget shard boundaries are
+// content-defined. A game-sized layout under the 1 MiB game budget, with
+// generated sizes spread like Ace Combat 6's (log-normal: median 11 KB, a
+// tail past 150 KB) and two functions larger than the budget, is planned
+// before and after one function grows, appears or disappears, at 120 places;
+// only the shards around each change may differ. The greedy fill it
+// replaces is measured on the same edits: its boundaries kept moving until
+// some shard's slack absorbed the change, rewriting many more shards.
+void test_shard_plan_is_content_defined() {
+  using xenon::recomp::plan_shard_starts;
+  constexpr std::size_t kBudget = DriverOptions::kGameShardMaxBytes;
+  constexpr std::size_t kHeader = 44;
+  struct Function {
+    std::uint32_t address;
+    std::size_t size;
+  };
+  std::uint64_t state = 0x5EEDu;
+  const auto next = [&] {
+    std::uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  };
+  // Log-normal sizes, median 11 KB, sigma about 1.1, in integers only: the
+  // layout - and the counts asserted below - must be the same with every
+  // compiler and CPU (std::exp, std::log and std::cos differ in their last
+  // bits between them, and the Windows CI runner once drew another layout).
+  // A standard normal is the sum of 12 uniforms less 6, in 1/4096 units; the
+  // size is 11000 * 2^(1.587 * normal), the fraction's power of two
+  // interpolated linearly.
+  const auto lognormal_size = [&]() -> std::size_t {
+    std::int64_t normal = -6 * 4096;
+    for (int k = 0; k < 12; ++k) normal += static_cast<std::int64_t>(next() % 4096u);
+    const std::int64_t exponent = normal * 1625 / 1024;
+    const std::int64_t whole = exponent >= 0 ? exponent / 4096 : -((-exponent + 4095) / 4096);
+    const std::int64_t fraction = exponent - whole * 4096;
+    const std::uint64_t scaled = 11000u * static_cast<std::uint64_t>(4096 + fraction) / 4096u;
+    return static_cast<std::size_t>(whole >= 0 ? scaled << whole : scaled >> -whole);
+  };
+  std::vector<Function> functions;
+  std::uint32_t address = 0x82000000u;
+  for (int i = 0; i < 8000; ++i) {
+    auto size = lognormal_size();
+    if (i == 2500 || i == 6100) size = kBudget + 300000u;  // jump-table giants
+    functions.push_back({address, (std::max)(size, std::size_t{200})});
+    address += 4u * static_cast<std::uint32_t>(8u + next() % 3000u);
+  }
+  // A shard is unchanged when the same functions with the same generated
+  // sizes land in it.
+  using Layout = std::set<std::string>;
+  const auto layout_of = [&](const std::vector<Function>& list,
+                             const std::vector<std::size_t>& starts) {
+    Layout shards;
+    for (std::size_t s = 0; s < starts.size(); ++s) {
+      const auto end = s + 1 < starts.size() ? starts[s + 1] : list.size();
+      std::string key;
+      for (auto i = starts[s]; i < end; ++i)
+        key += std::to_string(list[i].address) + ':' + std::to_string(list[i].size) + ';';
+      shards.insert(std::move(key));
+    }
+    return shards;
+  };
+  const auto plan = [&](const std::vector<Function>& list) {
+    std::vector<std::uint32_t> addresses;
+    std::vector<std::size_t> sizes;
+    for (const auto& f : list) {
+      addresses.push_back(f.address);
+      sizes.push_back(f.size);
+    }
+    const auto starts = plan_shard_starts(addresses, sizes, kBudget, kHeader);
+    // Every function exactly once, in order; within budget unless alone; a
+    // shard short of half the budget only where the next function did not
+    // fit.
+    assert(!starts.empty() && starts.front() == 0);
+    for (std::size_t s = 0; s < starts.size(); ++s) {
+      const auto end = s + 1 < starts.size() ? starts[s + 1] : list.size();
+      assert(end > starts[s]);
+      std::size_t bytes = kHeader;
+      for (auto i = starts[s]; i < end; ++i) bytes += list[i].size;
+      assert(bytes <= kBudget || end - starts[s] == 1);
+      if (end < list.size() && bytes < kBudget / 2u) assert(bytes + list[end].size > kBudget);
+    }
+    return layout_of(list, starts);
+  };
+  // The previous rule: fill until the next function overflows.
+  const auto greedy = [&](const std::vector<Function>& list) {
+    std::vector<std::size_t> starts;
+    std::size_t bytes = 0;
+    for (std::size_t i = 0; i < list.size(); ++i) {
+      if (starts.empty() || bytes + list[i].size > kBudget) {
+        starts.push_back(i);
+        bytes = kHeader;
+      }
+      bytes += list[i].size;
+    }
+    return layout_of(list, starts);
+  };
+  const auto rewritten = [](const Layout& before, const Layout& after) {
+    std::size_t count = 0;
+    for (const auto& shard : after) count += before.count(shard) == 0u;
+    return count;
+  };
+  const auto base = plan(functions);
+  const auto base_greedy = greedy(functions);
+  assert(base.size() > 100);
+  std::size_t total = 0, most = 0, greedy_total = 0, greedy_most = 0, edits = 0;
+  for (int place = 0; place < 120; ++place) {
+    const auto at = static_cast<std::size_t>(next() % (functions.size() - 2u));
+    const std::size_t delta = std::array<std::size_t, 4>{2000u, 8000u, 25000u, 60000u}[next() % 4u];
+    for (int kind = 0; kind < 3; ++kind) {
+      auto list = functions;
+      if (kind == 0) list[at].size += delta;
+      else if (kind == 1) list.insert(list.begin() + at + 1, Function{list[at].address + 4u, delta});
+      else list.erase(list.begin() + at);
+      const auto count = rewritten(base, plan(list));
+      const auto greedy_count = rewritten(base_greedy, greedy(list));
+      total += count;
+      most = (std::max)(most, count);
+      greedy_total += greedy_count;
+      greedy_most = (std::max)(greedy_most, greedy_count);
+      ++edits;
+    }
+  }
+  std::cout << "shard plan: " << base.size() << " shards (greedy " << base_greedy.size()
+            << "); per edit " << double(total) / double(edits) << " rewritten, at most " << most
+            << " (greedy " << double(greedy_total) / double(edits) << ", at most "
+            << greedy_most << ")" << std::endl;
+  // Deterministic everywhere: 1.33 per edit, 13 at most (greedy: 3.85, 41).
+  assert(most <= 16u);
+  assert(total * 2u <= edits * 3u);  // 1.5 per edit at most on average
+  // The measurement discriminates: the greedy fill rewrote far more.
+  assert(greedy_total >= 2u * total && greedy_most > most);
+  // Same input, same layout.
+  assert(plan(functions) == base);
+  std::cout << "Content-defined shard plan tests passed\n";
+}
+
 }  // namespace
 
 
@@ -468,5 +608,6 @@ int main() {
   auto a=g::compile_region(store,{},0x80010000,ranges);ranges[0].base+=0x100;
   auto b=g::compile_region(store,{},0x80010100,ranges);assert(a.nodes.back().key()!=b.nodes.back().key());
   test_shard_byte_budget();
+  test_shard_plan_is_content_defined();
   std::cout<<"Gen 10 graph integration passed; native fixture: "<<fixture.output<<"\n";
 }

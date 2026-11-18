@@ -220,6 +220,7 @@ GpuPerformanceCounters BackendCore<Derived, Api>::performance_counters()
   auto result = performance;
   result.shader_cache_misses = compiled_shader_count;
   result.pipeline_cache_misses = self().pipeline_cache_misses();
+  result.pipeline_cache_hits = pipeline_cache_hits.load(std::memory_order_relaxed);
   return result;
 }
 

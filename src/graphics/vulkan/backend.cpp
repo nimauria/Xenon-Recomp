@@ -68,6 +68,8 @@ struct BackendApi {
   static constexpr bool kSharedBlendFactorConstant = false;
   static constexpr bool kSupportsDirectColorTransfer = true;
   static constexpr bool kSupportsDirectDepthTransfer = true;
+  static constexpr bool kSupportsCanonicalGpuLoad = true;
+  static constexpr bool kSupportsCanonicalGpuStore = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Spirv;
@@ -146,6 +148,7 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   }
   EdramColorTransfer edram_color_transfer{};
   EdramDepthTransfer edram_depth_transfer{};
+  EdramCanonicalStore edram_canonical_store{};
   GpuResolver gpu_resolver{};
 
   bool gpu_color_resolve(RenderTargetImage& owner, const GpuResolvePlan& plan) {
@@ -234,6 +237,67 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
     return false;
   }
 
+  // Canonical EDRAM loads on the GPU: `tiles` uploaded from the CPU store,
+  // then unpacked into the image (BackendCore::canonical_to_color()).
+  bool load_canonical_color(RenderTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_color_transfer.load_canonical(context.device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
+      return true;
+    error = named(edram_color_transfer.error());
+    return false;
+  }
+  bool load_canonical_depth(DepthTargetImage& image, const Edram& edram,
+                            std::span<const std::uint16_t> tiles,
+                            const EdramTransferConstants& constants,
+                            std::span<const EdramSurfaceRegion> regions) {
+    if (!edram_canonical_store.upload(context.physical_device(), context.device(), queue, edram,
+                                      tiles)) {
+      error = named(edram_canonical_store.error());
+      return false;
+    }
+    if (edram_depth_transfer.load_canonical(context.device(), context.physical_device(), queue,
+                                            edram_canonical_store.source(), image, constants,
+                                            regions))
+      return true;
+    error = named(edram_depth_transfer.error());
+    return false;
+  }
+
+  // Ownership flushes on the GPU: the image's regions packed into canonical
+  // EDRAM by a compute pass, the tiles read back into the CPU store
+  // (BackendCore::color_to_canonical()).
+  template <typename Image>
+  bool store_canonical(Image& image, Edram& canonical, std::span<const std::uint16_t> tiles,
+                       const EdramTransferConstants& constants,
+                       std::span<const EdramSurfaceRegion> regions) {
+    if (edram_canonical_store.flush(context.physical_device(), context.device(), queue, image,
+                                    constants, regions, tiles, canonical))
+      return true;
+    error = named(edram_canonical_store.error());
+    return false;
+  }
+  bool store_canonical_color(RenderTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
+  }
+  bool store_canonical_depth(DepthTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
+  }
+
   bool create_render_target(RenderTargetImage& image,
                             const EdramSurfaceLayout& surface,
                             ColorRenderTargetFormat format) {
@@ -262,10 +326,6 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                     std::span<const std::byte> capture, std::uint32_t capture_base) {
     if (!image.matches(layout)) {
       const bool created = image.create(context.physical_device(), context.device(), layout);
-      // Fold in regardless of overall success/failure: a texture can
-      // successfully bind while its sampler still substituted an
-      // unsupported clamp mode.
-      unsupported.unsupported_sampler_behaviors += image.unsupported_sampler_behaviors();
       if (!created) {
         error = named(image.error());
         return false;
@@ -285,10 +345,21 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   bool create_replacement_texture(TextureImage& image, const DecodedTexture& texture) {
     return image.initialize(context.physical_device(), context.device(), queue, texture);
   }
+  // The sampler is made from the state the draw binds (the fetch constant
+  // with the shader's filter overrides), as on D3D12.
+  SamplerCache samplers{};
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
-    return resources.bind_texture(slot, descriptor.dimension, image.view(),
-                                  image.sampler());
+    const auto unsupported_before = samplers.unsupported_sampler_behaviors();
+    const auto sampler = samplers.get(descriptor);
+    // A sampler can be made while substituting an unsupported clamp mode.
+    unsupported.unsupported_sampler_behaviors +=
+        samplers.unsupported_sampler_behaviors() - unsupported_before;
+    if (!sampler) {
+      error = named(samplers.error());
+      return false;
+    }
+    return resources.bind_texture(slot, descriptor.dimension, image.view(), sampler);
   }
   VkPipelineLayout pipeline_root() { return resources.pipeline_layout(); }
   std::uint32_t color_render_width(const DrawResourceState& state,
@@ -547,6 +618,10 @@ bool Backend::initialize(const ContextConfig& config) {
     impl_->error = impl_->resources.error();
     return false;
   }
+  if (!impl_->samplers.initialize(impl_->context.physical_device(), impl_->context.device())) {
+    impl_->error = impl_->samplers.error();
+    return false;
+  }
   // Guest shaders bind guest memory the way the device's descriptors allow.
   impl_->guest_segments = impl_->resources.segmentation();
   if (impl_->guest_segments.segmented())
@@ -636,6 +711,10 @@ void Backend::prefetch_shaders(std::span<const ir::Command> commands) {
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
 bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
 void Backend::set_resolve_readback(ResolveReadback policy) { impl_->resolve_readback = policy; }
+void Backend::set_gpu_canonical_edram_flushes(bool enabled) noexcept {
+  if (impl_) impl_->gpu_canonical_flushes = enabled;
+}
+
 bool Backend::set_parallel_recording(unsigned threads, std::uint32_t min_run_draws) {
   if (!impl_ || !impl_->queue.set_recording_threads(threads)) return false;
   impl_->parallel_run_draws = (std::max)(1u, min_run_draws);

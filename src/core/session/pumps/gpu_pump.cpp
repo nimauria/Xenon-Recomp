@@ -327,6 +327,15 @@ std::uint32_t XenonSession::run_gpu_pump_thread() {
       const auto vblank = scanout_requested_.load(std::memory_order_acquire);
       const auto front_buffer = kernel_process_->gpu_front_buffer();
       graphics_system_->run_backend_task([this, vblank, front_buffer] {
+        // Claim the vblank; one the vsync thread already gave up on (its
+        // interrupt is out and the title may be rendering into the buffer)
+        // is not presented.
+        auto claim = scanout_claim_.load(std::memory_order_acquire);
+        do {
+          if ((claim >> 1u) >= vblank) return;
+        } while (!scanout_claim_.compare_exchange_weak(claim, vblank << 1u,
+                                                        std::memory_order_acq_rel,
+                                                        std::memory_order_acquire));
         logging::ActivityScope present_activity(present_key,
                                                 {last_presented_generation_, 0, 0, 0});
         present_front_buffer(front_buffer);
@@ -572,6 +581,9 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
   constexpr int kMaxUnusableDisplayVblanks = 3;
   // Longest a vblank interrupt waits for the worker to latch the scan-out.
   constexpr auto kScanoutLatchTimeout = std::chrono::milliseconds(8);
+  // Longest it then waits for a present already under way (a hung backend
+  // must not stop vblanks).
+  constexpr auto kScanoutPresentTimeout = std::chrono::milliseconds(100);
   auto next_vsync = Clock::now() + kVsyncInterval;
 
   // Guest vblanks fall on host display refreshes where the refresh rate is a
@@ -639,8 +651,33 @@ std::uint32_t XenonSession::run_gpu_vsync_thread() {
     gpu_wake_.notify(kGpuWakePresent);
     if (graphics_system_ && gpu_ &&
         !scanout_latched_.wait_until(vblank, Clock::now() + kScanoutLatchTimeout)) {
-      scanout_latch_timeouts_.fetch_add(1u, std::memory_order_relaxed);
-      vblank_activity.arguments[2] = 1u;
+      // Not latched in time. No interrupt goes out while a present is still
+      // reading the front buffer (the title would render into it: the tear
+      // the latch prevents). This vblank's present already under way is let
+      // finish; otherwise the vblank is given up on - the worker will not
+      // present it late - after any earlier present still in flight ends.
+      auto claim = scanout_claim_.load(std::memory_order_acquire);
+      std::uint64_t in_flight = 0;  // the vblank being presented, if any
+      while (true) {
+        if ((claim >> 1u) >= vblank) {
+          if ((claim & 1u) == 0u) in_flight = claim >> 1u;
+          break;
+        }
+        if (scanout_claim_.compare_exchange_weak(claim, (vblank << 1u) | 1u,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+          if ((claim & 1u) == 0u && (claim >> 1u) != 0u) in_flight = claim >> 1u;
+          break;
+        }
+      }
+      const bool presented_this_vblank = in_flight >= vblank;
+      const bool settled =
+          in_flight == 0u ||
+          scanout_latched_.wait_until(in_flight, Clock::now() + kScanoutPresentTimeout);
+      if (!presented_this_vblank || !settled) {
+        scanout_latch_timeouts_.fetch_add(1u, std::memory_order_relaxed);
+        vblank_activity.arguments[2] = 1u;
+      }
     }
 
     // The vblank advances the GPU progress counter EVENT_WRITE_SHD reports,

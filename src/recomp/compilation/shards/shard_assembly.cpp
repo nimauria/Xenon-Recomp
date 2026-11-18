@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "recomp/compilation/project_generation_internal.hpp"
+#include "xenon/recomp/shard_plan.hpp"
 
 namespace xenon::recomp::detail {
 
@@ -55,15 +56,28 @@ ShardLayout assemble_shards(const std::vector<const DiscoveredFunction*>& codege
     shard_function_count_current = 0;
     shard_bytes_current = kHeaderSize;
   };
+  // Byte budget: content-defined boundaries (plan_shard_starts()), so a
+  // regeneration rewrites - and the build recompiles - only the shards
+  // around what changed. A shard always takes at least one function; one
+  // larger than the budget gets an oversized shard of its own.
+  std::vector<std::size_t> planned_starts;
+  if (options.shard_max_bytes) {
+    std::vector<std::uint32_t> addresses;
+    std::vector<std::size_t> sizes;
+    addresses.reserve(codegen_items.size());
+    sizes.reserve(codegen_items.size());
+    for (std::size_t index = 0; index < codegen_items.size(); ++index) {
+      addresses.push_back(codegen_items[index]->guest_start);
+      sizes.push_back(function_sources[index].size());
+    }
+    planned_starts = plan_shard_starts(addresses, sizes, *options.shard_max_bytes, kHeaderSize);
+  }
+  std::size_t next_planned = 0;
   for (std::size_t index = 0; index < codegen_items.size(); ++index) {
     const auto& source = function_sources[index];
     if (options.shard_max_bytes) {
-      // A shard always takes at least one function - a single function
-      // larger than the budget gets its own oversized shard rather than an
-      // empty one or a silently-unbounded one.
-      const bool exceeds_budget =
-          !shard_path.empty() && shard_bytes_current + source.size() > *options.shard_max_bytes;
-      if (shard_path.empty() || exceeds_budget) {
+      if (next_planned < planned_starts.size() && planned_starts[next_planned] == index) {
+        ++next_planned;
         flush_shard();
         start_shard(index);
       }

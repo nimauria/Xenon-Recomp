@@ -1663,6 +1663,131 @@ void run_converting_transfers(Make make, std::string_view name) {
   }
 }
 
+// Canonical EDRAM loads on the GPU (GPU-resident canonical storage): a
+// native image taking tiles that canonical EDRAM holds - first use, or after
+// native state was discarded - gets every guest sample's word from the
+// uploaded EDRAM image, unpacked in a shader, for each format the converting
+// transfer covers and each MSAA mode. Returned to canonical storage, every
+// word comes back unchanged - by the GPU flush (Phase 3: packed in a compute
+// shader, the tiles read back once) and by the CPU flush (a readback per
+// sample and the CPU's exact pack) alike, and the two leave EDRAM
+// byte-identical, words outside the image in the flushed tiles included.
+template <typename Backend>
+void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
+  constexpr std::uint32_t kPitch = 80;
+  constexpr std::uint32_t kRows = 16;
+  xenon::memory::AddressSpace memory;
+  assert(memory.initialize());
+  Edram edram;
+  const std::array views{kD24S8View, kD24FS8View, kRgba8View, kR32FloatView, kR16G16FloatView};
+  const std::array<MsaaSamples, 3> modes{MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4};
+  for (const auto& view : views) {
+    for (const auto msaa : modes) {
+     std::vector<std::byte> gpu_flushed;
+     for (const bool gpu_flush : {true, false}) {
+      backend.set_gpu_canonical_edram_flushes(gpu_flush);
+      edram.reset();
+      const EdramSurfaceLayout layout{kSurfaceBaseTile, kPitch, kRows, msaa, false, view.depth};
+      const auto samples = 1u << static_cast<unsigned>(msaa);
+      // Words every view holds exactly (finite 16-bit halves), distinct per
+      // sample.
+      const auto seeded = [](std::uint32_t x, std::uint32_t y, std::uint32_t s) -> std::uint32_t {
+        return 0x40000000u | (((x * 7u + y * 37u + s * 91u) & 0xFFu) << 16u) | (y << 8u) | x;
+      };
+      for (std::uint32_t s = 0; s < samples; ++s)
+        for (std::uint32_t y = 0; y < kRows; ++y)
+          for (std::uint32_t x = 0; x < kPitch; ++x)
+            assert(write_edram_sample(edram, layout, x, y, {seeded(x, y, s), 0u}, s));
+      backend.begin_submission(memory, edram);
+      assert_backend_ok(backend, "begin_submission");
+      // Everything canonical: the draw below loads the tiles.
+      assert(backend.invalidate_edram_native_state());
+      const auto loads_before = backend.performance_counters().gpu_canonical_edram_loads;
+      write_register(backend, 0x2000, kPitch | (static_cast<std::uint32_t>(msaa) << 16u));
+      write_register(backend, 0x200E, 0u);
+      write_register(backend, 0x200F, kPitch | (kRows << 16u));
+      write_register(backend, 0x2081, 1u << 31u);
+      write_register(backend, 0x2082, kPitch | (kRows << 16u));
+      write_register(backend, view.depth ? 0x2002 : 0x2001,
+                     kSurfaceBaseTile | (std::uint32_t(view.format) << 16u));
+      write_register(backend, 0x2208,
+                     static_cast<std::uint32_t>(view.depth ? EdramMode::DepthOnly
+                                                           : EdramMode::ColorDepth));
+      write_register(backend, 0x2104, view.depth ? 0u : 0xFu);
+      write_register(backend, 0x2200, view.depth ? (1u << 1u) | (1u << 2u) : 0u);
+      issue_dummy_draw(backend);
+      assert_backend_ok(backend, "draw loading canonical tiles");
+      if (backend.performance_counters().gpu_canonical_edram_loads <= loads_before) {
+        std::cerr << name << ' ' << view.label << " x" << samples
+                  << ": the canonical tiles were not loaded on the GPU\n";
+        assert(false);
+      }
+      // The CPU copy is overwritten; only the native image holds the words.
+      for (std::uint32_t s = 0; s < samples; ++s)
+        for (std::uint32_t y = 0; y < kRows; ++y)
+          for (std::uint32_t x = 0; x < kPitch; ++x)
+            assert(write_edram_sample(edram, layout, x, y, {0xDEADBEEFu, 0u}, s));
+      // A tile past the surface's (at most 4 here) is not the flush's to write.
+      constexpr std::uint32_t kSentinel = 0xA5C3E10Fu;
+      const auto sentinel_offset = std::size_t(kSurfaceBaseTile + 8u) * Edram::kTileBytes + 52u;
+      std::memcpy(edram.bytes().data() + sentinel_offset, &kSentinel, 4u);
+      const auto stores_before = backend.performance_counters().gpu_canonical_edram_stores;
+      assert(backend.make_edram_canonical());
+      assert_backend_ok(backend, "returning the tiles to canonical storage");
+      const bool stored_on_gpu =
+          backend.performance_counters().gpu_canonical_edram_stores > stores_before;
+      if (stored_on_gpu != gpu_flush) {
+        std::cerr << name << ' ' << view.label << " x" << samples << ": the flush ran on the "
+                  << (stored_on_gpu ? "GPU" : "CPU") << ", expected the "
+                  << (gpu_flush ? "GPU" : "CPU") << '\n';
+        assert(false);
+      }
+      std::uint32_t mismatches = 0;
+      for (std::uint32_t s = 0; s < samples; ++s) {
+        for (std::uint32_t y = 0; y < kRows; ++y) {
+          for (std::uint32_t x = 0; x < kPitch; ++x) {
+            const auto word = read_edram_sample(edram, layout, x, y, s)[0];
+            if (word == seeded(x, y, s)) continue;
+            if (++mismatches <= 6u)
+              std::cerr << name << ' ' << view.label << " x" << samples << " sample " << s
+                        << " at (" << x << ',' << y << "): 0x" << std::hex << word
+                        << ", loaded 0x" << seeded(x, y, s) << std::dec
+                        << (gpu_flush ? " (GPU flush)" : " (CPU flush)") << '\n';
+          }
+        }
+      }
+      assert(mismatches == 0);
+      std::uint32_t sentinel{};
+      std::memcpy(&sentinel, edram.bytes().data() + sentinel_offset, 4u);
+      assert(sentinel == kSentinel);
+      backend.end_submission();
+      const auto bytes = edram.bytes();
+      if (gpu_flush) {
+        gpu_flushed.assign(bytes.begin(), bytes.end());
+        continue;
+      }
+      // The GPU flush left EDRAM exactly as the CPU flush does.
+      assert(gpu_flushed.size() == bytes.size());
+      std::size_t differing = 0;
+      for (std::size_t i = 0; i < bytes.size(); i += 4u) {
+        if (std::memcmp(gpu_flushed.data() + i, bytes.data() + i, 4u) == 0) continue;
+        if (++differing <= 6u) {
+          std::uint32_t gpu_word{}, cpu_word{};
+          std::memcpy(&gpu_word, gpu_flushed.data() + i, 4u);
+          std::memcpy(&cpu_word, bytes.data() + i, 4u);
+          std::cerr << name << ' ' << view.label << " x" << samples << ": EDRAM byte " << i
+                    << " (tile " << i / Edram::kTileBytes << ") GPU flush 0x" << std::hex
+                    << gpu_word << ", CPU flush 0x" << cpu_word << std::dec << '\n';
+        }
+      }
+      assert(differing == 0);
+     }
+    }
+  }
+  backend.set_gpu_canonical_edram_flushes(true);
+  std::cout << name << " canonical EDRAM loads and GPU flushes on the GPU: ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -1719,6 +1844,11 @@ int main() {
       assert(indexed.initialize({.enable_validation = false}));
       run_indexed_draws_track_index_buffer_writes(indexed, "Vulkan");
     }
+    {
+      xenon::gpu::vulkan::Backend canonical;
+      assert(canonical.initialize({.enable_validation = false}));
+      run_canonical_gpu_loads(canonical, "Vulkan");
+    }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command buffer of its own and submitted in order, give
     // the same pixels.
@@ -1754,6 +1884,14 @@ int main() {
       assert(reloaded.initialize({.enable_validation = false}));
       reloaded.set_shader_cache_directory(cache_directory.string());
       run_dot_products_follow_xenos_zero_rule(reloaded, "Vulkan (reloaded pipeline cache)");
+      // XEN-004: pipelines the persistent cache supplied are reported like
+      // D3D12's pipeline-library loads (creation feedback; a driver that gives
+      // none reports zero rather than a guess).
+      const auto counters = reloaded.performance_counters();
+      std::cout << "Vulkan pipelines from the persistent cache: " << counters.pipeline_cache_hits
+                << " of " << counters.pipeline_cache_misses << std::endl;
+      assert(counters.pipeline_cache_hits <= counters.pipeline_cache_misses);
+      assert(counters.pipeline_cache_hits > 0u);
     }
     std::filesystem::remove_all(cache_directory, cache_error);
     run_converting_transfers<xenon::gpu::vulkan::Backend>(
@@ -1815,6 +1953,11 @@ int main() {
       assert(indexed.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
       run_indexed_draws_track_index_buffer_writes(indexed, "D3D12");
     }
+    {
+      xenon::gpu::d3d12::Backend canonical;
+      assert(canonical.initialize({.enable_debug_layer = false, .allow_software_adapter = false}));
+      run_canonical_gpu_loads(canonical, "D3D12");
+    }
     // GPU V3 parallel recording: the same draws, every run recorded on a
     // worker into a command list of its own and submitted in order, give the
     // same pixels.
@@ -1849,6 +1992,7 @@ int main() {
         run_dot_products_follow_xenos_zero_rule(first, "D3D12 (new pipeline library)");
         const auto created = first.pipeline_library_statistics();
         assert(created.open && created.loaded == 0u && created.stored > 0u);
+        assert(first.performance_counters().pipeline_cache_hits == 0u);
         stored = created.stored;
       }
       const auto library_file = library_directory / "d3d12_pipelines.bin";
@@ -1860,6 +2004,8 @@ int main() {
         reloaded.set_shader_cache_directory(library_directory.string());
         run_dot_products_follow_xenos_zero_rule(reloaded, "D3D12 (reloaded pipeline library)");
         const auto loaded = reloaded.pipeline_library_statistics();
+        // The generic counter reports the same loads (XEN-004).
+        assert(reloaded.performance_counters().pipeline_cache_hits == loaded.loaded);
         if (loaded.loaded != stored || loaded.stored != 0u) {
           std::cerr << "D3D12 pipeline library: " << stored << " stored, then " << loaded.loaded
                     << " loaded and " << loaded.stored << " stored again" << std::endl;

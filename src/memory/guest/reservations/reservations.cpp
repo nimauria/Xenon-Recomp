@@ -27,7 +27,9 @@ std::uint64_t AddressSpace::claim_reservation(
   const auto granule = physical_address / kReservationGranuleSize;
   const auto word = granule >> 6u;
   const auto bit = std::uint64_t{1} << (granule & 63u);
-  reservation_seen_bitmap_[word].fetch_or(bit, std::memory_order_release);
+  // Sequentially consistent: see the ordering note at
+  // reservation_monitor_detail::reservation_seen() (memory_port.hpp).
+  reservation_seen_bitmap_[word].fetch_or(bit, std::memory_order_seq_cst);
 
   auto generation = reservation_next_generation_.fetch_add(
       1u, std::memory_order_acq_rel);
@@ -45,7 +47,7 @@ std::uint64_t AddressSpace::claim_reservation(
        ++slot_index) {
     auto expected = std::uint64_t{0};
     if (reservation_slots_[slot_index].compare_exchange_strong(
-            expected, descriptor, std::memory_order_acq_rel,
+            expected, descriptor, std::memory_order_seq_cst,
             std::memory_order_acquire)) {
       return make_reservation_token(slot_index, generation);
     }
@@ -149,10 +151,11 @@ std::uint64_t AddressSpace::reserve32(GuestAddress address,
       coherency_.write_epoch_data()->load(std::memory_order_acquire);
   auto token = claim_reservation(physical_address, sizeof(value));
   value = atomic_load_guest_be<std::uint32_t>(ptr);
+  // Writer count before the closing epoch (see MemoryAccessContext::reserve32).
+  const auto writers =
+      coherency_.active_writers_data()->load(std::memory_order_seq_cst);
   const auto epoch_after =
       coherency_.write_epoch_data()->load(std::memory_order_acquire);
-  const auto writers =
-      coherency_.active_writers_data()->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     cancel_reservation(token);
     token = 0u;
@@ -188,10 +191,11 @@ std::uint64_t AddressSpace::reserve64(GuestAddress address,
       coherency_.write_epoch_data()->load(std::memory_order_acquire);
   auto token = claim_reservation(physical_address, sizeof(value));
   value = atomic_load_guest_be<std::uint64_t>(ptr);
+  // Writer count before the closing epoch (see MemoryAccessContext::reserve32).
+  const auto writers =
+      coherency_.active_writers_data()->load(std::memory_order_seq_cst);
   const auto epoch_after =
       coherency_.write_epoch_data()->load(std::memory_order_acquire);
-  const auto writers =
-      coherency_.active_writers_data()->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     cancel_reservation(token);
     token = 0u;

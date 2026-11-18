@@ -946,6 +946,14 @@ enum class SlotStatus : std::uint64_t {
          (std::uint64_t{physical_address} & kPhysicalAddressMask);
 }
 
+// Reservation <-> plain-store ordering (XEN-005). A reserve publishes its
+// claim (seen bit, slot) and then reads the in-flight writer count; a plain
+// writer publishes itself in that count and then reads the seen bits and
+// slots. That is the store-buffering pattern: with acquire/release alone both
+// sides may read the other's old value, so the reserve keeps a reservation a
+// writer never invalidated. These operations are sequentially consistent so
+// at least one side sees the other (the same instructions as acq_rel on x86-64
+// and ARMv8, whose acquire/release are already RCsc).
 [[nodiscard]] inline bool reservation_seen(const FastMemoryView& fast,
                                            std::uint32_t granule) noexcept {
   if (!fast.reservation_seen_bitmap || !fast.reservation_seen_word_count) {
@@ -954,7 +962,7 @@ enum class SlotStatus : std::uint64_t {
   const auto word = granule >> 6u;
   if (word >= fast.reservation_seen_word_count) return false;
   const auto bit = std::uint64_t{1} << (granule & 63u);
-  return (fast.reservation_seen_bitmap[word].load(std::memory_order_acquire) &
+  return (fast.reservation_seen_bitmap[word].load(std::memory_order_seq_cst) &
           bit) != 0u;
 }
 
@@ -1000,7 +1008,7 @@ inline void invalidate_range(const FastMemoryView& fast,
   for (std::uint32_t slot_index = 0; slot_index < fast.reservation_slot_count;
        ++slot_index) {
     auto& slot = fast.reservation_slots[slot_index];
-    auto descriptor = slot.load(std::memory_order_acquire);
+    auto descriptor = slot.load(std::memory_order_seq_cst);
     for (;;) {
       if (slot_status(descriptor) != SlotStatus::Active) break;
       const auto slot_granule =
@@ -1049,7 +1057,7 @@ inline void end_reservation_operation(const FastMemoryView& fast) noexcept {
   const auto word = granule >> 6u;
   if (word >= fast.reservation_seen_word_count) return 0u;
   const auto bit = std::uint64_t{1} << (granule & 63u);
-  fast.reservation_seen_bitmap[word].fetch_or(bit, std::memory_order_release);
+  fast.reservation_seen_bitmap[word].fetch_or(bit, std::memory_order_seq_cst);
 
   auto generation = fast.reservation_next_generation->fetch_add(
       1u, std::memory_order_acq_rel);
@@ -1065,7 +1073,7 @@ inline void end_reservation_operation(const FastMemoryView& fast) noexcept {
        ++slot_index) {
     auto expected = std::uint64_t{0};
     if (fast.reservation_slots[slot_index].compare_exchange_strong(
-            expected, descriptor, std::memory_order_acq_rel,
+            expected, descriptor, std::memory_order_seq_cst,
             std::memory_order_acquire)) {
       return make_token(slot_index, generation);
     }
@@ -1172,7 +1180,7 @@ inline void mark_cpu_dirty_pages(const FastMemoryView& fast,
     }
     if (fast.active_coherency_writers) {
       fast.active_coherency_writers->fetch_add(1u,
-                                                std::memory_order_acq_rel);
+                                                std::memory_order_seq_cst);
     }
     reservation_participant =
         range_has_seen_reservation(fast, physical_address, width) &&
@@ -1783,10 +1791,15 @@ inline std::uint64_t MemoryAccessContext::reserve32(
       fast_, resolved.physical_address, sizeof(value));
   const auto raw = detail::atomic_load_relaxed<std::uint32_t>(resolved.ptr);
   value = byteswap_if(raw, std::endian::native == std::endian::little);
+  // The writer count first, then the epoch: a writer in flight at the claim
+  // is either still counted here or has finished, and then its epoch bump
+  // (made before its release of the count) is visible below. Read the other
+  // way round, a store that completed between the two loads went unseen and
+  // the conditional store later overwrote it.
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_seq_cst);
   const auto epoch_after =
       fast_.global_write_epoch->load(std::memory_order_acquire);
-  const auto writers =
-      fast_.active_coherency_writers->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     reservation_monitor_detail::cancel_reservation(fast_, token);
     token = 0u;
@@ -1826,10 +1839,15 @@ inline std::uint64_t MemoryAccessContext::reserve64(
       fast_, resolved.physical_address, sizeof(value));
   const auto raw = detail::atomic_load_relaxed<std::uint64_t>(resolved.ptr);
   value = byteswap_if(raw, std::endian::native == std::endian::little);
+  // The writer count first, then the epoch: a writer in flight at the claim
+  // is either still counted here or has finished, and then its epoch bump
+  // (made before its release of the count) is visible below. Read the other
+  // way round, a store that completed between the two loads went unseen and
+  // the conditional store later overwrote it.
+  const auto writers =
+      fast_.active_coherency_writers->load(std::memory_order_seq_cst);
   const auto epoch_after =
       fast_.global_write_epoch->load(std::memory_order_acquire);
-  const auto writers =
-      fast_.active_coherency_writers->load(std::memory_order_acquire);
   if (token && (epoch_before != epoch_after || writers != 0u)) {
     reservation_monitor_detail::cancel_reservation(fast_, token);
     token = 0u;

@@ -173,6 +173,17 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "if(NOT XENON_RECOMP_ROOT)\n"
            "  message(FATAL_ERROR \"Set XENON_RECOMP_ROOT to the Xenon-Recomp source tree\")\n"
            "endif()\n"
+           // Every object of this build - the shared Xenon runtime libraries
+           // as well as the generated code - goes through the verified
+           // native-object cache (tools/compilation_cache.py), shared by every
+           // module's workspace. The runtime is compiled with the same source
+           // tree, flags and toolchain for every module, so a second module
+           // (another XEX of the title, another title or region) reuses its
+           // verified objects instead of compiling the runtime again; a
+           // changed source, flag or compiler is a different key and builds.
+           "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
+           "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
+           "set(CMAKE_CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n"
            "add_subdirectory(${XENON_RECOMP_ROOT} xenon-recomp EXCLUDE_FROM_ALL)\n"
            "add_library(xenon_game STATIC\n";
   for (const auto& path : shards)
@@ -196,9 +207,7 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "add_library(xenon_game_module SHARED module_export.cpp)\n"
            "target_link_libraries(xenon_game_module PRIVATE xenon_game)\n"
            "target_include_directories(xenon_game_module PRIVATE ${XENON_RECOMP_ROOT}/include)\n";
-  build << "find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)\n"
-           "set(XENON_GRAPH_CACHE \"${CMAKE_CURRENT_SOURCE_DIR}/.graph/native\" CACHE PATH \"Gen 10 native object cache\")\n"
-           "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
+  build << "if(MSVC)\n  target_compile_options(xenon_game PRIVATE /Brepro)\n  target_link_options(xenon_game_module PRIVATE /Brepro /INCREMENTAL:NO)\nendif()\n"
            // A module is prepared on the machine that plays it, so generated
            // code may use that machine's x86-64-v3 features (AVX2, FMA, BMI2,
            // MOVBE): wider vector code and fewer instructions per byte-swapped
@@ -235,7 +244,7 @@ bool write_generated_cmake(const std::filesystem::path& generation_stage, const 
            "    endif()\n"
            "  endif()\n"
            "endif()\n"
-           "set_property(TARGET xenon_game PROPERTY CXX_COMPILER_LAUNCHER \"${Python3_EXECUTABLE};${XENON_RECOMP_ROOT}/tools/compilation_cache.py;compile;${XENON_GRAPH_CACHE}\")\n";
+           ;
   build.close();
   return static_cast<bool>(build);
 }

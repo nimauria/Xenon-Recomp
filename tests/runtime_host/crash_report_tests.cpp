@@ -1,7 +1,8 @@
 // Host crash reports (runtime_host/src/crash_report.hpp): the line format,
 // and - by running this executable again in a mode that really crashes - that
 // an access violation, a stack overflow on the main thread or on another
-// thread, and an uncaught C++ exception each leave their line in crash.log.
+// thread, and an uncaught C++ exception each leave their line in crash.log
+// and, on Windows, a minidump in crash.dmp (none with XENON_CRASH_DUMP=off).
 
 #include <cassert>
 #include <cstdlib>
@@ -94,7 +95,35 @@ void expect_crash_line(const char* self, std::string_view mode, const std::files
       assert(false);
     }
   }
+#if defined(_WIN32)
+  // And a minidump for a debugger beside it (DbgHelp's "MDMP" header).
+  const auto dump = directory / "crash.dmp";
+  std::ifstream in(dump, std::ios::binary);
+  char signature[4]{};
+  in.read(signature, 4);
+  if (!in || std::string_view(signature, 4) != "MDMP" ||
+      std::filesystem::file_size(dump) < 1024u) {
+    std::cerr << mode << ": no minidump at " << dump.string() << "\n";
+    assert(false);
+  }
+#endif
 }
+
+#if defined(_WIN32)
+// XENON_CRASH_DUMP=off: the line still, no dump.
+void expect_no_dump_when_off(const char* self, const std::filesystem::path& root) {
+  const auto directory = root / "dump-off";
+  std::filesystem::create_directories(directory);
+  _putenv_s("XENON_CRASH_DUMP", "off");
+  const std::string command =
+      "\"\"" + std::string(self) + "\" null-write \"" + directory.string() + "\"\"";
+  const int status = std::system(command.c_str());
+  _putenv_s("XENON_CRASH_DUMP", "");
+  assert(status != 0);
+  assert(read_lines(directory / "crash.log").size() == 1u);
+  assert(!std::filesystem::exists(directory / "crash.dmp"));
+}
+#endif
 
 void test_format() {
   char line[512];
@@ -164,6 +193,7 @@ int main(int argc, char** argv) {
                      "xenon_runtime_host_crash_report_tests", ", writing 0x0"});
   expect_crash_line(argv[0], "overflow", root, {"exception 0xC00000FD (stack overflow)"});
   expect_crash_line(argv[0], "thread-overflow", root, {"exception 0xC00000FD (stack overflow)"});
+  expect_no_dump_when_off(argv[0], root);
 #else
   expect_crash_line(argv[0], "null-write", root, {"signal 11 (segmentation fault)", "0x0"});
   expect_crash_line(argv[0], "overflow", root, {"signal 11 (segmentation fault)"});

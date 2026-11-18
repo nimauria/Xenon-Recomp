@@ -21,6 +21,7 @@ if(XENON_ENABLE_KERNEL)
     synchronization/timer.cpp
     synchronization/timer_manager.cpp
     synchronization/wait.cpp
+    synchronization/wait_profile.cpp
     threading/thread.cpp
     timing/time.cpp
     module/module.cpp

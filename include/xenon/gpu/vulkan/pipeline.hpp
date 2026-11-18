@@ -39,11 +39,16 @@ class GraphicsPipeline {
   void reset() noexcept;
   [[nodiscard]] VkPipeline pipeline() const noexcept { return pipeline_; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // Whether the driver reported that the pipeline cache supplied this
+  // pipeline (pipeline creation feedback, core in Vulkan 1.3); false when it
+  // compiled it or reports nothing. The D3D12 pipeline's equivalent.
+  [[nodiscard]] bool loaded_from_library() const noexcept { return loaded_from_library_; }
 
  private:
   VkPipelineCache cache_{VK_NULL_HANDLE};
   VkDevice device_{VK_NULL_HANDLE};
   VkPipeline pipeline_{VK_NULL_HANDLE};
+  bool loaded_from_library_{};
   std::string error_{};
 };
 

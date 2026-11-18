@@ -86,9 +86,28 @@ class Writer {
 
 class Reader {
  public:
-  explicit Reader(const std::filesystem::path& path) : file_(path, std::ios::binary) {}
+  explicit Reader(const std::filesystem::path& path) : file_(path, std::ios::binary) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    size_ = ec ? 0 : size;
+  }
 
   [[nodiscard]] bool good() const noexcept { return file_.good(); }
+
+  // Bytes the file still holds. Every count and size read from the file is
+  // checked against it before anything is allocated: a capture is untrusted
+  // input, and a few bytes declaring a 16 GiB blob or 2^28 elements must be
+  // rejected, not allocated.
+  [[nodiscard]] std::uint64_t remaining() {
+    const auto position = file_.tellg();
+    if (position < 0) return 0;
+    const auto at = static_cast<std::uint64_t>(position);
+    return at < size_ ? size_ - at : 0;
+  }
+  // `count` items of at least `bytes_each` encoded bytes fit in what is left.
+  [[nodiscard]] bool holds(std::uint64_t count, std::uint64_t bytes_each) {
+    return count <= remaining() / bytes_each;
+  }
 
   bool bytes(void* data, std::size_t size) {
     if (!size) return true;
@@ -124,7 +143,7 @@ class Reader {
 
   bool string(std::string& value) {
     std::uint64_t size{};
-    if (!integer(size) || size > kMaximumBlobBytes ||
+    if (!integer(size) || size > kMaximumBlobBytes || !holds(size, 1) ||
         size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       return false;
     }
@@ -136,7 +155,7 @@ class Reader {
   bool pod_vector(std::vector<T>& values) {
     static_assert(std::is_integral_v<T> || std::is_enum_v<T>);
     std::uint64_t count{};
-    if (!integer(count) || count > kMaximumVectorElements ||
+    if (!integer(count) || count > kMaximumVectorElements || !holds(count, sizeof(IntegerStorageT<T>)) ||
         count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       return false;
     }
@@ -149,7 +168,7 @@ class Reader {
 
   bool blob(std::vector<std::byte>& value) {
     std::uint64_t size{};
-    if (!integer(size) || size > kMaximumBlobBytes ||
+    if (!integer(size) || size > kMaximumBlobBytes || !holds(size, 1) ||
         size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       return false;
     }
@@ -165,6 +184,7 @@ class Reader {
 
  private:
   std::ifstream file_;
+  std::uint64_t size_{};
 };
 
 bool write_register_snapshot(Writer& out, const RegisterFile::Snapshot& snapshot) {
@@ -202,7 +222,7 @@ bool read_shader_program(Reader& in, ShaderProgram& program) {
   std::uint64_t expected_hash{};
   std::uint64_t count{};
   if (!in.integer(stage) || !in.integer(start_slot) || !in.integer(expected_hash) ||
-      !in.integer(count) || count > kMaximumVectorElements ||
+      !in.integer(count) || count > kMaximumVectorElements || !in.holds(count, sizeof(std::uint32_t)) ||
       count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return false;
   }
@@ -465,6 +485,7 @@ bool read_frontend(Reader& in, FrontendSubmissionCapture& capture) {
       !read_optional_shader(in, capture.initial_vertex_program) ||
       !read_optional_shader(in, capture.initial_pixel_program) ||
       !in.integer(command_count) || command_count > kMaximumVectorElements ||
+      !in.holds(command_count, 1) ||
       command_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     return false;
   }
@@ -559,7 +580,9 @@ std::optional<PortableSubmissionCapture> load_portable_capture(
   }
 
   std::uint64_t range_count{};
+  // A range is at least its address, usage and blob size.
   if (!in.integer(range_count) || range_count > kMaximumVectorElements ||
+      !in.holds(range_count, sizeof(std::uint32_t) * 2 + sizeof(std::uint64_t)) ||
       range_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     set_error(error, "portable GPU capture physical range table is invalid");
     return std::nullopt;
@@ -580,6 +603,7 @@ std::optional<PortableSubmissionCapture> load_portable_capture(
   }
   std::uint64_t diagnostic_count{};
   if (!in.integer(diagnostic_count) || diagnostic_count > kMaximumVectorElements ||
+      !in.holds(diagnostic_count, sizeof(std::uint64_t)) ||
       diagnostic_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
     set_error(error, "portable GPU capture diagnostic table is invalid");
     return std::nullopt;

@@ -120,6 +120,45 @@ void test_draw_runs_and_read_pointer_counts() {
   assert(contains(empty, "runs 0:0 1:0 2-3:0 4-15:0 16-63:0 64-255:0 256+:0"));
 }
 
+// The frame timeline: each presented frame's line holds the work done since
+// the previous frame - lifetime counters, unaffected by the per-second window
+// being taken in between - and the interval between the two presents.
+void test_frame_timeline_reports_each_frames_work() {
+  const auto t = Clock::now() + 200s;
+  (void)perf::take_frame_timeline_line(t);  // anchors the first frame
+  perf::add(perf::Counter::Draws, 120u);
+  perf::add(perf::Counter::Resolves, 3u);
+  perf::add(perf::Counter::GpuBusyNs, 4'500'000u);
+  perf::add(perf::Counter::BackendWaitNs, 2'000'000u);
+  perf::add(perf::Counter::BackendWaits, 5u);
+  perf::add(perf::Counter::HoldsBarrier, 5u);
+  (void)perf::take_line(1.0);  // the per-second window, taken mid-frame
+  perf::add(perf::Counter::Draws, 30u);
+  const auto line = perf::take_frame_timeline_line(t + 33ms);
+  assert(contains(line, "interval 33.0 ms"));
+  assert(contains(line, "draws 150 resolves 3"));
+  assert(contains(line, "gpu busy 4.50 ms"));
+  assert(contains(line, "frontend waited 2.00 ms (5 holds: barrier 5"));
+  // The next frame starts from there.
+  const auto next = perf::take_frame_timeline_line(t + 66ms);
+  assert(contains(next, "draws 0 resolves 0"));
+  assert(perf::lifetime(perf::Counter::Resolves) >= 3u);
+}
+
+// Backend queue depth: the window's deepest queue and the mean depth at post.
+void test_queue_depth_columns() {
+  (void)perf::take_line(1.0);
+  perf::note_max(perf::Counter::BackendQueueMax, 3u);
+  perf::note_max(perf::Counter::BackendQueueMax, 9u);
+  perf::note_max(perf::Counter::BackendQueueMax, 4u);
+  for (const std::uint64_t depth : {1u, 2u, 9u}) {
+    perf::add(perf::Counter::BackendQueueDepthSum, depth);
+    perf::add(perf::Counter::BackendPosts, 1u);
+  }
+  assert(contains(perf::take_line(1.0), "queue max 9 mean 4.0"));
+  assert(contains(perf::take_line(1.0), "queue max 0 mean 0.0"));
+}
+
 void test_scoped_time_counts_one_and_adds_its_duration() {
   (void)perf::take_line(1.0);
   {
@@ -172,6 +211,10 @@ int main() {
   test_p99_and_max_show_a_hitch();
   std::cerr << "draw_runs_and_read_pointer_counts\n";
   test_draw_runs_and_read_pointer_counts();
+  std::cerr << "frame_timeline_reports_each_frames_work\n";
+  test_frame_timeline_reports_each_frames_work();
+  std::cerr << "queue_depth_columns\n";
+  test_queue_depth_columns();
   std::cerr << "scoped_time_counts_one_and_adds_its_duration\n";
   test_scoped_time_counts_one_and_adds_its_duration();
   std::cerr << "flush_writes_once_a_second_without_probe_logs\n";

@@ -120,12 +120,87 @@ VkFormat host_texture_format(TextureHostFormat format) noexcept {
 
 TextureImage::~TextureImage() { reset(); }
 
+VkSamplerCreateInfo describe_sampler(const TextureDescriptor& state, bool anisotropy_supported,
+                                     std::uint64_t& unsupported_counter) noexcept {
+  const auto lod = xenos_sampler_lod_range(state.mip_filter, state.mip_min_level,
+                                           state.mip_max_level);
+  VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  info.magFilter = state.mag_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+  info.minFilter = state.min_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+  info.mipmapMode = lod.linear_mips ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  info.addressModeU = address_mode(state.clamps[0], unsupported_counter);
+  info.addressModeV = address_mode(state.clamps[1], unsupported_counter);
+  info.addressModeW = address_mode(state.clamps[2], unsupported_counter);
+  info.borderColor = xenos_border_is_white(state.border_color) ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                                                               : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+  info.mipLodBias = float(state.lod_bias) / 32.0f;
+  info.minLod = lod.min_lod;
+  info.maxLod = lod.max_lod;
+  info.anisotropyEnable = state.aniso_filter && anisotropy_supported;
+  info.maxAnisotropy = info.anisotropyEnable ? max_anisotropy(state.aniso_filter) : 1.0f;
+  return info;
+}
+
+SamplerCache::~SamplerCache() { reset(); }
+
+bool SamplerCache::initialize(VkPhysicalDevice physical_device, VkDevice device) {
+  reset();
+  error_.clear();
+  if (!physical_device || !device) {
+    error_ = "Vulkan sampler cache requires a device";
+    return false;
+  }
+  device_ = device;
+  VkPhysicalDeviceFeatures features{};
+  vkGetPhysicalDeviceFeatures(physical_device, &features);
+  anisotropy_ = features.samplerAnisotropy == VK_TRUE;
+  VkPhysicalDeviceProperties properties{};
+  vkGetPhysicalDeviceProperties(physical_device, &properties);
+  // Leave room for the samplers the backend's own passes create.
+  const auto device_limit = properties.limits.maxSamplerAllocationCount;
+  limit_ = device_limit > 256u ? device_limit - 256u : device_limit / 2u;
+  return true;
+}
+
+void SamplerCache::reset() noexcept {
+  if (device_) {
+    for (const auto& [key, sampler] : samplers_) vkDestroySampler(device_, sampler, nullptr);
+  }
+  samplers_.clear();
+  device_ = VK_NULL_HANDLE;
+}
+
+VkSampler SamplerCache::get(const TextureDescriptor& state) {
+  const auto lod_bias = static_cast<std::uint16_t>(state.lod_bias);
+  const Key key{state.mag_filter,    state.min_filter,      state.mip_filter,
+                state.aniso_filter,  state.clamps[0],       state.clamps[1],
+                state.clamps[2],     state.border_color,    std::uint8_t(lod_bias & 0xFFu),
+                std::uint8_t(lod_bias >> 8u), state.mip_min_level, state.mip_max_level};
+  if (const auto found = samplers_.find(key); found != samplers_.end()) return found->second;
+  if (!device_) {
+    error_ = "Vulkan sampler cache is not initialized";
+    return VK_NULL_HANDLE;
+  }
+  if (samplers_.size() >= limit_) {
+    error_ = "Vulkan device sampler limit reached (" + std::to_string(samplers_.size()) +
+             " distinct Xenos sampling states)";
+    return VK_NULL_HANDLE;
+  }
+  const auto info = describe_sampler(state, anisotropy_, unsupported_);
+  VkSampler sampler = VK_NULL_HANDLE;
+  if (vkCreateSampler(device_, &info, nullptr, &sampler) != VK_SUCCESS) {
+    error_ = "vkCreateSampler failed for Xenos sampling state";
+    return VK_NULL_HANDLE;
+  }
+  samplers_.emplace(key, sampler);
+  return sampler;
+}
+
 bool TextureImage::create(VkPhysicalDevice physical_device, VkDevice device,
                           const TextureLayout& layout) {
   reset();
   error_.clear();
   unsupported_format_ = false;
-  unsupported_sampler_behaviors_ = 0;
   if (!layout.valid || !physical_device || !device) {
     error_ = "Vulkan texture image requires a valid texture layout and a device";
     return false;
@@ -222,30 +297,6 @@ bool TextureImage::create(VkPhysicalDevice physical_device, VkDevice device,
     reset();
     return false;
   }
-  VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  sampler_info.magFilter = descriptor.mag_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-  sampler_info.minFilter = descriptor.min_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-  sampler_info.mipmapMode = descriptor.mip_filter ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                                                   : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-  sampler_info.addressModeU = address_mode(descriptor.clamps[0], unsupported_sampler_behaviors_);
-  sampler_info.addressModeV = address_mode(descriptor.clamps[1], unsupported_sampler_behaviors_);
-  sampler_info.addressModeW = address_mode(descriptor.clamps[2], unsupported_sampler_behaviors_);
-  sampler_info.borderColor = xenos_border_is_white(descriptor.border_color)
-                                 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
-                                 : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-  sampler_info.mipLodBias = float(descriptor.lod_bias) / 32.0f;
-  sampler_info.minLod = float(descriptor.mip_min_level);
-  sampler_info.maxLod = float(descriptor.mip_max_level);
-  VkPhysicalDeviceFeatures features{};
-  vkGetPhysicalDeviceFeatures(physical_device, &features);
-  sampler_info.anisotropyEnable = descriptor.aniso_filter && features.samplerAnisotropy;
-  sampler_info.maxAnisotropy =
-      sampler_info.anisotropyEnable ? max_anisotropy(descriptor.aniso_filter) : 1.0f;
-  if (vkCreateSampler(device_, &sampler_info, nullptr, &sampler_) != VK_SUCCESS) {
-    error_ = "vkCreateSampler failed for Xenos texture";
-    reset();
-    return false;
-  }
   descriptor_ = descriptor;
   layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
   return true;
@@ -334,11 +385,9 @@ bool TextureImage::initialize(VkPhysicalDevice physical_device, VkDevice device,
 }
 
 void TextureImage::reset() noexcept {
-  if (device_ && sampler_) vkDestroySampler(device_, sampler_, nullptr);
   if (device_ && view_) vkDestroyImageView(device_, view_, nullptr);
   if (device_ && image_) vkDestroyImage(device_, image_, nullptr);
   if (device_ && memory_) vkFreeMemory(device_, memory_, nullptr);
-  sampler_ = VK_NULL_HANDLE;
   view_ = VK_NULL_HANDLE;
   image_ = VK_NULL_HANDLE;
   memory_ = VK_NULL_HANDLE;

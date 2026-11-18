@@ -147,6 +147,11 @@ class CommandProcessor {
   // commands before them have executed, so a renderer that executes graphics
   // IR after decoding installs a barrier that executes what is pending
   // (GraphicsSystem::submit_ring(Backend&, ...)). Empty: decode only.
+  // What a guest-visible barrier is for (last_barrier_kind(), read by the
+  // barrier callback): a CP interrupt, a front-buffer flip, a wait on memory
+  // or a register, or a guest memory write or instruction store.
+  enum class BarrierKind : std::uint8_t { Write, Wait, Interrupt, Swap, ShaderStore };
+  [[nodiscard]] BarrierKind last_barrier_kind() const noexcept { return barrier_kind_; }
   void set_guest_visible_barrier(std::function<void()> barrier) {
     guest_visible_barrier_ = std::move(barrier);
   }
@@ -367,9 +372,11 @@ class CommandProcessor {
   void before_guest_memory_read(std::uint32_t address, std::uint32_t size) const {
     if (guest_read_fence_) guest_read_fence_(address, size);
   }
-  void before_guest_visible_effect() {
+  void before_guest_visible_effect(BarrierKind kind = BarrierKind::Write) {
+    barrier_kind_ = kind;
     if (guest_visible_barrier_) guest_visible_barrier_();
   }
+  BarrierKind barrier_kind_{BarrierKind::Write};
   void sync_point() {
     ++stats_.sync_points;
     if (sync_point_callback_) sync_point_callback_();

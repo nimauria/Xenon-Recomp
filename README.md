@@ -24,6 +24,13 @@ The long-term goal is an adaptive, cross-platform Xbox 360 recompilation platfor
 >
 > The first title, Ace Combat 6, now loads through the main menu into the first mission with its characters, aircraft and terrain drawn correctly. It is not yet playable: in-engine cutscenes and missions run at a low frame rate, and the parts the game presents at 60 fps run at double speed. See [Current milestone](#current-milestone-project-gracemeria).
 
+> [!IMPORTANT]
+> **Reduced update schedule (from 18 November 2026)**
+>
+> Project Xenon is moving to a reduced update schedule for a while. Most development time and resources are going to other projects for now. Xenon is still in active development and remains a priority project: work continues, but commits, releases of new findings and updates to this README will come less often than they did through October and November 2026. Issues and pull requests may take longer to get a reply.
+>
+> The latest progress before the change is summarised in [Latest progress](#latest-progress-12-to-18-november-2026).
+
 > [!NOTE]
 > Xenon does not distribute Xbox 360 games, executables, firmware, title updates, DLC, encryption keys or any other proprietary content. You must supply content from lawful sources.
 
@@ -65,6 +72,34 @@ Current status, updated 12 November 2026 from the project owner's runtime testin
   - The GPU sits mostly idle. The cost is CPU-side command processing plus shader compiles the first time each shader is used.
   - A persistent shader cache now keeps compiled shaders between sessions.
   - Audio decodes in real time.
+
+### Latest progress (12 to 18 November 2026)
+
+This is the work that landed after the 12 November test, before the move to a reduced update schedule.
+
+- **Mission timing is now understood better.** In missions the aircraft and the mission clock run about twice as fast as real time, and have done since the first mission run. A probe run ruled out Xenon's clocks: the game swaps about 30 times a second, the guest timebase runs at 50 MHz, vblank callbacks arrive about 59 times a second, and the game measures each frame at about 33.4 ms. The fault lies in how the game turns those clocks into game time. The next step is a probe of AC6's frame-delta calculation through the Project Gracemeria module.
+- **Mission audio crackles** because the guest's audio render callback cannot keep up: it delivers about 167 buffers a second where the device asks for about 187. It waits on game threads that are busy with game code, so it most likely has the same cause as the fast clock.
+- **GPU V3, the multi-threaded renderer.** Rendering work moved off the command processor's thread (see [GPU execution](#gpu-execution-gpu-v3)). Since then:
+  - Direct3D 12 keeps compiled pipelines in a pipeline library, and long runs of draws are recorded on worker threads;
+  - both backends submit up to 1024 draws per batch;
+  - index buffers are converted once, cached, and drawn from a GPU-resident buffer;
+  - EDRAM surfaces are looked up by exact keys instead of a byte-wise hash, and EDRAM loads are done on the GPU;
+  - cached resources are invalidated through an index, and resident memory uses best-fit allocation;
+  - the GPU fence is queried only when something waits on it, and barriers are grouped by kind;
+  - the ring read pointer the guest sees is the command processor's fetch position.
+- **Vulkan binds guest memory in windows** no larger than the device's storage-buffer limit, so devices with smaller limits can run it (XEN-001).
+- **CPU:** VMX semantics are inlined into generated code, and partial quadword loads and stores are handled.
+- **Audio:** XMA decoding continues correctly past a packet run-on, and races between XMA context locks and kicks are fixed.
+- **Input:** game modules can supply input profiles, and the mouse can be captured.
+- **Display timing:** guest vblanks are no longer locked to displays that wait slower than they report.
+- **Tools and diagnostics:**
+  - `draw-bench`, a deterministic renderer benchmark, and `gpu-replay`, which replays a frame captured from a live session as a benchmark of real work;
+  - a host sampling profiler, with symbols in Release builds;
+  - host threads named after the guest kernel threads they run;
+  - wait attribution, a per-frame timeline and the backend's queue depth in the frame log;
+  - `XENON_D3D12_ADAPTER=warp` forces the WARP software adapter.
+
+**Not yet measured:** no AC6 mission has been run on the newest renderer, so its effect on mission frame rates is not known yet.
 
 Earlier integration milestones on `development-restructure`:
 
@@ -644,11 +679,11 @@ Xenon is exclusively an Xbox 360 project. Original Xbox (XBE/NV2A) recompilation
 
 ## Roadmap
 
-These are goals in a rough order, not commitments or dates. Nothing here promises universal compatibility or automatic game fixes.
+These are goals in a rough order, not commitments or dates. Nothing here promises universal compatibility or automatic game fixes. While Xenon is on a reduced update schedule, progress on them will be slower.
 
 **Current priorities**
 
-1. Make AC6 playable: a real-time frame step so 30 fps sections stay at 30 while gameplay runs at 60 fps or higher, and cutscene and mission frame rates. *(Active; the game reaches the first mission with correct geometry.)*
+1. Make AC6 playable: a real-time frame step so 30 fps sections stay at 30 while gameplay runs at 60 fps or higher, missions that run at real-time speed, and cutscene and mission frame rates. *(Active; the game reaches the first mission with correct geometry.)*
 2. Validate sustained gameplay and full-title compatibility.
 3. Extend real-title rendering validation to Vulkan and keep Windows/Linux build and test workflows reliable.
 4. Deliver the shared [rendering enhancement plan](docs/graphics/UPSCALING_FRAME_GENERATION_PLAN.md): GPU inputs, native AA/upscaling, then frame generation, with per-title quality and fallback gates.

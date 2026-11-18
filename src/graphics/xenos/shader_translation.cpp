@@ -1756,7 +1756,7 @@ constexpr std::string_view kEdramTransferMappingHlsl = R"hlsl(  const uint x = u
   if ((depth_flags & 1u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
   const uint row_in_tile = sample_y % 16u;
   const uint tile = (dst_base + (sample_y / 16u) * dst_pitch + (sample_x / 80u) * stride) % 2048u;
-  // The source sample holding that word.
+)hlsl" R"hlsl(  // The source sample holding that word.
   const uint relative = (tile + 2048u - src_base) % 2048u;
   if ((depth_flags & 2u) != 0u) in_tile_x = (in_tile_x + 40u) % 80u;
   const uint source_sample_x = ((relative % src_pitch) / stride) * 80u + in_tile_x;
@@ -2128,6 +2128,142 @@ LoweredShader make_edram_converting_depth_transfer_shader(MsaaSamples source_hos
                     edram_converting_transfer_supported(source, destination_endpoint);
   if (!result.complete)
     result.diagnostics.emplace_back("unsupported converting EDRAM depth transfer");
+  return result;
+}
+
+namespace {
+
+// The canonical load's source: the EDRAM image as a raw buffer, and `word`,
+// the word of the destination sample (the mapping's EDRAM half - tile, row
+// and in-tile column - with the byte layout edram_sample_address() gives).
+constexpr std::string_view kCanonicalEdramSourceHlsl =
+    "ByteAddressBuffer CanonicalEdram : register(t0);\n";
+constexpr std::string_view kCanonicalEdramWordHlsl =
+    "  const uint word = CanonicalEdram.Load(tile * 5120u + (row_in_tile * 80u + in_tile_x) * 4u);\n";
+
+std::string_view edram_destination_word_hlsl() {
+  // kEdramTransferMappingHlsl up to the destination's EDRAM word.
+  constexpr std::string_view marker = "  // The source sample holding that word.";
+  return kEdramTransferMappingHlsl.substr(0, kEdramTransferMappingHlsl.find(marker));
+}
+
+}  // namespace
+
+LoweredShader make_edram_canonical_color_load_shader(ColorRenderTargetFormat destination) {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  const auto unpack = color_word_codec(destination).second;
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding << kCanonicalEdramSourceHlsl << kEdramWordCodecHlsl
+      << (color_host_transfers_as_integer(destination) ? "uint4" : "float4")
+      << " main(float4 position : SV_Position, uint host_sample : SV_SampleIndex)"
+         " : SV_Target0 {\n"
+      << edram_destination_word_hlsl() << kCanonicalEdramWordHlsl << "  return " << unpack
+      << "(word);\n}\n";
+  result.hlsl = out.str();
+  const EdramTransferEndpoint endpoint{false, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.color.v1") ^
+                       (std::uint64_t(destination) << 32u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = !unpack.empty() && edram_canonical_load_supported(endpoint);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM color load");
+  return result;
+}
+
+LoweredShader make_edram_canonical_depth_load_shader(DepthRenderTargetFormat destination,
+                                                     EdramDepthTransferPass pass,
+                                                     Unorm24DepthWrite unorm24_write) {
+  LoweredShader result{};
+  result.stage = ShaderStage::Pixel;
+  result.entry_point = "main";
+  result.profile = "ps_6_0";
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; "
+         "uint4 stencil; };\n"
+      << kEdramTransferConstantsBinding << kCanonicalEdramSourceHlsl << kEdramWordCodecHlsl
+      << unorm24_depth_write_hlsl(unorm24_write);
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "struct Output { float depth : SV_Depth; uint stencil : SV_StencilRef; };\n"
+             "Output main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "float main(float4 position : SV_Position,\n"
+             "           uint host_sample : SV_SampleIndex) : SV_Depth {\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "void main(float4 position : SV_Position, uint host_sample : SV_SampleIndex) {\n";
+      break;
+  }
+  out << edram_destination_word_hlsl() << kCanonicalEdramWordHlsl;
+  // As the converting transfer writes a word: D24FS8 at half its guest value
+  // (depth_stencil_to_host), D24S8 as this device stores the code.
+  const std::string depth = destination == DepthRenderTargetFormat::D24FS8
+                                ? "xe_unpack_float20e4(word >> 8u) * 0.5"
+                                : "xe_unorm24_depth_out(word >> 8u)";
+  switch (pass) {
+    case EdramDepthTransferPass::DepthAndStencil:
+      out << "  Output o; o.depth = " << depth << "; o.stencil = word & 0xFFu; return o;\n}\n";
+      break;
+    case EdramDepthTransferPass::Depth:
+      out << "  return " << depth << ";\n}\n";
+      break;
+    case EdramDepthTransferPass::StencilBit:
+      out << "  if ((word & transfer.stencil.x) == 0u) discard;\n}\n";
+      break;
+  }
+  result.hlsl = out.str();
+  const EdramTransferEndpoint endpoint{true, static_cast<std::uint8_t>(destination)};
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.depth.v1") ^
+                       (std::uint64_t(destination) << 32u) ^ (std::uint64_t(pass) << 40u) ^
+                       (std::uint64_t(unorm24_write) << 48u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = edram_canonical_load_supported(endpoint);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM depth load");
+  return result;
+}
+
+LoweredShader make_edram_canonical_store_shader(MsaaSamples source_host_samples,
+                                                EdramTransferEndpoint source) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Compute;
+  result.entry_point = "main";
+  result.profile = "cs_6_0";
+  // The mapping's EDRAM half, run per host sample of the source image (which
+  // is this surface's own image): a host sample that holds no guest sample
+  // (2x in a 4x image) has nothing to store.
+  std::string mapping(edram_destination_word_hlsl());
+  for (std::size_t at = mapping.find("discard;"); at != std::string::npos;
+       at = mapping.find("discard;", at))
+    mapping.replace(at, 8, "return;");
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl
+      << "RWByteAddressBuffer CanonicalEdram : register(u0, space1);\n"
+         "[numthreads(8, 8, 1)]\n"
+         "void main(uint3 id : SV_DispatchThreadID) {\n"
+         "  if (id.x >= transfer.source.z || id.y >= transfer.source.w) return;\n"
+         "  const float4 position = float4(float(transfer.source.x + id.x),\n"
+         "                                 float(transfer.source.y + id.y), 0.0, 1.0);\n"
+         "  const uint host_sample = id.z;\n"
+      << mapping
+      << "  const uint source_x = x, source_y = y, source_host = host_sample;\n";
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  out << "  CanonicalEdram.Store(tile * 5120u + (row_in_tile * 80u + in_tile_x) * 4u, word);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.store.v1") ^
+                       (std::uint64_t(count) << 8u) ^ (std::uint64_t(source.depth) << 16u) ^
+                       (std::uint64_t(source.format) << 24u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
+                    edram_canonical_load_supported(source);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM store");
   return result;
 }
 

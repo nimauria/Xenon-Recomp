@@ -518,6 +518,10 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
   drain_streaming_ = false;
   drain_first_draw_ = command_processor_.draw_count();
   command_processor_.set_guest_visible_barrier([this, &backend] {
+    // Which kind of effect held the frontend, and for how long
+    // (perf_frame.log "barriers").
+    const bool held = executor_.running() && !executor_.idle();
+    const auto started = std::chrono::steady_clock::now();
     note_hold(perf::Counter::HoldsBarrier);
     run_ir_then(backend, /*all=*/false, /*submit=*/false, [&backend] {
       if (!backend.publish_gpu_writes(/*wait=*/true)) {
@@ -525,6 +529,19 @@ std::uint32_t GraphicsSystem::submit_ring(Backend& backend, std::uint32_t physic
                                         "resolve readback failed: " + backend.last_error());
       }
     });
+    if (!held) return;
+    using Kind = CommandProcessor::BarrierKind;
+    const auto kind = command_processor_.last_barrier_kind();
+    const auto [count, time] =
+        kind == Kind::Interrupt ? std::pair{perf::Counter::BarrierInterrupts,
+                                            perf::Counter::BarrierInterruptNs}
+        : kind == Kind::Swap    ? std::pair{perf::Counter::BarrierSwaps, perf::Counter::BarrierSwapNs}
+        : kind == Kind::Wait    ? std::pair{perf::Counter::BarrierWaits, perf::Counter::BarrierWaitNs}
+                                : std::pair{perf::Counter::BarrierWrites, perf::Counter::BarrierWriteNs};
+    perf::add(count, 1u);
+    perf::add(time, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - started)
+                                                   .count()));
   });
   // A sync point captures guest memory as it stands now, for the commands
   // after it (Backend::sync_guest_reads()): the CPU code it releases may

@@ -52,7 +52,8 @@ UINT component_mapping(std::uint16_t swizzle, std::uint32_t component) {
 D3D12_FILTER basic_filter(const TextureDescriptor& state) {
   const bool min = state.min_filter != 0;
   const bool mag = state.mag_filter != 0;
-  const bool mip = state.mip_filter != 0;
+  const bool mip = xenos_sampler_lod_range(state.mip_filter, state.mip_min_level,
+                                           state.mip_max_level).linear_mips;
   if (min && mag && mip) return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
   if (min && mag) return D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT;
   if (min && mip) return D3D12_FILTER_MIN_LINEAR_MAG_POINT_MIP_LINEAR;
@@ -298,8 +299,10 @@ bool ResourceLayout::bind_texture(std::uint32_t slot, TextureDimension dimension
   for (auto& channel : sampler.BorderColor) channel = border;
   sampler.MipLODBias = float(state.lod_bias) / 32.0f;
   sampler.MaxAnisotropy = max_anisotropy(state.aniso_filter);
-  sampler.MinLOD = float(state.mip_min_level);
-  sampler.MaxLOD = float(state.mip_max_level);
+  const auto lod = xenos_sampler_lod_range(state.mip_filter, state.mip_min_level,
+                                           state.mip_max_level);
+  sampler.MinLOD = lod.min_lod;
+  sampler.MaxLOD = lod.max_lod;
   if (sampler_known_[slot] &&
       std::memcmp(&bound_samplers_[slot], &sampler, sizeof(sampler)) == 0) {
     ++descriptor_writes_skipped_;

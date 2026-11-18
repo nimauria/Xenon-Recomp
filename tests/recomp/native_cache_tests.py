@@ -62,5 +62,30 @@ class CacheTests(unittest.TestCase):
             (node / "payload").write_bytes(b"bad")
         self.assertIn(b"[Graph object] built",run().stderr)
 
+    def test_reuse_across_build_directories(self):
+        # XEN-003: two modules' workspaces compile the shared runtime from one
+        # source tree with one set of flags into different object paths; the
+        # second reuses the first's verified object.
+        compiler = os.environ.get("XENON_TEST_CXX") or shutil.which("cl.exe") or shutil.which("c++")
+        self.assertIsNotNone(compiler, "real compiler is required")
+        src = self.root / "runtime.cpp"
+        src.write_text('extern "C" int runtime_value() { return 42; }\n')
+        msvc = Path(compiler).name.lower() == "cl.exe"
+        launcher = [sys.executable, str(ROOT / "tools/compilation_cache.py"), "compile", str(self.root / "cache")]
+        objects = []
+        outputs = []
+        for workspace in ("module-a", "module-b"):
+            obj = self.root / workspace / "build" / "runtime.obj"
+            obj.parent.mkdir(parents=True)
+            command = ([compiler, "/nologo", "/c", "/O2", "/Brepro", str(src), "/Fo" + str(obj)] if msvc
+                       else [compiler, "-c", "-O2", str(src), "-o", str(obj)])
+            result = subprocess.run(launcher + command, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            outputs.append(result.stderr)
+            objects.append(obj.read_bytes())
+        self.assertIn(b"[Graph object] built", outputs[0])
+        self.assertIn(b"[Graph object] hit", outputs[1])
+        self.assertEqual(objects[0], objects[1])
+
 if __name__ == "__main__":
     unittest.main()

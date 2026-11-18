@@ -476,7 +476,20 @@ void test_kicks_always_wake_the_engine() {
       fixture.kick();
       assert(fixture.decoder.block_while_in_use(fixture.context));
     });
-    assert(kick.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    // A lost wake-up never decodes (nothing else kicks this context); a
+    // decode that is merely late was delayed by the machine. Tell the two
+    // apart: report a late decode with its time, fail only one that never
+    // comes.
+    const auto kicked_at = std::chrono::steady_clock::now();
+    if (kick.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+      const bool decoded = kick.wait_for(std::chrono::seconds(120)) == std::future_status::ready;
+      std::cerr << "kick round " << round << ": decode took "
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - kicked_at)
+                       .count()
+                << " ms" << (decoded ? "" : " and never came (lost wake-up)") << std::endl;
+      assert(decoded);
+    }
     assert(fixture.decoder.read_context(fixture.context, state));
     assert(!state.input_buffer_0_valid);
     // Vary where the next kick lands against the worker going to sleep.

@@ -280,6 +280,13 @@ struct EdramTransferEndpoint {
 [[nodiscard]] bool edram_converting_transfer_supported(EdramTransferEndpoint source,
                                                        EdramTransferEndpoint destination) noexcept;
 
+// Whether canonical EDRAM words load into a native image of `destination` on
+// the GPU (make_edram_canonical_color_load_shader): the same formats as the
+// converting transfer, since each word is unpacked into the destination's
+// host value the same way - every bit kept. Other formats load through the
+// CPU conversion.
+[[nodiscard]] bool edram_canonical_load_supported(EdramTransferEndpoint destination) noexcept;
+
 struct EdramTransferSample {
   std::uint32_t x{};
   std::uint32_t y{};

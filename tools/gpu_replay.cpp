@@ -16,13 +16,21 @@
 // canonical afterwards and checks every iteration produced the same bytes
 // (the replay is deterministic).
 //
+// --shader-cache DIR prepares a persistent shader and pipeline cache from the
+// capture: every shader and pipeline the recorded frames use is compiled and
+// stored in DIR (as a session's own "Persistent" cache, <session>/
+// shader_cache), so a session started on it does not stall compiling them
+// on first use. `--warmup 0 --iterations 1` does it in one pass; the report
+// says how many were compiled and stored and how many came from DIR already.
+//
 //   gpu-replay <capture.xgc> [--iterations N] [--warmup N] [--vulkan]
-//              [--cold-edram] [--profile] [--verify]
+//              [--cold-edram] [--profile] [--verify] [--shader-cache DIR]
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -54,12 +62,13 @@ struct Options {
   bool profile{};
   bool verify{};
   bool cold_edram{};
+  std::string shader_cache{};
 };
 
 bool parse(int argc, char** argv, Options& options) {
   const auto usage = [] {
     std::cerr << "usage: gpu-replay <capture.xgc> [--iterations N] [--warmup N] [--vulkan] "
-                 "[--cold-edram] [--profile] [--verify]\n";
+                 "[--cold-edram] [--profile] [--verify] [--shader-cache DIR]\n";
     return false;
   };
   for (int i = 1; i < argc; ++i) {
@@ -84,6 +93,9 @@ bool parse(int argc, char** argv, Options& options) {
       options.verify = true;
     } else if (arg == "--cold-edram") {
       options.cold_edram = true;
+    } else if (arg == "--shader-cache") {
+      if (i + 1 >= argc || !*argv[i + 1]) return usage();
+      options.shader_cache = argv[++i];
     } else if (!arg.empty() && arg[0] != '-' && options.path.empty()) {
       options.path = std::string(arg);
     } else {
@@ -100,6 +112,16 @@ std::uint64_t hash_bytes(std::uint64_t hash, std::span<const std::byte> bytes) {
 
 template <typename Backend>
 int run(Backend& backend, const Options& options, const PortableSubmissionCapture& capture) {
+  if (!options.shader_cache.empty()) {
+    std::error_code created;
+    std::filesystem::create_directories(options.shader_cache, created);
+    if (created) {
+      std::cerr << "gpu-replay: shader cache " << options.shader_cache << ": "
+                << created.message() << "\n";
+      return 2;
+    }
+    backend.set_shader_cache_directory(options.shader_cache);
+  }
   xenon::memory::AddressSpace memory;
   if (!memory.initialize()) {
     std::cerr << "gpu-replay: guest memory could not be initialized\n";
@@ -237,7 +259,19 @@ int run(Backend& backend, const Options& options, const PortableSubmissionCaptur
             << " MiB per iteration\n";
   for (const auto& diagnostic : capture.diagnostics) std::cout << "  note: " << diagnostic << "\n";
   if (options.verify)
-    std::cout << "  deterministic: " << (deterministic ? "yes" : "NO - iterations differ") << "\n";
+    std::cout << "  deterministic: " << (deterministic ? "yes" : "NO - iterations differ")
+              << " (EDRAM and resolve destinations hash " << std::hex << first_hash.value_or(0)
+              << std::dec << ")\n";
+  if (!options.shader_cache.empty()) {
+    // Pipelines reach the cache files when the backend is destroyed, after
+    // this report; shaders as they compile.
+    const auto shaders = backend.shader_coverage();
+    const auto counters = backend.performance_counters();
+    std::cout << "  shader cache " << options.shader_cache << ": " << shaders.cache_disk_writes
+              << " shaders compiled and stored, " << shaders.cache_disk_hits
+              << " loaded from it; pipelines " << counters.pipeline_cache_misses << " created, "
+              << counters.pipeline_cache_hits << " of them from the persistent cache\n";
+  }
   if (options.profile) std::cout << "\n" << sampler.report();
   return options.verify && !deterministic ? 3 : 0;
 }
