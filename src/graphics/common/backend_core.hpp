@@ -260,6 +260,9 @@ class BackendCore {
   std::unordered_map<std::uint64_t, EdramOwnerId> depth_target_owners{};
   std::unordered_map<EdramOwnerId, DepthTargetImage*> owner_depth_targets{};
   std::unordered_map<std::uint64_t, std::unique_ptr<GraphicsPipeline>> pipelines{};
+  // Pipelines the backend's persistent cache supplied (statistics are read
+  // from other threads).
+  std::atomic<std::uint64_t> pipeline_cache_hits{};
   std::unordered_map<std::uint64_t, std::vector<std::uint8_t>> shader_textures{};
   // Per shader, the filters each fetch constant it samples is fetched with
   // (ShaderReflection::texture_filter_overrides).

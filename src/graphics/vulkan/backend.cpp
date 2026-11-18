@@ -299,10 +299,6 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
                     std::span<const std::byte> capture, std::uint32_t capture_base) {
     if (!image.matches(layout)) {
       const bool created = image.create(context.physical_device(), context.device(), layout);
-      // Fold in regardless of overall success/failure: a texture can
-      // successfully bind while its sampler still substituted an
-      // unsupported clamp mode.
-      unsupported.unsupported_sampler_behaviors += image.unsupported_sampler_behaviors();
       if (!created) {
         error = named(image.error());
         return false;
@@ -322,10 +318,21 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
   bool create_replacement_texture(TextureImage& image, const DecodedTexture& texture) {
     return image.initialize(context.physical_device(), context.device(), queue, texture);
   }
+  // The sampler is made from the state the draw binds (the fetch constant
+  // with the shader's filter overrides), as on D3D12.
+  SamplerCache samplers{};
   bool bind_texture(std::uint32_t slot, const TextureDescriptor& descriptor,
                     TextureImage& image) {
-    return resources.bind_texture(slot, descriptor.dimension, image.view(),
-                                  image.sampler());
+    const auto unsupported_before = samplers.unsupported_sampler_behaviors();
+    const auto sampler = samplers.get(descriptor);
+    // A sampler can be made while substituting an unsupported clamp mode.
+    unsupported.unsupported_sampler_behaviors +=
+        samplers.unsupported_sampler_behaviors() - unsupported_before;
+    if (!sampler) {
+      error = named(samplers.error());
+      return false;
+    }
+    return resources.bind_texture(slot, descriptor.dimension, image.view(), sampler);
   }
   VkPipelineLayout pipeline_root() { return resources.pipeline_layout(); }
   std::uint32_t color_render_width(const DrawResourceState& state,
@@ -582,6 +589,10 @@ bool Backend::initialize(const ContextConfig& config) {
   if (!impl_->resources.initialize(impl_->context.physical_device(),
                                    impl_->context.device())) {
     impl_->error = impl_->resources.error();
+    return false;
+  }
+  if (!impl_->samplers.initialize(impl_->context.physical_device(), impl_->context.device())) {
+    impl_->error = impl_->samplers.error();
     return false;
   }
   // Guest shaders bind guest memory the way the device's descriptors allow.

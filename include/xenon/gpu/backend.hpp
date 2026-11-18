@@ -21,6 +21,11 @@ struct GpuPerformanceCounters {
   std::uint64_t draws{};
   std::uint64_t shader_cache_misses{};
   std::uint64_t pipeline_cache_misses{};
+  // Of the pipelines created, those the persistent cache supplied instead of
+  // a compile: D3D12 pipeline-library loads, Vulkan pipeline-cache hits as
+  // the driver reports them (pipeline creation feedback). Same meaning on
+  // both backends (XEN-004).
+  std::uint64_t pipeline_cache_hits{};
   std::uint64_t resolve_operations{};
   std::uint64_t edram_transfers{};
   std::uint64_t staging_transfers{};

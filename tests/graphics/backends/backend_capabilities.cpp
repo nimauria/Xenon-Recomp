@@ -579,8 +579,39 @@ int main() {
   assert(vulkan_texture.initialize(vulkan_context.physical_device(),
                                    vulkan_context.device(), vulkan_queue,
                                    vulkan_decoded));
+  // XEN-004: Vulkan samplers come from the sampling state the draw binds
+  // (the fetch constant with the shader's per-fetch filter overrides, or a
+  // texture mod's mip range), as D3D12's do - not from the state the texture
+  // image was created with.
+  xenon::gpu::vulkan::SamplerCache vulkan_samplers;
+  assert(vulkan_samplers.initialize(vulkan_context.physical_device(), vulkan_context.device()));
+  const auto vulkan_sampler = vulkan_samplers.get(vulkan_texture_descriptor);
+  assert(vulkan_sampler != VK_NULL_HANDLE);
+  assert(vulkan_samplers.get(vulkan_texture_descriptor) == vulkan_sampler);
+  {
+    auto overridden = vulkan_texture_descriptor;
+    overridden.mag_filter = overridden.mag_filter ? 0u : 1u;  // a tfetch filter override
+    const auto other = vulkan_samplers.get(overridden);
+    assert(other != VK_NULL_HANDLE && other != vulkan_sampler && vulkan_samplers.size() == 2u);
+    std::uint64_t unsupported = 0;
+    const auto info = xenon::gpu::vulkan::describe_sampler(overridden, true, unsupported);
+    assert(info.magFilter == (overridden.mag_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST));
+    // Base-map mip filtering samples only the fetch's minimum level.
+    auto base_map = vulkan_texture_descriptor;
+    base_map.mip_filter = 2u;
+    base_map.mip_min_level = 1u;
+    base_map.mip_max_level = 4u;
+    const auto base_info = xenon::gpu::vulkan::describe_sampler(base_map, true, unsupported);
+    assert(base_info.minLod == 1.0f && base_info.maxLod == 1.0f);
+    assert(base_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST);
+    base_map.mip_filter = 1u;
+    const auto linear_info = xenon::gpu::vulkan::describe_sampler(base_map, true, unsupported);
+    assert(linear_info.minLod == 1.0f && linear_info.maxLod == 4.0f);
+    assert(linear_info.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR);
+    assert(unsupported == 0u);
+  }
   assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
-                                       vulkan_texture.view(), vulkan_texture.sampler()));
+                                       vulkan_texture.view(), vulkan_sampler));
   // Regression (AC6 on Vulkan ran its menus at 17 fps): resolve readbacks
   // were read by the CPU from uncached host-visible memory, ~40 ms each. A
   // buffer the CPU reads back takes cached memory wherever the device has it.
@@ -617,11 +648,11 @@ int main() {
     assert(first.set != VK_NULL_HANDLE && second.set == first.set);
     assert(second.constants_offset > first.constants_offset);
     assert(vulkan_resources.bind_texture(0, xenon::gpu::TextureDimension::TwoDOrStacked,
-                                         vulkan_texture.view(), vulkan_texture.sampler()));
+                                         vulkan_texture.view(), vulkan_sampler));
     const auto third = vulkan_resources.prepare_draw(1, 2);
     assert(third.set == first.set);
     assert(vulkan_resources.bind_texture(1, xenon::gpu::TextureDimension::TwoDOrStacked,
-                                         vulkan_texture.view(), vulkan_texture.sampler()));
+                                         vulkan_texture.view(), vulkan_sampler));
     const auto fourth = vulkan_resources.prepare_draw(1, 3);
     assert(fourth.set != VK_NULL_HANDLE && fourth.set != first.set);
     assert(vulkan_resources.prepare_draw(1, 4).set == fourth.set);

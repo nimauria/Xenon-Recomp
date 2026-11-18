@@ -1839,6 +1839,14 @@ int main() {
       assert(reloaded.initialize({.enable_validation = false}));
       reloaded.set_shader_cache_directory(cache_directory.string());
       run_dot_products_follow_xenos_zero_rule(reloaded, "Vulkan (reloaded pipeline cache)");
+      // XEN-004: pipelines the persistent cache supplied are reported like
+      // D3D12's pipeline-library loads (creation feedback; a driver that gives
+      // none reports zero rather than a guess).
+      const auto counters = reloaded.performance_counters();
+      std::cout << "Vulkan pipelines from the persistent cache: " << counters.pipeline_cache_hits
+                << " of " << counters.pipeline_cache_misses << std::endl;
+      assert(counters.pipeline_cache_hits <= counters.pipeline_cache_misses);
+      assert(counters.pipeline_cache_hits > 0u);
     }
     std::filesystem::remove_all(cache_directory, cache_error);
     run_converting_transfers<xenon::gpu::vulkan::Backend>(
@@ -1939,6 +1947,7 @@ int main() {
         run_dot_products_follow_xenos_zero_rule(first, "D3D12 (new pipeline library)");
         const auto created = first.pipeline_library_statistics();
         assert(created.open && created.loaded == 0u && created.stored > 0u);
+        assert(first.performance_counters().pipeline_cache_hits == 0u);
         stored = created.stored;
       }
       const auto library_file = library_directory / "d3d12_pipelines.bin";
@@ -1950,6 +1959,8 @@ int main() {
         reloaded.set_shader_cache_directory(library_directory.string());
         run_dot_products_follow_xenos_zero_rule(reloaded, "D3D12 (reloaded pipeline library)");
         const auto loaded = reloaded.pipeline_library_statistics();
+        // The generic counter reports the same loads (XEN-004).
+        assert(reloaded.performance_counters().pipeline_cache_hits == loaded.loaded);
         if (loaded.loaded != stored || loaded.stored != 0u) {
           std::cerr << "D3D12 pipeline library: " << stored << " stored, then " << loaded.loaded
                     << " loaded and " << loaded.stored << " stored again" << std::endl;

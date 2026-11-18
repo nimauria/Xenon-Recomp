@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
@@ -25,8 +27,8 @@ class TextureImage {
   TextureImage(const TextureImage&) = delete;
   TextureImage& operator=(const TextureImage&) = delete;
 
-  // Creates the host image, view and sampler for `layout`, without contents
-  // (layout UNDEFINED).
+  // Creates the host image and view for `layout`, without contents (layout
+  // UNDEFINED). The sampler comes from SamplerCache at bind time.
   [[nodiscard]] bool create(VkPhysicalDevice physical_device, VkDevice device,
                             const TextureLayout& layout);
   // Whether this image can hold `layout` (same format, extent, dimension and
@@ -41,7 +43,6 @@ class TextureImage {
   void reset() noexcept;
   [[nodiscard]] VkImage image() const noexcept { return image_; }
   [[nodiscard]] VkImageView view() const noexcept { return view_; }
-  [[nodiscard]] VkSampler sampler() const noexcept { return sampler_; }
   [[nodiscard]] VkFormat format() const noexcept { return format_; }
   [[nodiscard]] VkImageAspectFlags aspect() const noexcept { return aspect_; }
   [[nodiscard]] std::uint32_t mip_levels() const noexcept { return mip_levels_; }
@@ -55,16 +56,12 @@ class TextureImage {
   // distinguishable reason - without the caller having to string-match
   // error().
   [[nodiscard]] bool unsupported_format() const noexcept { return unsupported_format_; }
-  [[nodiscard]] std::uint64_t unsupported_sampler_behaviors() const noexcept {
-    return unsupported_sampler_behaviors_;
-  }
 
  private:
   VkDevice device_{VK_NULL_HANDLE};
   VkImage image_{VK_NULL_HANDLE};
   VkDeviceMemory memory_{VK_NULL_HANDLE};
   VkImageView view_{VK_NULL_HANDLE};
-  VkSampler sampler_{VK_NULL_HANDLE};
   VkFormat format_{VK_FORMAT_UNDEFINED};
   VkImageAspectFlags aspect_{VK_IMAGE_ASPECT_COLOR_BIT};
   VkImageLayout layout_{VK_IMAGE_LAYOUT_UNDEFINED};
@@ -73,7 +70,45 @@ class TextureImage {
   std::uint32_t layers_{};
   std::string error_{};
   bool unsupported_format_{};
-  std::uint64_t unsupported_sampler_behaviors_{};
+};
+
+// The VkSamplerCreateInfo for the sampling state a draw binds: the fetch
+// constant with the shader's per-fetch filter overrides, or a texture mod's
+// mip range. Matches the D3D12 backend's sampler field for field. Address
+// modes the host lacks are counted in `unsupported_counter`.
+[[nodiscard]] VkSamplerCreateInfo describe_sampler(const TextureDescriptor& state,
+                                                   bool anisotropy_supported,
+                                                   std::uint64_t& unsupported_counter) noexcept;
+
+// Host samplers made at bind time from the bound sampling state (XEN-004:
+// they used to be made once per texture image from its fetch constant, so a
+// shader's filter overrides and a texture mod's mip range were ignored on
+// Vulkan and honoured on D3D12). One per distinct state, kept until the
+// device goes: draws in flight may still use any of them.
+class SamplerCache {
+ public:
+  SamplerCache() = default;
+  ~SamplerCache();
+  SamplerCache(const SamplerCache&) = delete;
+  SamplerCache& operator=(const SamplerCache&) = delete;
+
+  [[nodiscard]] bool initialize(VkPhysicalDevice physical_device, VkDevice device);
+  void reset() noexcept;
+  // The sampler for `state`; VK_NULL_HANDLE (error() says why) when the
+  // device's sampler limit would be exceeded or creation fails.
+  [[nodiscard]] VkSampler get(const TextureDescriptor& state);
+  [[nodiscard]] std::size_t size() const noexcept { return samplers_.size(); }
+  [[nodiscard]] std::uint64_t unsupported_sampler_behaviors() const noexcept { return unsupported_; }
+  [[nodiscard]] const std::string& error() const noexcept { return error_; }
+
+ private:
+  using Key = std::array<std::uint8_t, 12>;
+  VkDevice device_{VK_NULL_HANDLE};
+  bool anisotropy_{};
+  std::uint32_t limit_{};
+  std::map<Key, VkSampler> samplers_{};
+  std::uint64_t unsupported_{};
+  std::string error_{};
 };
 
 // Textures loaded on the GPU (see GpuTextureLoadConstants): a compute pass
