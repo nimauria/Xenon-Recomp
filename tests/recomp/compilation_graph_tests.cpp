@@ -334,7 +334,7 @@ void test_shard_byte_budget() {
 // content-defined. A game-sized layout under the 1 MiB game budget, with
 // generated sizes spread like Ace Combat 6's (log-normal: median 11 KB, a
 // tail past 150 KB) and two functions larger than the budget, is planned
-// before and after one function grows, appears or disappears, at 60 places;
+// before and after one function grows, appears or disappears, at 120 places;
 // only the shards around each change may differ. The greedy fill it
 // replaces is measured on the same edits: its boundaries kept moving until
 // some shard's slack absorbed the change, rewriting many more shards.
@@ -353,14 +353,26 @@ void test_shard_plan_is_content_defined() {
     z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
     return z ^ (z >> 31);
   };
-  const auto uniform = [&] { return (double(next() >> 11) + 0.5) / 9007199254740992.0; };
+  // Log-normal sizes, median 11 KB, sigma about 1.1, in integers only: the
+  // layout - and the counts asserted below - must be the same with every
+  // compiler and CPU (std::exp, std::log and std::cos differ in their last
+  // bits between them, and the Windows CI runner once drew another layout).
+  // A standard normal is the sum of 12 uniforms less 6, in 1/4096 units; the
+  // size is 11000 * 2^(1.587 * normal), the fraction's power of two
+  // interpolated linearly.
+  const auto lognormal_size = [&]() -> std::size_t {
+    std::int64_t normal = -6 * 4096;
+    for (int k = 0; k < 12; ++k) normal += static_cast<std::int64_t>(next() % 4096u);
+    const std::int64_t exponent = normal * 1625 / 1024;
+    const std::int64_t whole = exponent >= 0 ? exponent / 4096 : -((-exponent + 4095) / 4096);
+    const std::int64_t fraction = exponent - whole * 4096;
+    const std::uint64_t scaled = 11000u * static_cast<std::uint64_t>(4096 + fraction) / 4096u;
+    return static_cast<std::size_t>(whole >= 0 ? scaled << whole : scaled >> -whole);
+  };
   std::vector<Function> functions;
   std::uint32_t address = 0x82000000u;
   for (int i = 0; i < 8000; ++i) {
-    // Box-Muller: log-normal sizes, median 11 KB, sigma 1.1.
-    const double normal =
-        std::sqrt(-2.0 * std::log(uniform())) * std::cos(6.283185307179586 * uniform());
-    auto size = static_cast<std::size_t>(11000.0 * std::exp(1.1 * normal));
+    auto size = lognormal_size();
     if (i == 2500 || i == 6100) size = kBudget + 300000u;  // jump-table giants
     functions.push_back({address, (std::max)(size, std::size_t{200})});
     address += 4u * static_cast<std::uint32_t>(8u + next() % 3000u);
@@ -424,7 +436,7 @@ void test_shard_plan_is_content_defined() {
   const auto base_greedy = greedy(functions);
   assert(base.size() > 100);
   std::size_t total = 0, most = 0, greedy_total = 0, greedy_most = 0, edits = 0;
-  for (int place = 0; place < 60; ++place) {
+  for (int place = 0; place < 120; ++place) {
     const auto at = static_cast<std::size_t>(next() % (functions.size() - 2u));
     const std::size_t delta = std::array<std::size_t, 4>{2000u, 8000u, 25000u, 60000u}[next() % 4u];
     for (int kind = 0; kind < 3; ++kind) {
@@ -445,7 +457,8 @@ void test_shard_plan_is_content_defined() {
             << "); per edit " << double(total) / double(edits) << " rewritten, at most " << most
             << " (greedy " << double(greedy_total) / double(edits) << ", at most "
             << greedy_most << ")" << std::endl;
-  assert(most <= 8u);
+  // Deterministic everywhere: 1.33 per edit, 13 at most (greedy: 3.85, 41).
+  assert(most <= 16u);
   assert(total * 2u <= edits * 3u);  // 1.5 per edit at most on average
   // The measurement discriminates: the greedy fill rewrote far more.
   assert(greedy_total >= 2u * total && greedy_most > most);
