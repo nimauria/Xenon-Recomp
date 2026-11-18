@@ -755,9 +755,46 @@ void test_sample_transfer_shaders() {
       }
     }
   }
+  // The canonical store (GPU ownership flush): a compute shader for every
+  // source the canonical loads accept, at every sample count, compiling to
+  // DXIL and SPIR-V. Its EDRAM address is the mapping's destination half,
+  // verbatim but for returning where the fragment version discards.
+  for (const auto samples : {MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4}) {
+    for (const auto& source :
+         {EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8)},
+          EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R32Float)},
+          EdramTransferEndpoint{false, std::uint8_t(ColorRenderTargetFormat::R16G16Float)},
+          EdramTransferEndpoint{true, std::uint8_t(DepthRenderTargetFormat::D24S8)},
+          EdramTransferEndpoint{true, std::uint8_t(DepthRenderTargetFormat::D24FS8)}}) {
+      if (!edram_canonical_load_supported(source)) continue;
+      const auto shader = make_edram_canonical_store_shader(samples, source);
+      assert(shader.complete);
+      assert(shader.stage == ShaderStage::Compute);
+      assert(shader.hlsl.find("RWByteAddressBuffer CanonicalEdram : register(u0, space1)") !=
+             std::string::npos);
+      assert(shader.hlsl.find("discard") == std::string::npos);
+      const auto tile_at = shader.hlsl.find("  const uint tile = ");
+      assert(tile_at != std::string::npos);
+      assert(color.find(shader.hlsl.substr(tile_at, shader.hlsl.find('\n', tile_at) - tile_at)) !=
+             std::string::npos);
+      for (const auto& options : {ShaderCompileOptions{}, spirv}) {
+        const auto compiled = compiler.compile(shader, options);
+        if (!compiled.succeeded) {
+          for (const auto& line : compiled.diagnostics) std::cerr << line << '\n';
+          std::cerr << shader.hlsl << '\n';
+          assert(false);
+        }
+      }
+      // Each source and sample count is its own shader.
+      if (samples != MsaaSamples::X1)
+        assert(shader.source_hash !=
+               make_edram_canonical_store_shader(MsaaSamples::X1, source).source_hash);
+    }
+  }
   // A view whose host storage is not its EDRAM word is refused, not
   // approximated.
   const EdramTransferEndpoint gamma{false, std::uint8_t(ColorRenderTargetFormat::R8G8B8A8Gamma)};
+  assert(!make_edram_canonical_store_shader(MsaaSamples::X1, gamma).complete);
   assert(!make_edram_converting_color_transfer_shader(MsaaSamples::X1, gamma,
                                                       ColorRenderTargetFormat::R32Float)
               .complete);

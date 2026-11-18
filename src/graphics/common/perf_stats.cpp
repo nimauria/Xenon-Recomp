@@ -88,7 +88,7 @@ std::string take_frame_timeline_line(Clock::time_point when) {
       "frame %llu at %.1f ms: interval %.1f ms | draws %llu resolves %llu | gpu busy %.2f ms idle "
       "%.2f ms (%llu batches) | backend %.2f ms, frontend waited %.2f ms (%llu holds: barrier "
       "%llu sync %llu read %llu drain %llu) | fence %.2f ms | shader wait %.2f ms | edram cpu "
-      "%llu gpu %llu\n",
+      "%llu gpu %llu gpu store %llu\n",
       static_cast<unsigned long long>(g_timeline_frames), at_ms, interval_ms,
       static_cast<unsigned long long>(delta(Counter::Draws)),
       static_cast<unsigned long long>(delta(Counter::Resolves)), ms(delta(Counter::GpuBusyNs)),
@@ -101,7 +101,8 @@ std::string take_frame_timeline_line(Clock::time_point when) {
       static_cast<unsigned long long>(delta(Counter::HoldsDrain)), ms(delta(Counter::FenceWaitNs)),
       ms(delta(Counter::ShaderWaitNs)),
       static_cast<unsigned long long>(delta(Counter::EdramCpuTransfers)),
-      static_cast<unsigned long long>(delta(Counter::EdramGpuLoads)));
+      static_cast<unsigned long long>(delta(Counter::EdramGpuLoads)),
+      static_cast<unsigned long long>(delta(Counter::EdramGpuStores)));
   g_timeline_previous = now;
   g_timeline_last = when;
   ++g_timeline_frames;
@@ -154,7 +155,7 @@ std::string take_line(double seconds) {
                 "%llu written %llu | shader wait %.0f ms (%llu) | gpu busy %.0f ms idle %.0f ms "
                 "(%llu batches) | indices reused %llu converted %llu (%.1f MB) | bounds %llu "
                 "(%.1f ms) | resident %llu (%.1f MB) | edram cpu %llu (%.1f MB, %.0f ms) | edram "
-                "gpu %llu (%.1f MB, %.1f ms) | rptr "
+                "gpu %llu (%.1f MB, %.1f ms) | edram gpu store %llu (%.1f MB, %.1f ms) | rptr "
                 "early %llu held %llu | runs 0:%llu 1:%llu 2-3:%llu 4-15:%llu 16-63:%llu "
                 "64-255:%llu 256+:%llu | queue max %llu mean %.1f | barriers interrupt %llu (%.0f "
                 "ms) swap %llu (%.0f ms) wait %llu (%.0f ms) write %llu (%.0f ms)\n",
@@ -201,6 +202,9 @@ std::string take_line(double seconds) {
                 static_cast<unsigned long long>(take(Counter::EdramGpuLoads)),
                 static_cast<double>(take(Counter::EdramGpuLoadBytes)) / (1024.0 * 1024.0),
                 ms(take(Counter::EdramGpuLoadNs)),
+                static_cast<unsigned long long>(take(Counter::EdramGpuStores)),
+                static_cast<double>(take(Counter::EdramGpuStoreBytes)) / (1024.0 * 1024.0),
+                ms(take(Counter::EdramGpuStoreNs)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerEarly)),
                 static_cast<unsigned long long>(take(Counter::ReadPointerHeld)),
                 static_cast<unsigned long long>(take(Counter::DrawRuns0)),

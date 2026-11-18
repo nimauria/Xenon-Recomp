@@ -53,6 +53,10 @@ class Backend final : public xenon::gpu::Backend {
   // Submits pending work first. Defaults: RecordingWorkers::
   // default_thread_count() and 8 draws.
   [[nodiscard]] bool set_parallel_recording(unsigned threads, std::uint32_t min_run_draws);
+  // Whether ownership flushes to canonical EDRAM run on the GPU (a compute
+  // pack and one tile readback; the default) or read back and convert each
+  // sample on the CPU. For A/B comparison; both write the same bytes.
+  void set_gpu_canonical_edram_flushes(bool enabled) noexcept;
   // Draw runs recorded on workers so far.
   [[nodiscard]] std::uint64_t parallel_runs_recorded() const noexcept;
   // GPU timestamps (perf_frame.log "gpu"): waits for the GPU, reads every

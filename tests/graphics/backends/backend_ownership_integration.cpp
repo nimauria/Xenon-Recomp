@@ -1667,8 +1667,11 @@ void run_converting_transfers(Make make, std::string_view name) {
 // native image taking tiles that canonical EDRAM holds - first use, or after
 // native state was discarded - gets every guest sample's word from the
 // uploaded EDRAM image, unpacked in a shader, for each format the converting
-// transfer covers and each MSAA mode. Returned to canonical storage (a
-// readback and the CPU's exact pack), every word comes back unchanged.
+// transfer covers and each MSAA mode. Returned to canonical storage, every
+// word comes back unchanged - by the GPU flush (Phase 3: packed in a compute
+// shader, the tiles read back once) and by the CPU flush (a readback per
+// sample and the CPU's exact pack) alike, and the two leave EDRAM
+// byte-identical, words outside the image in the flushed tiles included.
 template <typename Backend>
 void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
   constexpr std::uint32_t kPitch = 80;
@@ -1676,11 +1679,14 @@ void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
   xenon::memory::AddressSpace memory;
   assert(memory.initialize());
   Edram edram;
-  edram.reset();
   const std::array views{kD24S8View, kD24FS8View, kRgba8View, kR32FloatView, kR16G16FloatView};
   const std::array<MsaaSamples, 3> modes{MsaaSamples::X1, MsaaSamples::X2, MsaaSamples::X4};
   for (const auto& view : views) {
     for (const auto msaa : modes) {
+     std::vector<std::byte> gpu_flushed;
+     for (const bool gpu_flush : {true, false}) {
+      backend.set_gpu_canonical_edram_flushes(gpu_flush);
+      edram.reset();
       const EdramSurfaceLayout layout{kSurfaceBaseTile, kPitch, kRows, msaa, false, view.depth};
       const auto samples = 1u << static_cast<unsigned>(msaa);
       // Words every view holds exactly (finite 16-bit halves), distinct per
@@ -1721,8 +1727,21 @@ void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
         for (std::uint32_t y = 0; y < kRows; ++y)
           for (std::uint32_t x = 0; x < kPitch; ++x)
             assert(write_edram_sample(edram, layout, x, y, {0xDEADBEEFu, 0u}, s));
+      // A tile past the surface's (at most 4 here) is not the flush's to write.
+      constexpr std::uint32_t kSentinel = 0xA5C3E10Fu;
+      const auto sentinel_offset = std::size_t(kSurfaceBaseTile + 8u) * Edram::kTileBytes + 52u;
+      std::memcpy(edram.bytes().data() + sentinel_offset, &kSentinel, 4u);
+      const auto stores_before = backend.performance_counters().gpu_canonical_edram_stores;
       assert(backend.make_edram_canonical());
       assert_backend_ok(backend, "returning the tiles to canonical storage");
+      const bool stored_on_gpu =
+          backend.performance_counters().gpu_canonical_edram_stores > stores_before;
+      if (stored_on_gpu != gpu_flush) {
+        std::cerr << name << ' ' << view.label << " x" << samples << ": the flush ran on the "
+                  << (stored_on_gpu ? "GPU" : "CPU") << ", expected the "
+                  << (gpu_flush ? "GPU" : "CPU") << '\n';
+        assert(false);
+      }
       std::uint32_t mismatches = 0;
       for (std::uint32_t s = 0; s < samples; ++s) {
         for (std::uint32_t y = 0; y < kRows; ++y) {
@@ -1732,15 +1751,41 @@ void run_canonical_gpu_loads(Backend& backend, std::string_view name) {
             if (++mismatches <= 6u)
               std::cerr << name << ' ' << view.label << " x" << samples << " sample " << s
                         << " at (" << x << ',' << y << "): 0x" << std::hex << word
-                        << ", loaded 0x" << seeded(x, y, s) << std::dec << '\n';
+                        << ", loaded 0x" << seeded(x, y, s) << std::dec
+                        << (gpu_flush ? " (GPU flush)" : " (CPU flush)") << '\n';
           }
         }
       }
       assert(mismatches == 0);
+      std::uint32_t sentinel{};
+      std::memcpy(&sentinel, edram.bytes().data() + sentinel_offset, 4u);
+      assert(sentinel == kSentinel);
       backend.end_submission();
+      const auto bytes = edram.bytes();
+      if (gpu_flush) {
+        gpu_flushed.assign(bytes.begin(), bytes.end());
+        continue;
+      }
+      // The GPU flush left EDRAM exactly as the CPU flush does.
+      assert(gpu_flushed.size() == bytes.size());
+      std::size_t differing = 0;
+      for (std::size_t i = 0; i < bytes.size(); i += 4u) {
+        if (std::memcmp(gpu_flushed.data() + i, bytes.data() + i, 4u) == 0) continue;
+        if (++differing <= 6u) {
+          std::uint32_t gpu_word{}, cpu_word{};
+          std::memcpy(&gpu_word, gpu_flushed.data() + i, 4u);
+          std::memcpy(&cpu_word, bytes.data() + i, 4u);
+          std::cerr << name << ' ' << view.label << " x" << samples << ": EDRAM byte " << i
+                    << " (tile " << i / Edram::kTileBytes << ") GPU flush 0x" << std::hex
+                    << gpu_word << ", CPU flush 0x" << cpu_word << std::dec << '\n';
+        }
+      }
+      assert(differing == 0);
+     }
     }
   }
-  std::cout << name << " canonical EDRAM loads on the GPU: ok\n";
+  backend.set_gpu_canonical_edram_flushes(true);
+  std::cout << name << " canonical EDRAM loads and GPU flushes on the GPU: ok\n";
 }
 
 }  // namespace

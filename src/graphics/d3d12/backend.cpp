@@ -69,6 +69,7 @@ struct BackendApi {
   static constexpr bool kSupportsDirectColorTransfer = true;
   static constexpr bool kSupportsDirectDepthTransfer = true;
   static constexpr bool kSupportsCanonicalGpuLoad = true;
+  static constexpr bool kSupportsCanonicalGpuStore = true;
 #ifdef XENON_HAS_DXC
   static constexpr ShaderBinaryFormat kShaderBinaryFormat =
       ShaderBinaryFormat::Dxil;
@@ -235,6 +236,38 @@ class Backend::Impl : public detail::BackendCore<Backend::Impl, BackendApi> {
       return true;
     error = named(edram_depth_transfer.error());
     return false;
+  }
+
+  // Ownership flushes on the GPU: the image's regions packed into canonical
+  // EDRAM by a compute pass, the tiles read back into the CPU store
+  // (BackendCore::color_to_canonical()).
+  template <typename Image>
+  bool store_canonical(Image& image, Edram& canonical, std::span<const std::uint16_t> tiles,
+                       const EdramTransferConstants& constants,
+                       std::span<const EdramSurfaceRegion> regions) {
+    std::string source_error;
+    const auto view = edram_transfer_source(image, source_error);
+    if (!view.heap) {
+      error = named(source_error);
+      return false;
+    }
+    if (edram_canonical_store.flush(context.device(), queue, view, constants, regions, tiles,
+                                    canonical))
+      return true;
+    error = named(edram_canonical_store.error());
+    return false;
+  }
+  bool store_canonical_color(RenderTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
+  }
+  bool store_canonical_depth(DepthTargetImage& image, Edram& canonical,
+                             std::span<const std::uint16_t> tiles,
+                             const EdramTransferConstants& constants,
+                             std::span<const EdramSurfaceRegion> regions) {
+    return store_canonical(image, canonical, tiles, constants, regions);
   }
 
   bool create_render_target(RenderTargetImage& image,
@@ -667,6 +700,10 @@ void Backend::prefetch_shaders(std::span<const ir::Command> commands) {
 void Backend::end_guest_read_sync() { impl_->end_guest_read_sync(); }
 bool Backend::publish_gpu_writes(bool wait) { return impl_->publish_gpu_writes(wait); }
 void Backend::set_resolve_readback(ResolveReadback policy) { impl_->resolve_readback = policy; }
+void Backend::set_gpu_canonical_edram_flushes(bool enabled) noexcept {
+  if (impl_) impl_->gpu_canonical_flushes = enabled;
+}
+
 bool Backend::set_parallel_recording(unsigned threads, std::uint32_t min_run_draws) {
   if (!impl_ || !impl_->queue.set_recording_threads(threads)) return false;
   impl_->parallel_run_draws = (std::max)(1u, min_run_draws);

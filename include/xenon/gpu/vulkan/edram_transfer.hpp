@@ -69,6 +69,13 @@ struct CanonicalEdramSource {
 // store tile by tile through a persistently mapped staging buffer laid out as
 // EDRAM. upload() records the copies into the queue's open batch; a tile's
 // staging bytes are rewritten only once the GPU has copied the previous ones.
+//
+// flush() is the reverse, an ownership flush done on the GPU: a compute pass
+// packs a native image's samples in `regions` into their EDRAM words in the
+// buffer (the covered `tiles` uploaded first, so words the regions do not
+// cover come back unchanged), one copy reads the tiles back, and they are
+// written into `edram`. It waits for the GPU. For the formats
+// edram_canonical_load_supported() accepts.
 class EdramCanonicalStore {
  public:
   EdramCanonicalStore() = default;
@@ -79,18 +86,46 @@ class EdramCanonicalStore {
   [[nodiscard]] bool upload(VkPhysicalDevice physical_device, VkDevice device,
                             CommandQueue& queue, const Edram& edram,
                             std::span<const std::uint16_t> tiles);
+  [[nodiscard]] bool flush(VkPhysicalDevice physical_device, VkDevice device,
+                           CommandQueue& queue, RenderTargetImage& source,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions,
+                           std::span<const std::uint16_t> tiles, Edram& edram);
+  [[nodiscard]] bool flush(VkPhysicalDevice physical_device, VkDevice device,
+                           CommandQueue& queue, DepthTargetImage& source,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions,
+                           std::span<const std::uint16_t> tiles, Edram& edram);
   [[nodiscard]] CanonicalEdramSource source() const noexcept { return {set_}; }
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
 
  private:
   [[nodiscard]] bool create(VkPhysicalDevice physical_device, VkDevice device);
+  // The flush's compute pipeline for a source of `endpoint` and sample count.
+  [[nodiscard]] VkPipeline store_pipeline(VkDevice device, EdramTransferEndpoint endpoint,
+                                          MsaaSamples host_msaa);
+  template <typename Source>
+  [[nodiscard]] bool run_flush(VkPhysicalDevice physical_device, VkDevice device,
+                               CommandQueue& queue, Source& source,
+                               const EdramTransferConstants& constants,
+                               std::span<const EdramSurfaceRegion> regions,
+                               std::span<const std::uint16_t> tiles, Edram& edram);
   VkDevice device_{VK_NULL_HANDLE};
   Buffer buffer_{};
   Buffer staging_{};
+  Buffer readback_{};
   std::span<std::byte> mapped_{};
+  std::span<std::byte> readback_mapped_{};
   VkDescriptorSetLayout set_layout_{VK_NULL_HANDLE};
   VkDescriptorPool pool_{VK_NULL_HANDLE};
   VkDescriptorSet set_{VK_NULL_HANDLE};
+  // The flush: set 0 the source (color, depth: the transfer layouts'
+  // definitions), set 1 the buffer as a compute storage buffer at binding 0.
+  std::array<VkDescriptorSetLayout, 2> source_set_layouts_{};
+  VkDescriptorSetLayout store_set_layout_{VK_NULL_HANDLE};
+  VkDescriptorSet store_set_{VK_NULL_HANDLE};
+  std::array<VkPipelineLayout, 2> store_pipeline_layouts_{};
+  std::unordered_map<std::uint64_t, VkPipeline> store_pipelines_{};
   std::array<std::uint64_t, Edram::kTileCount> tile_busy_until_{};
   std::string error_{};
 };

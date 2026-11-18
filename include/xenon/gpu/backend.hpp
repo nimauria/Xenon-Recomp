@@ -54,6 +54,10 @@ struct GpuPerformanceCounters {
   // they are, unpacked in a shader) instead of converted sample by sample on
   // the CPU and uploaded.
   std::uint64_t gpu_canonical_edram_loads{};
+  // Native images flushed to canonical EDRAM on the GPU (packed in a compute
+  // shader, the tiles read back once) instead of read back sample by sample
+  // and converted on the CPU.
+  std::uint64_t gpu_canonical_edram_stores{};
   // Color resolves done on the GPU out of the image owning their tiles,
   // without flushing it to canonical EDRAM.
   std::uint64_t gpu_resolves{};

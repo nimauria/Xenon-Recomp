@@ -22,6 +22,9 @@
 //     // Impl::load_canonical_color/depth() exist (canonical EDRAM loads on
 //     // the GPU, edram_canonical_load_supported() formats):
 //     static constexpr bool kSupportsCanonicalGpuLoad = ...;
+//     // Impl::store_canonical_color/depth() exist (ownership flushes to
+//     // canonical EDRAM on the GPU, the same formats):
+//     static constexpr bool kSupportsCanonicalGpuStore = ...;
 //     // With XENON_HAS_DXC:
 //     static constexpr ShaderBinaryFormat kShaderBinaryFormat = ...;
 //     static constexpr std::string_view kShaderBinaryName = "SPIR-V";
@@ -683,6 +686,7 @@ class BackendCore {
   // copying entire surfaces through the CPU on every switch.
   bool color_to_canonical(RenderTargetImage& image,
                           std::span<const EdramSurfaceRegion> regions) {
+    if (canonical_gpu_store_applies(image)) return native_to_canonical_on_gpu(image, regions);
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"color flush", {"readback", "convert", "store"},
@@ -721,6 +725,7 @@ class BackendCore {
 
   bool depth_to_canonical(DepthTargetImage& image,
                           std::span<const EdramSurfaceRegion> regions) {
+    if (canonical_gpu_store_applies(image)) return native_to_canonical_on_gpu(image, regions);
     const auto& surface = image.surface();
     const auto sample_count = 1u << static_cast<unsigned>(surface.msaa);
     TransferTiming timing{"depth flush", {"readback", "-", "store"},
@@ -814,6 +819,63 @@ class BackendCore {
                                                std::chrono::steady_clock::now() - started)
                                                .count()));
       ++performance.gpu_canonical_edram_loads;
+      return true;
+    }
+  }
+
+  // The reverse, an ownership flush on the GPU: each sample of the regions is
+  // packed into its EDRAM word in a compute shader
+  // (make_edram_canonical_store_shader) and the covered tiles are read back
+  // once into the CPU store, instead of a readback per sample and a CPU
+  // conversion. Words of those tiles the regions do not cover keep the CPU
+  // store's value. Same formats and switch as the loads.
+  template <typename Image>
+  [[nodiscard]] bool canonical_gpu_store_applies(const Image& image) const {
+    if constexpr (!Api::kSupportsCanonicalGpuStore) {
+      return false;
+    } else {
+      constexpr bool depth = std::is_same_v<Image, DepthTargetImage>;
+      return edram && gpu_canonical_flushes.load(std::memory_order_relaxed) &&
+             canonical_gpu_loads_enabled() &&
+             edram_canonical_load_supported(
+                 {depth, static_cast<std::uint8_t>(image.guest_format())});
+    }
+  }
+  // set_gpu_canonical_edram_flushes(): false sends flushes through the CPU.
+  std::atomic<bool> gpu_canonical_flushes{true};
+  template <typename Image>
+  bool native_to_canonical_on_gpu(Image& image, std::span<const EdramSurfaceRegion> regions) {
+    if constexpr (!Api::kSupportsCanonicalGpuStore) {
+      error = named("canonical EDRAM flushes on the GPU are unavailable on this backend");
+      return false;
+    } else {
+      const auto started = std::chrono::steady_clock::now();
+      std::vector<std::uint16_t> tiles;
+      for (const auto& region : regions) {
+        const auto covered = covered_edram_tiles(image.surface(), region);
+        tiles.insert(tiles.end(), covered.begin(), covered.end());
+      }
+      std::sort(tiles.begin(), tiles.end());
+      tiles.erase(std::unique(tiles.begin(), tiles.end()), tiles.end());
+      if (tiles.empty()) return true;
+      // The mapping's EDRAM half is the image's own surface; the store
+      // shader takes the region from the constants' source half.
+      const auto constants = make_edram_transfer_constants(image.surface(), image.host_msaa(),
+                                                           image.surface(), image.host_msaa());
+      bool stored = false;
+      if constexpr (std::is_same_v<Image, DepthTargetImage>)
+        stored = self().store_canonical_depth(image, *edram, tiles, constants, regions);
+      else
+        stored = self().store_canonical_color(image, *edram, tiles, constants, regions);
+      if (!stored) return false;
+      perf::add(perf::Counter::EdramGpuStores, 1u);
+      perf::add(perf::Counter::EdramGpuStoreBytes,
+                std::uint64_t{tiles.size()} * Edram::kTileBytes);
+      perf::add(perf::Counter::EdramGpuStoreNs,
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count()));
+      ++performance.gpu_canonical_edram_stores;
       return true;
     }
   }

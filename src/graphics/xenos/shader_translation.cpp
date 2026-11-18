@@ -2226,6 +2226,47 @@ LoweredShader make_edram_canonical_depth_load_shader(DepthRenderTargetFormat des
   return result;
 }
 
+LoweredShader make_edram_canonical_store_shader(MsaaSamples source_host_samples,
+                                                EdramTransferEndpoint source) {
+  const auto count = 1u << static_cast<unsigned>(source_host_samples);
+  LoweredShader result{};
+  result.stage = ShaderStage::Compute;
+  result.entry_point = "main";
+  result.profile = "cs_6_0";
+  // The mapping's EDRAM half, run per host sample of the source image (which
+  // is this surface's own image): a host sample that holds no guest sample
+  // (2x in a 4x image) has nothing to store.
+  std::string mapping(edram_destination_word_hlsl());
+  for (std::size_t at = mapping.find("discard;"); at != std::string::npos;
+       at = mapping.find("discard;", at))
+    mapping.replace(at, 8, "return;");
+  std::ostringstream out;
+  out << "struct TransferConstants { uint4 destination; uint4 source; uint4 extent; };\n"
+      << kEdramTransferConstantsBinding;
+  write_converting_source(out, source_host_samples, source, true);
+  out << kEdramWordCodecHlsl
+      << "RWByteAddressBuffer CanonicalEdram : register(u0, space1);\n"
+         "[numthreads(8, 8, 1)]\n"
+         "void main(uint3 id : SV_DispatchThreadID) {\n"
+         "  if (id.x >= transfer.source.z || id.y >= transfer.source.w) return;\n"
+         "  const float4 position = float4(float(transfer.source.x + id.x),\n"
+         "                                 float(transfer.source.y + id.y), 0.0, 1.0);\n"
+         "  const uint host_sample = id.z;\n"
+      << mapping
+      << "  const uint source_x = x, source_y = y, source_host = host_sample;\n";
+  const bool source_ok = write_converting_source(out, source_host_samples, source, false);
+  out << "  CanonicalEdram.Store(tile * 5120u + (row_in_tile * 80u + in_tile_x) * 4u, word);\n}\n";
+  result.hlsl = out.str();
+  result.source_hash = hash_text("xenon.transfer.edram.canonical.store.v1") ^
+                       (std::uint64_t(count) << 8u) ^ (std::uint64_t(source.depth) << 16u) ^
+                       (std::uint64_t(source.format) << 24u);
+  result.translation_hash = hash_text(result.hlsl);
+  result.complete = (count == 1 || count == 2 || count == 4) && source_ok &&
+                    edram_canonical_load_supported(source);
+  if (!result.complete) result.diagnostics.emplace_back("unsupported canonical EDRAM store");
+  return result;
+}
+
 LoweredShader make_stencil_mask_write_shader() {
   LoweredShader result{};
   result.stage = ShaderStage::Pixel;

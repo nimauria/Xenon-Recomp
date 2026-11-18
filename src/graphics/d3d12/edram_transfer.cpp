@@ -47,13 +47,28 @@ bool EdramCanonicalStore::create(ID3D12Device* device) {
   desc.MipLevels = 1;
   desc.SampleDesc.Count = 1;
   desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  // It rests in COPY_DEST; a load moves it to PIXEL_SHADER_RESOURCE and back.
+  // It rests in COPY_DEST; a load moves it to PIXEL_SHADER_RESOURCE and back,
+  // a flush to UNORDERED_ACCESS and COPY_SOURCE and back.
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                              IID_PPV_ARGS(&buffer_)))) {
     error_ = "D3D12 canonical EDRAM buffer creation failed";
     return false;
   }
+  desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  void* readback_mapped = nullptr;
+  if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                             IID_PPV_ARGS(&readback_))) ||
+      FAILED(readback_->Map(0, nullptr, &readback_mapped))) {
+    buffer_.Reset();
+    readback_.Reset();
+    error_ = "D3D12 canonical EDRAM readback buffer creation failed";
+    return false;
+  }
+  readback_mapped_ = static_cast<const std::byte*>(readback_mapped);
   heap.Type = D3D12_HEAP_TYPE_UPLOAD;
   void* mapped = nullptr;
   if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
@@ -133,6 +148,157 @@ bool EdramCanonicalStore::upload(ID3D12Device* device, CommandQueue& queue, cons
   }
   const auto retirement = queue.retirement_value();
   for (const auto tile : sorted) tile_busy_until_[tile] = retirement;
+  return true;
+}
+
+ID3D12PipelineState* EdramCanonicalStore::store_pipeline(ID3D12Device* device,
+                                                         const EdramTransferSourceImage& source) {
+#ifndef XENON_HAS_DXC
+  error_ = "D3D12 canonical EDRAM flush requires DXC";
+  return nullptr;
+#else
+  const auto key = std::uint64_t(source.host_msaa) | (std::uint64_t(source.endpoint.depth) << 8u) |
+                   (std::uint64_t(source.endpoint.format) << 16u);
+  if (const auto found = store_pipelines_.find(key); found != store_pipelines_.end())
+    return found->second.Get();
+  // Constants at b0, the source's SRVs from t0, the EDRAM buffer as a root
+  // UAV at u0 in space 1.
+  const std::uint32_t srv_count = source.endpoint.depth ? 2u : 1u;
+  auto& root_signature = store_root_signatures_[srv_count - 1u];
+  if (!root_signature) {
+    D3D12_DESCRIPTOR_RANGE range{};
+    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    range.NumDescriptors = srv_count;
+    range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    std::array<D3D12_ROOT_PARAMETER, 3> parameters{};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[0].Constants.Num32BitValues = sizeof(EdramTransferConstants) / 4u;
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[1].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[1].DescriptorTable.pDescriptorRanges = &range;
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameters[2].Descriptor.ShaderRegister = 0;
+    parameters[2].Descriptor.RegisterSpace = 1;
+    D3D12_ROOT_SIGNATURE_DESC desc{};
+    desc.NumParameters = static_cast<UINT>(parameters.size());
+    desc.pParameters = parameters.data();
+    Microsoft::WRL::ComPtr<ID3DBlob> serialized;
+    Microsoft::WRL::ComPtr<ID3DBlob> diagnostics;
+    if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized,
+                                           &diagnostics)) ||
+        FAILED(device->CreateRootSignature(0, serialized->GetBufferPointer(),
+                                           serialized->GetBufferSize(),
+                                           IID_PPV_ARGS(&root_signature)))) {
+      error_ = "D3D12 canonical EDRAM flush root signature creation failed";
+      return nullptr;
+    }
+  }
+  UtilityShaderCompiler compiler;
+  const auto shader = make_edram_canonical_store_shader(source.host_msaa, source.endpoint);
+  const auto compiled = compiler.compile(shader);
+  if (!shader.complete || !compiled.succeeded) {
+    error_ = !shader.complete ? "D3D12 canonical EDRAM flush: unsupported format"
+             : !compiled.diagnostics.empty() ? compiled.diagnostics.front()
+                                             : "D3D12 canonical EDRAM flush shader compilation failed";
+    return nullptr;
+  }
+  D3D12_COMPUTE_PIPELINE_STATE_DESC desc{};
+  desc.pRootSignature = root_signature.Get();
+  desc.CS = {compiled.binary.data(), compiled.binary.size()};
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> state;
+  if (FAILED(device->CreateComputePipelineState(&desc, IID_PPV_ARGS(&state)))) {
+    error_ = "D3D12 canonical EDRAM flush pipeline creation failed";
+    return nullptr;
+  }
+  return store_pipelines_.emplace(key, std::move(state)).first->second.Get();
+#endif
+}
+
+bool EdramCanonicalStore::flush(ID3D12Device* device, CommandQueue& queue,
+                                const EdramTransferSourceImage& source,
+                                const EdramTransferConstants& constants,
+                                std::span<const EdramSurfaceRegion> regions,
+                                std::span<const std::uint16_t> tiles, Edram& edram) {
+  if (regions.empty() || tiles.empty()) return true;
+  if (!device || !source.resource || !source.heap || source.canonical ||
+      !edram_canonical_load_supported(source.endpoint)) {
+    error_ = "D3D12 canonical EDRAM flush needs a supported native image";
+    return false;
+  }
+  // Untouched words of the covered tiles come back as the CPU store holds them.
+  if (!upload(device, queue, edram, tiles)) return false;
+  auto* state = store_pipeline(device, source);
+  if (!state) return false;
+  auto* root_signature = store_root_signatures_[source.endpoint.depth ? 1u : 0u].Get();
+  std::vector<std::uint16_t> sorted(tiles.begin(), tiles.end());
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;  // first tile, count
+  for (const auto tile : sorted) {
+    if (!runs.empty() && runs.back().first + runs.back().second == tile)
+      ++runs.back().second;
+    else
+      runs.emplace_back(tile, 1u);
+  }
+  const auto host_samples = 1u << static_cast<unsigned>(source.host_msaa);
+  if (!queue.execute_async([&](ID3D12GraphicsCommandList* list, std::uint32_t, std::uint32_t) {
+        std::array<D3D12_RESOURCE_BARRIER, 2> barriers{};
+        for (auto& barrier : barriers) {
+          barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+          barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        }
+        barriers[0].Transition.pResource = source.resource;
+        barriers[0].Transition.StateBefore = source.state;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        barriers[1].Transition.pResource = buffer_.Get();
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        list->ResourceBarrier(2, barriers.data());
+        list->SetPipelineState(state);
+        list->SetComputeRootSignature(root_signature);
+        ID3D12DescriptorHeap* heaps[]{source.heap};
+        list->SetDescriptorHeaps(1, heaps);
+        list->SetComputeRootDescriptorTable(1, source.heap->GetGPUDescriptorHandleForHeapStart());
+        list->SetComputeRootUnorderedAccessView(2, buffer_->GetGPUVirtualAddress());
+        for (const auto& region : regions) {
+          const auto width = std::uint32_t(region.right - region.left);
+          const auto height = std::uint32_t(region.bottom - region.top);
+          if (!width || !height) continue;
+          auto region_constants = constants;
+          region_constants.source = {std::uint32_t(region.left), std::uint32_t(region.top), width,
+                                     height};
+          list->SetComputeRoot32BitConstants(0, sizeof(region_constants) / 4u, &region_constants,
+                                             0);
+          list->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, host_samples);
+        }
+        std::swap(barriers[0].Transition.StateBefore, barriers[0].Transition.StateAfter);
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(2, barriers.data());
+        for (const auto& [first, count] : runs)
+          list->CopyBufferRegion(readback_.Get(), std::uint64_t(first) * Edram::kTileBytes,
+                                 buffer_.Get(), std::uint64_t(first) * Edram::kTileBytes,
+                                 std::uint64_t(count) * Edram::kTileBytes);
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        list->ResourceBarrier(1, &barriers[1]);
+      })) {
+    error_ = queue.error();
+    return false;
+  }
+  const auto value = queue.retirement_value();
+  if ((value > queue.last_submitted_value() && !queue.flush()) ||
+      !queue.wait_for_completion(value)) {
+    error_ = queue.error();
+    return false;
+  }
+  auto bytes = edram.bytes();
+  for (const auto& [first, count] : runs) {
+    const auto offset = std::size_t(first) * Edram::kTileBytes;
+    std::memcpy(bytes.data() + offset, readback_mapped_ + offset,
+                std::size_t(count) * Edram::kTileBytes);
+  }
+  for (const auto tile : sorted) tile_busy_until_[tile] = value;
   return true;
 }
 

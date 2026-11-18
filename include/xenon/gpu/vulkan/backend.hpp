@@ -51,6 +51,8 @@ class Backend final : public xenon::gpu::Backend {
   void set_shader_cache_directory(const std::string& directory) override;
   // GPU V3 parallel recording (see d3d12::Backend::set_parallel_recording()).
   [[nodiscard]] bool set_parallel_recording(unsigned threads, std::uint32_t min_run_draws);
+  // See d3d12::Backend::set_gpu_canonical_edram_flushes().
+  void set_gpu_canonical_edram_flushes(bool enabled) noexcept;
   [[nodiscard]] std::uint64_t parallel_runs_recorded() const noexcept;
   // GPU timestamps (perf_frame.log "gpu"): waits for the GPU, reads every
   // batch's timestamps, and returns the batches timed and their GPU time.

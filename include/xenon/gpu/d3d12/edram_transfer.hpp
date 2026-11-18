@@ -44,13 +44,31 @@ class EdramCanonicalStore {
                             std::span<const std::uint16_t> tiles);
   [[nodiscard]] EdramTransferSourceImage source() const noexcept;
   [[nodiscard]] const std::string& error() const noexcept { return error_; }
+  // Phase 3: a native image's `regions` packed into canonical EDRAM on the
+  // GPU (make_edram_canonical_store_shader) and the covered `tiles` brought
+  // back into `edram` - one readback instead of one per sample, and no CPU
+  // conversion. The tiles are uploaded first, so words of a tile the regions
+  // do not cover come back as `edram` held them. Waits for the GPU (the
+  // caller needs the canonical bytes). For edram_canonical_load_supported()
+  // formats.
+  [[nodiscard]] bool flush(ID3D12Device* device, CommandQueue& queue,
+                           const EdramTransferSourceImage& source,
+                           const EdramTransferConstants& constants,
+                           std::span<const EdramSurfaceRegion> regions,
+                           std::span<const std::uint16_t> tiles, Edram& edram);
 
  private:
   [[nodiscard]] bool create(ID3D12Device* device);
+  [[nodiscard]] ID3D12PipelineState* store_pipeline(ID3D12Device* device,
+                                                    const EdramTransferSourceImage& source);
   Microsoft::WRL::ComPtr<ID3D12Resource> buffer_{};
   Microsoft::WRL::ComPtr<ID3D12Resource> upload_{};
+  Microsoft::WRL::ComPtr<ID3D12Resource> readback_{};
   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> heap_{};
+  std::array<Microsoft::WRL::ComPtr<ID3D12RootSignature>, 2> store_root_signatures_{};
+  std::unordered_map<std::uint64_t, Microsoft::WRL::ComPtr<ID3D12PipelineState>> store_pipelines_{};
   std::byte* mapped_{};
+  const std::byte* readback_mapped_{};
   std::array<std::uint64_t, Edram::kTileCount> tile_busy_until_{};
   std::string error_{};
 };

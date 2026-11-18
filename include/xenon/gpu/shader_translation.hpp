@@ -150,6 +150,19 @@ enum class EdramDepthTransferPass : std::uint8_t { DepthAndStencil, Depth, Stenc
     DepthRenderTargetFormat destination, EdramDepthTransferPass pass,
     Unorm24DepthWrite unorm24_write);
 
+// The reverse: a native image's EDRAM words packed into canonical storage on
+// the GPU (Phase 3: ownership flushes without a per-sample readback and CPU
+// conversion). A compute shader, one thread per host pixel and sample of a
+// region (8x8 groups, z = host sample): the sample's EDRAM word - packed as
+// the converting transfers pack it - is stored into the 10 MiB EDRAM image,
+// a raw buffer at u0 in space 1, at edram_sample_address()'s offset. The
+// source image is bound as the converting transfers bind it (t0, depth t0 and
+// t1). Constants as theirs, with the source half holding the region's left,
+// top, width and height. For the formats edram_canonical_load_supported()
+// accepts.
+[[nodiscard]] LoweredShader make_edram_canonical_store_shader(MsaaSamples source_host_samples,
+                                                              EdramTransferEndpoint source);
+
 struct ShaderCompileOptions {
   ShaderBinaryFormat format{ShaderBinaryFormat::Dxil};
   bool debug{};

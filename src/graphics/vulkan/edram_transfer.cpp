@@ -610,6 +610,13 @@ bool EdramDepthTransfer::load_canonical(VkDevice device, VkPhysicalDevice physic
 
 EdramCanonicalStore::~EdramCanonicalStore() {
   if (!device_) return;
+  for (const auto& [key, pipeline] : store_pipelines_)
+    vkDestroyPipeline(device_, pipeline, nullptr);
+  for (auto layout : store_pipeline_layouts_)
+    if (layout) vkDestroyPipelineLayout(device_, layout, nullptr);
+  for (auto layout : source_set_layouts_)
+    if (layout) vkDestroyDescriptorSetLayout(device_, layout, nullptr);
+  if (store_set_layout_) vkDestroyDescriptorSetLayout(device_, store_set_layout_, nullptr);
   if (pool_) vkDestroyDescriptorPool(device_, pool_, nullptr);
   if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
 }
@@ -618,7 +625,8 @@ bool EdramCanonicalStore::create(VkPhysicalDevice physical_device, VkDevice devi
   if (set_) return true;
   device_ = device;
   if (!buffer_.initialize(physical_device, device, Edram::kSize,
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
     error_ = "Vulkan canonical EDRAM buffer: " + buffer_.error();
     return false;
@@ -630,37 +638,60 @@ bool EdramCanonicalStore::create(VkPhysicalDevice physical_device, VkDevice devi
     error_ = "Vulkan canonical EDRAM staging buffer: " + staging_.error();
     return false;
   }
+  if (!readback_.initialize(physical_device, device, Edram::kSize,
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            Buffer::kCpuReadback) ||
+      !readback_.map(readback_mapped_)) {
+    error_ = "Vulkan canonical EDRAM readback buffer: " + readback_.error();
+    return false;
+  }
   VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
   set_info.bindingCount = 1;
   set_info.pBindings = &EdramTransferLayouts::kCanonicalBinding;
-  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  // The flush's view of the buffer: set 1, binding 0 (u0 in space 1).
+  const VkDescriptorSetLayoutBinding store_binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+  VkDescriptorSetLayoutCreateInfo store_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  store_info.bindingCount = 1;
+  store_info.pBindings = &store_binding;
+  const VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
   VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  pool_info.maxSets = 1;
+  pool_info.maxSets = 2;
   pool_info.poolSizeCount = 1;
   pool_info.pPoolSizes = &pool_size;
   if (vkCreateDescriptorSetLayout(device, &set_info, nullptr, &set_layout_) != VK_SUCCESS ||
+      vkCreateDescriptorSetLayout(device, &store_info, nullptr, &store_set_layout_) !=
+          VK_SUCCESS ||
       vkCreateDescriptorPool(device, &pool_info, nullptr, &pool_) != VK_SUCCESS) {
     error_ = "Vulkan canonical EDRAM descriptor creation failed";
     return false;
   }
+  const std::array layouts{set_layout_, store_set_layout_};
   VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   allocate.descriptorPool = pool_;
-  allocate.descriptorSetCount = 1;
-  allocate.pSetLayouts = &set_layout_;
-  VkDescriptorSet set = VK_NULL_HANDLE;
-  if (vkAllocateDescriptorSets(device, &allocate, &set) != VK_SUCCESS) {
+  allocate.descriptorSetCount = static_cast<std::uint32_t>(layouts.size());
+  allocate.pSetLayouts = layouts.data();
+  std::array<VkDescriptorSet, 2> sets{};
+  if (vkAllocateDescriptorSets(device, &allocate, sets.data()) != VK_SUCCESS) {
     error_ = "Vulkan canonical EDRAM descriptor set allocation failed";
     return false;
   }
   const VkDescriptorBufferInfo info{buffer_.buffer(), 0, Edram::kSize};
-  VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-  write.dstSet = set;
-  write.dstBinding = 16;
-  write.descriptorCount = 1;
-  write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-  write.pBufferInfo = &info;
-  vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-  set_ = set;
+  std::array<VkWriteDescriptorSet, 2> writes{};
+  for (std::size_t i = 0; i < writes.size(); ++i) {
+    writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[i].dstSet = sets[i];
+    writes[i].dstBinding = i == 0 ? 16u : 0u;
+    writes[i].descriptorCount = 1;
+    writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[i].pBufferInfo = &info;
+  }
+  vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
+                         nullptr);
+  store_set_ = sets[1];
+  set_ = sets[0];
   return true;
 }
 
@@ -727,6 +758,270 @@ bool EdramCanonicalStore::upload(VkPhysicalDevice physical_device, VkDevice devi
   const auto retirement = queue.retirement_value();
   for (const auto tile : sorted) tile_busy_until_[tile] = retirement;
   return true;
+}
+
+VkPipeline EdramCanonicalStore::store_pipeline(VkDevice device, EdramTransferEndpoint endpoint,
+                                               MsaaSamples host_msaa) {
+#ifndef XENON_HAS_DXC
+  (void)device;
+  (void)endpoint;
+  (void)host_msaa;
+  error_ = "Vulkan canonical EDRAM flush requires DXC";
+  return VK_NULL_HANDLE;
+#else
+  const auto key = std::uint64_t(host_msaa) | (std::uint64_t(endpoint.depth) << 8u) |
+                   (std::uint64_t(endpoint.format) << 16u);
+  if (const auto found = store_pipelines_.find(key); found != store_pipelines_.end())
+    return found->second;
+  const std::uint32_t kind = endpoint.depth ? 1u : 0u;
+  if (!store_pipeline_layouts_[kind]) {
+    // The source set as the transfer layouts define it (the images' cached
+    // descriptor sets are allocated against that definition).
+    const VkDescriptorSetLayoutBinding color_binding{16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                                     RenderTargetImage::kSampledSourceStages,
+                                                     nullptr};
+    const std::array depth_bindings{
+        VkDescriptorSetLayoutBinding{16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                     DepthTargetImage::kSampledSourceStages, nullptr},
+        VkDescriptorSetLayoutBinding{17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                     DepthTargetImage::kSampledSourceStages, nullptr}};
+    VkDescriptorSetLayoutCreateInfo set_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    set_info.bindingCount = endpoint.depth ? 2u : 1u;
+    set_info.pBindings = endpoint.depth ? depth_bindings.data() : &color_binding;
+    if (!source_set_layouts_[kind] &&
+        vkCreateDescriptorSetLayout(device, &set_info, nullptr, &source_set_layouts_[kind]) !=
+            VK_SUCCESS) {
+      source_set_layouts_[kind] = VK_NULL_HANDLE;
+      error_ = "Vulkan canonical EDRAM flush descriptor layout creation failed";
+      return VK_NULL_HANDLE;
+    }
+    const std::array set_layouts{source_set_layouts_[kind], store_set_layout_};
+    const VkPushConstantRange constants{VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                                        sizeof(EdramTransferConstants)};
+    VkPipelineLayoutCreateInfo layout_info{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layout_info.setLayoutCount = static_cast<std::uint32_t>(set_layouts.size());
+    layout_info.pSetLayouts = set_layouts.data();
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &constants;
+    if (vkCreatePipelineLayout(device, &layout_info, nullptr, &store_pipeline_layouts_[kind]) !=
+        VK_SUCCESS) {
+      store_pipeline_layouts_[kind] = VK_NULL_HANDLE;
+      error_ = "Vulkan canonical EDRAM flush pipeline layout creation failed";
+      return VK_NULL_HANDLE;
+    }
+  }
+  const auto shader = make_edram_canonical_store_shader(host_msaa, endpoint);
+  if (!shader.complete) {
+    error_ = "Vulkan canonical EDRAM flush: unsupported format";
+    return VK_NULL_HANDLE;
+  }
+  UtilityShaderCompiler compiler;
+  ShaderCompileOptions options{};
+  options.format = ShaderBinaryFormat::Spirv;
+  const auto compiled = compiler.compile(shader, options);
+  if (!compiled.succeeded) {
+    error_ = !compiled.diagnostics.empty()
+                 ? compiled.diagnostics.front()
+                 : "Vulkan canonical EDRAM flush shader compilation failed";
+    return VK_NULL_HANDLE;
+  }
+  VkShaderModuleCreateInfo module_info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  module_info.codeSize = compiled.binary.size();
+  module_info.pCode = reinterpret_cast<const std::uint32_t*>(compiled.binary.data());
+  VkShaderModule module = VK_NULL_HANDLE;
+  if (vkCreateShaderModule(device, &module_info, nullptr, &module) != VK_SUCCESS) {
+    error_ = "Vulkan canonical EDRAM flush shader module creation failed";
+    return VK_NULL_HANDLE;
+  }
+  VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                VK_SHADER_STAGE_COMPUTE_BIT, module, "main", nullptr};
+  info.layout = store_pipeline_layouts_[kind];
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) !=
+      VK_SUCCESS)
+    pipeline = VK_NULL_HANDLE;
+  vkDestroyShaderModule(device, module, nullptr);
+  if (!pipeline) {
+    error_ = "Vulkan canonical EDRAM flush pipeline creation failed";
+    return VK_NULL_HANDLE;
+  }
+  store_pipelines_.emplace(key, pipeline);
+  return pipeline;
+#endif
+}
+
+namespace {
+
+// A flush source read by the compute pass: a color image moved to
+// SHADER_READ_ONLY for compute and back (its tracked layout stays the
+// attachment's), a depth image through its own transitions.
+void begin_compute_sampling(VkCommandBuffer command, RenderTargetImage& source) {
+  source.transition_to_color_attachment(command);
+  VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+  barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+  barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  barrier.image = source.image();
+  barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dependency.imageMemoryBarrierCount = 1;
+  dependency.pImageMemoryBarriers = &barrier;
+  vkCmdPipelineBarrier2(command, &dependency);
+}
+void end_compute_sampling(VkCommandBuffer command, RenderTargetImage& source) {
+  VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+  barrier.dstAccessMask =
+      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  barrier.image = source.image();
+  barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dependency.imageMemoryBarrierCount = 1;
+  dependency.pImageMemoryBarriers = &barrier;
+  vkCmdPipelineBarrier2(command, &dependency);
+}
+void begin_compute_sampling(VkCommandBuffer command, DepthTargetImage& source) {
+  source.transition_to_sampled(command);
+}
+void end_compute_sampling(VkCommandBuffer command, DepthTargetImage& source) {
+  source.transition_to_depth_attachment(command);
+}
+
+void buffer_barrier(VkCommandBuffer command, VkBuffer buffer, VkPipelineStageFlags2 src_stage,
+                    VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+                    VkAccessFlags2 dst_access) {
+  VkBufferMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
+  barrier.srcStageMask = src_stage;
+  barrier.srcAccessMask = src_access;
+  barrier.dstStageMask = dst_stage;
+  barrier.dstAccessMask = dst_access;
+  barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.buffer = buffer;
+  barrier.size = VK_WHOLE_SIZE;
+  VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dependency.bufferMemoryBarrierCount = 1;
+  dependency.pBufferMemoryBarriers = &barrier;
+  vkCmdPipelineBarrier2(command, &dependency);
+}
+
+}  // namespace
+
+template <typename Source>
+bool EdramCanonicalStore::run_flush(VkPhysicalDevice physical_device, VkDevice device,
+                                    CommandQueue& queue, Source& source,
+                                    const EdramTransferConstants& constants,
+                                    std::span<const EdramSurfaceRegion> regions,
+                                    std::span<const std::uint16_t> tiles, Edram& edram) {
+  if (regions.empty() || tiles.empty()) return true;
+  const auto endpoint = endpoint_of(source);
+  if (!device || !source.image() || !edram_canonical_load_supported(endpoint)) {
+    error_ = "Vulkan canonical EDRAM flush needs a supported native image";
+    return false;
+  }
+  // Untouched words of the covered tiles come back as the CPU store holds them.
+  if (!upload(physical_device, device, queue, edram, tiles)) return false;
+  const auto state = store_pipeline(device, endpoint, source.host_msaa());
+  if (!state) return false;
+  const std::uint32_t kind = endpoint.depth ? 1u : 0u;
+  const auto layout = store_pipeline_layouts_[kind];
+  const auto source_set = transfer_set(source, source_set_layouts_[kind]);
+  if (!source_set) {
+    error_ = source.error();
+    return false;
+  }
+  std::vector<std::uint16_t> sorted(tiles.begin(), tiles.end());
+  for (auto& tile : sorted) tile = static_cast<std::uint16_t>(tile % Edram::kTileCount);
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  std::vector<VkBufferCopy> copies;  // runs of consecutive tiles
+  for (const auto tile : sorted) {
+    const auto offset = VkDeviceSize(tile) * Edram::kTileBytes;
+    if (!copies.empty() && copies.back().srcOffset + copies.back().size == offset)
+      copies.back().size += Edram::kTileBytes;
+    else
+      copies.push_back({offset, offset, Edram::kTileBytes});
+  }
+  const auto host_samples = 1u << static_cast<unsigned>(source.host_msaa());
+  const auto buffer = buffer_.buffer();
+  if (!queue.execute_async([&](VkCommandBuffer command, std::uint32_t, std::uint32_t) {
+        begin_compute_sampling(command, source);
+        // The upload's copy (and earlier loads' reads) before the stores.
+        buffer_barrier(command, buffer,
+                       VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, state);
+        const std::array sets{source_set, store_set_};
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0,
+                                static_cast<std::uint32_t>(sets.size()), sets.data(), 0,
+                                nullptr);
+        for (const auto& region : regions) {
+          const auto width = std::uint32_t(region.right - region.left);
+          const auto height = std::uint32_t(region.bottom - region.top);
+          if (!width || !height) continue;
+          auto region_constants = constants;
+          region_constants.source = {std::uint32_t(region.left), std::uint32_t(region.top), width,
+                                     height};
+          vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                             sizeof(region_constants), &region_constants);
+          vkCmdDispatch(command, (width + 7u) / 8u, (height + 7u) / 8u, host_samples);
+        }
+        end_compute_sampling(command, source);
+        buffer_barrier(command, buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                       VK_ACCESS_2_TRANSFER_READ_BIT);
+        vkCmdCopyBuffer(command, buffer, readback_.buffer(),
+                        static_cast<std::uint32_t>(copies.size()), copies.data());
+        buffer_barrier(command, readback_.buffer(), VK_PIPELINE_STAGE_2_COPY_BIT,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
+                       VK_ACCESS_2_HOST_READ_BIT);
+        // The stores are visible to later loads, and the readback copy is
+        // done before the next upload overwrites the buffer.
+        buffer_barrier(command, buffer,
+                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT,
+                       VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+      })) {
+    error_ = queue.error();
+    return false;
+  }
+  const auto value = queue.retirement_value();
+  if ((value > queue.last_submitted_value() && !queue.flush()) ||
+      !queue.wait_for_completion(value)) {
+    error_ = queue.error();
+    return false;
+  }
+  auto bytes = edram.bytes();
+  for (const auto& copy : copies)
+    std::memcpy(bytes.data() + copy.srcOffset, readback_mapped_.data() + copy.srcOffset,
+                std::size_t(copy.size));
+  for (const auto tile : sorted) tile_busy_until_[tile] = value;
+  return true;
+}
+
+bool EdramCanonicalStore::flush(VkPhysicalDevice physical_device, VkDevice device,
+                                CommandQueue& queue, RenderTargetImage& source,
+                                const EdramTransferConstants& constants,
+                                std::span<const EdramSurfaceRegion> regions,
+                                std::span<const std::uint16_t> tiles, Edram& edram) {
+  return run_flush(physical_device, device, queue, source, constants, regions, tiles, edram);
+}
+
+bool EdramCanonicalStore::flush(VkPhysicalDevice physical_device, VkDevice device,
+                                CommandQueue& queue, DepthTargetImage& source,
+                                const EdramTransferConstants& constants,
+                                std::span<const EdramSurfaceRegion> regions,
+                                std::span<const std::uint16_t> tiles, Edram& edram) {
+  return run_flush(physical_device, device, queue, source, constants, regions, tiles, edram);
 }
 
 }  // namespace xenon::gpu::vulkan
