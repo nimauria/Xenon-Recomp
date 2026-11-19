@@ -45,8 +45,39 @@ void XenonSession::start_guest_profile() {
   guest_profile_running_.store(true);
   guest_profile_thread_ = std::thread([this] {
     const auto start = std::chrono::steady_clock::now();
+    auto next_snapshot = start + std::chrono::seconds(30);
     std::unordered_map<std::uint32_t, std::string> names;
     while (guest_profile_running_.load(std::memory_order_relaxed)) {
+      // Every 30 s the profiles so far are written as they are at stop, so a
+      // run that crashes keeps them (both AC6 crash runs lost theirs). Only
+      // this thread touches the guest profiler while it runs; the wait
+      // profile has its own lock. Each file is replaced whole, never left
+      // half written.
+      if (const auto now = std::chrono::steady_clock::now(); now >= next_snapshot) {
+        next_snapshot = now + std::chrono::seconds(30);
+        const auto replace = [](const std::filesystem::path& path, const auto& write) {
+          try {
+            auto partial = path;
+            partial += ".partial";
+            {
+              std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+              write(out);
+              if (!out) return;
+            }
+            std::error_code ec;
+            std::filesystem::rename(partial, path, ec);
+          } catch (...) {
+            // Diagnostics must never take the session down.
+          }
+        };
+        replace(guest_profile_path_, [this](std::ostream& out) { guest_profiler_.write(out); });
+        if (kernel::wait_profile_enabled()) {
+          const auto directory = logging::probe_log_directory();
+          replace(directory.empty() ? std::filesystem::path("wait_profile.log")
+                                    : std::filesystem::path(directory) / "wait_profile.log",
+                  [](std::ostream& out) { out << kernel::wait_profile_report(); });
+        }
+      }
       const auto elapsed = static_cast<std::uint64_t>(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - start)

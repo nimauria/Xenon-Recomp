@@ -240,7 +240,8 @@ bool load_and_analyze(const DriverOptions& options, AnalysisReport& report, std:
     }
   }
 
-  build_guest_entry_map(report, std::move(absorption.entries), effective, expanded_runtime_helpers);
+  build_guest_entry_map_withdrawing_unanchored(report, absorption.entries, effective,
+                                               expanded_runtime_helpers);
   diagnose_function_ownership(report, range_index);
   deduplicate_unresolved(report);
 

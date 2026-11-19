@@ -443,8 +443,8 @@ void debug_signal_write_trap(GuestAddress address, std::uint64_t value) {
   constexpr const char* kFile = "signal_write_trap_diag.log";
   if (!logging::probe_logs_enabled()) return;
   std::lock_guard<std::mutex> lock(g_report_mutex);
-  logging::append_probe_log(kFile, "WRITE to guest 0x%08X value=0x%08X (thread os_tid=%lu):\n",
-                            (unsigned)address, (unsigned)value, current_thread_id());
+  logging::append_probe_log(kFile, "WRITE to guest 0x%08X value=0x%08llX (thread os_tid=%lu):\n",
+                            (unsigned)address, (unsigned long long)value, current_thread_id());
   append_store_context(&logging::append_probe_log, kFile);
 }
 
