@@ -45,11 +45,15 @@ inline std::atomic<std::uint32_t> trap_count{0};
 inline std::array<std::atomic<GuestAddress>, kMaxWriteTraps> trap_addresses{};
 }  // namespace write_trap_detail
 
-[[nodiscard]] inline bool is_write_trapped(GuestAddress address) noexcept {
+// True when a store of `size` bytes at `address` changes any byte of a
+// trapped 32-bit word. Any width: a trapped word written by a 64-bit or
+// 16-bit store was missed when only 32-bit stores at its address were checked.
+[[nodiscard]] inline bool is_write_trapped(GuestAddress address, std::uint32_t size = 4u) noexcept {
   const auto count = write_trap_detail::trap_count.load(std::memory_order_relaxed);
   for (std::uint32_t i = 0; i < count; ++i) {
-    if (write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed) == address)
-      return true;
+    const auto trapped = write_trap_detail::trap_addresses[i].load(std::memory_order_relaxed);
+    // [address, address + size) and [trapped, trapped + 4) overlap.
+    if (trapped - address < size || address - trapped < 4u) return true;
   }
   return false;
 }
@@ -1353,10 +1357,8 @@ inline T MemoryAccessContext::read_integer(GuestAddress address,
 template <typename T>
 inline void MemoryAccessContext::write_integer(GuestAddress address, T value,
                                                bool little_endian) {
-  if constexpr (sizeof(T) == 4u) {
-    if (is_write_trapped(address)) {
-      debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
-    }
+  if (is_write_trapped(address, sizeof(T))) [[unlikely]] {
+    debug_signal_write_trap(address, static_cast<std::uint64_t>(value));
   }
   ScopedReadGuard guard(*this);
   Resolved resolved{};
@@ -1410,9 +1412,7 @@ XENON_CPU_FORCEINLINE void MemoryAccessContext::write_value(GuestAddress address
                                                             bool little_endian) {
   std::uint32_t physical_page{};
   auto* ptr = native_ram<sizeof(T), sizeof(T)>(address, fast_memory::kWrite, physical_page);
-  if constexpr (sizeof(T) == 4u) {
-    if (is_write_trapped(address)) ptr = nullptr;
-  }
+  if (is_write_trapped(address, sizeof(T))) [[unlikely]] ptr = nullptr;
   if (ptr) [[likely]] {
     const bool host_little = std::endian::native == std::endian::little;
     const auto stored = byteswap_if(value, little_endian ? !host_little : host_little);
